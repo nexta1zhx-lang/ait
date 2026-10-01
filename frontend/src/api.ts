@@ -97,7 +97,12 @@ export interface AppConfig {
   rules: RulesInfo
   knowledge: {doCount: number; dontCount: number; total: number}
   usage: UsageHeadline
-  balance: {ok: boolean; cny: number | null; available: boolean; error: string | null}
+  balance: {
+    ok: boolean
+    cny: number | null
+    available: boolean
+    error: string | null
+  }
 }
 
 export interface Contract {
@@ -113,10 +118,12 @@ export const fetchAccount = (refresh = false) =>
 
 /** 切换模型（写回 .env） */
 export const switchModel = (model: string) =>
-  post<{ok: boolean; model: string; persisted: boolean; warning: string | null}>(
-    '/api/account/model',
-    {model}
-  )
+  post<{
+    ok: boolean
+    model: string
+    persisted: boolean
+    warning: string | null
+  }>('/api/account/model', {model})
 
 export const fetchContracts = () =>
   get<{contracts: Contract[]; error?: string}>('/api/contracts')

@@ -78,7 +78,9 @@ export async function fetchBalance(
   })
 
   if (!config.llm.apiKey) {
-    return empty('未配置 LLM_API_KEY，拿不到余额。在 .env 里填上 Key 就能看到。')
+    return empty(
+      '未配置 LLM_API_KEY，拿不到余额。在 .env 里填上 Key 就能看到。'
+    )
   }
 
   const url = `${baseUrl(config)}${BALANCE_PATH}`

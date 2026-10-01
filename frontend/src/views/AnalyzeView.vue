@@ -33,7 +33,9 @@ const error = ref('')
 const result = ref<AnalyzeResult | null>(null)
 
 /** 周期和假设胜率都由后端配置决定，页面上不再让用户填 */
-const timeframesText = computed(() => config.value?.timeframes ?? '15m,1h,4h,1d')
+const timeframesText = computed(
+  () => config.value?.timeframes ?? '15m,1h,4h,1d'
+)
 
 onMounted(() => {
   if (config.value) mock.value = !config.value.hasApiKey

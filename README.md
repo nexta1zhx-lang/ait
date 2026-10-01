@@ -4,33 +4,43 @@
 
 前后端分离：`backend/` 是 Node + TypeScript 的 API，`frontend/` 是 Vue3 的单页应用。
 
-| 页面 | 干什么 |
-| --- | --- |
-| **开单分析** | 选个币种，AI 按我的规则 + 知识库判断该不该做 |
-| **知识库** | 收录我做对 / 做错的案例，AI 提炼成可复用的经验 |
-| **用量** | 每次调用的 token 与花费，人民币计价，带图表和明细表 |
+| 页面         | 干什么                                              |
+| ------------ | --------------------------------------------------- |
+| **开单分析** | 选个币种，AI 按我的规则 + 知识库判断该不该做        |
+| **知识库**   | 收录我做对 / 做错的案例，AI 提炼成可复用的经验      |
+| **用量**     | 每次调用的 token 与花费，人民币计价，带图表和明细表 |
 
 顶部常驻显示**当前模型**（可切换）、**账户余额**（人民币）、规则加载情况、知识库条数。
 
 ---
 
-## 快速开始
+## 启动
+
+### 首次（只做一次）
 
 ```bash
-npm install
-cp .env.example .env       # 填 LLM_API_KEY（DeepSeek 的 key）
+npm install                # 装依赖
+cp .env.example .env       # 然后编辑 .env，填上 LLM_API_KEY
 npm run db:up              # 起数据库（Docker）
-npm run sync:contracts     # 拉一份合约列表（只需一次）
-npm run web                # http://localhost:8787  ← 就这一步，不用 build
+npm run sync:contracts     # 拉合约列表（527 个）
 ```
 
-**开发阶段一次 build 都不需要。**
+`.env` 至少要填这一行，否则只能跑「模拟判断」：
 
-`npm run web` 启动时，后端会把 Vite 以中间件方式挂进自己的进程：
+```bash
+LLM_API_KEY=sk-你的key
+```
 
-- 前后端**同一个进程、同一个端口**（8787），不用开两个终端
-- 改前端代码**立刻生效**（热更新），改后端代码 Ctrl+C 重启
-- 启动日志会写明当前是哪种模式
+### 每次启动
+
+```bash
+npm run web                # → http://localhost:8787
+```
+
+**就这一条，不需要 build。** 后端用 `tsx` 直接跑 TypeScript，
+前端由后端挂进 Vite 中间件 —— 同一个进程、同一个端口。
+
+启动日志会告诉你当前是哪种模式：
 
 ```
   ✅ 开单分析 Web 界面已启动
@@ -38,25 +48,66 @@ npm run web                # http://localhost:8787  ← 就这一步，不用 bu
 
   前端    Vite 开发模式 —— 改前端代码立刻生效，不需要 build
   规则    主提示词.md、交易规则与方法.md
+
+  按 Ctrl+C 停止。
 ```
 
-> 想单独调前端（比如用浏览器开发者工具的 Vue 面板）也可以：
-> `npm run ui:dev` → http://localhost:5173（`/api` 自动代理到 8787）。
+- 改**前端**代码：立刻生效（热更新），不用重启
+- 改**后端**代码：Ctrl+C 再 `npm run web`
+- 改 **rules/ 下的规则**：立刻生效，连重启都不用，下次分析自动重读
 
-### 什么时候才真的需要 build
+### 数据库
 
-只有**部署**时。生产环境不装 `vite` / `tsx`，所以要预先生成静态文件和 JS：
+数据库没起来，页面会打不开（后端会打印 `npm run db:up` 的提示）。
+
+```bash
+npm run db:up              # 启动（Docker）
+npm run db:status          # 看连接状态 + 各表条数
+npm run db:down            # 停止
+npm run db:reset -- --yes  # 清空数据（知识库 / 分析记录 / 用量）
+```
+
+### 端口被占用
+
+之前起的服务还占着 8787 时会报 `EADDRINUSE`，先关掉它：
+
+```bash
+pkill -f "tsx backend/src/server.ts"
+npm run web
+```
+
+想换端口：`PORT=9000 npm run web`
+
+### 不想开网页
+
+```bash
+npm run dev -- BTC/USDT        # 直接分析一个币
+npm run dev -- BTC/USDT --mock # 离线跑通（不花钱）
+npm run cost -- --days 7       # 看 API 花费
+npm run swing -- SOL 4h        # 只看拉升检测
+npm run selftest               # 离线自检（不需要网络和 Key）
+```
+
+### 也可以只跑前端
+
+比如要用浏览器开发者工具的 Vue 面板调试前端：
+
+```bash
+npm run web                # 终端 1：后端
+npm run ui:dev             # 终端 2：→ http://localhost:5173（/api 自动代理到 8787）
+```
+
+### 部署时才需要 build
+
+生产环境不装 `vite` / `tsx`，所以要预先生成静态文件和 JS：
 
 ```bash
 npm run build:all          # 编译后端 → backend/dist，构建前端 → frontend/dist
-npm run web:start          # 跑编译后的版本（自动走静态托管）
+npm run web:start          # 跑编译版（自动走静态托管）
 ```
 
 即使装了 `vite`，也可以用 `FRONTEND=dist npm run web` 强制走静态托管，
 用来验证「构建后的样子」。
-
-> 没填 `LLM_API_KEY` 也能跑，但走的是「模拟判断」，不是真的 AI 在读你的规则，
-> 也拿不到账户余额。
 
 ---
 
@@ -165,9 +216,11 @@ npm run swing -- SOL 1h --days 30
 
 ```markdown
 ### 我做对的（照这样找）
+
 - [BTC 4h C档] 回踩不破前高，右侧进的
 
 ### 我踩过的坑（出现类似特征就拒绝）
+
 - [ROBO 1h B档] 突破一点后续没力量
 ```
 
@@ -235,9 +288,9 @@ $$\text{cost} = \frac{\text{命中 token} \times p_{hit} + \text{未命中 token
 
 顶部栏常驻：
 
-| 控件 | 说明 |
-| --- | --- |
-| **模型** 下拉 | 可切换的模型（`GET /models` 拿到的列表，拿不到就用内置的） |
+| 控件          | 说明                                                        |
+| ------------- | ----------------------------------------------------------- |
+| **模型** 下拉 | 可切换的模型（`GET /models` 拿到的列表，拿不到就用内置的）  |
 | **余额** 按钮 | DeepSeek 账户余额（人民币）。点一下刷新（服务端缓存 60 秒） |
 
 切换模型会**写回 `.env` 的 `LLM_MODEL`**，重启也保留。
@@ -256,11 +309,11 @@ curl -X POST localhost:8787/api/account/model \
 
 PostgreSQL（Docker，数据卷 `ca-pgdata`），三张表：
 
-| 表 | 存什么 |
-| --- | --- |
+| 表          | 存什么                        |
+| ----------- | ----------------------------- |
 | `knowledge` | 知识库案例（含前后两段 K 线） |
-| `analyses` | 分析记录（回溯用） |
-| `llm_usage` | 每次 API 调用的 token 与花费 |
+| `analyses`  | 分析记录（回溯用）            |
+| `llm_usage` | 每次 API 调用的 token 与花费  |
 
 **规则不存数据库** —— 直接读 `rules/` 目录。
 
@@ -273,36 +326,58 @@ npm run db:reset -- --yes   # 清空数据
 
 ---
 
-## 命令行
+## 命令速查
 
-### 平时用这些（全部走 `tsx` / Vite，不需要编译）
+### 日常（全部 `tsx` / Vite 直跑，不需要编译）
 
-```bash
-npm run web                                  # 起服务 → http://localhost:8787
-npm run ui:dev                               # 只跑前端 → http://localhost:5173
-npm run dev -- BTC/USDT                      # 命令行分析
-npm run dev -- BTC/USDT --mock               # 离线跑通
-npm run learn -- MAGMA 4h --do "回调不破，右侧进的"   # 收录案例
-npm run learn -- ROBO 1h --dont "突破一点后续没力量"
-npm run learn -- MAGMA 4h --do "..." --from 2026-09-01 --to 2026-09-15
-npm run swing -- BTC 4h                      # 只看拉升检测
-npm run cost -- --days 7                     # API 用量与花费
-npm run selftest                             # 离线自检（不需网络，也不需编译）
-npm run typecheck                            # 类型检查
-npm run db:status / db:up / db:down / db:reset
-npm run sync:contracts                       # 重新拉合约列表
-```
+| 命令                                                                     | 干什么                                                      |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `npm run web`                                                            | 起服务 → http://localhost:8787                              |
+| `npm run ui:dev`                                                         | 只跑前端 → http://localhost:5173                            |
+| `npm run dev -- BTC/USDT`                                                | 命令行分析                                                  |
+| `npm run dev -- BTC/USDT --mock`                                         | 离线跑通，不花钱                                            |
+| `npm run learn -- MAGMA 4h --do "回调不破，右侧进的"`                    | 收录正面案例                                                |
+| `npm run learn -- ROBO 1h --dont "突破一点后续没力量"`                   | 收录反面案例                                                |
+| `npm run learn -- MAGMA 4h --do "..." --from 2026-09-01 --to 2026-09-15` | 只关心某段时间                                              |
+| `npm run swing -- BTC 4h`                                                | 只看拉升检测                                                |
+| `npm run cost -- --days 7`                                               | API 用量与花费（`--json` / `--recent N` / `--clear --yes`） |
+| `npm run selftest`                                                       | 离线自检，不需要网络和 Key                                  |
+| `npm run typecheck`                                                      | 类型检查                                                    |
+| `npm run db:up` / `db:down` / `db:status` / `db:reset`                   | 数据库                                                      |
+| `npm run sync:contracts`                                                 | 重新拉合约列表                                              |
 
-### 只在部署 / 发布时用
+### 部署 / 发布
 
-```bash
-npm run ui:build        # 构建前端 → frontend/dist
-npm run build           # 编译后端 → backend/dist
-npm run build:all       # 上面两步
-npm run start           # 跑编译后的 CLI
-npm run web:start       # 跑编译后的服务（自动走静态托管）
-npm run clean           # 清掉两边产物
-```
+| 命令                | 干什么                           |
+| ------------------- | -------------------------------- |
+| `npm run ui:build`  | 构建前端 → `frontend/dist`       |
+| `npm run build`     | 编译后端 → `backend/dist`        |
+| `npm run build:all` | 上面两步                         |
+| `npm run start`     | 跑编译后的 CLI                   |
+| `npm run web:start` | 跑编译后的服务（自动走静态托管） |
+| `npm run clean`     | 清掉两边产物                     |
+
+---
+
+## API
+
+后端所有接口都开了 CORS，可以单独调用（前端独立部署也行）。
+
+| 接口                                          | 干什么                                                       |
+| --------------------------------------------- | ------------------------------------------------------------ |
+| `GET /api/health`                             | 数据库连接 + 规则加载情况                                    |
+| `GET /api/config`                             | 页面初始化的全部信息（规则 / 知识库条数 / 花费 / 余额）      |
+| `GET /api/account`                            | 余额 + 可用模型（`?refresh=1` 绕过 60 秒缓存）               |
+| `POST /api/account/model`                     | 切换模型，写回 `.env`                                        |
+| `GET /api/contracts`                          | 本地合约列表                                                 |
+| `GET /api/candles?symbol&timeframe&limit`     | K 线 + 最近 4 小时压力支撑                                   |
+| `GET /api/analyze?symbol&mock`                | 开单分析（周期与胜率用后端默认值）                           |
+| `POST /api/knowledge`                         | 收录案例（`{symbol,timeframe,label,note?,from?,to?,save?}`） |
+| `GET /api/knowledge?label=`                   | 案例列表                                                     |
+| `GET /api/knowledge/:id`                      | 案例详情（含 K 线）                                          |
+| `DELETE /api/knowledge/:id`                   | 删除案例                                                     |
+| `GET /api/usage/summary?days&kind&realOnly`   | 用量汇总                                                     |
+| `GET /api/usage/calls?days&kind&limit&offset` | 用量明细（分页）                                             |
 
 ---
 

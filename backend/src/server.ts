@@ -22,11 +22,7 @@ import {
   type ModelsResult
 } from './llm/account'
 import {writeEnvVar} from './util/envfile'
-import {
-  hasBuiltFrontend,
-  mountViteDev,
-  type ViteDev
-} from './devtools/vite-dev'
+import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
 import {collectCase} from './knowledge-service'
 import {computeRecentSR, fetchCandles, fetchSnapshot} from './data/market'
 import {buildContext} from './context/builder'
@@ -119,7 +115,10 @@ function serveStatic(res: http.ServerResponse, urlPath: string): void {
     return
   }
 
-  res.writeHead(404, {'Content-Type': MIME['.html'], 'Cache-Control': 'no-store'})
+  res.writeHead(404, {
+    'Content-Type': MIME['.html'],
+    'Cache-Control': 'no-store'
+  })
   res.end(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>前端还没构建</title>
 <style>
@@ -307,12 +306,11 @@ async function handleAnalyze(
 
   const tfParam = q.get('timeframes')
   const fallbackTfs = loadConfig().timeframes
-  let timeframes = (
-    tfParam ? tfParam.split(',') : fallbackTfs
-  )
+  let timeframes = (tfParam ? tfParam.split(',') : fallbackTfs)
     .map(s => s.trim())
     .filter((s): s is Timeframe => (VALID_TFS as string[]).includes(s))
-  if (timeframes.length === 0) timeframes = fallbackTfs.length ? fallbackTfs : ['1h', '4h', '1d']
+  if (timeframes.length === 0)
+    timeframes = fallbackTfs.length ? fallbackTfs : ['1h', '4h', '1d']
 
   const hasKey = Boolean(process.env.LLM_API_KEY)
   const mockParam = q.get('mock')

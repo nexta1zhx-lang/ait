@@ -86,7 +86,10 @@ async function onRefresh() {
 
     <!-- 模型切换 + 账户余额（人民币） -->
     <div v-if="config" class="account">
-      <label class="model-pick" title="切换判断用的模型（会写进 .env，重启也保留）">
+      <label
+        class="model-pick"
+        title="切换判断用的模型（会写进 .env，重启也保留）"
+      >
         <span class="dim">模型</span>
         <select
           :value="config.model"
