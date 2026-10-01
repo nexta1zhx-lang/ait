@@ -206,10 +206,19 @@ async function showDetail(id: number) {
     }
   }
 
-  if (a.result?.exitTriggers?.length) {
+  const holding = a.result?.exitPlan?.holding ?? []
+  const watching = a.result?.exitPlan?.watching ?? []
+  if (holding.length || watching.length) {
     L.push('')
-    L.push('什么情况下必须走')
-    for (const e of a.result.exitTriggers) L.push(`  · ${e}`)
+    L.push('后续怎么跟')
+    if (holding.length) {
+      L.push('  已开单 —— 必须走')
+      for (const e of holding) L.push(`    · ${e}`)
+    }
+    if (watching.length) {
+      L.push('  还没开 —— 回头看')
+      for (const e of watching) L.push(`    · ${e}`)
+    }
   }
   if (a.result?.coachLine) {
     L.push('')

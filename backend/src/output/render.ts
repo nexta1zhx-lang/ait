@@ -44,7 +44,7 @@ export interface RenderInfo {
   judge?: {
     grade: string
     gradeReason?: string
-    exitTriggers?: string[]
+    exitPlan?: {holding?: string[]; watching?: string[]}
     coachLine?: string
     knowledgeRefs?: {symbol: string; timeframe: string; lesson: string}[]
   }
@@ -162,9 +162,18 @@ export function render(
     L.push(`${paint(A.bold, 'AI 结论:')} ${decision.reasoning}`)
   }
 
-  if (info.judge?.exitTriggers && info.judge.exitTriggers.length > 0) {
-    L.push(paint(A.bold, '什么情况下必须走:'))
-    for (const t of info.judge.exitTriggers) L.push(`  · ${t}`)
+  const holding = info.judge?.exitPlan?.holding ?? []
+  const watching = info.judge?.exitPlan?.watching ?? []
+  if (holding.length || watching.length) {
+    L.push(paint(A.bold, '后续怎么跟:'))
+    if (holding.length) {
+      L.push('  已开单 —— 必须走:')
+      for (const t of holding) L.push(`    · ${t}`)
+    }
+    if (watching.length) {
+      L.push('  还没开 —— 回头看:')
+      for (const t of watching) L.push(`    · ${t}`)
+    }
   }
 
   if (info.judge?.knowledgeRefs && info.judge.knowledgeRefs.length > 0) {

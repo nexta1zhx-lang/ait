@@ -5,7 +5,13 @@ import path from 'node:path'
 import {loadConfig, ROOT_DIR} from './config'
 import {loadContracts} from './contracts'
 import {loadRules} from './rules'
-import {checkDb, closePool, dbHelpMessage, ensureSchema, query} from './db/client'
+import {
+  checkDb,
+  closePool,
+  dbHelpMessage,
+  ensureSchema,
+  query
+} from './db/client'
 import {
   CaseLabel,
   deleteCase,

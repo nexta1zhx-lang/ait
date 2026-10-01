@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import {computed, onMounted, ref, watch} from 'vue'
-import {useRoute, useRouter} from 'vue-router'
-import StatCards, {type StatCard} from '../comps/StatCards.vue'
-import SegTabs from '../comps/SegTabs.vue'
-import DataTable, {type Column} from '../comps/DataTable.vue'
-import SymbolCombo from '../comps/SymbolCombo.vue'
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import StatCards, { type StatCard } from "../comps/StatCards.vue";
+import SegTabs from "../comps/SegTabs.vue";
+import DataTable, { type Column } from "../comps/DataTable.vue";
+import SymbolCombo from "../comps/SymbolCombo.vue";
 import {
   OUTCOME_TEXT,
   OUTCOME_TONE,
@@ -16,8 +16,8 @@ import {
   type AnalysisRow,
   type AnalysisStats,
   type GradeStat,
-  type OutcomeKind
-} from '../api'
+  type OutcomeKind,
+} from "../api";
 import {
   GRADE_TEXT,
   VERDICT_TEXT,
@@ -31,57 +31,57 @@ import {
   signedPct,
   structureFull,
   tok,
-  usd
-} from '../format'
-import {contracts} from '../store'
+  usd,
+} from "../format";
+import { contracts } from "../store";
 
-const route = useRoute()
-const router = useRouter()
+const route = useRoute();
+const router = useRouter();
 
 /* ---------------- 筛选 ---------------- */
 
 const RANGES = [
-  {value: 7, label: '7 天'},
-  {value: 30, label: '30 天'},
-  {value: 90, label: '90 天'},
-  {value: 365, label: '1 年'},
-  {value: 3650, label: '全部'}
-]
+  { value: 7, label: "7 天" },
+  { value: 30, label: "30 天" },
+  { value: 90, label: "90 天" },
+  { value: 365, label: "1 年" },
+  { value: 3650, label: "全部" },
+];
 
 const GRADES = [
-  {value: '', label: '全部档位'},
-  {value: 'A', label: 'A 档'},
-  {value: 'B', label: 'B 档'},
-  {value: 'C', label: 'C 档'}
-]
+  { value: "", label: "全部档位" },
+  { value: "A", label: "A 档" },
+  { value: "B", label: "B 档" },
+  { value: "C", label: "C 档" },
+];
 
 const VERDICTS = [
-  {value: '', label: '全部结论'},
-  {value: 'go', label: '可做'},
-  {value: 'wait', label: '等'},
-  {value: 'no_go', label: '不可做'}
-]
+  { value: "", label: "全部结论" },
+  { value: "go", label: "可做" },
+  { value: "wait", label: "等" },
+  { value: "no_go", label: "不可做" },
+];
 
-const days = ref(90)
+const days = ref(90);
 const symbol = ref(
-  typeof route.query.symbol === 'string' ? route.query.symbol : ''
-)
-const grade = ref('')
-const verdict = ref('')
-const actionable = ref(false)
-const pending = ref(false)
+  typeof route.query.symbol === "string" ? route.query.symbol : "",
+);
+const grade = ref("");
+const verdict = ref("");
+const actionable = ref(false);
+const pending = ref(false);
 
 /* ---------------- 列表 ---------------- */
 
-const rows = ref<AnalysisRow[]>([])
-const total = ref(0)
-const stats = ref<AnalysisStats | null>(null)
-const rate = ref(7.1)
-const limit = ref(20)
-const offset = ref(0)
-const loading = ref(true)
-const error = ref('')
-const updatedAt = ref<number | null>(null)
+const rows = ref<AnalysisRow[]>([]);
+const total = ref(0);
+const stats = ref<AnalysisStats | null>(null);
+const rate = ref(7.1);
+const limit = ref(20);
+const offset = ref(0);
+const loading = ref(true);
+const error = ref("");
+const updatedAt = ref<number | null>(null);
 
 const query = computed(() => ({
   symbol: symbol.value.trim().toUpperCase(),
@@ -91,296 +91,317 @@ const query = computed(() => ({
   pending: pending.value,
   days: days.value,
   limit: limit.value,
-  offset: offset.value
-}))
+  offset: offset.value,
+}));
 
 async function load() {
-  loading.value = true
-  error.value = ''
+  loading.value = true;
+  error.value = "";
   try {
-    const page = await fetchAnalyses(query.value)
-    rows.value = page.rows
-    total.value = page.total
-    stats.value = page.stats
-    rate.value = page.rate || 7.1
-    updatedAt.value = Date.now()
+    const page = await fetchAnalyses(query.value);
+    rows.value = page.rows;
+    total.value = page.total;
+    stats.value = page.stats;
+    rate.value = page.rate || 7.1;
+    updatedAt.value = Date.now();
   } catch (e) {
-    error.value = (e as Error).message
+    error.value = (e as Error).message;
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
 /** 只换页，不动汇总 */
 async function loadPage() {
   try {
-    const page = await fetchAnalyses(query.value, {offset: offset.value})
-    rows.value = page.rows
-    total.value = page.total
+    const page = await fetchAnalyses(query.value, { offset: offset.value });
+    rows.value = page.rows;
+    total.value = page.total;
   } catch (e) {
-    error.value = (e as Error).message
+    error.value = (e as Error).message;
   }
 }
 
-onMounted(load)
+onMounted(load);
 watch([days, symbol, grade, verdict, actionable, pending], () => {
-  offset.value = 0
-  load()
-})
+  offset.value = 0;
+  load();
+});
 
-const rmb = (usdValue: unknown) => cny((Number(usdValue) || 0) * rate.value)
+const rmb = (usdValue: unknown) => cny((Number(usdValue) || 0) * rate.value);
 
 /* ---------------- KPI ---------------- */
 
 const goCount = computed(
-  () => stats.value?.byGrade.reduce((s, g) => s + g.goCount, 0) ?? 0
-)
+  () => stats.value?.byGrade.reduce((s, g) => s + g.goCount, 0) ?? 0,
+);
 const settledAll = computed(() => {
-  const g = stats.value?.byGrade ?? []
-  const settled = g.reduce((s, x) => s + x.settled, 0)
-  const totalR = g.reduce((s, x) => s + (x.totalR ?? 0), 0)
+  const g = stats.value?.byGrade ?? [];
+  const settled = g.reduce((s, x) => s + x.settled, 0);
+  const totalR = g.reduce((s, x) => s + (x.totalR ?? 0), 0);
   const wins = g.reduce(
     (s, x) => s + Math.round((x.winRate ?? 0) * x.settled),
-    0
-  )
-  return {settled, totalR, wins}
-})
+    0,
+  );
+  return { settled, totalR, wins };
+});
 
 const cards = computed<StatCard[]>(() => {
-  const s = stats.value
-  const {settled, totalR, wins} = settledAll.value
+  const s = stats.value;
+  const { settled, totalR, wins } = settledAll.value;
   return [
     {
-      label: '分析次数',
+      label: "分析次数",
       value: int(s?.total),
-      sub: '每次分析都完整存档'
+      sub: "每次分析都完整存档",
     },
     {
-      label: '给出「可做」',
+      label: "给出「可做」",
       value: int(goCount.value),
       sub: s?.total
         ? `占 ${pct(goCount.value / s.total)}，其余都是等/不做`
-        : '还没有分析',
-      tone: 'blue'
+        : "还没有分析",
+      tone: "blue",
     },
     {
-      label: '已结算',
+      label: "已结算",
       value: `${settled} / ${int(s?.total)}`,
-      sub: settled ? `胜 ${wins} 次 · 胜率 ${pct(wins / settled)}` : '还没复盘',
-      tone: settled ? '' : 'warn'
+      sub: settled ? `胜 ${wins} 次 · 胜率 ${pct(wins / settled)}` : "还没复盘",
+      tone: settled ? "" : "warn",
     },
     {
-      label: '累计 R',
-      value: settled ? fixed(totalR) : '—',
-      sub: settled ? `平均每单 ${fixed(totalR / settled)}R` : '结算后才有',
-      tone: totalR > 0 ? 'ok' : totalR < 0 ? 'bad' : ''
+      label: "累计 R",
+      value: settled ? fixed(totalR) : "—",
+      sub: settled ? `平均每单 ${fixed(totalR / settled)}R` : "结算后才有",
+      tone: totalR > 0 ? "ok" : totalR < 0 ? "bad" : "",
     },
     {
-      label: '待复盘',
+      label: "待复盘",
       value: int(s?.pending),
-      sub: '「可做」但还没填结果',
-      tone: s?.pending ? 'warn' : ''
+      sub: "「可做」但还没填结果",
+      tone: s?.pending ? "warn" : "",
     },
     {
-      label: '累计花费',
+      label: "累计花费",
       value: rmb(s?.costUsd),
-      sub: `原价 ${usd(s?.costUsd)}`
-    }
-  ]
-})
+      sub: `原价 ${usd(s?.costUsd)}`,
+    },
+  ];
+});
 
 /* ---------------- 档位对比 ---------------- */
 
 const gradeCols: Column<GradeStat>[] = [
-  {key: 'grade', label: '档位', strong: true},
-  {key: 'calls', label: '次数', align: 'right', value: r => r.calls},
-  {key: 'goCount', label: '可做', align: 'right', value: r => r.goCount},
-  {key: 'settled', label: '已结算', align: 'right', value: r => r.settled},
+  { key: "grade", label: "档位", strong: true },
+  { key: "calls", label: "次数", align: "right", value: (r) => r.calls },
+  { key: "goCount", label: "可做", align: "right", value: (r) => r.goCount },
+  { key: "settled", label: "已结算", align: "right", value: (r) => r.settled },
   {
-    key: 'winRate',
-    label: '胜率',
-    align: 'right',
-    value: r => r.winRate ?? -1
+    key: "winRate",
+    label: "胜率",
+    align: "right",
+    value: (r) => r.winRate ?? -1,
   },
-  {key: 'avgR', label: '平均 R', align: 'right', value: r => r.avgR ?? 0},
-  {key: 'totalR', label: '累计 R', align: 'right', value: r => r.totalR ?? 0}
-]
+  { key: "avgR", label: "平均 R", align: "right", value: (r) => r.avgR ?? 0 },
+  {
+    key: "totalR",
+    label: "累计 R",
+    align: "right",
+    value: (r) => r.totalR ?? 0,
+  },
+];
 
 const symbolCols: Column<{
-  symbol: string
-  calls: number
-  settled: number
-  avgR: number | null
+  symbol: string;
+  calls: number;
+  settled: number;
+  avgR: number | null;
 }>[] = [
-  {key: 'symbol', label: '币种', strong: true},
-  {key: 'calls', label: '次数', align: 'right', value: r => r.calls},
-  {key: 'settled', label: '已结算', align: 'right', value: r => r.settled},
-  {key: 'avgR', label: '平均 R', align: 'right', value: r => r.avgR ?? 0}
-]
+  { key: "symbol", label: "币种", strong: true },
+  { key: "calls", label: "次数", align: "right", value: (r) => r.calls },
+  { key: "settled", label: "已结算", align: "right", value: (r) => r.settled },
+  { key: "avgR", label: "平均 R", align: "right", value: (r) => r.avgR ?? 0 },
+];
 
 /* ---------------- 列表 ---------------- */
 
 const listCols: Column<AnalysisRow>[] = [
-  {key: 'createdAt', label: '时间', strong: true},
-  {key: 'symbol', label: '币种'},
-  {key: 'grade', label: '档'},
-  {key: 'verdict', label: '结论'},
+  { key: "createdAt", label: "时间", strong: true },
+  { key: "symbol", label: "币种" },
+  { key: "grade", label: "档" },
+  { key: "verdict", label: "结论" },
   {
-    key: 'confidence',
-    label: '把握',
-    align: 'right',
-    value: r => r.confidence ?? 0
+    key: "confidence",
+    label: "把握",
+    align: "right",
+    value: (r) => r.confidence ?? 0,
   },
   {
-    key: 'entryPrice',
-    label: '入场',
-    align: 'right',
-    value: r => r.entryPrice ?? 0
+    key: "entryPrice",
+    label: "入场",
+    align: "right",
+    value: (r) => r.entryPrice ?? 0,
   },
-  {key: 'stopLoss', label: '止损', align: 'right', value: r => r.stopLoss ?? 0},
   {
-    key: 'expectancyR',
-    label: '期望 R',
-    align: 'right',
-    value: r => r.expectancyR ?? 0
+    key: "stopLoss",
+    label: "止损",
+    align: "right",
+    value: (r) => r.stopLoss ?? 0,
   },
-  {key: 'outcome', label: '结果'},
-  {key: 'rMultiple', label: 'R', align: 'right', value: r => r.rMultiple ?? 0},
-  {key: 'costUsd', label: '花费', align: 'right', value: r => r.costUsd ?? 0},
-  {key: 'actions', label: '操作'}
-]
+  {
+    key: "expectancyR",
+    label: "期望 R",
+    align: "right",
+    value: (r) => r.expectancyR ?? 0,
+  },
+  { key: "outcome", label: "结果" },
+  {
+    key: "rMultiple",
+    label: "R",
+    align: "right",
+    value: (r) => r.rMultiple ?? 0,
+  },
+  {
+    key: "costUsd",
+    label: "花费",
+    align: "right",
+    value: (r) => r.costUsd ?? 0,
+  },
+  { key: "actions", label: "操作" },
+];
 
-const gradeText = (g: string | null) => (g ? (GRADE_TEXT[g] ?? `${g} 档`) : '—')
+const gradeText = (g: string | null) =>
+  g ? (GRADE_TEXT[g] ?? `${g} 档`) : "—";
 const verdictText = (v: string | null) =>
-  v ? (VERDICT_TEXT[v]?.[0] ?? v) : '—'
+  v ? (VERDICT_TEXT[v]?.[0] ?? v) : "—";
 const verdictTone = (v: string | null) =>
-  v ? (VERDICT_TEXT[v]?.[1] ?? '') : 'dim'
-const num = (v: number | null) => (v === null ? '—' : fixed(v, 4))
+  v ? (VERDICT_TEXT[v]?.[1] ?? "") : "dim";
+const num = (v: number | null) => (v === null ? "—" : fixed(v, 4));
 
 /* ---------------- 详情 ---------------- */
 
-const detail = ref<AnalysisDetail | null>(null)
-const detailLoading = ref(false)
-const detailError = ref('')
+const detail = ref<AnalysisDetail | null>(null);
+const detailLoading = ref(false);
+const detailError = ref("");
 
 async function open(id: number) {
-  detailLoading.value = true
-  detailError.value = ''
-  detail.value = null
+  detailLoading.value = true;
+  detailError.value = "";
+  detail.value = null;
   try {
-    const r = await fetchAnalysis(id)
-    detail.value = r.analysis
-    void router.replace({query: {...route.query, id: String(id)}})
+    const r = await fetchAnalysis(id);
+    detail.value = r.analysis;
+    void router.replace({ query: { ...route.query, id: String(id) } });
   } catch (e) {
-    detailError.value = (e as Error).message
+    detailError.value = (e as Error).message;
   } finally {
-    detailLoading.value = false
+    detailLoading.value = false;
   }
 }
 
 function close() {
-  detail.value = null
-  detailError.value = ''
-  const q = {...route.query}
-  delete q.id
-  void router.replace({query: q})
+  detail.value = null;
+  detailError.value = "";
+  const q = { ...route.query };
+  delete q.id;
+  void router.replace({ query: q });
 }
 
 /* ---------------- 结算 ---------------- */
 
-const settling = ref(false)
-const settleMsg = ref('')
+const settling = ref(false);
+const settleMsg = ref("");
 const form = ref({
-  outcome: 'tp1' as OutcomeKind,
-  price: '',
-  rMultiple: '',
-  mfePct: '',
-  maePct: '',
-  note: ''
-})
+  outcome: "tp1" as OutcomeKind,
+  price: "",
+  rMultiple: "",
+  mfePct: "",
+  maePct: "",
+  note: "",
+});
 
-const OUTCOMES = (Object.keys(OUTCOME_TEXT) as OutcomeKind[]).map(k => ({
+const OUTCOMES = (Object.keys(OUTCOME_TEXT) as OutcomeKind[]).map((k) => ({
   value: k,
-  label: OUTCOME_TEXT[k]
-}))
+  label: OUTCOME_TEXT[k],
+}));
 
 /** 选了结果先把 R 猜好，省得每次手算（止损 = -1，TP1/2/3 用计划里的 R） */
 function guessR() {
-  const d = detail.value
-  if (!d) return ''
-  const o = form.value.outcome
-  if (o === 'sl') return '-1'
-  if (o === 'breakeven' || o === 'skipped') return '0'
-  if (o === 'tp1')
-    return d.result?.takeProfits?.[0] ? fixed(d.result.takeProfits[0].r) : ''
-  if (o === 'tp2')
-    return d.result?.takeProfits?.[1] ? fixed(d.result.takeProfits[1].r) : ''
-  if (o === 'tp3')
-    return d.result?.takeProfits?.[2] ? fixed(d.result.takeProfits[2].r) : ''
-  return ''
+  const d = detail.value;
+  if (!d) return "";
+  const o = form.value.outcome;
+  if (o === "sl") return "-1";
+  if (o === "breakeven" || o === "skipped") return "0";
+  if (o === "tp1")
+    return d.result?.takeProfits?.[0] ? fixed(d.result.takeProfits[0].r) : "";
+  if (o === "tp2")
+    return d.result?.takeProfits?.[1] ? fixed(d.result.takeProfits[1].r) : "";
+  if (o === "tp3")
+    return d.result?.takeProfits?.[2] ? fixed(d.result.takeProfits[2].r) : "";
+  return "";
 }
 
 watch(
   () => form.value.outcome,
   () => {
-    const g = guessR()
-    if (g) form.value.rMultiple = g
-  }
-)
+    const g = guessR();
+    if (g) form.value.rMultiple = g;
+  },
+);
 
 async function submitSettle() {
-  const d = detail.value
-  if (!d) return
-  settling.value = true
-  settleMsg.value = ''
+  const d = detail.value;
+  if (!d) return;
+  settling.value = true;
+  settleMsg.value = "";
   try {
     await settleAnalysis(d.id, {
       outcome: form.value.outcome,
-      price: form.value.price === '' ? null : Number(form.value.price),
+      price: form.value.price === "" ? null : Number(form.value.price),
       rMultiple:
-        form.value.rMultiple === '' ? null : Number(form.value.rMultiple),
-      mfePct: form.value.mfePct === '' ? null : Number(form.value.mfePct),
-      maePct: form.value.maePct === '' ? null : Number(form.value.maePct),
-      note: form.value.note || null
-    })
-    settleMsg.value = '已结算'
-    await load()
-    await open(d.id)
+        form.value.rMultiple === "" ? null : Number(form.value.rMultiple),
+      mfePct: form.value.mfePct === "" ? null : Number(form.value.mfePct),
+      maePct: form.value.maePct === "" ? null : Number(form.value.maePct),
+      note: form.value.note || null,
+    });
+    settleMsg.value = "已结算";
+    await load();
+    await open(d.id);
   } catch (e) {
-    settleMsg.value = (e as Error).message
+    settleMsg.value = (e as Error).message;
   } finally {
-    settling.value = false
+    settling.value = false;
   }
 }
 
 async function remove(id: number) {
-  if (!window.confirm(`删除第 ${id} 条分析记录？不可恢复。`)) return
+  if (!window.confirm(`删除第 ${id} 条分析记录？不可恢复。`)) return;
   try {
-    await deleteAnalysis(id)
-    if (detail.value?.id === id) close()
-    await load()
+    await deleteAnalysis(id);
+    if (detail.value?.id === id) close();
+    await load();
   } catch (e) {
-    error.value = (e as Error).message
+    error.value = (e as Error).message;
   }
 }
 
 /* ---------------- 分页 ---------------- */
 
-const page = computed(() => Math.floor(offset.value / limit.value) + 1)
-const pages = computed(() => Math.max(1, Math.ceil(total.value / limit.value)))
+const page = computed(() => Math.floor(offset.value / limit.value) + 1);
+const pages = computed(() => Math.max(1, Math.ceil(total.value / limit.value)));
 
 function go(delta: number) {
-  const next = offset.value + delta * limit.value
-  if (next < 0 || next >= total.value) return
-  offset.value = next
-  loadPage()
+  const next = offset.value + delta * limit.value;
+  if (next < 0 || next >= total.value) return;
+  offset.value = next;
+  loadPage();
 }
 
 /* 进来带 ?id= 就直接打开详情 */
 onMounted(() => {
-  const id = Number(route.query.id)
-  if (Number.isInteger(id) && id > 0) void open(id)
-})
+  const id = Number(route.query.id);
+  if (Number.isInteger(id) && id > 0) void open(id);
+});
 </script>
 
 <template>
@@ -409,7 +430,7 @@ onMounted(() => {
         {{ ago(new Date(updatedAt).toISOString()) }}更新
       </span>
       <button class="ghost" :disabled="loading" @click="load">
-        {{ loading ? '加载中…' : '刷新' }}
+        {{ loading ? "加载中…" : "刷新" }}
       </button>
     </section>
 
@@ -432,22 +453,22 @@ onMounted(() => {
         initial-sort="grade"
         empty="还没有分析记录"
       >
-        <template #grade="{row}">
+        <template #grade="{ row }">
           <span :class="['grade', row.grade]">{{ row.grade }}</span>
         </template>
-        <template #winRate="{row}">
+        <template #winRate="{ row }">
           <span v-if="row.settled === 0" class="dim">待复盘</span>
           <span v-else :class="row.winRate >= 0.5 ? 'v ok' : 'v bad'">
             {{ pct(row.winRate) }}
           </span>
         </template>
-        <template #avgR="{row}">
+        <template #avgR="{ row }">
           <span v-if="row.settled === 0" class="dim">—</span>
           <span v-else :class="row.avgR > 0 ? 'v ok' : 'v bad'">
             {{ fixed(row.avgR) }}R
           </span>
         </template>
-        <template #totalR="{row}">
+        <template #totalR="{ row }">
           <span v-if="row.settled === 0" class="dim">—</span>
           <span v-else :class="row.totalR > 0 ? 'v ok' : 'v bad'">
             {{ fixed(row.totalR) }}R
@@ -484,55 +505,55 @@ onMounted(() => {
         initial-sort="createdAt"
         empty="这段时间没有分析记录。去「开单分析」跑一次，结果会自动存到这里。"
       >
-        <template #createdAt="{row}">
+        <template #createdAt="{ row }">
           <a class="linkish" @click="open(row.id)">
             {{ bjTime(row.createdAt) }}
           </a>
         </template>
-        <template #symbol="{row}">
+        <template #symbol="{ row }">
           <b>{{ row.symbol }}</b>
           <div class="dim" style="font-size: 11px">
-            {{ row.timeframes.join(' · ') }}
+            {{ row.timeframes.join(" · ") }}
           </div>
         </template>
-        <template #grade="{row}">
+        <template #grade="{ row }">
           <span :class="['grade', row.grade ?? '']">{{
-            row.grade ?? '—'
+            row.grade ?? "—"
           }}</span>
         </template>
-        <template #verdict="{row}">
+        <template #verdict="{ row }">
           <span :class="['v', verdictTone(row.verdict)]">
             {{ verdictText(row.verdict) }}
           </span>
         </template>
-        <template #confidence="{row}">{{ row.confidence ?? '—' }}</template>
-        <template #entryPrice="{row}">{{ num(row.entryPrice) }}</template>
-        <template #stopLoss="{row}">
+        <template #confidence="{ row }">{{ row.confidence ?? "—" }}</template>
+        <template #entryPrice="{ row }">{{ num(row.entryPrice) }}</template>
+        <template #stopLoss="{ row }">
           {{ num(row.stopLoss) }}
           <div v-if="row.stopPct !== null" class="dim" style="font-size: 11px">
             {{ pct(row.stopPct) }}
           </div>
         </template>
-        <template #expectancyR="{row}">
+        <template #expectancyR="{ row }">
           <span v-if="row.expectancyR === null" class="dim">—</span>
           <span v-else :class="row.expectancyR > 0 ? 'v ok' : 'v bad'">
             {{ fixed(row.expectancyR) }}R
           </span>
         </template>
-        <template #outcome="{row}">
+        <template #outcome="{ row }">
           <span v-if="!row.outcome" class="dim">未结算</span>
           <span v-else :class="['v', OUTCOME_TONE[row.outcome]]">
             {{ OUTCOME_TEXT[row.outcome] }}
           </span>
         </template>
-        <template #rMultiple="{row}">
+        <template #rMultiple="{ row }">
           <span v-if="row.rMultiple === null" class="dim">—</span>
           <span v-else :class="row.rMultiple > 0 ? 'v ok' : 'v bad'">
             {{ fixed(row.rMultiple) }}
           </span>
         </template>
-        <template #costUsd="{row}">{{ rmb(row.costUsd) }}</template>
-        <template #actions="{row}">
+        <template #costUsd="{ row }">{{ rmb(row.costUsd) }}</template>
+        <template #actions="{ row }">
           <button class="ghost tiny" @click="open(row.id)">详情</button>
           <button class="ghost tiny danger" @click="remove(row.id)">删</button>
         </template>
@@ -573,12 +594,12 @@ onMounted(() => {
             <span :class="['v', verdictTone(detail.verdict)]">
               {{ verdictText(detail.verdict) }}
             </span>
-            <span class="dim">把握 {{ detail.confidence ?? '—' }}/100</span>
+            <span class="dim">把握 {{ detail.confidence ?? "—" }}/100</span>
             <span
               v-if="detail.direction && detail.direction !== 'none'"
               class="v blue"
             >
-              方向 {{ detail.direction === 'long' ? '做多' : '做空' }}
+              方向 {{ detail.direction === "long" ? "做多" : "做空" }}
             </span>
           </div>
 
@@ -610,7 +631,7 @@ onMounted(() => {
             <div>
               <span>末段 R</span
               ><b>{{
-                detail.rrFinal === null ? '—' : fixed(detail.rrFinal)
+                detail.rrFinal === null ? "—" : fixed(detail.rrFinal)
               }}</b>
             </div>
             <div>
@@ -618,8 +639,8 @@ onMounted(() => {
               <b :class="(detail.expectancyR ?? 0) > 0 ? 'v ok' : 'v bad'">
                 {{
                   detail.expectancyR === null
-                    ? '—'
-                    : fixed(detail.expectancyR) + 'R'
+                    ? "—"
+                    : fixed(detail.expectancyR) + "R"
                 }}
               </b>
             </div>
@@ -627,34 +648,34 @@ onMounted(() => {
               <span>假设胜率</span>
               <b>{{
                 detail.assumedWinRate === null
-                  ? '—'
+                  ? "—"
                   : pct(detail.assumedWinRate)
               }}</b>
             </div>
             <div>
               <span>止损幅度</span>
-              <b>{{ detail.stopPct === null ? '—' : pct(detail.stopPct) }}</b>
+              <b>{{ detail.stopPct === null ? "—" : pct(detail.stopPct) }}</b>
             </div>
             <div>
               <span>仓位</span
               ><b>{{
-                detail.positionQty === null ? '—' : fixed(detail.positionQty, 6)
+                detail.positionQty === null ? "—" : fixed(detail.positionQty, 6)
               }}</b>
             </div>
             <div>
               <span>名义价值</span>
               <b>{{
                 detail.positionNotional === null
-                  ? '—'
-                  : '$' + int(detail.positionNotional)
+                  ? "—"
+                  : "$" + int(detail.positionNotional)
               }}</b>
             </div>
             <div>
               <span>杠杆</span>
               <b>{{
                 detail.leverageUsed === null
-                  ? '—'
-                  : fixed(detail.leverageUsed) + 'x'
+                  ? "—"
+                  : fixed(detail.leverageUsed) + "x"
               }}</b>
             </div>
           </div>
@@ -663,7 +684,7 @@ onMounted(() => {
           <h3>
             护栏
             <span :class="detail.guardPassed ? 'v ok' : 'v bad'">
-              {{ detail.guardPassed ? '通过' : '被拦下' }}
+              {{ detail.guardPassed ? "通过" : "被拦下" }}
             </span>
           </h3>
           <ul v-if="detail.veto.length" class="list bad">
@@ -681,7 +702,7 @@ onMounted(() => {
             Checklist
             <span class="tag">
               {{
-                detail.result?.checklist?.filter(c => c.status === 'pass')
+                detail.result?.checklist?.filter((c) => c.status === "pass")
                   .length ?? 0
               }}
               / {{ detail.result?.checklist?.length ?? 0 }} 通过
@@ -695,7 +716,7 @@ onMounted(() => {
             >
               <b>
                 {{
-                  c.status === 'pass' ? '✅' : c.status === 'warn' ? '⚠️' : '❌'
+                  c.status === "pass" ? "✅" : c.status === "warn" ? "⚠️" : "❌"
                 }}
                 {{ c.item }}
               </b>
@@ -704,13 +725,29 @@ onMounted(() => {
           </ul>
 
           <!-- 平仓触发 -->
-          <template v-if="(detail.result?.exitTriggers ?? []).length">
-            <h3>什么情况下必须走</h3>
-            <ul class="list">
-              <li v-for="(t, i) in detail.result.exitTriggers" :key="i">
-                {{ t }}
-              </li>
-            </ul>
+          <template
+            v-if="
+              (detail.result?.exitPlan?.holding ?? []).length ||
+              (detail.result?.exitPlan?.watching ?? []).length
+            "
+          >
+            <h3>后续怎么跟</h3>
+            <template v-if="(detail.result?.exitPlan?.holding ?? []).length">
+              <p class="dim" style="margin: 6px 0 0">已开单 · 必须走</p>
+              <ul class="list bad">
+                <li v-for="(t, i) in detail.result.exitPlan.holding" :key="i">
+                  {{ t }}
+                </li>
+              </ul>
+            </template>
+            <template v-if="(detail.result?.exitPlan?.watching ?? []).length">
+              <p class="dim" style="margin: 6px 0 0">还没开 · 出现才回头看</p>
+              <ul class="list">
+                <li v-for="(t, i) in detail.result.exitPlan.watching" :key="i">
+                  {{ t }}
+                </li>
+              </ul>
+            </template>
           </template>
 
           <p v-if="detail.result?.coachLine" class="coach">
@@ -726,10 +763,10 @@ onMounted(() => {
             </div>
             <div>
               <span>指标周期</span>
-              <b>{{ detail.timeframes.join(' · ') }}</b>
+              <b>{{ detail.timeframes.join(" · ") }}</b>
             </div>
             <div>
-              <span>图表周期</span><b>{{ detail.chartTimeframe ?? '—' }}</b>
+              <span>图表周期</span><b>{{ detail.chartTimeframe ?? "—" }}</b>
             </div>
           </div>
           <p class="dim">{{ structureFull(detail.snapshot?.structure) }}</p>
@@ -750,11 +787,11 @@ onMounted(() => {
                 "
               >
                 {{
-                  t.trend === 'up'
-                    ? '上升'
-                    : t.trend === 'down'
-                      ? '下跌'
-                      : '震荡'
+                  t.trend === "up"
+                    ? "上升"
+                    : t.trend === "down"
+                      ? "下跌"
+                      : "震荡"
                 }}
               </span>
               <div class="dim" style="font-size: 11px">
@@ -796,20 +833,20 @@ onMounted(() => {
               <span>耗时</span><b>{{ ms(detail.latencyMs) }}</b>
             </div>
             <div>
-              <span>尝试次数</span><b>{{ detail.attempts ?? '—' }}</b>
+              <span>尝试次数</span><b>{{ detail.attempts ?? "—" }}</b>
             </div>
             <div>
-              <span>模型</span><b>{{ detail.model ?? '—' }}</b>
+              <span>模型</span><b>{{ detail.model ?? "—" }}</b>
             </div>
             <div>
               <span>规则版本</span>
               <b title="规则文件内容的 hash，改了规则这里就变">
-                {{ detail.rulesHash ? detail.rulesHash.slice(0, 12) : '—' }}
+                {{ detail.rulesHash ? detail.rulesHash.slice(0, 12) : "—" }}
               </b>
             </div>
             <div>
               <span>护栏档</span
-              ><b>{{ detail.guardrails?.minRr ?? '—' }}R 起</b>
+              ><b>{{ detail.guardrails?.minRr ?? "—" }}R 起</b>
             </div>
           </div>
 
@@ -830,8 +867,8 @@ onMounted(() => {
               v-if="detail.mfePct !== null || detail.maePct !== null"
               class="dim"
             >
-              最大浮盈 {{ detail.mfePct === null ? '—' : pct(detail.mfePct) }} ·
-              最大浮亏 {{ detail.maePct === null ? '—' : pct(detail.maePct) }}
+              最大浮盈 {{ detail.mfePct === null ? "—" : pct(detail.mfePct) }} ·
+              最大浮亏 {{ detail.maePct === null ? "—" : pct(detail.maePct) }}
             </div>
             <div v-if="detail.outcomeNote" class="dim">
               {{ detail.outcomeNote }}
@@ -893,7 +930,7 @@ onMounted(() => {
           </div>
           <div style="display: flex; align-items: center; gap: 10px">
             <button class="primary" :disabled="settling" @click="submitSettle">
-              {{ settling ? '保存中…' : '保存结算' }}
+              {{ settling ? "保存中…" : "保存结算" }}
             </button>
             <button class="ghost danger" @click="remove(detail.id)">
               删除这条
@@ -912,7 +949,7 @@ onMounted(() => {
               当时的规则原文
               <span class="tag">
                 {{ detail.rules.hash.slice(0, 12) }} ·
-                {{ detail.rules.sources.join('、') }}
+                {{ detail.rules.sources.join("、") }}
               </span>
             </summary>
             <pre>{{ detail.rules.body }}</pre>

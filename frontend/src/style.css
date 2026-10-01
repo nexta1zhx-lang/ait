@@ -43,6 +43,29 @@ body {
   padding: 12px 16px 32px;
 }
 
+/* ------------------------------------------------------------------
+   开单分析页：一屏塞下，不整页滚动，各栏自己滚
+   （其它页还是普通长文档，所以只在 body 上挂类时生效）
+   ------------------------------------------------------------------ */
+body.fixed-viewport {
+  overflow: hidden;
+}
+
+body.fixed-viewport #app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  overflow: hidden;
+}
+
+body.fixed-viewport #app > .topbar,
+body.fixed-viewport #app > .notice,
+body.fixed-viewport #app > .error {
+  flex: 0 0 auto;
+}
+
 h1 {
   margin: 0;
   font-size: 21px;
@@ -594,6 +617,20 @@ button.danger:hover {
   font-weight: 600;
 }
 
+/* 「最该守住的」跟在「怎么做」的计划后面，不单独占一块 */
+.coach-inline {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.coach-inline .k {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
 /* 热度 / 键值列表 */
 .heat-row {
   display: flex;
@@ -689,7 +726,12 @@ button.danger:hover {
 .analyze {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+}
+
+body.fixed-viewport .analyze {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* 顶部：一行放完 */
@@ -782,18 +824,149 @@ button.danger:hover {
   }
 }
 
-/* 左右布局：左 = 步骤 + 结论，右 = K 线 + 历史 */
+/* 左右布局：左 = 实时分析 / 历史分析（窄），右 = K 线（宽） */
 .split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(420px, 44%);
+  grid-template-columns: minmax(340px, 32%) minmax(0, 1fr);
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
 }
 
-/* 侧栏里的 K 线：宽度有限，高度给够一点 */
+body.fixed-viewport .split {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 左栏：tab 固定，内容自己滚 */
+.split > .col {
+  min-height: 0;
+}
+
+.scroll-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+/*
+ * 这是个 overflow:auto 的 flex 列：内容超出时默认的 flex-shrink:1 会把子项「挤扁」
+ * 来试图塞下，而不是让它溢出滚动。
+ * .seg 又带 overflow:hidden，min-height:auto 失效 → 二级 tab 会被压成 2px（只剩边框）。
+ * 所以这里明确禁止收缩。
+ */
+.scroll-body > * {
+  flex: 0 0 auto;
+}
+
+/* 代码层护栏否决：红底，放在结论最上面 */
+.veto-banner {
+  margin-top: 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  color: var(--bad);
+}
+
+.veto-banner b {
+  display: block;
+  font-size: 13px;
+}
+
+.veto-banner ul {
+  margin: 4px 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+
+.veto-banner .dim {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 「后续怎么跟」的两块：已开 / 还没开 */
+.exit-block {
+  margin-top: 10px;
+}
+
+.exit-block .badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.exit-block .checklist {
+  margin: 2px 0 0;
+}
+
+/* 二级 tab 比一级小一号，视觉上分得出层级 */
+.sub-tabs {
+  align-self: flex-start;
+}
+
+.sub-tabs button {
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+/* 二级 tab 就 4 个短的，让它自己排一行 */
+.analyze .sub-tabs {
+  flex-wrap: wrap;
+}
+
+/* 右侧 K 线铺满整栏高度 */
+.side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.chart-side {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .chart-side .chart-wrap {
-  height: 360px;
+  flex: 1 1 auto;
+  height: auto;
   min-height: 260px;
+}
+
+/* 折叠后的分析过程：一行，点开恢复 */
+.steps-collapsed {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  padding: 8px 12px;
+}
+
+.steps-collapsed .t {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.steps-collapsed .dim {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.steps-collapsed .dim:last-child {
+  flex: 0 0 auto;
+  color: var(--blue);
 }
 
 /* 该币种的历史分析列表 */
@@ -849,9 +1022,14 @@ button.danger:hover {
 .tab-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   flex-wrap: wrap;
+}
+
+.tab-row .seg,
+.tab-row > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .side .panel h2 {

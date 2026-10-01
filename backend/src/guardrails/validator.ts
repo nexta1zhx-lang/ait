@@ -11,6 +11,48 @@ import {
 
 const parser = new Parser()
 
+/**
+ * 红线表达式的取值域 = 行情快照变量 + 由**这次判断**派生的量。
+ *
+ * 快照里只有行情，没有「止损放哪」—— 那是 AI 给出的计划的一部分。
+ * 但「止损回撤不能超过价格 5%」这类红线必须能引用它，所以在这里补上。
+ * 没给止损时一律取 0，红线自然不会误命中。
+ */
+function redLineScope(
+  decision: LlmDecision,
+  snapshot: MarketSnapshot
+): Record<string, number> {
+  const entry = decision.entry?.price ?? snapshot.price
+  const sl = decision.stopLoss
+  const hasStop =
+    typeof sl === 'number' && Number.isFinite(sl) && entry > 0 && sl !== entry
+  const stopDistance = hasStop ? Math.abs(entry - (sl as number)) : 0
+  const stopDistancePct = entry > 0 ? (stopDistance / entry) * 100 : 0
+  const tps = decision.takeProfits ?? []
+  const lastTp = tps.length ? Number(tps[tps.length - 1].price) : 0
+  const firstTp = tps.length ? Number(tps[0].price) : 0
+
+  return {
+    ...snapshot.variables,
+    // ── 本次判断派生 ──
+    entry_price: entry,
+    stop_loss: hasStop ? (sl as number) : 0,
+    /** 止损距入场的百分比（无止损 = 0） */
+    stop_distance_pct: stopDistancePct,
+    /** 止损距入场的绝对价差 */
+    stop_distance: stopDistance,
+    tp1_price: firstTp,
+    tp_last_price: lastTp,
+    /** 末段盈亏比（无止损 = 0） */
+    rr_final:
+      stopDistance > 0 && lastTp > 0
+        ? Math.abs(lastTp - entry) / stopDistance
+        : 0,
+    is_long: decision.direction === 'long' ? 1 : 0,
+    is_open: decision.decision === 'open' ? 1 : 0
+  }
+}
+
 /** 安全求值：只读取 scope 中已有变量，缺失或出错一律视为不命中 */
 function evalWhen(expr: string, scope: Record<string, number>): boolean {
   try {
@@ -42,8 +84,9 @@ export function validate(
   const checks: GuardrailCheck[] = []
 
   // 1) 硬性红线
+  const scope = redLineScope(decision, snapshot)
   for (const rl of config.redLines) {
-    const hit = evalWhen(rl.when, snapshot.variables)
+    const hit = evalWhen(rl.when, scope)
     checks.push({
       name: `红线: ${rl.desc || rl.id}`,
       pass: !hit,

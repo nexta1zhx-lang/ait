@@ -108,14 +108,25 @@ const judge: JudgeResult = {
     check('这个币强势吗？', 'pass', '4h 更高的高点 + 更高的低点'),
     check('有盘整结构吗？', 'pass', '前高附近横盘蓄势'),
     check('有强力 K / 放量突破吗？', 'pass', '量比 1.2，放量上破'),
-    check('后续还有力量吗？', 'pass', '持仓量变化 +2.5%'),
-    check('止损位写得出吗？空间合理吗？', 'pass', '止损放在波段低点下方'),
+    check(
+      '各周期趋势一致吗？',
+      'pass',
+      '15m / 1h / 4h / 1d 同向上涨，4h 结构最清楚'
+    ),
+    check(
+      '止损位写得出吗？空间合理吗？',
+      'pass',
+      '止损放在 1h 最近波段低点下方'
+    ),
     check('现在是关键时段还是垃圾时段？', 'warn', '数据判断不了，自己看'),
     check('心态是否平稳？', 'warn', '数据判断不了，自己看')
   ],
   failedCritical: [],
   verdictReason: '结构、量能、止损三项都对上了，可以做。',
-  exitTriggers: ['动能衰竭（量能萎缩、后续没力量）就走'],
+  exitPlan: {
+    holding: ['跌破 58,500 结构低点不能快速收回 → 走'],
+    watching: ['放量突破 62,400 并回踩不破 → 才回头看']
+  },
   knowledgeRefs: [],
   coachLine: '强势就顺势做，别在弱势里赌突破。',
   decision: 'open'
@@ -192,7 +203,7 @@ console.log(
     judge: {
       grade: judge.grade,
       gradeReason: judge.gradeReason,
-      exitTriggers: judge.exitTriggers,
+      exitPlan: judge.exitPlan,
       coachLine: judge.coachLine,
       knowledgeRefs: judge.knowledgeRefs
     }

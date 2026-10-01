@@ -15,21 +15,29 @@
   分批减仓比例: [50, 25, 25] # 对应 TP1/TP2/TP3 的减仓百分比
 
 # 硬性红线：任一命中 -> 直接否决，无论 LLM 怎么判断。
-# when 表达式可引用：funding_rate / amplitude24h_pct / change24h_pct /
-#   oi_change_pct / net_change_<tf> / vol_ratio_<tf> / trend_up_count 等
+# when 表达式可引用上下文变量（均来自价格结构与市场热度，无技术指标）：
+#   通用：price / funding_rate / open_interest / oi_change_pct / change24h_pct
+#         amplitude24h_pct / volume24h / long_short_ratio / swing_high / swing_low
+#         last_swing_high / last_swing_low / trend_up_count / trend_down_count
+#   分周期（<tf> ∈ 5m|15m|1h|4h|1d）：
+#         close_<tf> / net_change_<tf> / range_<tf> / vol_ratio_<tf> / trend_<tf>
+#   本次判断派生（来自 AI 给的入场/止损/止盈，没给就是 0）：
+#         entry_price / stop_loss / stop_distance / stop_distance_pct
+#         tp1_price / tp_last_price / rr_final / is_long / is_open
 硬性红线:
   - id: funding_extreme
     desc: 资金费率过热
     when: 'funding_rate > 0.05'
 
-  - id: daily_loss_limit
-    desc: 当日连亏达上限，停手
-    when: 'today_consecutive_losses >= 3'
-
-  - id: max_positions
-    desc: 持仓数达上限
-    when: 'open_positions >= 5'
-
   - id: extreme_volatility
     desc: 24h 波动过大
     when: 'amplitude24h_pct > 15'
+
+  - id: overheated_pump
+    desc: 24h 涨幅过大（追高风险）
+    when: 'change24h_pct > 20'
+
+  # 止损回撤不能超过价格的 5% —— 止损给太宽，一笔亏太多，直接否决
+  - id: stop_too_wide
+    desc: 止损回撤超过价格 5%
+    when: 'stop_distance_pct > 5'

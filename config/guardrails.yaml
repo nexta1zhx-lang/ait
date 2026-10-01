@@ -11,7 +11,8 @@
   最大杠杆: 5 # 超过则拒绝
   最小盈亏比: 1.5 # (TP1-入场)/(入场-止损) < 1.5 则告警
   止损方式: structure # structure（结构位：前低/前高）| pct（固定百分比）
-  止损距离百分比范围: [0.2, 8.0] # 止损距入场的百分比，超出范围则告警
+  止损距离百分比范围: [0.2, 5.0] # 止损距入场的百分比，超出范围则告警
+  #                              ↑ 上限跟下面的 stop_too_wide 红线一致
   止盈分批: [1.0, 2.0, 3.0] # 以 R 为单位
   分批减仓比例: [50, 25, 25] # 对应 TP1/TP2/TP3 的减仓百分比
 
@@ -22,15 +23,11 @@
 #         last_swing_high / last_swing_low / trend_up_count / trend_down_count
 #   分周期（<tf> ∈ 5m|15m|1h|4h|1d）：
 #         close_<tf> / net_change_<tf> / range_<tf> / vol_ratio_<tf> / trend_<tf>
+#   本次判断派生（来自 AI 给的入场/止损/止盈，没给就是 0）：
+#         entry_price / stop_loss / stop_distance / stop_distance_pct
+#         tp1_price / tp_last_price / rr_final / is_long / is_open
 硬性红线:
-  - id: funding_extreme
-    desc: 资金费率过热
-    when: 'funding_rate > 0.05'
-
-  - id: extreme_volatility
-    desc: 24h 波动过大
-    when: 'amplitude24h_pct > 15'
-
-  - id: overheated_pump
-    desc: 24h 涨幅过大（追高风险）
-    when: 'change24h_pct > 20'
+  # 止损回撤不能超过价格的 5% —— 止损给太宽，一笔亏太多，直接否决
+  - id: stop_too_wide
+    desc: 止损回撤超过价格 5%
+    when: 'stop_distance_pct > 5'

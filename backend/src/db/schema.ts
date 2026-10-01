@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS analyses (
   chart_timeframe TEXT,
 
   -- ────────── 全量存档：只管回放，不参与查询 ──────────
-  -- AI 的完整输出（checklist / exitTriggers / coachLine 都在里面）
+  -- AI 的完整输出（checklist / exitPlan / coachLine 都在里面）
   result        JSONB       NOT NULL DEFAULT '{}'::jsonb,
   -- 护栏逐条明细
   guardrails    JSONB       NOT NULL DEFAULT '{}'::jsonb,

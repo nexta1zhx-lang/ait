@@ -39,8 +39,17 @@ export const judgeSchema = z.object({
   failedCritical: z.array(z.string()).catch([]),
   /** 差在哪一条 */
   verdictReason: z.string().catch(''),
-  /** 什么情况下必须走 */
-  exitTriggers: z.array(z.string()).catch([]),
+  /**
+   * 后续怎么跟（只写当下数据能验证的触发条件，不预测）
+   *   holding  —— 已开单：什么情况下必须走
+   *   watching —— 还没开：出现什么条件才回头看
+   */
+  exitPlan: z
+    .object({
+      holding: z.array(z.string()).catch([]),
+      watching: z.array(z.string()).catch([])
+    })
+    .catch({holding: [], watching: []}),
   /** 引用了知识库里哪些经验 */
   knowledgeRefs: z
     .array(

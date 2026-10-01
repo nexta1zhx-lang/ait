@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import {computed, onMounted, ref} from 'vue'
-import {RouterLink, RouterView} from 'vue-router'
+import {computed, onMounted, ref, watch} from 'vue'
+import {RouterLink, RouterView, useRoute} from 'vue-router'
 import {cny} from './format'
 import {
   account,
@@ -24,6 +24,19 @@ const NAV = [
 
 const toast = ref('')
 const accountError = ref('')
+
+/**
+ * 开单分析页要「一屏塞下、内部各自滚动」，其它页还是普通长文档。
+ * 页面高度归 body 管，所以在这里切换一个 class，别影响别的路由。
+ */
+const route = useRoute()
+watch(
+  () => route.path,
+  p => {
+    document.body.classList.toggle('fixed-viewport', p === '/')
+  },
+  {immediate: true}
+)
 
 onMounted(bootstrap)
 

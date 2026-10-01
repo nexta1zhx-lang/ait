@@ -119,7 +119,7 @@ export interface AnalysisDetail extends AnalysisRow {
   mfePct: number | null
   maePct: number | null
   outcomePrice: number | null
-  /** AI 完整输出（checklist / exitTriggers / coachLine 都在里面） */
+  /** AI 完整输出（checklist / exitPlan / coachLine 都在里面） */
   result: JudgeResult
   /** 护栏逐条明细 */
   guardrails: GuardrailResult

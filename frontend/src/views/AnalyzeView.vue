@@ -52,12 +52,24 @@ const timeframesText = computed(
   () => config.value?.timeframes ?? '15m,1h,4h,1d'
 )
 
+/** 左侧一级 tab：实时分析 / 历史分析 */
 const LEFT_TABS = [
+  {value: 'live', label: '实时分析'},
+  {value: 'history', label: '历史分析'}
+]
+const leftTab = ref<'live' | 'history'>('live')
+
+/** 实时分析内部的二级 tab */
+const LIVE_TABS = [
   {value: 'verdict', label: 'AI 结论'},
   {value: 'checklist', label: 'Checklist'},
+  {value: 'plan', label: '怎么做'},
   {value: 'market', label: '市场与周期'}
 ]
-const leftTab = ref<'verdict' | 'checklist' | 'market'>('verdict')
+const liveTab = ref<'verdict' | 'checklist' | 'plan' | 'market'>('verdict')
+
+/** 分析过程：跑的时候展开，出结论后收成一行，点一下还能展开 */
+const showSteps = ref(true)
 
 /* ---------------- 该币种的历史分析 ---------------- */
 
@@ -121,7 +133,9 @@ function run() {
   result.value = null
   steps.value = []
   stepStartedAt.clear()
-  leftTab.value = 'verdict'
+  leftTab.value = 'live'
+  liveTab.value = 'verdict'
+  showSteps.value = true
   loading.value = true
   runStartedAt.value = Date.now()
   ticker = window.setInterval(() => (tick.value = Date.now()), 200)
@@ -138,6 +152,8 @@ function run() {
       // 后端给的 steps 是完整终态，直接覆盖，免得漏掉最后几步的耗时
       if (r.steps?.length) steps.value = r.steps
       result.value = r
+      // 结论出来了就把过程和结论让出位置，需要看过程点那一行展开
+      showSteps.value = false
       stop()
       void refreshConfig()
       void loadHistory(s)
@@ -194,17 +210,6 @@ const verdictInfo = computed(
   () => VERDICT_TEXT[judge.value?.verdict ?? ''] ?? ['—', '']
 )
 
-const costLine = computed(() => {
-  const r = result.value
-  if (!r) return ''
-  const u = r.meta.usage
-  return (
-    `本次调用 ${u.text}` +
-    (u.attempts > 1 ? ` · 重试 ${u.attempts} 次` : '') +
-    (u.callId === null ? '（未记入统计）' : '')
-  )
-})
-
 const STAT_ICON: Record<string, [string, string]> = {
   pass: ['✅', 'ok'],
   fail: ['❌', 'bad'],
@@ -222,6 +227,11 @@ const chartPlan = computed(() => {
   if (!j) return null
   return {entry: j.entry, stopLoss: j.stopLoss, takeProfits: j.takeProfits}
 })
+
+const exitHolding = computed(() => result.value?.judge.exitPlan?.holding ?? [])
+const exitWatching = computed(
+  () => result.value?.judge.exitPlan?.watching ?? []
+)
 
 const expRow = computed(() => result.value?.expectancy ?? null)
 const position = computed(() => guard.value?.position ?? null)
@@ -320,335 +330,454 @@ const tfCols: Column<TfStat>[] = [
 
     <!-- ============ 左右布局 ============ -->
     <div class="split">
-      <!-- ── 左：步骤 + 结论 ── -->
+      <!-- ── 左：实时分析 / 历史分析 ── -->
       <div class="col">
-        <section class="panel">
-          <div class="steps-head">
-            <h3>分析过程</h3>
-            <span v-if="steps.length" class="dim">
-              {{ loading ? '进行中' : '完成' }} · 共
-              {{ (totalMs / 1000).toFixed(1) }}s
-            </span>
-          </div>
-          <ol v-if="steps.length" class="steps">
-            <li
-              v-for="s in steps"
-              :key="s.id"
-              class="step"
-              :class="[s.state, {active: s.state === 'running'}]"
+        <div class="tab-row">
+          <SegTabs v-model="leftTab" :options="LEFT_TABS" />
+          <RouterLink
+            v-if="leftTab === 'live' && result?.analysisId"
+            class="archived-link"
+            :to="`/history?id=${result.analysisId}`"
+          >
+            已存档 #{{ result.analysisId }} → 去复盘
+          </RouterLink>
+        </div>
+
+        <!-- ① 实时分析 -->
+        <template v-if="leftTab === 'live'">
+          <div class="scroll-body">
+            <!-- 出结论后收成一行，点一下看全过程 -->
+            <button
+              v-if="result && !showSteps"
+              type="button"
+              class="panel steps-collapsed"
+              @click="showSteps = true"
             >
-              <span class="dot">{{ STEP_ICON[s.state] }}</span>
-              <span class="body">
-                <b>{{ s.label }}</b>
-                <em v-if="s.detail">{{ s.detail }}</em>
-              </span>
-              <span class="ms">{{ stepTime(s) }}</span>
-            </li>
-          </ol>
-          <p v-else class="hint">
-            点「让 AI 判断」后，这里会逐步写出：读规则 → 取知识库 → 拉行情 →
-            拼上下文 → 调模型 → 护栏校验 → 存档。
-          </p>
-        </section>
-
-        <template v-if="result">
-          <div class="tab-row">
-            <SegTabs v-model="leftTab" :options="LEFT_TABS" />
-            <RouterLink
-              v-if="result.analysisId"
-              class="archived-link"
-              :to="`/history?id=${result.analysisId}`"
-            >
-              已存档 #{{ result.analysisId }} → 去复盘
-            </RouterLink>
-          </div>
-
-          <!-- tab 1：AI 结论 -->
-          <section v-if="leftTab === 'verdict'" class="panel">
-            <div class="grade-row">
-              <div class="grade" :class="gradeCls">{{ gradeText }}</div>
-              <div class="grade-title">
-                <span class="pill" :class="verdictInfo[1]">{{
-                  verdictInfo[0]
-                }}</span>
-                <span class="conf">把握 {{ result.judge.confidence }}/100</span>
-                <span v-if="costLine" class="conf">{{ costLine }}</span>
-              </div>
-            </div>
-
-            <p class="hint" style="margin-top: 10px">
-              {{ result.judge.gradeReason }}
-            </p>
-            <div v-if="result.judge.verdictReason" class="reasoning">
-              {{ result.judge.verdictReason }}
-            </div>
-
-            <div class="stats">
-              <div class="stat">
-                <span class="k">当前价</span>
-                <span class="v">{{ fmt(result.price) }}</span>
-              </div>
-              <div class="stat">
-                <span class="k">24h 涨跌</span>
-                <span
-                  class="v"
-                  :class="
-                    result.change24hPct == null
-                      ? ''
-                      : result.change24hPct >= 0
-                        ? 'ok'
-                        : 'bad'
-                  "
-                >
-                  {{ signedPct(result.change24hPct) }}
-                </span>
-              </div>
-              <div class="stat">
-                <span class="k">资金费率</span>
-                <span class="v">
-                  {{
-                    result.fundingRate == null
-                      ? '—'
-                      : (Number(result.fundingRate) * 100).toFixed(4) + '%'
-                  }}
-                </span>
-              </div>
-              <div class="stat">
-                <span class="k">波段高 / 低</span>
-                <span class="v">
-                  {{ fmt(result.structure?.swingHigh) }} /
-                  {{ fmt(result.structure?.swingLow) }}
-                </span>
-              </div>
-              <div class="stat">
-                <span class="k">规则版本</span>
-                <span class="v">{{ result.meta.rules.hash }}</span>
-              </div>
-              <div class="stat">
-                <span class="k">知识库</span>
-                <span class="v">
-                  {{ result.meta.knowledgeUsed ? '已注入经验' : '无经验可引' }}
-                </span>
-              </div>
-            </div>
-
-            <template v-if="result.judge.knowledgeRefs?.length">
-              <h3 style="margin-top: 16px">
-                知识库参考 <span class="tag">来自我的案例</span>
-              </h3>
-              <ul class="checklist">
-                <li
-                  v-for="k in result.judge.knowledgeRefs"
-                  :key="k.lesson"
-                  class="ok"
-                >
-                  <span class="rule">{{ k.lesson }}</span>
-                  <span class="note">{{ k.symbol }} {{ k.timeframe }}</span>
-                </li>
-              </ul>
-            </template>
-          </section>
-
-          <!-- tab 2：Checklist -->
-          <section v-else-if="leftTab === 'checklist'" class="panel">
-            <h2>
-              Checklist
-              <span class="tag">{{ passCount }}/{{ judge?.checklist?.length }} 通过</span>
-            </h2>
-            <ul class="checklist big">
-              <li v-if="!judge?.checklist?.length" class="muted">
-                （AI 没有返回 Checklist）
-              </li>
-              <li
-                v-for="c in judge?.checklist ?? []"
-                :key="c.item"
-                :class="iconOf(c)[1]"
+              <span class="t"
+                >分析过程 · 共 {{ (totalMs / 1000).toFixed(1) }}s</span
               >
-                <span>{{ iconOf(c)[0] }}</span>
-                <span class="rule">{{ c.item }}</span>
-                <span v-if="c.evidence" class="note">{{ c.evidence }}</span>
-              </li>
-            </ul>
-          </section>
+              <span class="dim">
+                {{ steps.map(s2 => s2.label).join(' → ') }}
+              </span>
+              <span class="dim">展开 ▾</span>
+            </button>
 
-          <!-- tab 3：市场与周期 -->
-          <template v-else>
-            <section class="panel">
-              <h2>市场热度 <span class="tag">交易所数据</span></h2>
-              <div class="heat-grid">
-                <div v-for="r in heatRows" :key="r.k" class="heat-row">
-                  <span class="k">{{ r.k }}</span>
-                  <span class="v" :class="r.cls">{{ r.v }}</span>
-                </div>
+            <section v-if="!result || showSteps" class="panel">
+              <div class="steps-head">
+                <h3>分析过程</h3>
+                <button
+                  v-if="result"
+                  type="button"
+                  class="ghost tiny"
+                  @click="showSteps = false"
+                >
+                  收起
+                </button>
+                <span v-else-if="steps.length" class="dim">
+                  {{ loading ? '进行中' : '完成' }} · 共
+                  {{ (totalMs / 1000).toFixed(1) }}s
+                </span>
               </div>
+              <ol v-if="steps.length" class="steps">
+                <li
+                  v-for="s in steps"
+                  :key="s.id"
+                  class="step"
+                  :class="[s.state, {active: s.state === 'running'}]"
+                >
+                  <span class="dot">{{ STEP_ICON[s.state] }}</span>
+                  <span class="body">
+                    <b>{{ s.label }}</b>
+                    <em v-if="s.detail">{{ s.detail }}</em>
+                  </span>
+                  <span class="ms">{{ stepTime(s) }}</span>
+                </li>
+              </ol>
+              <p v-else class="hint">
+                点「让 AI 判断」后，这里会逐步写出：读规则 → 取知识库 → 拉行情 →
+                拼上下文 → 调模型 → 护栏校验 → 存档。
+              </p>
             </section>
 
-            <section class="panel">
-              <h2>
-                多周期趋势
-                <span class="tag">代码统计 · AI 据此判断周期是否一致</span>
-              </h2>
-              <DataTable :columns="tfCols" :rows="result.timeframes">
-                <template #close="{row}">{{ fmt(row.close) }}</template>
-                <template #trend="{row}">
+            <template v-if="result">
+              <SegTabs
+                v-model="liveTab"
+                :options="LIVE_TABS"
+                class="sub-tabs"
+              />
+
+              <!-- tab 1：AI 结论 -->
+              <section v-if="liveTab === 'verdict'" class="panel">
+                <div class="grade-row">
+                  <div class="grade" :class="gradeCls">{{ gradeText }}</div>
+                  <div class="grade-title">
+                    <span class="pill" :class="verdictInfo[1]">{{
+                      verdictInfo[0]
+                    }}</span>
+                    <span class="conf"
+                      >把握 {{ result.judge.confidence }}/100</span
+                    >
+                  </div>
+                </div>
+
+                <!-- 代码层否决 LLM：必须显眼，否则「AI 说可做」会被当成能做 -->
+                <div v-if="guard && !guard.passed" class="veto-banner">
+                  <b>⛔ 代码层护栏拦下，这笔不能做</b>
+                  <ul>
+                    <li v-for="(v, i) in guard.violations" :key="i">
+                      {{ v.desc || v.id }}
+                    </li>
+                  </ul>
+                  <span class="dim">
+                    AI 的判断覆盖不了红线 —— 这是硬性规则，不讨论。
+                  </span>
+                </div>
+
+                <p class="hint" style="margin-top: 10px">
+                  {{ result.judge.gradeReason }}
+                </p>
+                <div v-if="result.judge.verdictReason" class="reasoning">
+                  {{ result.judge.verdictReason }}
+                </div>
+
+                <div class="stats">
+                  <div class="stat">
+                    <span class="k">当前价</span>
+                    <span class="v">{{ fmt(result.price) }}</span>
+                  </div>
+                  <div class="stat">
+                    <span class="k">24h 涨跌</span>
+                    <span
+                      class="v"
+                      :class="
+                        result.change24hPct == null
+                          ? ''
+                          : result.change24hPct >= 0
+                            ? 'ok'
+                            : 'bad'
+                      "
+                    >
+                      {{ signedPct(result.change24hPct) }}
+                    </span>
+                  </div>
+                  <div class="stat">
+                    <span class="k">资金费率</span>
+                    <span class="v">
+                      {{
+                        result.fundingRate == null
+                          ? '—'
+                          : (Number(result.fundingRate) * 100).toFixed(4) + '%'
+                      }}
+                    </span>
+                  </div>
+                  <div class="stat">
+                    <span class="k">波段高 / 低</span>
+                    <span class="v">
+                      {{ fmt(result.structure?.swingHigh) }} /
+                      {{ fmt(result.structure?.swingLow) }}
+                    </span>
+                  </div>
+                  <div class="stat">
+                    <span class="k">规则版本</span>
+                    <span class="v">{{ result.meta.rules.hash }}</span>
+                  </div>
+                  <div class="stat">
+                    <span class="k">知识库</span>
+                    <span class="v">
+                      {{
+                        result.meta.knowledgeUsed ? '已注入经验' : '无经验可引'
+                      }}
+                    </span>
+                  </div>
+                </div>
+
+                <template v-if="result.judge.knowledgeRefs?.length">
+                  <h3 style="margin-top: 16px">
+                    知识库参考 <span class="tag">来自我的案例</span>
+                  </h3>
+                  <ul class="checklist">
+                    <li
+                      v-for="k in result.judge.knowledgeRefs"
+                      :key="k.lesson"
+                      class="ok"
+                    >
+                      <span class="rule">{{ k.lesson }}</span>
+                      <span class="note">{{ k.symbol }} {{ k.timeframe }}</span>
+                    </li>
+                  </ul>
+                </template>
+              </section>
+
+              <!-- tab 2：Checklist -->
+              <section v-else-if="liveTab === 'checklist'" class="panel">
+                <h2>
+                  Checklist
+                  <span class="tag"
+                    >{{ passCount }}/{{ judge?.checklist?.length }} 通过</span
+                  >
+                </h2>
+                <ul class="checklist big">
+                  <li v-if="!judge?.checklist?.length" class="muted">
+                    （AI 没有返回 Checklist）
+                  </li>
+                  <li
+                    v-for="c in judge?.checklist ?? []"
+                    :key="c.item"
+                    :class="iconOf(c)[1]"
+                  >
+                    <span>{{ iconOf(c)[0] }}</span>
+                    <span class="rule">{{ c.item }}</span>
+                    <span v-if="c.evidence" class="note">{{ c.evidence }}</span>
+                  </li>
+                </ul>
+              </section>
+
+              <!-- tab 3：怎么做 -->
+              <section v-else-if="liveTab === 'plan'" class="panel">
+                <h2>怎么做</h2>
+                <div class="plan">
+                  <div class="plan-row">
+                    <span class="k">入场</span>
+                    <span class="v">
+                      {{ fmt(entryPrice) }}
+                      <em>{{
+                        result.judge.entry?.type === 'limit' ? '限价' : '市价'
+                      }}</em>
+                    </span>
+                  </div>
+                  <div class="plan-row">
+                    <span class="k">止损</span>
+                    <span
+                      class="v"
+                      :class="result.judge.stopLoss != null ? 'bad' : 'muted'"
+                    >
+                      <template v-if="result.judge.stopLoss != null">
+                        {{ fmt(result.judge.stopLoss) }}
+                        <em>
+                          {{
+                            signedPct(
+                              ((result.judge.stopLoss - entryPrice) /
+                                entryPrice) *
+                                100
+                            )
+                          }}
+                        </em>
+                      </template>
+                      <template v-else>写不出止损 → 不做</template>
+                    </span>
+                  </div>
+                  <div class="plan-row">
+                    <span class="k">止盈</span>
+                    <span class="v" :class="tps.length ? 'ok' : 'muted'">
+                      <template v-if="!tps.length">—</template>
+                      <template v-for="(t, i) in tps" :key="t.label">
+                        <br v-if="i" />
+                        {{ fmt(t.price) }}
+                        <em
+                          >{{ t.label }} {{ fmt(t.r, 1) }}R<span
+                            v-if="t.reducePercent"
+                          >
+                            减{{ t.reducePercent }}%</span
+                          ></em
+                        >
+                      </template>
+                    </span>
+                  </div>
+                  <div class="plan-row">
+                    <span class="k">期望值</span>
+                    <span
+                      v-if="expRow"
+                      class="v"
+                      :class="expRow.positive ? 'ok' : 'bad'"
+                    >
+                      {{ expRow.expectancyR }}R
+                      <em>
+                        胜率 {{ Math.round(expRow.winRate * 100) }}% × 加权
+                        {{ expRow.weightedR }}R
+                      </em>
+                    </span>
+                    <span v-else class="v muted">—</span>
+                  </div>
+                  <template v-if="position">
+                    <div class="plan-row">
+                      <span class="k">仓位</span>
+                      <span class="v">
+                        {{ fmt(position.quantity, 4) }}
+                        <em>名义 {{ fmt(position.notional) }} U</em>
+                      </span>
+                    </div>
+                    <div class="plan-row">
+                      <span class="k">风险</span>
+                      <span class="v">
+                        {{ fmt(position.riskAmount) }} U
+                        <em>账户 {{ position.riskPercent }}%</em>
+                      </span>
+                    </div>
+                    <div class="plan-row">
+                      <span class="k">杠杆</span>
+                      <span class="v">
+                        {{ fmt(position.requiredLeverage, 2) }}x
+                        <em>建议 {{ fmt(position.leverageUsed, 2) }}x</em>
+                      </span>
+                    </div>
+                  </template>
+                  <div v-else class="plan-row">
+                    <span class="k">仓位</span>
+                    <span class="v muted">—</span>
+                  </div>
+                  <div
+                    v-if="guard && !guard.passed && guard.violations.length"
+                    class="plan-row"
+                  >
+                    <span class="k">护栏</span>
+                    <span class="v bad">
+                      {{ guard.violations.map(v => v.desc || v.id).join('；') }}
+                    </span>
+                  </div>
+                </div>
+
+                <!-- 每次最该守住的那句话，跟计划放在一起 -->
+                <div v-if="result.judge.coachLine" class="coach-inline">
+                  <span class="k">⚠️ 当前最该守住的</span>
+                  <p class="coach-line">{{ result.judge.coachLine }}</p>
+                </div>
+              </section>
+
+              <!-- tab 4：市场与周期 -->
+              <template v-else>
+                <section class="panel">
+                  <h2>市场热度 <span class="tag">交易所数据</span></h2>
+                  <div class="heat-grid">
+                    <div v-for="r in heatRows" :key="r.k" class="heat-row">
+                      <span class="k">{{ r.k }}</span>
+                      <span class="v" :class="r.cls">{{ r.v }}</span>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="panel">
+                  <h2>
+                    多周期趋势
+                    <span class="tag">代码统计 · AI 据此判断周期是否一致</span>
+                  </h2>
+                  <DataTable :columns="tfCols" :rows="result.timeframes">
+                    <template #close="{row}">{{ fmt(row.close) }}</template>
+                    <template #trend="{row}">
+                      <span
+                        :class="
+                          row.trend === 'up'
+                            ? 'v ok'
+                            : row.trend === 'down'
+                              ? 'v bad'
+                              : 'v muted'
+                        "
+                      >
+                        {{ TREND_TEXT[row.trend] ?? row.trend }}
+                      </span>
+                    </template>
+                    <template #netChangePct="{row}">
+                      <span :class="row.netChangePct >= 0 ? 'v ok' : 'v bad'">
+                        {{ signedPct(row.netChangePct) }}
+                      </span>
+                    </template>
+                    <template #rangePct="{row}">
+                      {{ fixed(row.rangePct, 2) }}%
+                    </template>
+                    <template #volRatio="{row}">
+                      {{ fixed(row.volRatio, 2) }}
+                    </template>
+                    <template #structure="{row}">
+                      <span :title="structureFull(row.structure)">
+                        {{ structureText(row.structure) }}
+                      </span>
+                    </template>
+                  </DataTable>
+                </section>
+              </template>
+
+              <!-- 后续怎么跟：已开 / 还没开 分开写 -->
+              <section
+                v-if="exitHolding.length || exitWatching.length"
+                class="panel"
+              >
+                <h2>
+                  后续怎么跟
+                  <span class="tag">只用当下数据能验证的条件</span>
+                </h2>
+
+                <div v-if="exitHolding.length" class="exit-block">
+                  <span class="badge">已开单 · 必须走</span>
+                  <ul class="checklist">
+                    <li v-for="e in exitHolding" :key="e" class="bad">
+                      <span class="rule">{{ e }}</span>
+                    </li>
+                  </ul>
+                </div>
+
+                <div v-if="exitWatching.length" class="exit-block">
+                  <span class="badge">还没开 · 出现才回头看</span>
+                  <ul class="checklist">
+                    <li v-for="e in exitWatching" :key="e" class="warn">
+                      <span class="rule">{{ e }}</span>
+                    </li>
+                  </ul>
+                </div>
+              </section>
+            </template>
+          </div>
+        </template>
+
+        <!-- ② 历史分析：只在切到这个 tab 时显示 -->
+        <div v-else class="scroll-body">
+          <section class="panel">
+            <h2>
+              {{ symbol }} 的历史分析
+              <span class="tag">共 {{ historyTotal }} 条</span>
+            </h2>
+            <div v-if="historyError" class="dim">
+              （读取失败：{{ historyError }}）
+            </div>
+            <ul v-else-if="history.length" class="hist">
+              <li v-for="h in history" :key="h.id">
+                <RouterLink :to="`/history?id=${h.id}`">
+                  <span class="t">{{ bjShort(h.createdAt) }}</span>
+                  <span class="grade" :class="(h.grade ?? '').toLowerCase()">
+                    {{ h.grade ?? '—' }}
+                  </span>
                   <span
+                    class="v"
                     :class="
-                      row.trend === 'up'
-                        ? 'v ok'
-                        : row.trend === 'down'
-                          ? 'v bad'
-                          : 'v muted'
+                      h.verdict ? (VERDICT_TEXT[h.verdict]?.[1] ?? '') : 'dim'
                     "
                   >
-                    {{ TREND_TEXT[row.trend] ?? row.trend }}
+                    {{
+                      h.verdict
+                        ? (VERDICT_TEXT[h.verdict]?.[0] ?? h.verdict)
+                        : '—'
+                    }}
                   </span>
-                </template>
-                <template #netChangePct="{row}">
-                  <span :class="row.netChangePct >= 0 ? 'v ok' : 'v bad'">
-                    {{ signedPct(row.netChangePct) }}
+                  <span
+                    class="out"
+                    :class="h.outcome ? OUTCOME_TONE[h.outcome] : 'dim'"
+                  >
+                    {{ h.outcome ? OUTCOME_TEXT[h.outcome] : '未结算' }}
                   </span>
-                </template>
-                <template #rangePct="{row}">
-                  {{ fixed(row.rangePct, 2) }}%
-                </template>
-                <template #volRatio="{row}">
-                  {{ fixed(row.volRatio, 2) }}
-                </template>
-                <template #structure="{row}">
-                  <span :title="structureFull(row.structure)">
-                    {{ structureText(row.structure) }}
+                  <span
+                    v-if="h.rMultiple !== null"
+                    class="r"
+                    :class="h.rMultiple > 0 ? 'ok' : 'bad'"
+                  >
+                    {{ fixed(h.rMultiple) }}R
                   </span>
-                </template>
-              </DataTable>
-            </section>
-          </template>
-
-          <!-- 怎么做 -->
-          <section class="panel">
-            <h2>怎么做</h2>
-            <div class="plan">
-              <div class="plan-row">
-                <span class="k">入场</span>
-                <span class="v">
-                  {{ fmt(entryPrice) }}
-                  <em>{{
-                    result.judge.entry?.type === 'limit' ? '限价' : '市价'
-                  }}</em>
-                </span>
-              </div>
-              <div class="plan-row">
-                <span class="k">止损</span>
-                <span
-                  class="v"
-                  :class="result.judge.stopLoss != null ? 'bad' : 'muted'"
-                >
-                  <template v-if="result.judge.stopLoss != null">
-                    {{ fmt(result.judge.stopLoss) }}
-                    <em>
-                      {{
-                        signedPct(
-                          ((result.judge.stopLoss - entryPrice) / entryPrice) *
-                            100
-                        )
-                      }}
-                    </em>
-                  </template>
-                  <template v-else>写不出止损 → 不做</template>
-                </span>
-              </div>
-              <div class="plan-row">
-                <span class="k">止盈</span>
-                <span class="v" :class="tps.length ? 'ok' : 'muted'">
-                  <template v-if="!tps.length">—</template>
-                  <template v-for="(t, i) in tps" :key="t.label">
-                    <br v-if="i" />
-                    {{ fmt(t.price) }}
-                    <em
-                      >{{ t.label }} {{ fmt(t.r, 1) }}R<span
-                        v-if="t.reducePercent"
-                      >
-                        减{{ t.reducePercent }}%</span
-                      ></em
-                    >
-                  </template>
-                </span>
-              </div>
-              <div class="plan-row">
-                <span class="k">期望值</span>
-                <span
-                  v-if="expRow"
-                  class="v"
-                  :class="expRow.positive ? 'ok' : 'bad'"
-                >
-                  {{ expRow.expectancyR }}R
-                  <em>
-                    胜率 {{ Math.round(expRow.winRate * 100) }}% × 加权
-                    {{ expRow.weightedR }}R
-                  </em>
-                </span>
-                <span v-else class="v muted">—</span>
-              </div>
-              <template v-if="position">
-                <div class="plan-row">
-                  <span class="k">仓位</span>
-                  <span class="v">
-                    {{ fmt(position.quantity, 4) }}
-                    <em>名义 {{ fmt(position.notional) }} U</em>
-                  </span>
-                </div>
-                <div class="plan-row">
-                  <span class="k">风险</span>
-                  <span class="v">
-                    {{ fmt(position.riskAmount) }} U
-                    <em>账户 {{ position.riskPercent }}%</em>
-                  </span>
-                </div>
-                <div class="plan-row">
-                  <span class="k">杠杆</span>
-                  <span class="v">
-                    {{ fmt(position.requiredLeverage, 2) }}x
-                    <em>建议 {{ fmt(position.leverageUsed, 2) }}x</em>
-                  </span>
-                </div>
-              </template>
-              <div v-else class="plan-row">
-                <span class="k">仓位</span>
-                <span class="v muted">—</span>
-              </div>
-              <div
-                v-if="guard && !guard.passed && guard.violations.length"
-                class="plan-row"
-              >
-                <span class="k">护栏</span>
-                <span class="v bad">
-                  {{ guard.violations.map(v => v.desc || v.id).join('；') }}
-                </span>
-              </div>
-            </div>
-          </section>
-
-          <!-- 必须走 -->
-          <section v-if="result.judge.exitTriggers?.length" class="panel">
-            <h2>什么情况下必须走</h2>
-            <ul class="checklist">
-              <li v-for="e in result.judge.exitTriggers" :key="e" class="warn">
-                <span class="rule">{{ e }}</span>
+                </RouterLink>
               </li>
             </ul>
+            <p v-else class="hint">{{ symbol }} 还没有分析记录。</p>
           </section>
-
-          <!-- 守住 -->
-          <section
-            v-if="result.judge.coachLine"
-            class="panel coach-panel"
-          >
-            <h2>⚠️ 当前最该守住的</h2>
-            <p class="coach-line">{{ result.judge.coachLine }}</p>
-          </section>
-        </template>
+        </div>
       </div>
 
-      <!-- ── 右：K 线 + 该币种的历史分析 ── -->
+      <!-- ── 右：K 线（整屏高度） ── -->
       <aside class="col side">
         <KlineChart
           class="chart-side"
@@ -658,42 +787,6 @@ const tfCols: Column<TfStat>[] = [
           @update:timeframe="chartTf = $event"
           @error="error = $event"
         />
-
-        <section class="panel">
-          <h2>
-            {{ symbol }} 的历史分析
-            <span class="tag">共 {{ historyTotal }} 条</span>
-          </h2>
-          <div v-if="historyError" class="dim">（读取失败：{{ historyError }}）</div>
-          <ul v-else-if="history.length" class="hist">
-            <li v-for="h in history" :key="h.id">
-              <RouterLink :to="`/history?id=${h.id}`">
-                <span class="t">{{ bjShort(h.createdAt) }}</span>
-                <span class="grade" :class="(h.grade ?? '').toLowerCase()">
-                  {{ h.grade ?? '—' }}
-                </span>
-                <span
-                  class="v"
-                  :class="h.verdict ? (VERDICT_TEXT[h.verdict]?.[1] ?? '') : 'dim'"
-                >
-                  {{ h.verdict ? (VERDICT_TEXT[h.verdict]?.[0] ?? h.verdict) : '—' }}
-                </span>
-                <span
-                  class="out"
-                  :class="h.outcome ? OUTCOME_TONE[h.outcome] : 'dim'"
-                >
-                  {{ h.outcome ? OUTCOME_TEXT[h.outcome] : '未结算' }}
-                </span>
-                <span v-if="h.rMultiple !== null" class="r" :class="h.rMultiple > 0 ? 'ok' : 'bad'">
-                  {{ fixed(h.rMultiple) }}R
-                </span>
-              </RouterLink>
-            </li>
-          </ul>
-          <p v-else class="hint">
-            {{ symbol }} 还没有分析记录。
-          </p>
-        </section>
       </aside>
     </div>
   </div>
