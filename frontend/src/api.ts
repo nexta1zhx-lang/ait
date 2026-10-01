@@ -76,7 +76,6 @@ export interface AccountResult {
   provider: string
   baseUrl: string
   hasApiKey: boolean
-  mock: boolean
   model: string
   balance: AccountBalance
   models: {
@@ -238,6 +237,8 @@ export interface Expectancy {
 }
 
 export interface AnalyzeResult {
+  /** 存档编号；后端落库失败时为 null（分析结果照常返回） */
+  analysisId: number | null
   symbol: string
   exchange: string
   price: number
@@ -251,7 +252,6 @@ export interface AnalyzeResult {
   expectancy: Expectancy | null
   meta: {
     model: string
-    mock: boolean
     warning: string | null
     knowledgeUsed: boolean
     usage: {
@@ -267,12 +267,10 @@ export interface AnalyzeResult {
 }
 
 /** 开单分析。周期与假设胜率都用后端配置的默认值。 */
-export function analyze(opts: {symbol: string; mock: boolean}) {
-  const p = new URLSearchParams({
-    symbol: opts.symbol,
-    mock: opts.mock ? '1' : '0'
-  })
-  return get<AnalyzeResult>('/api/analyze?' + p.toString())
+export function analyze(symbol: string) {
+  return get<AnalyzeResult>(
+    '/api/analyze?' + new URLSearchParams({symbol}).toString()
+  )
 }
 
 /* ---------------- 知识库 ---------------- */
@@ -311,7 +309,6 @@ export interface CollectResult {
   candleCount: number
   meta: {
     model: string
-    mock: boolean
     warning: string | null
     usage: {
       totalTokens: number
@@ -339,7 +336,6 @@ export const deleteCase = (id: number) =>
 
 export interface UsageTotals {
   calls: number
-  mockCalls: number
   promptTokens: number
   completionTokens: number
   totalTokens: number
@@ -363,7 +359,6 @@ export interface UsageRow {
   totalTokens: number
   cacheHitTokens: number
   costUsd: number
-  mock: boolean
   attempts: number
   latencyMs: number | null
   createdAt: string
@@ -397,14 +392,10 @@ export interface UsageCallPage {
 export interface UsageQuery {
   days: number
   kind: '' | 'judge' | 'extract'
-  realOnly: boolean
 }
 
 function usageQs(q: UsageQuery, extra: Record<string, string | number> = {}) {
-  const p = new URLSearchParams({
-    days: String(q.days),
-    realOnly: q.realOnly ? '1' : '0'
-  })
+  const p = new URLSearchParams({days: String(q.days)})
   if (q.kind) p.set('kind', q.kind)
   for (const [k, v] of Object.entries(extra)) p.set(k, String(v))
   return p.toString()
@@ -428,3 +419,198 @@ export const fetchUsageCalls = (
       offset: opts.offset ?? 0
     })}`
   )
+
+/* ---------------- 历史存档 ---------------- */
+
+export type OutcomeKind =
+  | 'tp1'
+  | 'tp2'
+  | 'tp3'
+  | 'sl'
+  | 'breakeven'
+  | 'expired'
+  | 'skipped'
+
+export const OUTCOME_TEXT: Record<OutcomeKind, string> = {
+  tp1: '到 TP1',
+  tp2: '到 TP2',
+  tp3: '到 TP3',
+  sl: '打止损',
+  breakeven: '平手离场',
+  expired: '到期没触发',
+  skipped: '看了没做'
+}
+
+/** 结算时算不算「赢」 */
+export const OUTCOME_WIN: Record<OutcomeKind, boolean | null> = {
+  tp1: true,
+  tp2: true,
+  tp3: true,
+  sl: false,
+  breakeven: null,
+  expired: null,
+  skipped: null
+}
+
+export const OUTCOME_TONE: Record<OutcomeKind, string> = {
+  tp1: 'ok',
+  tp2: 'ok',
+  tp3: 'ok',
+  sl: 'bad',
+  breakeven: 'warn',
+  expired: '',
+  skipped: 'dim'
+}
+
+export interface AnalysisRow {
+  id: number
+  symbol: string
+  exchange: string
+  marketType: string
+  timeframes: string[]
+  grade: string | null
+  gradeReason: string | null
+  verdict: string | null
+  confidence: number | null
+  direction: string | null
+  price: number | null
+  entryPrice: number | null
+  entryType: string | null
+  stopLoss: number | null
+  stopPct: number | null
+  tp1Price: number | null
+  tp2Price: number | null
+  tp3Price: number | null
+  rrFinal: number | null
+  expectancyR: number | null
+  positionQty: number | null
+  leverageUsed: number | null
+  guardPassed: boolean | null
+  veto: string[]
+  redLines: string[]
+  model: string | null
+  rulesHash: string | null
+  knowledgeRefs: {symbol: string; timeframe: string; lesson: string}[]
+  costUsd: number | null
+  latencyMs: number | null
+  outcome: OutcomeKind | null
+  rMultiple: number | null
+  outcomeAt: string | null
+  outcomeNote: string | null
+  createdAt: string
+}
+
+export interface GradeStat {
+  grade: string
+  calls: number
+  goCount: number
+  settled: number
+  winRate: number | null
+  avgR: number | null
+  totalR: number | null
+}
+
+export interface AnalysisStats {
+  total: number
+  pending: number
+  costUsd: number
+  byGrade: GradeStat[]
+  bySymbol: {
+    symbol: string
+    calls: number
+    settled: number
+    avgR: number | null
+  }[]
+}
+
+export interface AnalysisDetail extends AnalysisRow {
+  ccxtSymbol: string | null
+  assumedWinRate: number | null
+  verdictReason: string | null
+  positionNotional: number | null
+  riskAmount: number | null
+  chartTimeframe: string | null
+  promptTokens: number | null
+  completionTokens: number | null
+  attempts: number | null
+  mfePct: number | null
+  maePct: number | null
+  outcomePrice: number | null
+  result: Judge
+  guardrails: Guardrails
+  expectancy: Expectancy | null
+  snapshot: {
+    price?: number
+    timeframes?: TfStat[]
+    heat?: Heat
+    structure?: Structure
+  }
+  meta: Record<string, unknown>
+  rules: {hash: string; sources: string[]; system: string; body: string} | null
+}
+
+export interface AnalysisQuery {
+  symbol: string
+  grade: string
+  verdict: string
+  actionable: boolean
+  pending: boolean
+  days: number
+  limit: number
+  offset: number
+}
+
+export interface AnalysisPage {
+  rows: AnalysisRow[]
+  total: number
+  stats: AnalysisStats
+  /** 美元 → 人民币汇率，跟用量页共用 */
+  rate: number
+}
+
+function analysisQs(
+  q: AnalysisQuery,
+  extra: Record<string, string | number> = {}
+) {
+  const p = new URLSearchParams({
+    days: String(q.days),
+    limit: String(q.limit),
+    offset: String(q.offset)
+  })
+  if (q.symbol) p.set('symbol', q.symbol)
+  if (q.grade) p.set('grade', q.grade)
+  if (q.verdict) p.set('verdict', q.verdict)
+  if (q.actionable) p.set('actionable', '1')
+  if (q.pending) p.set('pending', '1')
+  for (const [k, v] of Object.entries(extra)) p.set(k, String(v))
+  return p.toString()
+}
+
+export const fetchAnalyses = (
+  q: AnalysisQuery,
+  opts: {limit?: number; offset?: number} = {}
+) =>
+  get<AnalysisPage>(
+    `/api/analyses?${analysisQs(q, {
+      limit: opts.limit ?? q.limit,
+      offset: opts.offset ?? q.offset
+    })}`
+  )
+
+export const fetchAnalysis = (id: number) =>
+  get<{analysis: AnalysisDetail}>(`/api/analyses/${id}`)
+
+export const settleAnalysis = (
+  id: number,
+  body: {
+    outcome: OutcomeKind
+    price?: number | null
+    rMultiple?: number | null
+    mfePct?: number | null
+    maePct?: number | null
+    note?: string | null
+  }
+) => post<{ok: boolean}>(`/api/analyses/${id}/settle`, body)
+
+export const deleteAnalysis = (id: number) =>
+  del<{ok: boolean}>(`/api/analyses/${id}`)

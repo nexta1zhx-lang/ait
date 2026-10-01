@@ -41,9 +41,3 @@ export function writeEnvVar(name: string, value: string): boolean {
 }
 
 /** 展示用：只留头尾，中间打码 */
-export function maskSecret(v: string): string {
-  const s = String(v ?? '')
-  if (!s) return ''
-  if (s.length <= 10) return s.slice(0, 2) + '***'
-  return `${s.slice(0, 6)}…${s.slice(-4)}`
-}

@@ -5,7 +5,7 @@ import path from 'node:path'
 import {loadConfig, ROOT_DIR} from './config'
 import {loadContracts} from './contracts'
 import {loadRules} from './rules'
-import {checkDb, dbHelpMessage, ensureSchema, query} from './db/client'
+import {checkDb, closePool, dbHelpMessage, ensureSchema, query} from './db/client'
 import {
   CaseLabel,
   deleteCase,
@@ -14,6 +14,17 @@ import {
   listCases
 } from './db/knowledge'
 import {recordUsage, usageCalls, usageHeadline, usageSummary} from './db/usage'
+import {
+  OUTCOME_LABEL,
+  analysisStats,
+  deleteAnalysis,
+  getAnalysis,
+  listAnalyses,
+  saveAnalysis,
+  saveRulesVersion,
+  settleAnalysis,
+  type OutcomeKind
+} from './db/analyses'
 import {oneLineCost, usdToCny} from './llm/pricing'
 import {
   clearBalanceCache,
@@ -26,6 +37,7 @@ import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
 import {collectCase} from './knowledge-service'
 import {computeRecentSR, fetchCandles, fetchSnapshot} from './data/market'
 import {buildContext} from './context/builder'
+import {DEFAULT_WIN_RATE, expectancyOf} from './analysis/expectancy'
 import {judge, toDecision} from './llm/client'
 import {validate} from './guardrails/validator'
 import {Candle, LlmDecision, MarketType, Timeframe} from './types'
@@ -259,32 +271,14 @@ async function handleCandles(
 /* 开单分析                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 按分批减仓比例加权的盈亏比 → 每笔期望值（单位 R） */
-function expectancyOf(dec: LlmDecision, winRate: number) {
-  const entry = dec.entry?.price ?? null
-  const sl = dec.stopLoss ?? null
-  const tps = dec.takeProfits ?? []
-  if (entry === null || sl === null || entry === sl || tps.length === 0)
-    return null
-  const risk = Math.abs(entry - sl)
-  const rs = tps.map(t => Math.abs(t.price - entry) / risk)
-  const totalPct = tps.reduce((s, t) => s + (t.reducePercent ?? 0), 0)
-  const weightedR =
-    totalPct > 0
-      ? tps.reduce(
-          (s, t, i) => s + ((t.reducePercent ?? 0) / totalPct) * rs[i],
-          0
-        )
-      : Math.max(...rs)
-  const p = Math.min(1, Math.max(0.01, winRate))
-  const r2 = (n: number) => Math.round(n * 100) / 100
-  return {
-    winRate: p,
-    weightedR: r2(weightedR),
-    maxR: r2(Math.max(...rs)),
-    expectancyR: r2(p * weightedR - (1 - p)),
-    positive: p * weightedR - (1 - p) > 0
-  }
+/** `BTC/USDT:USDT` → `BTC`（跟知识库里的写法保持一致） */
+function baseSymbol(ccxtSymbol: string): string {
+  return (
+    ccxtSymbol
+      .split('/')[0]
+      ?.replace(/:[^:]*$/, '')
+      .toUpperCase() ?? ccxtSymbol
+  )
 }
 
 async function handleAnalyze(
@@ -312,17 +306,13 @@ async function handleAnalyze(
   if (timeframes.length === 0)
     timeframes = fallbackTfs.length ? fallbackTfs : ['1h', '4h', '1d']
 
-  const hasKey = Boolean(process.env.LLM_API_KEY)
-  const mockParam = q.get('mock')
-  const mock = mockParam === '1' ? true : mockParam === '0' ? false : !hasKey
-  /** 期望值用的假设胜率。页面不暴露这个输入了，用默认值；显式传参仍然有效 */
-  const DEFAULT_WIN_RATE = 0.45
+  // 期望值用的假设胜率。页面不暴露这个输入了，用默认值；显式传参仍然有效
   const winRate = Math.min(
     1,
     Math.max(0.01, Number(q.get('winRate')) || DEFAULT_WIN_RATE)
   )
 
-  const config = loadConfig({marketType: market, timeframes, mock})
+  const config = loadConfig({marketType: market, timeframes})
   const rules = loadRules()
 
   // 知识库：注入「我做对的」和「我踩过的坑」
@@ -361,38 +351,53 @@ async function handleAnalyze(
   const billed = await recordUsage({
     kind: 'judge',
     model: meta.model,
-    symbol: snapshot.symbol.replace(/:[^:]*$/, ''),
+    symbol: baseSymbol(snapshot.symbol),
     timeframe: timeframes.join(','),
     usage: meta.usage,
-    mock: meta.mock,
     attempts: meta.attempts,
     latencyMs: meta.latencyMs
   })
 
+  const expectancy = expectancyOf(decision, winRate)
+  const chartTimeframe = '1h'
+
+  // 存档：把这次分析完整落库（规则全文按 hash 去重存一份）
+  let analysisId: number | null = null
   try {
-    await query(
-      `INSERT INTO analyses (symbol, exchange, grade, verdict, confidence, price,
-         decision, rules_hash, model, mock)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [
-        snapshot.symbol,
-        config.exchange,
-        result.grade,
-        result.verdict,
-        result.confidence,
-        snapshot.price,
-        JSON.stringify(result),
-        rules.hash,
-        meta.model,
-        meta.mock
-      ]
-    )
+    await saveRulesVersion({
+      hash: rules.hash,
+      system: rules.system,
+      body: rules.body,
+      sources: rules.sources
+    })
+    analysisId = await saveAnalysis({
+      symbol: baseSymbol(snapshot.symbol),
+      ccxtSymbol: snapshot.symbol,
+      exchange: config.exchange,
+      marketType: config.marketType,
+      timeframes,
+      assumedWinRate: winRate,
+      chartTimeframe,
+      judge: result,
+      guardrails,
+      expectancy,
+      snapshot,
+      meta: {model: meta.model},
+      model: meta.model,
+      rulesHash: rules.hash,
+      llmUsageId: billed?.id ?? null,
+      usage: meta.usage,
+      costUsd: billed?.costUsd ?? null,
+      latencyMs: meta.latencyMs,
+      attempts: meta.attempts
+    })
   } catch (e) {
-    console.warn('[analyze] 记录失败:', (e as Error).message)
+    console.warn('[analyze] 存档失败:', (e as Error).message)
   }
 
   sendJson(res, 200, {
-    symbol: snapshot.symbol.replace(/:[^:]*$/, ''),
+    analysisId,
+    symbol: baseSymbol(snapshot.symbol),
     ccxtSymbol: snapshot.symbol,
     exchange: config.exchange,
     marketType: config.marketType,
@@ -406,14 +411,9 @@ async function handleAnalyze(
     series: snapshot.series,
     judge: result,
     guardrails,
-    expectancy: expectancyOf(decision, winRate),
+    expectancy,
     meta: {
       model: meta.model,
-      mock: meta.mock,
-      warning:
-        mock && !hasKey
-          ? '未配置 LLM_API_KEY，本次是「模拟判断」，不是真实 AI 判断。'
-          : null,
       rules: {
         sources: rules.sources,
         hash: rules.hash,
@@ -474,7 +474,6 @@ async function handleCollectCase(
     from,
     to,
     lookbackBars: num(body.lookbackBars),
-    mock: typeof body.mock === 'boolean' ? body.mock : undefined,
     dryRun: body.save === false
   })
   sendJson(res, 200, result)
@@ -606,8 +605,7 @@ async function route(
         usageSummary({
           days: Number(days ?? 30),
           recent: Number(recent ?? 10),
-          kind: url.searchParams.get('kind'),
-          realOnly: url.searchParams.get('realOnly') === '1'
+          kind: url.searchParams.get('kind')
         }),
         usageHeadline()
       ])
@@ -637,7 +635,6 @@ async function route(
       const page = await usageCalls({
         days: Number(url.searchParams.get('days') ?? 30),
         kind: url.searchParams.get('kind'),
-        realOnly: url.searchParams.get('realOnly') === '1',
         limit: Number(url.searchParams.get('limit') ?? 50),
         offset: Number(url.searchParams.get('offset') ?? 0)
       })
@@ -661,7 +658,6 @@ async function route(
       provider: 'deepseek',
       baseUrl: config.llm.baseUrl,
       hasApiKey: Boolean(config.llm.apiKey),
-      mock: config.llm.mock,
       model: config.llm.model,
       balance,
       models
@@ -730,6 +726,80 @@ async function route(
       return sendJson(res, 405, {error: 'Method Not Allowed'})
     await handleAnalyze(url, res)
     return
+  }
+
+  /* ---- 分析存档 ---- */
+  if (p === '/api/analyses') {
+    try {
+      const [list, stats] = await Promise.all([
+        listAnalyses({
+          symbol: url.searchParams.get('symbol') ?? undefined,
+          grade: url.searchParams.get('grade') ?? undefined,
+          verdict: url.searchParams.get('verdict') ?? undefined,
+          actionableOnly: url.searchParams.get('actionable') === '1',
+          pendingOnly: url.searchParams.get('pending') === '1',
+          limit: Number(url.searchParams.get('limit') ?? 30),
+          offset: Number(url.searchParams.get('offset') ?? 0)
+        }),
+        analysisStats(Number(url.searchParams.get('days') ?? 365))
+      ])
+      sendJson(res, 200, {...list, stats, rate: usdToCny(1)})
+    } catch (e) {
+      sendJson(res, 503, {error: dbHelpMessage(e)})
+    }
+    return
+  }
+
+  if (p.startsWith('/api/analyses/')) {
+    const m = p.match(/\/(\d+)(\/settle)?$/)
+    if (!m)
+      return sendJson(res, 400, {
+        error: '路径不对。用法：/api/analyses/12 或 /api/analyses/12/settle'
+      })
+    const id = Number(m[1])
+    const settle = Boolean(m[2])
+
+    if (!settle) {
+      if (method === 'DELETE') {
+        const ok = await deleteAnalysis(id)
+        return sendJson(
+          res,
+          ok ? 200 : 404,
+          ok ? {ok: true} : {error: '记录不存在'}
+        )
+      }
+      const row = await getAnalysis(id).catch(() => null)
+      if (!row) return sendJson(res, 404, {error: '记录不存在'})
+      return sendJson(res, 200, {analysis: row})
+    }
+
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    let body: Record<string, unknown>
+    try {
+      body = await readJsonBody(req)
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+    const outcome = str(body.outcome).trim()
+    if (!(outcome in OUTCOME_LABEL)) {
+      return sendJson(res, 400, {
+        error: `outcome 只能是：${Object.keys(OUTCOME_LABEL).join(' / ')}`
+      })
+    }
+    const ok = await settleAnalysis(id, {
+      outcome: outcome as OutcomeKind,
+      outcomePrice: num(body.price) ?? null,
+      rMultiple: num(body.rMultiple) ?? null,
+      mfePct: num(body.mfePct) ?? null,
+      maePct: num(body.maePct) ?? null,
+      note: str(body.note) || null
+    }).catch(() => false)
+    return sendJson(
+      res,
+      ok ? 200 : 404,
+      ok ? {ok: true} : {error: '记录不存在'}
+    )
   }
 
   /* ---- 知识库 ---- */
@@ -812,16 +882,17 @@ async function main(): Promise<void> {
   })
 }
 
-/** 退出时把 Vite 关干净，别留个孤儿进程 */
+/** 退出时把 Vite 与数据库连接池关干净，别留孤儿进程 */
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
     void Promise.resolve(viteDev?.close())
+      .catch(() => undefined)
+      .then(() => closePool())
       .catch(() => undefined)
       .then(() => process.exit(0))
   })
 }
 
-void 0
 main().catch(e => {
   console.error('启动失败：', (e as Error).message)
   process.exitCode = 1

@@ -27,7 +27,6 @@ export interface CollectInput {
   to?: number
   /** 时间段的额外前置量（根），保证拉升点前面有足够历史 */
   lookbackBars?: number
-  mock?: boolean
   /** 只分析不落库 */
   dryRun?: boolean
 }
@@ -63,7 +62,6 @@ export interface CollectResult {
   candleCount: number
   meta: {
     model: string
-    mock: boolean
     warning: string | null
     /** 本次提炼消耗的 token 与花费 */
     usage: {
@@ -86,8 +84,6 @@ export interface CollectResult {
  */
 export async function collectCase(input: CollectInput): Promise<CollectResult> {
   const config = loadConfig()
-  const hasKey = Boolean(process.env.LLM_API_KEY)
-  const mock = input.mock ?? (process.env.LLM_MOCK === '1' ? true : !hasKey)
 
   const tfMs = TF_MS[input.timeframe]
   const lookback = (input.lookbackBars ?? 120) * tfMs
@@ -135,30 +131,24 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
   const windowCandles = sliceWindow(candles, win)
   const {text: rallyText, segments} = describeRally(candles, win)
 
-  const {
-    result: extracted,
-    model,
-    mock: usedMock,
-    usage,
-    attempts,
-    latencyMs
-  } = await extractCase(
-    {
-      symbol: input.symbol.toUpperCase(),
-      timeframe: input.timeframe,
-      label: input.label,
-      note: input.note ?? '',
-      rallyText,
-      segments,
-      rallyMeta: {
-        changePct: win.leg.changePct,
-        bars: win.leg.bars,
-        atrMultiple: win.leg.atrMultiple,
-        volMultiple: win.leg.volMultiple
-      }
-    },
-    {...config, llm: {...config.llm, mock}}
-  )
+  const {result: extracted, model, usage, attempts, latencyMs} =
+    await extractCase(
+      {
+        symbol: input.symbol.toUpperCase(),
+        timeframe: input.timeframe,
+        label: input.label,
+        note: input.note ?? '',
+        rallyText,
+        segments,
+        rallyMeta: {
+          changePct: win.leg.changePct,
+          bars: win.leg.bars,
+          atrMultiple: win.leg.atrMultiple,
+          volMultiple: win.leg.volMultiple
+        }
+      },
+      config
+    )
 
   // 记账：提炼经验也是一次真实调用
   const billed = await recordUsage({
@@ -167,7 +157,6 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
     symbol: input.symbol.toUpperCase(),
     timeframe: input.timeframe,
     usage,
-    mock: usedMock,
     attempts,
     latencyMs
   })
@@ -236,11 +225,7 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
     candleCount: candles.length,
     meta: {
       model,
-      mock: usedMock,
-      warning:
-        usedMock && !hasKey
-          ? '未配置 LLM_API_KEY，本次经验是本地兜底生成的，请手改后再用。'
-          : null,
+      warning: null,
       usage: {
         promptTokens: usage.promptTokens,
         completionTokens: usage.completionTokens,
@@ -253,11 +238,6 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
       }
     }
   }
-}
-
-/** 让 AI 只做提炼、不落库（前端可以先预览再存） */
-export async function previewCase(input: CollectInput): Promise<CollectResult> {
-  return collectCase({...input, dryRun: true})
 }
 
 export type {KnowledgeRow}

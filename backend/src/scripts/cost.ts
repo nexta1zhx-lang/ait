@@ -94,7 +94,7 @@ function recentTable(rows: UsageRow[]): string[] {
     ).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(
       d.getMinutes()
     ).padStart(2, '0')}`
-    const cost = r.mock ? '模拟' : formatUsd(r.costUsd)
+    const cost = formatUsd(r.costUsd)
     out.push(
       `  ${when}  ${pad(r.kind === 'extract' ? '案例提炼' : '开单分析', 10)}${fit(
         (r.symbol ?? '—') + (r.timeframe ? ' ' + r.timeframe : ''),
@@ -144,8 +144,7 @@ async function main(): Promise<void> {
   }
 
   const t = s.totals
-  const realCalls = t.calls - t.mockCalls
-  const perCall = realCalls > 0 ? t.costUsd / realCalls : 0
+  const perCall = t.calls > 0 ? t.costUsd / t.calls : 0
   const hitRate = t.promptTokens > 0 ? t.cacheHitTokens / t.promptTokens : 0
 
   const L: string[] = []
@@ -153,11 +152,7 @@ async function main(): Promise<void> {
   L.push('=== API 用量与花费 ===')
   L.push('')
   L.push(`统计范围   最近 ${s.days} 天`)
-  L.push(
-    `调用次数   ${t.calls} 次${
-      t.mockCalls ? `（其中模拟 ${t.mockCalls} 次，不计费）` : ''
-    }`
-  )
+  L.push(`调用次数   ${t.calls} 次`)
   L.push(
     `Token      输入 ${formatTokens(t.promptTokens)}（缓存命中 ${formatTokens(
       t.cacheHitTokens
@@ -168,7 +163,7 @@ async function main(): Promise<void> {
   L.push(
     `花费       ${formatUsd(t.costUsd)}（${formatCny(t.costUsd)}，汇率 ${process.env.USD_CNY ?? 7.1}）`
   )
-  if (realCalls > 0) {
+  if (t.calls > 0) {
     L.push(`平均单次   ${formatUsd(perCall)}（${formatCny(perCall)}）`)
   }
   L.push('')
@@ -184,9 +179,9 @@ async function main(): Promise<void> {
     L.push('（还没有记录。跑一次分析或收录一个案例就会自动记账。）')
     L.push('')
   }
-  if (realCalls > 0 && t.costUsd / realCalls < 0.05) {
+  if (t.calls > 0 && perCall < 0.05) {
     L.push(
-      `参考：按目前节奏，100 次分析约 ${formatCny((t.costUsd / realCalls) * 100)}。`
+      `参考：按目前节奏，100 次分析约 ${formatCny(perCall * 100)}。`
     )
     L.push('')
   }

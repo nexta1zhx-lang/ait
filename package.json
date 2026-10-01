@@ -25,6 +25,7 @@
     "db:reset": "tsx backend/src/scripts/db.ts reset",
     "swing": "tsx backend/src/scripts/swing.ts",
     "learn": "tsx backend/src/scripts/learn.ts",
+    "history": "tsx backend/src/scripts/history.ts",
     "cost": "tsx backend/src/scripts/cost.ts",
     "clean": "npm run clean:backend && npm run clean:frontend",
     "clean:backend": "rm -rf backend/dist",

@@ -19,5 +19,5 @@
     "sourceMap": true
   },
   "include": ["src/**/*"],
-  "exclude": ["web", "node_modules", "public", "dist"]
+  "exclude": ["node_modules", "dist"]
 }

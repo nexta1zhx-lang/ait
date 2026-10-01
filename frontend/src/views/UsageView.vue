@@ -32,7 +32,6 @@ const KINDS = [
 
 const days = ref(30)
 const kind = ref<'' | 'judge' | 'extract'>('')
-const realOnly = ref(false)
 
 /* ---------------- 数据 ---------------- */
 
@@ -45,11 +44,7 @@ const loading = ref(true)
 const error = ref('')
 const updatedAt = ref<number | null>(null)
 
-const query = computed(() => ({
-  days: days.value,
-  kind: kind.value,
-  realOnly: realOnly.value
-}))
+const query = computed(() => ({days: days.value, kind: kind.value}))
 
 const rate = computed(() => summary.value?.rate ?? 7.1)
 const rmb = (usdValue: unknown) => cny((Number(usdValue) || 0) * rate.value)
@@ -88,7 +83,7 @@ async function loadPage() {
 }
 
 onMounted(load)
-watch([days, kind, realOnly], () => {
+watch([days, kind], () => {
   offset.value = 0
   load()
 })
@@ -96,11 +91,8 @@ watch([days, kind, realOnly], () => {
 /* ---------------- KPI ---------------- */
 
 const t = computed(() => summary.value?.totals)
-const realCalls = computed(
-  () => (t.value?.calls ?? 0) - (t.value?.mockCalls ?? 0)
-)
 const perCall = computed(() =>
-  realCalls.value > 0 ? (t.value?.costUsd ?? 0) / realCalls.value : 0
+  (t.value?.calls ?? 0) > 0 ? (t.value?.costUsd ?? 0) / (t.value?.calls ?? 1) : 0
 )
 const hitRate = computed(() =>
   (t.value?.promptTokens ?? 0) > 0
@@ -126,9 +118,7 @@ const cards = computed<StatCard[]>(() => {
     {
       label: '调用次数',
       value: int(tt?.calls),
-      sub: tt?.mockCalls
-        ? `其中模拟 ${tt.mockCalls} 次（不计费）`
-        : '全部为真实调用'
+      sub: '每次都真实调用了大模型'
     },
     {
       label: '平均单次',
@@ -152,11 +142,9 @@ const cards = computed<StatCard[]>(() => {
       sub: '按当前平均单价推算'
     },
     {
-      label: '是否计费',
-      value: tt?.calls ? `${realCalls.value} 次付费` : '暂无付费调用',
-      sub: tt?.calls
-        ? '高峰全价 · 其余时段减半'
-        : '填好 LLM_API_KEY 并取消「模拟」',
+      label: '计价方式',
+      value: tt?.calls ? '高峰全价' : '暂无记录',
+      sub: '其余时段按高峰价减半',
       tone: tt?.calls ? '' : 'warn'
     }
   ]
@@ -288,10 +276,6 @@ const symbolText = (r: UsageRow) =>
     >
       <SegTabs v-model="days" :options="RANGES" />
       <SegTabs v-model="kind" :options="KINDS" />
-      <label class="chk">
-        <input v-model="realOnly" type="checkbox" />
-        只看付费调用
-      </label>
       <span style="flex: 1"></span>
       <span v-if="updatedAt" class="dim">
         {{ ago(new Date(updatedAt).toISOString()) }}更新
@@ -420,22 +404,16 @@ const symbolText = (r: UsageRow) =>
             ×{{ row.attempts }}
           </span>
         </template>
-        <template #model="{row}">
-          <span :class="{dim: row.mock}">{{ row.model }}</span>
-        </template>
+        <template #model="{row}">{{ row.model }}</template>
         <template #symbol="{row}">{{ symbolText(row) }}</template>
         <template #costUsd="{row}">
-          <span v-if="row.mock" class="dim">模拟</span>
-          <template v-else>
-            {{ rmb(row.costUsd) }}
-            <span class="dim">{{ usd(row.costUsd) }}</span>
-          </template>
+          {{ rmb(row.costUsd) }}
+          <span class="dim">{{ usd(row.costUsd) }}</span>
         </template>
         <template #latencyMs="{row}">{{ ms(row.latencyMs) }}</template>
         <template #attempts="{row}">
-          <span :class="row.mock ? 'dim' : 'v ok'">
-            {{ row.mock ? '不花钱' : '付费' }}
-          </span>
+          <span v-if="row.attempts > 1" class="v warn">重试 {{ row.attempts }} 次</span>
+          <span v-else class="v ok">一次成功</span>
         </template>
       </DataTable>
 

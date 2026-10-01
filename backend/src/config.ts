@@ -2,6 +2,7 @@ import 'dotenv/config'
 import fs from 'fs'
 import path from 'path'
 import YAML from 'yaml'
+import {canonicalModel} from './llm/pricing'
 import {AppConfig, MarketType, RedLineConfig, Timeframe} from './types'
 
 /** 仓库根目录（backend/src 与 backend/dist 的往上两级） */
@@ -41,7 +42,6 @@ export interface ConfigOverrides {
   timeframes?: Timeframe[]
   apiBase?: string
   marketType?: MarketType
-  mock?: boolean
 }
 
 export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
@@ -85,13 +85,13 @@ export function loadConfig(overrides: ConfigOverrides = {}): AppConfig {
     llm: {
       apiKey: process.env.LLM_API_KEY ?? '',
       baseUrl: process.env.LLM_BASE_URL ?? 'https://api.deepseek.com',
-      model: process.env.LLM_MODEL ?? 'deepseek-chat',
-      visionModel:
-        process.env.LLM_VISION_MODEL ??
-        process.env.LLM_MODEL ??
-        'deepseek-flash',
-      temperature: num(process.env.LLM_TEMPERATURE, 0.1),
-      mock: overrides.mock ?? process.env.LLM_MOCK === '1'
+      /**
+       * .env 里可能是历史别名（deepseek-chat / deepseek-reasoner）。
+       * 这里统一归一成真实模型 id —— 否则同一份模型会在用量/存档里
+       * 被记成两个名字，统计和单价都跟着错。
+       */
+      model: canonicalModel(process.env.LLM_MODEL ?? 'deepseek-flash'),
+      temperature: num(process.env.LLM_TEMPERATURE, 0.1)
     }
   }
 }

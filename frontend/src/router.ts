@@ -1,5 +1,6 @@
 import {createRouter, createWebHistory} from 'vue-router'
 import AnalyzeView from './views/AnalyzeView.vue'
+import HistoryView from './views/HistoryView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
 import UsageView from './views/UsageView.vue'
 
@@ -9,6 +10,12 @@ export const routes = [
     name: 'analyze',
     component: AnalyzeView,
     meta: {title: '开单分析', nav: '开单分析'}
+  },
+  {
+    path: '/history',
+    name: 'history',
+    component: HistoryView,
+    meta: {title: '历史分析', nav: '历史'}
   },
   {
     path: '/knowledge',

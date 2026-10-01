@@ -91,27 +91,6 @@ ${input.heatText ? `\n【市场热度】\n${input.heatText}` : ''}
 }
 
 /** 无 API Key 时的兜底：用统计数字拼一段，不让流程断掉 */
-function fallback(input: ExtractInput): ExtractResult {
-  const m = input.rallyMeta
-  const isDo = input.label === 'do'
-  return {
-    grade: isDo ? 'C' : 'B',
-    title: `${input.symbol} ${m.changePct >= 0 ? '拉升' : '下挫'} ${m.changePct.toFixed(1)}%`,
-    features: {
-      pre: input.segments[0]?.structure ?? '',
-      rally: `${m.bars} 根涨 ${m.changePct.toFixed(2)}%，力度 ${m.atrMultiple.toFixed(1)}×ATR，量能 ${
-        m.volMultiple === null ? '未知' : m.volMultiple.toFixed(2) + ' 倍'
-      }`,
-      post: input.segments[2] ? `${input.segments[2].structure}` : '',
-      heat: '无数据'
-    },
-    whatWorked: input.note || '（未配置 LLM_API_KEY，无法提炼）',
-    lesson:
-      input.note.trim() ||
-      `（未配置 LLM_API_KEY，无法自动提炼经验，请手动补一条）${input.symbol} ${input.timeframe}：${isDo ? '这种形态该做' : '这种形态不该做'}`
-  }
-}
-
 function coerce(raw: string): ExtractResult | null {
   try {
     const t = raw.trim()
@@ -145,21 +124,12 @@ export async function extractCase(
 ): Promise<{
   result: ExtractResult
   model: string
-  mock: boolean
   usage: TokenUsage
   attempts: number
   latencyMs: number
 }> {
-  if (config.llm.mock || !config.llm.apiKey) {
-    return {
-      result: fallback(input),
-      model: 'mock',
-      mock: true,
-      usage: emptyUsage(),
-      attempts: 0,
-      latencyMs: 0
-    }
-  }
+  if (!config.llm.apiKey)
+    throw new Error('未配置 LLM_API_KEY：提炼案例需要调用大模型。')
 
   const client = new OpenAI({
     apiKey: config.llm.apiKey,
@@ -189,7 +159,6 @@ export async function extractCase(
       return {
         result: parsed,
         model: config.llm.model,
-        mock: false,
         usage,
         attempts,
         latencyMs: Date.now() - startedAt

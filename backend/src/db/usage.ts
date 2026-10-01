@@ -14,7 +14,6 @@ export interface RecordUsageInput {
   symbol?: string | null
   timeframe?: string | null
   usage?: TokenUsage | null
-  mock?: boolean
   attempts?: number
   latencyMs?: number | null
   ok?: boolean
@@ -38,15 +37,7 @@ export async function recordUsage(
 ): Promise<RecordedUsage | null> {
   const at = input.at ?? new Date()
   const usage = input.usage ?? emptyUsage()
-  const mock = Boolean(input.mock)
-  const cost = mock
-    ? {
-        costUsd: 0,
-        peak: false,
-        assumed: false,
-        price: {inputHit: 0, inputMiss: 0, output: 0}
-      }
-    : costOf(input.model, usage, at)
+  const cost = costOf(input.model, usage, at)
 
   try {
     const rows = await query<{id: string; cost_usd: string}>(
@@ -54,8 +45,8 @@ export async function recordUsage(
          prompt_tokens, completion_tokens, total_tokens,
          cache_hit_tokens, cache_miss_tokens,
          cost_usd, peak, price, assumed, attempts, latency_ms,
-         ok, error, mock, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         ok, error, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        RETURNING id, cost_usd`,
       [
         input.kind,
@@ -75,7 +66,6 @@ export async function recordUsage(
         input.latencyMs == null ? null : Math.round(input.latencyMs),
         input.ok ?? true,
         input.error ?? null,
-        mock,
         at
       ]
     )
@@ -103,7 +93,6 @@ export interface UsageRow {
   totalTokens: number
   cacheHitTokens: number
   costUsd: number
-  mock: boolean
   attempts: number
   latencyMs: number | null
   createdAt: string
@@ -111,7 +100,6 @@ export interface UsageRow {
 
 export interface UsageTotals {
   calls: number
-  mockCalls: number
   promptTokens: number
   completionTokens: number
   totalTokens: number
@@ -145,7 +133,6 @@ interface RawRow {
   total_tokens: number
   cache_hit_tokens: number
   cost_usd: string
-  mock: boolean
   attempts: number
   latency_ms: number | null
   created_at: Date
@@ -163,7 +150,6 @@ function mapRow(r: RawRow): UsageRow {
     totalTokens: Number(r.total_tokens),
     cacheHitTokens: Number(r.cache_hit_tokens),
     costUsd: Number(r.cost_usd),
-    mock: r.mock,
     attempts: Number(r.attempts),
     latencyMs: r.latency_ms === null ? null : Number(r.latency_ms),
     createdAt: r.created_at.toISOString()
@@ -173,7 +159,6 @@ function mapRow(r: RawRow): UsageRow {
 interface RawBucket {
   key: string
   calls: string
-  mock_calls: string
   prompt_tokens: string
   completion_tokens: string
   total_tokens: string
@@ -184,7 +169,6 @@ interface RawBucket {
 const BUCKET_SQL = (groupExpr: string, where: string) => `
   SELECT ${groupExpr} AS key,
          count(*)::text                            AS calls,
-         count(*) FILTER (WHERE mock)::text         AS mock_calls,
          COALESCE(sum(prompt_tokens), 0)::text     AS prompt_tokens,
          COALESCE(sum(completion_tokens), 0)::text AS completion_tokens,
          COALESCE(sum(total_tokens), 0)::text      AS total_tokens,
@@ -199,7 +183,6 @@ function mapBucket(r: RawBucket, label?: (k: string) => string): UsageBucket {
     key: r.key,
     label: label ? label(r.key) : r.key,
     calls: Number(r.calls),
-    mockCalls: Number(r.mock_calls),
     promptTokens: Number(r.prompt_tokens),
     completionTokens: Number(r.completion_tokens),
     totalTokens: Number(r.total_tokens),
@@ -223,16 +206,15 @@ function daysOf(v: unknown, fallback = 30): number {
 }
 
 /** 拼 WHERE（全部走白名单 / 数字，无注入面） */
-function whereSql(days: number, kind: UsageKind | null, realOnly: boolean) {
+function whereSql(days: number, kind: UsageKind | null) {
   const parts = [`created_at >= now() - interval '${days} days'`]
-  if (realOnly) parts.push('NOT mock')
   if (kind) parts.push(`kind = '${kind}'`)
   return parts.join(' AND ')
 }
 
 const ROW_COLS = `id, kind, model, symbol, timeframe, prompt_tokens,
   completion_tokens, total_tokens, cache_hit_tokens,
-  cost_usd, mock, attempts, latency_ms, created_at`
+  cost_usd, attempts, latency_ms, created_at`
 
 /** 汇总最近 N 天的用量 */
 export async function usageSummary(
@@ -241,19 +223,16 @@ export async function usageSummary(
     recent?: number
     /** 只看某类调用 */
     kind?: UsageKind | string | null
-    /** 只看非模拟调用 */
-    realOnly?: boolean
   } = {}
 ): Promise<UsageSummary> {
   const days = daysOf(opts.days)
   const recent = Math.max(0, Math.min(500, Math.round(opts.recent ?? 10)))
   const kind = kindOf(opts.kind)
-  const where = whereSql(days, kind, Boolean(opts.realOnly))
+  const where = whereSql(days, kind)
 
   const totalsRow = await query<RawBucket>(
     `SELECT 'all' AS key,
             count(*)::text                            AS calls,
-            count(*) FILTER (WHERE mock)::text         AS mock_calls,
             COALESCE(sum(prompt_tokens), 0)::text     AS prompt_tokens,
             COALESCE(sum(completion_tokens), 0)::text AS completion_tokens,
             COALESCE(sum(total_tokens), 0)::text      AS total_tokens,
@@ -290,7 +269,6 @@ export async function usageSummary(
     totals: t
       ? {
           calls: Number(t.calls),
-          mockCalls: Number(t.mock_calls),
           promptTokens: Number(t.prompt_tokens),
           completionTokens: Number(t.completion_tokens),
           totalTokens: Number(t.total_tokens),
@@ -299,7 +277,6 @@ export async function usageSummary(
         }
       : {
           calls: 0,
-          mockCalls: 0,
           promptTokens: 0,
           completionTokens: 0,
           totalTokens: 0,
@@ -327,14 +304,13 @@ export async function usageCalls(
   opts: {
     days?: number
     kind?: UsageKind | string | null
-    realOnly?: boolean
     limit?: number
     offset?: number
   } = {}
 ): Promise<UsagePage> {
   const days = daysOf(opts.days)
   const kind = kindOf(opts.kind)
-  const where = whereSql(days, kind, Boolean(opts.realOnly))
+  const where = whereSql(days, kind)
   const limit = Math.max(1, Math.min(500, Math.round(opts.limit ?? 50)))
   const offset = Math.max(0, Math.round(opts.offset ?? 0))
 
@@ -373,15 +349,13 @@ export async function usageHeadline(): Promise<{
   }>(
     `SELECT
        count(*) FILTER (
-         WHERE NOT mock
-           AND created_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
+         WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
        )::text AS today_calls,
        COALESCE(sum(cost_usd) FILTER (
-         WHERE NOT mock
-           AND created_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
+         WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'
        ), 0)::text AS today_cost,
-       count(*) FILTER (WHERE NOT mock)::text AS all_calls,
-       COALESCE(sum(cost_usd) FILTER (WHERE NOT mock), 0)::text AS all_cost
+       count(*)::text AS all_calls,
+       COALESCE(sum(cost_usd), 0)::text AS all_cost
      FROM llm_usage`
   ).catch(() => [])
   const r = rows[0]

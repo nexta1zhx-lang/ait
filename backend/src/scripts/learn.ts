@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     dryRun
   })
 
-  console.log(`• 模型: ${r.meta.model}${r.meta.mock ? ' [mock]' : ''}`)
+  console.log(`• 模型: ${r.meta.model}`)
   if (r.meta.warning) console.log(`  ⚠️  ${r.meta.warning}`)
 
   console.log('')

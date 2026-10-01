@@ -40,6 +40,20 @@ const ALIASES: Record<string, string> = {
   'deepseek-v4-pro-0813': 'deepseek-v4-pro'
 }
 
+/**
+ * 把历史别名（deepseek-chat / deepseek-reasoner 之类）归一到真实模型 id。
+ * 归不了的原样返回 —— 用户可能自己在 .env 里写了别的服务商的模型。
+ */
+export function canonicalModel(id: string): string {
+  const m = (id ?? '').trim()
+  return ALIASES[m] ?? m
+}
+
+/** 这个 id 是不是已知别名（用于提示「你写的其实是 XX」） */
+export function isAlias(id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(ALIASES, (id ?? '').trim())
+}
+
 export interface PriceLookup {
   price: ModelPrice
   /** 价目表里没有这个模型，用的是兜底价 */

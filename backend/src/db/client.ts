@@ -1,5 +1,5 @@
 import {Pool, PoolClient, QueryResultRow} from 'pg'
-import {SCHEMA_SQL} from './schema'
+import {SCHEMA_SQL, MIGRATE_SQL} from './schema'
 
 let pool: Pool | null = null
 
@@ -42,30 +42,11 @@ export async function queryOne<T extends QueryResultRow = QueryResultRow>(
   return rows[0] ?? null
 }
 
-/** 事务包装：回调里抛错会自动回滚 */
-export async function withTransaction<T>(
-  fn: (client: PoolClient) => Promise<T>
-): Promise<T> {
-  const client = await getPool().connect()
-  try {
-    await client.query('BEGIN')
-    const out = await fn(client)
-    await client.query('COMMIT')
-    return out
-  } catch (e) {
-    try {
-      await client.query('ROLLBACK')
-    } catch {
-      /* 忽略回滚失败 */
-    }
-    throw e
-  } finally {
-    client.release()
-  }
-}
 
 /** 建表（幂等），启动时调用 */
 export async function ensureSchema(): Promise<void> {
+  // 先清掉结构不兼容的旧表，再建新表
+  await getPool().query(MIGRATE_SQL)
   await getPool().query(SCHEMA_SQL)
 }
 

@@ -151,6 +151,25 @@ export interface GuardrailResult {
   rMultiple: number | null
 }
 
+/**
+ * 期望值：按分批减仓比例**加权**的盈亏比，算出每笔的数学期望（单位 R）。
+ *
+ *   E = p × 加权R − (1 − p)
+ *
+ * E > 0 才值得做。假设胜率 p 由用户给（页面默认 0.45）。
+ */
+export interface Expectancy {
+  /** 假设胜率（0~1） */
+  winRate: number
+  /** 按减仓比例加权的盈亏比 */
+  weightedR: number
+  /** 最远那一档的盈亏比 */
+  maxR: number
+  /** 数学期望（R） */
+  expectancyR: number
+  positive: boolean
+}
+
 export interface RedLineConfig {
   id: string
   desc: string
@@ -177,10 +196,8 @@ export interface AppConfig {
   llm: {
     apiKey: string
     baseUrl: string
+    /** 真实模型 id。历史别名（deepseek-chat 等）在读配置时已归一 */
     model: string
-    /** 图片转写用的视觉模型（DeepSeek 需用 deepseek-flash，deepseek-chat 不支持图片） */
-    visionModel: string
     temperature: number
-    mock: boolean
   }
 }

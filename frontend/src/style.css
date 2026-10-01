@@ -1167,3 +1167,8 @@ button.danger:hover {
     grid-template-columns: 1fr;
   }
 }
+
+.archived-link {
+  color: var(--blue, #58a6ff);
+  text-decoration: underline;
+}

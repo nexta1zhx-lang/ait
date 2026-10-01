@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 /**
- * 离线自检：验证「开单判断 → 护栏校验 → 仓位计算」整条链路。
+ * 离线自检：验证「判断结果 → 护栏校验 → 仓位计算 → 渲染」整条链路。
  *
  *   npm run selftest
  *
  * 不依赖网络、不依赖 API Key，也**不需要先编译**（用 tsx 直接跑 TS）。
+ * 这里喂进去的是一份**测试夹具**（手写的判断结果），
+ * 只用来验证护栏与渲染的算法，跟真实 AI 输出无关。
  */
-import {mockJudge, toDecision} from '../llm/client'
+import {JudgeResult, toDecision} from '../llm/client'
 import {validate} from '../guardrails/validator'
 import {render} from '../output/render'
 import {loadConfig} from '../config'
 import {MarketSnapshot, StructureState, Timeframe} from '../types'
 
-const config = loadConfig({mock: true})
+const config = loadConfig()
 const close = 60000
 
 function structure(up: boolean): StructureState {
@@ -80,7 +82,45 @@ const snapshot: MarketSnapshot = {
   }
 }
 
-const judge = mockJudge(snapshot, config)
+function check(
+  item: string,
+  status: 'pass' | 'fail' | 'warn',
+  evidence: string
+) {
+  return {item, status, evidence}
+}
+
+/** 一份「强势上涨、可以开多」的判断结果，用来验证开仓这条路径 */
+const judge: JudgeResult = {
+  grade: 'A',
+  gradeReason: '回踩不破前高，4h 上升结构完好',
+  verdict: 'go',
+  confidence: 78,
+  direction: 'long',
+  entry: {type: 'market', price: close},
+  stopLoss: close * 0.975,
+  takeProfits: [
+    {label: 'TP1', price: close * 1.025, r: 1, reducePercent: 50},
+    {label: 'TP2', price: close * 1.05, r: 2, reducePercent: 25},
+    {label: 'TP3', price: close * 1.075, r: 3, reducePercent: 25}
+  ],
+  checklist: [
+    check('这个币强势吗？', 'pass', '4h 更高的高点 + 更高的低点'),
+    check('有盘整结构吗？', 'pass', '前高附近横盘蓄势'),
+    check('有强力 K / 放量突破吗？', 'pass', '量比 1.2，放量上破'),
+    check('后续还有力量吗？', 'pass', '持仓量变化 +2.5%'),
+    check('止损位写得出吗？空间合理吗？', 'pass', '止损放在波段低点下方'),
+    check('现在是关键时段还是垃圾时段？', 'warn', '数据判断不了，自己看'),
+    check('心态是否平稳？', 'warn', '数据判断不了，自己看')
+  ],
+  failedCritical: [],
+  verdictReason: '结构、量能、止损三项都对上了，可以做。',
+  exitTriggers: ['动能衰竭（量能萎缩、后续没力量）就走'],
+  knowledgeRefs: [],
+  coachLine: '强势就顺势做，别在弱势里赌突破。',
+  decision: 'open'
+}
+
 // 判断结果 → 护栏模块认识的形状（与网页 / CLI 走同一条链路）
 const decision = toDecision(judge)
 const guard = validate(decision, snapshot, config)
@@ -146,8 +186,7 @@ if (failed) process.exit(1)
 console.log('\n---- CLI 渲染预览（开仓情形）----')
 console.log(
   render(snapshot, decision, guard, {
-    model: 'mock',
-    mock: true,
+    model: 'selftest',
     disciplineEmpty: false,
     disciplineHash: 'selftest',
     judge: {

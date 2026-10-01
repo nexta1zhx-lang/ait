@@ -8,8 +8,10 @@ import {fetchSnapshot} from './data/market'
 import {buildContext} from './context/builder'
 import {judge, toDecision} from './llm/client'
 import {oneLineCost} from './llm/pricing'
+import {DEFAULT_WIN_RATE, expectancyOf} from './analysis/expectancy'
 import {lessonsByGrade} from './db/knowledge'
 import {recordUsage} from './db/usage'
+import {saveAnalysis, saveRulesVersion} from './db/analyses'
 import {validate} from './guardrails/validator'
 import {render} from './output/render'
 import {ask, askHidden, isInteractive} from './util/prompt'
@@ -33,7 +35,6 @@ program
   .option('-n, --recent <count>', '上下文中包含的最近 K 线数量', '30')
   .option('--api-base <url>', '覆盖交易所公共 API 域名（默认域名不可达时使用）')
   .option('--json', '输出完整 JSON（便于程序消费，进度输出到 stderr）')
-  .option('--mock', '使用内置模拟决策（不调用 LLM，用于离线跑通）')
   .option('--api-key <key>', '直接传入 LLM API Key（本次生效，不写入 .env）')
   .option('--save-context <file>', '把发给 LLM 的上下文另存为文件')
   .showHelpAfterError()
@@ -52,42 +53,31 @@ program
         apiBase: opts.apiBase ? String(opts.apiBase) : undefined,
         marketType: opts.market
           ? (String(opts.market) as MarketType)
-          : undefined,
-        mock: opts.mock === true ? true : undefined
+          : undefined
       })
       const rules = loadRules()
       log(`• 我的规则: ${rules.sources.join('、') || '（空）'} (${rules.hash})`)
       for (const w of rules.warnings) log(`  ⚠️  ${w}`)
 
       // 解析 API Key：命令行 > .env > 交互式输入
-      if (!config.llm.mock) {
-        if (opts.apiKey) config.llm.apiKey = String(opts.apiKey)
-        if (!config.llm.apiKey) {
-          if (!isInteractive()) {
-            throw new Error(
-              '未设置 LLM_API_KEY。请在 .env 填写，或用 --api-key 传入，或加 --mock 离线跑通。'
-            )
-          }
-          log('')
-          log(`• 未检测到 LLM_API_KEY（接口: ${config.llm.baseUrl}）`)
-          log(
-            '  请粘贴你的 API Key 后回车（输入过程不回显）；按 Ctrl+C 可取消。'
+      if (opts.apiKey) config.llm.apiKey = String(opts.apiKey)
+      if (!config.llm.apiKey) {
+        if (!isInteractive()) {
+          throw new Error(
+            '未设置 LLM_API_KEY。请在 .env 填写，或用 --api-key 传入。'
           )
-          const key = await askHidden('API Key: ')
-          if (!key) throw new Error('未提供 API Key，已退出。')
-          config.llm.apiKey = key
-          const save = await ask('是否保存到 .env 以便下次自动使用？(y/N) ')
-          if (/^y(es)?$/i.test(save)) {
-            if (saveKeyToEnv(key))
-              log('• 已保存到 .env（并将 LLM_MOCK 设为 0）')
-            else log('• 保存到 .env 失败，本次仍会使用该 Key。')
-          }
         }
-      } else {
-        log('• 当前为「模拟决策」，不调用大模型。')
-        log(
-          '  要看真实分析：把 .env 中 LLM_MOCK 改为 0，运行时会提示输入 API Key。'
-        )
+        log('')
+        log(`• 未检测到 LLM_API_KEY（接口: ${config.llm.baseUrl}）`)
+        log('  请粘贴你的 API Key 后回车（输入过程不回显）；按 Ctrl+C 可取消。')
+        const key = await askHidden('API Key: ')
+        if (!key) throw new Error('未提供 API Key，已退出。')
+        config.llm.apiKey = key
+        const save = await ask('是否保存到 .env 以便下次自动使用？(y/N) ')
+        if (/^y(es)?$/i.test(save)) {
+          if (saveKeyToEnv(key)) log('• 已保存到 .env')
+          else log('• 保存到 .env 失败，本次仍会使用该 Key。')
+        }
       }
 
       log(
@@ -111,9 +101,7 @@ program
         log(`• 上下文已保存: ${f}`)
       }
 
-      log(
-        `• 调用大模型 (${config.llm.model}${config.llm.mock ? ' [mock]' : ''}) ...`
-      )
+      log(`• 调用大模型 (${config.llm.model}) ...`)
 
       // 知识库经验（表不存在时忽略）
       let lessons = ''
@@ -138,13 +126,47 @@ program
       const billed = await recordUsage({
         kind: 'judge',
         model: meta.model,
-        symbol,
-        timeframe: config.timeframes.join(','),
+        symbol: symbol.split('/')[0],
+        timeframe: timeframes.join(','),
         usage: meta.usage,
-        mock: meta.mock,
         attempts: meta.attempts,
         latencyMs: meta.latencyMs
       })
+
+      // 存档：跟网页走同一张表，这样命令行做的分析也能在历史里看到
+      const expectancy = expectancyOf(decision, DEFAULT_WIN_RATE)
+      let analysisId: number | null = null
+      try {
+        await saveRulesVersion({
+          hash: rules.hash,
+          system: rules.system,
+          body: rules.body,
+          sources: rules.sources
+        })
+        analysisId = await saveAnalysis({
+          symbol: symbol.split('/')[0],
+          ccxtSymbol: snapshot.symbol,
+          exchange: config.exchange,
+          marketType: config.marketType,
+          timeframes,
+          assumedWinRate: DEFAULT_WIN_RATE,
+          chartTimeframe: '1h',
+          judge: result,
+          guardrails,
+          expectancy,
+          snapshot,
+          meta: {model: meta.model, via: 'cli'},
+          model: meta.model,
+          rulesHash: rules.hash,
+          llmUsageId: billed?.id ?? null,
+          usage: meta.usage,
+          costUsd: billed?.costUsd ?? null,
+          latencyMs: meta.latencyMs,
+          attempts: meta.attempts
+        })
+      } catch (e) {
+        console.warn('[cli] 存档失败:', (e as Error).message)
+      }
 
       // 审计日志
       const logDir = path.join(ROOT_DIR, 'logs')
@@ -164,7 +186,6 @@ program
             rules: {hash: rules.hash, sources: rules.sources},
             llm: {
               model: meta.model,
-              mock: meta.mock,
               raw: meta.raw,
               usage: meta.usage,
               attempts: meta.attempts,
@@ -194,7 +215,6 @@ program
               guardrails,
               llm: {
                 model: meta.model,
-                mock: meta.mock,
                 usage: meta.usage,
                 attempts: meta.attempts,
                 latencyMs: meta.latencyMs,
@@ -211,7 +231,6 @@ program
         process.stdout.write(
           render(snapshot, decision, guardrails, {
             model: meta.model,
-            mock: meta.mock,
             disciplineEmpty: rules.sources.length === 0,
             disciplineHash: rules.hash,
             logFile,
@@ -227,7 +246,5 @@ program
       process.exitCode = 1
     }
   })
-
-/** 把 API Key 写入 .env，并把 LLM_MOCK 设为 0 */
 
 program.parseAsync(process.argv)

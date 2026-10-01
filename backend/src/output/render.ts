@@ -35,7 +35,6 @@ function fmt(n: number | null | undefined, digits?: number): string {
 
 export interface RenderInfo {
   model: string
-  mock: boolean
   disciplineEmpty: boolean
   disciplineHash: string
   logFile?: string
@@ -185,7 +184,7 @@ export function render(
     : paint(A.red, '被护栏拦截')
   L.push(rule)
   L.push(
-    `护栏结果: ${verdict}   模型: ${info.model}${info.mock ? paint(A.yellow, ' [mock]') : ''}   我的规则: ${info.disciplineEmpty ? '（空）' : '已加载'} (${info.disciplineHash})`
+    `护栏结果: ${verdict}   模型: ${info.model}   我的规则: ${info.disciplineEmpty ? '（空）' : '已加载'} (${info.disciplineHash})`
   )
   if (info.usageText) L.push(paint(A.dim, `本次调用: ${info.usageText}`))
   if (info.logFile) L.push(paint(A.dim, `审计日志: ${info.logFile}`))

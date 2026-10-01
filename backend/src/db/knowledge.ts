@@ -224,12 +224,6 @@ export async function deleteCase(id: number): Promise<boolean> {
   return rows.length > 0
 }
 
-export async function countCases(): Promise<number> {
-  const r = await queryOne<{n: string}>(
-    'SELECT count(*)::text AS n FROM knowledge'
-  )
-  return Number(r?.n ?? 0)
-}
 
 /**
  * 给分析用的「经验条目」——只取 lesson 字段，很轻。

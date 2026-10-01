@@ -1,9 +1,11 @@
-<script setup lang="ts" generic="T extends Record<string, any>">
-import {computed, ref} from 'vue'
-
-/** 通用表格：点击表头排序 + 具名插槽自定义单元格 */
-
-export interface Column {
+<script lang="ts">
+/**
+ * 通用列定义。
+ * 泛型参数必须写在这里（普通 `<script>` 块）——
+ * 写在 `<script setup generic>` 里的话，别的文件 import 时拿不到泛型参数，
+ * 会报「类型 Column 不是泛型类型」。
+ */
+export interface Column<T = Record<string, any>> {
   /** 行数据字段名，同时作为插槽名 */
   key: string
   label: string
@@ -15,9 +17,15 @@ export interface Column {
   /** 首列加粗 */
   strong?: boolean
 }
+</script>
+
+<script setup lang="ts" generic="T extends Record<string, any>">
+import {computed, ref} from 'vue'
+
+/** 通用表格：点击表头排序 + 具名插槽自定义单元格 */
 
 const props = defineProps<{
-  columns: Column[]
+  columns: Column<T>[]
   rows: T[]
   empty?: string
   initialSort?: string
@@ -40,7 +48,7 @@ const sorted = computed(() => {
   })
 })
 
-function toggle(col: Column) {
+function toggle(col: Column<T>) {
   if (!col.value && !(col.key in (props.rows[0] ?? {}))) return
   if (sortKey.value === col.key) {
     sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
@@ -50,7 +58,7 @@ function toggle(col: Column) {
   sortDir.value = col.dir ?? 'desc'
 }
 
-function arrow(col: Column) {
+function arrow(col: Column<T>) {
   if (sortKey.value !== col.key) return ''
   return sortDir.value === 'asc' ? '▲' : '▼'
 }

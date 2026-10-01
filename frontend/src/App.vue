@@ -17,6 +17,7 @@ import {
 
 const NAV = [
   {to: '/', label: '开单分析'},
+  {to: '/history', label: '历史'},
   {to: '/knowledge', label: '知识库'},
   {to: '/usage', label: '用量'}
 ]

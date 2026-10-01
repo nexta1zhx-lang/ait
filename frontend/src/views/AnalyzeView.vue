@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {computed, onMounted, ref, watch} from 'vue'
+import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import KlineChart from '../comps/KlineChart.vue'
 import DataTable, {type Column} from '../comps/DataTable.vue'
@@ -25,7 +26,6 @@ import {
 /* ---------------- 表单 ---------------- */
 
 const symbol = ref('BTC')
-const mock = ref(true)
 const chartTf = ref('1h')
 
 const loading = ref(false)
@@ -36,14 +36,6 @@ const result = ref<AnalyzeResult | null>(null)
 const timeframesText = computed(
   () => config.value?.timeframes ?? '15m,1h,4h,1d'
 )
-
-onMounted(() => {
-  if (config.value) mock.value = !config.value.hasApiKey
-})
-
-watch(config, c => {
-  if (c) mock.value = !c.hasApiKey
-})
 
 /** 换币种：清掉上一只币的结论，图表由 KlineChart 自己重画 */
 function pickSymbol(v: string) {
@@ -63,10 +55,7 @@ async function run() {
   error.value = ''
   result.value = null
   try {
-    result.value = await callAnalyze({
-      symbol: s,
-      mock: mock.value
-    })
+    result.value = await callAnalyze(s)
     await refreshConfig()
   } catch (e) {
     error.value = (e as Error).message
@@ -89,7 +78,6 @@ const verdictInfo = computed(
 const costLine = computed(() => {
   const r = result.value
   if (!r) return ''
-  if (r.meta.mock) return '本次为「模拟判断」，没有调用 AI，不计费。'
   const u = r.meta.usage
   return (
     `本次调用 ${u.text}` +
@@ -200,10 +188,6 @@ const tfCols: Column<TfStat>[] = [
               @submit="run"
             />
           </label>
-          <label class="chk">
-            <input v-model="mock" type="checkbox" />
-            模拟（不调用 AI）
-          </label>
         </div>
         <button class="btn-block" :disabled="loading" @click="run">
           {{ loading ? '判断中…' : '让 AI 判断' }}
@@ -235,6 +219,16 @@ const tfCols: Column<TfStat>[] = [
             {{ result.judge.verdictReason }}
           </div>
           <p class="hint" style="margin-top: 8px">{{ costLine }}</p>
+          <p v-if="result.analysisId" class="hint" style="margin-top: 4px">
+            已存档
+            <RouterLink
+              class="archived-link"
+              :to="`/history?id=${result.analysisId}`"
+            >
+              #{{ result.analysisId }}
+            </RouterLink>
+            —— 之后在「历史」里复盘结算。
+          </p>
 
           <div class="stats">
             <div class="stat">

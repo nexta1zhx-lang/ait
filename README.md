@@ -25,7 +25,7 @@ npm run db:up              # 起数据库（Docker）
 npm run sync:contracts     # 拉合约列表（527 个）
 ```
 
-`.env` 至少要填这一行，否则只能跑「模拟判断」：
+`.env` 里至少要填这一行，没填就跑不了 —— 判断与提炼都要真实调用大模型：
 
 ```bash
 LLM_API_KEY=sk-你的key
@@ -82,7 +82,7 @@ npm run web
 
 ```bash
 npm run dev -- BTC/USDT        # 直接分析一个币
-npm run dev -- BTC/USDT --mock # 离线跑通（不花钱）
+npm run history              # 看历史分析 / 档位胜率
 npm run cost -- --days 7       # 看 API 花费
 npm run swing -- SOL 4h        # 只看拉升检测
 npm run selftest               # 离线自检（不需要网络和 Key）
@@ -121,25 +121,25 @@ backend/                    后端（Node + TypeScript，没有任何 Web 框架
 │  ├─ rules.ts              读取 rules/ 目录
 │  ├─ knowledge-service.ts  收录案例的完整链路
 │  ├─ config.ts             配置（.env + config/guardrails.yaml）
-│  ├─ analysis/             拉升检测、段落描述
+│  ├─ analysis/             拉升检测、段落描述、期望值计算
 │  ├─ data/                 ccxt 拉行情、趋势、市场热度
 │  ├─ context/              行情 → LLM 可读文本
 │  ├─ llm/                  判断、提炼、提示词、计价、余额与模型
-│  ├─ db/                   PostgreSQL（知识库 / 分析记录 / 用量）
+│  ├─ db/                   PostgreSQL（存档 / 规则版本 / 知识库 / 用量）
 │  ├─ guardrails/           代码层的红线与仓位计算
 │  ├─ devtools/            Vite 中间件（开发时零构建的关键）
-│  └─ scripts/              selftest / swing / learn / cost / db
+│  └─ scripts/              selftest / swing / learn / cost / history / db
 └─ tsconfig.json
 
 frontend/                   前端（Vue3 + Vite）
 ├─ src/
 │  ├─ App.vue              顶部栏（导航 + 模型切换 + 余额）
-│  ├─ router.ts            三个页面的路由
+│  ├─ router.ts            四个页面的路由
 │  ├─ store.ts             全局状态（配置 / 账户 / 合约列表）
 │  ├─ api.ts               所有接口的类型与调用
 │  ├─ format.ts            金额、token、北京时间格式化
 │  ├─ comps/               通用组件（图表、表格、卡片、币种下拉…）
-│  └─ views/               三个页面
+│  └─ views/               四个页面：开单分析 / 历史 / 知识库 / 用量
 ├─ vite.config.ts
 └─ tsconfig.json
 
@@ -280,7 +280,6 @@ $$\text{cost} = \frac{\text{命中 token} \times p_{hit} + \text{未命中 token
 - 想用自己的数：`.env` 里覆盖 `LLM_PRICE_INPUT_HIT / LLM_PRICE_INPUT_MISS / LLM_PRICE_OUTPUT`（填高峰价）
 - 汇率 `USD_CNY`（默认 7.1）只影响展示
 
-> 模拟判断也会记一笔，但 token 与花费为 0，统计里单独标出来。
 
 ---
 
@@ -290,8 +289,14 @@ $$\text{cost} = \frac{\text{命中 token} \times p_{hit} + \text{未命中 token
 
 | 控件          | 说明                                                        |
 | ------------- | ----------------------------------------------------------- |
-| **模型** 下拉 | 可切换的模型（`GET /models` 拿到的列表，拿不到就用内置的）  |
+| **模型** 下拉 | `GET /models` 拿到的真实模型列表，拿不到就用内置的 |
 | **余额** 按钮 | DeepSeek 账户余额（人民币）。点一下刷新（服务端缓存 60 秒） |
+
+DeepSeek 目前只有两个模型：`deepseek-flash`（便宜、够用）和
+`deepseek-v4-pro`（更强、贵几十倍）。下拉里就这两项。
+
+`.env` 里写 `deepseek-chat` / `deepseek-reasoner` 这类旧别名也能跑 ——
+读配置时会自动归一到上面两个，免得同一个模型在用量和存档里被记成两个名字。
 
 切换模型会**写回 `.env` 的 `LLM_MODEL`**，重启也保留。
 
@@ -307,15 +312,41 @@ curl -X POST localhost:8787/api/account/model \
 
 ## 数据
 
-PostgreSQL（Docker，数据卷 `ca-pgdata`），三张表：
+PostgreSQL（Docker，数据卷 `ca-pgdata`），四张表：
 
-| 表          | 存什么                        |
-| ----------- | ----------------------------- |
-| `knowledge` | 知识库案例（含前后两段 K 线） |
-| `analyses`  | 分析记录（回溯用）            |
-| `llm_usage` | 每次 API 调用的 token 与花费  |
+| 表               | 存什么                                       |
+| ---------------- | -------------------------------------------- |
+| `analyses`       | 每次分析的完整存档（输入 / 结论 / 计划 / 结果） |
+| `rules_versions` | 规则全文快照，按内容 hash 去重                 |
+| `knowledge`      | 知识库案例（含前后两段 K 线）                  |
+| `llm_usage`      | 每次 API 调用的 token 与花费                   |
 
-**规则不存数据库** —— 直接读 `rules/` 目录。
+**规则本身不存数据库** —— 直接读 `rules/` 目录，改完不用重启。
+
+### 分析存档怎么分层
+
+一次分析的字段很多，塞法按用途分三类：
+
+- **要筛选 / 排序 / 统计的** → 独立列。
+  档位、结论、币种、入场价、止损价、期望值 R、R 倍数……这些是拿来算胜率的，必须是列。
+- **只用来看详情的** → JSONB。
+  AI 的完整输出（`result`）、护栏明细（`guardrails`）、当时行情（`snapshot`）。
+  这些不会用来查询，拆成列只是给自己找麻烦。
+- **会重复的长文本** → 单独一张表按 hash 去重。
+  规则全文 6.6K，每行分析存一份就废了。`analyses.rules_hash` 指向 `rules_versions`，
+  这样「规则改了以后，旧分析还能还原现场」。
+
+### 存档是为了复盘
+
+每条 `analyses` 都带一组事后字段：`outcome` / `r_multiple` / `mfe_pct` / `mae_pct` /
+`outcome_note`。跑完一单回到「历史」页填上结果，就能看到：
+
+- 每个档位（A / B / C）的真实胜率与平均 R
+- 哪些币反复在做
+- 「可做」但还没结算的有多少
+
+如果 A 档的胜率长期不比 B 档高，说明 `rules/` 里的分档跟实际结果对不上 ——
+那要改的是规则文件，不是这套统计。
 
 ```bash
 npm run db:up               # 启动
@@ -335,13 +366,13 @@ npm run db:reset -- --yes   # 清空数据
 | `npm run web`                                                            | 起服务 → http://localhost:8787                              |
 | `npm run ui:dev`                                                         | 只跑前端 → http://localhost:5173                            |
 | `npm run dev -- BTC/USDT`                                                | 命令行分析                                                  |
-| `npm run dev -- BTC/USDT --mock`                                         | 离线跑通，不花钱                                            |
+| `npm run history`                                                        | 历史分析：列表 / 档位胜率 / 结算复盘                         |
 | `npm run learn -- MAGMA 4h --do "回调不破，右侧进的"`                    | 收录正面案例                                                |
 | `npm run learn -- ROBO 1h --dont "突破一点后续没力量"`                   | 收录反面案例                                                |
 | `npm run learn -- MAGMA 4h --do "..." --from 2026-09-01 --to 2026-09-15` | 只关心某段时间                                              |
 | `npm run swing -- BTC 4h`                                                | 只看拉升检测                                                |
 | `npm run cost -- --days 7`                                               | API 用量与花费（`--json` / `--recent N` / `--clear --yes`） |
-| `npm run selftest`                                                       | 离线自检，不需要网络和 Key                                  |
+| `npm run selftest`                                                       | 离线自检：护栏 + 仓位 + 渲染，不需要网络和 Key               |
 | `npm run typecheck`                                                      | 类型检查                                                    |
 | `npm run db:up` / `db:down` / `db:status` / `db:reset`                   | 数据库                                                      |
 | `npm run sync:contracts`                                                 | 重新拉合约列表                                              |
@@ -371,12 +402,16 @@ npm run db:reset -- --yes   # 清空数据
 | `POST /api/account/model`                     | 切换模型，写回 `.env`                                        |
 | `GET /api/contracts`                          | 本地合约列表                                                 |
 | `GET /api/candles?symbol&timeframe&limit`     | K 线 + 最近 4 小时压力支撑                                   |
-| `GET /api/analyze?symbol&mock`                | 开单分析（周期与胜率用后端默认值）                           |
+| `GET /api/analyze?symbol`                     | 开单分析（周期与胜率用后端默认值，结果自动存档）             |
+| `GET /api/analyses`                           | 历史分析列表 + 档位统计                                      |
+| `GET /api/analyses/:id`                       | 单条分析完整详情（含当时的规则原文）                         |
+| `POST /api/analyses/:id/settle`               | 填事后结果（到没到 TP / 打没打止损 / R 倍数）                 |
+| `DELETE /api/analyses/:id`                    | 删除一条分析                                                 |
 | `POST /api/knowledge`                         | 收录案例（`{symbol,timeframe,label,note?,from?,to?,save?}`） |
 | `GET /api/knowledge?label=`                   | 案例列表                                                     |
 | `GET /api/knowledge/:id`                      | 案例详情（含 K 线）                                          |
 | `DELETE /api/knowledge/:id`                   | 删除案例                                                     |
-| `GET /api/usage/summary?days&kind&realOnly`   | 用量汇总                                                     |
+| `GET /api/usage/summary?days&kind`            | 用量汇总                                                     |
 | `GET /api/usage/calls?days&kind&limit&offset` | 用量明细（分页）                                             |
 
 ---

@@ -1,5 +1,5 @@
 import {AppConfig} from '../types'
-import {priceFor} from './pricing'
+import {canonicalModel, isAlias, priceFor} from './pricing'
 
 /**
  * DeepSeek 账户余额与可用模型。
@@ -152,7 +152,7 @@ export async function fetchBalance(
 /* 可用模型                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 拉不到就退回这份内置列表（DeepSeek 官方在售） */
+/** 拉不到就退回这份内置列表（DeepSeek 官方在售，只有这两个） */
 export const FALLBACK_MODELS = ['deepseek-flash', 'deepseek-v4-pro']
 
 export interface ModelOption {
@@ -164,8 +164,10 @@ export interface ModelOption {
 }
 
 export interface ModelsResult {
-  /** 当前正在用的模型 */
+  /** 当前正在用的模型（已归一成真实 id） */
   current: string
+  /** .env 里写的是别名的话，这里放原始值，页面上提示一下 */
+  alias: string | null
   /** 可选列表 */
   available: ModelOption[]
   /** 列表是从接口拿的，还是内置兜底 */
@@ -180,14 +182,28 @@ function option(id: string): ModelOption {
 
 /** 查可用模型 */
 export async function fetchModels(config: AppConfig): Promise<ModelsResult> {
-  const current = config.llm.model
+  /**
+   * .env 里写的可能是历史别名（deepseek-chat / deepseek-reasoner）。
+   * 别名不是真实模型 id，直接塞进列表会出现「选了不存在的模型」——
+   * 所以先归一，再拿归一后的 id 去跟真实列表对齐。
+   */
+  const raw = config.llm.model
+  const current = canonicalModel(raw)
 
-  const fallback = (error: string | null): ModelsResult => {
-    const ids = [...new Set([current, ...FALLBACK_MODELS])].filter(Boolean)
-    return {current, available: ids.map(option), fromApi: false, error}
+  /** 真实列表里没有 current 时兜底也算上，免得下拉框选不中当前在用的模型 */
+  const build = (ids: string[], fromApi: boolean, error: string | null) => {
+    const list = [...new Set(ids)].filter(Boolean)
+    if (!list.includes(current)) list.unshift(current)
+    return {
+      current,
+      alias: isAlias(raw) ? raw : null,
+      available: list.map(option),
+      fromApi,
+      error
+    }
   }
 
-  if (!config.llm.apiKey) return fallback(null)
+  if (!config.llm.apiKey) return build(FALLBACK_MODELS, false, null)
 
   try {
     const res = await fetch(`${baseUrl(config)}${MODELS_PATH}`, {
@@ -197,23 +213,28 @@ export async function fetchModels(config: AppConfig): Promise<ModelsResult> {
       },
       signal: AbortSignal.timeout(10_000)
     })
-    if (!res.ok) return fallback(`模型列表接口返回 HTTP ${res.status}`)
+    if (!res.ok)
+      return build(
+        FALLBACK_MODELS,
+        false,
+        `模型列表接口返回 HTTP ${res.status}`
+      )
 
     const json = (await res.json()) as {data?: {id?: string}[]}
     const ids = (json.data ?? [])
-      .map(m => String(m.id ?? ''))
+      .map(m => canonicalModel(String(m.id ?? '')))
       .filter(Boolean)
       .sort()
 
-    if (!ids.length) return fallback('模型列表是空的，用内置列表')
+    if (!ids.length)
+      return build(FALLBACK_MODELS, false, '模型列表是空的，用内置列表')
 
-    return {
-      current,
-      available: [...new Set([current, ...ids])].filter(Boolean).map(option),
-      fromApi: true,
-      error: null
-    }
+    return build(ids, true, null)
   } catch (e) {
-    return fallback(`请求模型列表失败：${(e as Error).message}`)
+    return build(
+      FALLBACK_MODELS,
+      false,
+      `请求模型列表失败：${(e as Error).message}`
+    )
   }
 }

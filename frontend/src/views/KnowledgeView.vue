@@ -264,7 +264,7 @@ onMounted(load)
             <span class="k">本次花费</span>
             <span class="v">
               {{
-                collected.meta.mock
+                collected.meta.warning
                   ? '模拟提炼，不计费'
                   : collected.meta.usage.text
               }}
