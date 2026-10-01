@@ -37,9 +37,10 @@ body {
 }
 
 #app {
-  max-width: 1240px;
-  margin: 0 auto;
-  padding: 18px 20px 40px;
+  /* 全屏铺满：分析页要同时放表格、图表和步骤清单，限宽会到处挤 */
+  width: 100%;
+  max-width: none;
+  padding: 12px 16px 32px;
 }
 
 h1 {
@@ -686,9 +687,128 @@ button.danger:hover {
 
 /* ==================== 开单分析页布局 ==================== */
 .analyze {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 顶部：左边查询，右边分析过程 */
+.query-bar {
   display: grid;
-  grid-template-columns: 380px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.query-left {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.query-left .hint {
+  margin: 0;
+}
+
+.query-right {
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  padding-left: 18px;
+}
+
+.steps-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.steps-head h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 14px 190px minmax(0, 1fr) 52px;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.step .dot {
+  font-size: 9px;
+  line-height: 1.6;
+  color: var(--line);
+}
+
+.step b {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.step em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step .ms {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.step.done .dot {
+  color: var(--ok);
+}
+
+.step.error .dot,
+.step.error b,
+.step.error em {
+  color: var(--bad);
+}
+
+.step.active .dot {
+  color: var(--blue);
+}
+.step.active {
+  animation: step-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes step-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* 两列：左 tab，右三块 */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 12px;
   align-items: start;
 }
 
@@ -697,6 +817,39 @@ button.danger:hover {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+}
+
+.tab-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.side .panel h2 {
+  font-size: 13px;
+}
+
+.heat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 4px 16px;
+}
+
+.checklist.big > li {
+  padding: 8px 0 8px 12px;
+}
+
+.checklist.big .note {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* K 线占用收窄：整行但矮一截 */
+.chart-slim .chart-wrap {
+  height: 300px;
+  min-height: 220px;
 }
 
 .chart-panel {

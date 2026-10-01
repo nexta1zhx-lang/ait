@@ -26,7 +26,7 @@ const OUTPUT_CONTRACT = `【输出格式（必须严格遵守）】
   "verdictReason": "差在哪一条 / 为什么可做",
   "exitTriggers": ["什么情况下必须走"],
   "knowledgeRefs": [
-    { "symbol": "ROBO", "timeframe": "1h", "lesson": "引用的经验原文" }
+    { "symbol": "ROBO", "timeframe": "1h", "lesson": "引用的经验原文（只能逐字摘自我给的经验列表；没有就给 []）" }
   ],
   "coachLine": "结尾那句话：我当前最该守住的规则"
 }
@@ -45,6 +45,8 @@ const OUTPUT_CONTRACT = `【输出格式（必须严格遵守）】
 - 写不出止损位 → verdict 必须是 no_go 或 wait
 - grade = B 时 verdict 必须是 no_go
 - 不要预测涨跌，不要给「稳赚」的话术，不要建议加仓 / 加杠杆 / 扛单
+- knowledgeRefs 只能逐字摘自我在【我过往的经验】里给出的条目；
+  没给经验列表（或列表为空）时必须返回 []，**不许自己编经验**
 - coachLine 每次都要有`
 
 export function buildSystemPrompt(rules: RulesBundle): string {
@@ -66,6 +68,13 @@ export function buildUserPrompt(context: string, lessons: string): string {
   if (lessons.trim()) {
     parts.push(
       `【我过往的经验（来自我自己的知识库，判断时请参考）】\n\n${lessons.trim()}`
+    )
+  } else {
+    // 不说清楚的话，模型会照着输出格式硬凑几条根本不存在的「经验」
+    parts.push(
+      '【我过往的经验】\n\n' +
+        '（我的知识库现在是空的，本次没有任何经验可引用。' +
+        'knowledgeRefs 必须返回空数组 []，一条都不许编。）'
     )
   }
   parts.push(`【当前行情快照】\n\n${context}`)

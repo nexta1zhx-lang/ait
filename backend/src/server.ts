@@ -38,9 +38,17 @@ import {collectCase} from './knowledge-service'
 import {computeRecentSR, fetchCandles, fetchSnapshot} from './data/market'
 import {buildContext} from './context/builder'
 import {DEFAULT_WIN_RATE, expectancyOf} from './analysis/expectancy'
-import {judge, toDecision} from './llm/client'
+import {judge, toDecision, type JudgeMeta, type JudgeResult} from './llm/client'
 import {validate} from './guardrails/validator'
-import {Candle, LlmDecision, MarketType, Timeframe} from './types'
+import {
+  Candle,
+  Expectancy,
+  GuardrailResult,
+  LlmDecision,
+  MarketSnapshot,
+  MarketType,
+  Timeframe
+} from './types'
 
 const PORT = Number(process.env.PORT || 8787)
 /** 前端构建产物（npm run ui:build 生成） */
@@ -67,6 +75,13 @@ const HASHED_ASSET = /-[\w-]{8,}\.(js|css|woff2)$/
 /* 基础设施                                                            */
 /* ------------------------------------------------------------------ */
 
+/** 所有响应都带上，前端独立部署也能调 */
+const CORS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
+}
+
 function sendJson(
   res: http.ServerResponse,
   status: number,
@@ -75,7 +90,7 @@ function sendJson(
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*'
+    ...CORS
   })
   res.end(JSON.stringify(data))
 }
@@ -281,73 +296,214 @@ function baseSymbol(ccxtSymbol: string): string {
   )
 }
 
-async function handleAnalyze(
-  url: URL,
-  res: http.ServerResponse
-): Promise<void> {
-  const q = url.searchParams
-  const symbolInput = (q.get('symbol') ?? '').trim().toUpperCase()
-  if (!symbolInput) {
-    sendJson(res, 400, {error: '请先选择币种'})
-    return
+/** 分析过程中的一步，用于前端「分析过程」时间线 */
+export interface AnalyzeStep {
+  /** 稳定 id，前端拿来匹配 */
+  id: string
+  /** 显示文案 */
+  label: string
+  state: 'running' | 'done' | 'error'
+  /** 这一步的补充说明（周期、K 线数、token、耗时…） */
+  detail?: string
+  /** 这一步花了多少毫秒 */
+  ms?: number
+}
+
+type OnStep = (step: AnalyzeStep) => void
+
+export interface AnalyzeOutcome {
+  analysisId: number | null
+  symbol: string
+  ccxtSymbol: string
+  exchange: string
+  marketType: string
+  price: number
+  heat: MarketSnapshot['heat']
+  change24hPct: number | null
+  fundingRate: number | null
+  openInterest: number | null
+  structure: MarketSnapshot['structure']
+  timeframes: MarketSnapshot['timeframes']
+  series: MarketSnapshot['series']
+  judge: JudgeResult
+  guardrails: GuardrailResult
+  expectancy: Expectancy | null
+  /** 本次分析走了哪几步（前端画时间线） */
+  steps: AnalyzeStep[]
+  meta: {
+    model: string
+    rules: {sources: string[]; hash: string; warnings: string[]}
+    knowledgeUsed: boolean
+    usage: {
+      callId: number | null
+      promptTokens: number
+      completionTokens: number
+      totalTokens: number
+      cacheHitTokens: number
+      costUsd: number
+      costCny: number
+      attempts: number
+      latencyMs: number
+      text: string
+    }
+  }
+}
+
+function parseTimeframes(raw: string | null): Timeframe[] {
+  const fallback = loadConfig().timeframes
+  const list = (raw ? raw.split(',') : fallback)
+    .map(x => x.trim())
+    .filter((x): x is Timeframe => (VALID_TFS as string[]).includes(x))
+  if (list.length > 0) return list
+  return fallback.length ? fallback : ['1h', '4h', '1d']
+}
+
+/** 读 query 里的 symbol / market / timeframes / winRate */
+function analyzeParams(q: URLSearchParams): {
+  symbol: string
+  market?: MarketType
+  timeframes: Timeframe[]
+  winRate: number
+} {
+  const marketParam = q.get('market')
+  return {
+    symbol: (q.get('symbol') ?? '').trim().toUpperCase(),
+    market:
+      marketParam && ['spot', 'swap', 'coinm'].includes(marketParam)
+        ? (marketParam as MarketType)
+        : undefined,
+    timeframes: parseTimeframes(q.get('timeframes')),
+    // 期望值用的假设胜率。页面不暴露这个输入，用默认值；显式传参仍然有效
+    winRate: Math.min(
+      1,
+      Math.max(0.01, Number(q.get('winRate')) || DEFAULT_WIN_RATE)
+    )
+  }
+}
+
+/**
+ * 一次分析的全过程。
+ * 网页（JSON）、网页（SSE 进度）、命令行都走这里，避免几份实现各写一遍。
+ */
+async function runAnalysis(opts: {
+  symbol: string
+  market?: MarketType
+  timeframes: Timeframe[]
+  winRate: number
+  onStep?: OnStep
+}): Promise<AnalyzeOutcome> {
+  const {symbol: symbolInput, market, timeframes, winRate} = opts
+  const onStep: OnStep = opts.onStep ?? (() => {})
+  const steps: AnalyzeStep[] = []
+
+  /** 开一步 → 返回「收尾」函数（自动算耗时并置为 done） */
+  const step = (id: string, label: string) => {
+    const startedAt = Date.now()
+    const rec: AnalyzeStep = {id, label, state: 'running' as const}
+    steps.push(rec)
+    onStep({...rec})
+    return (detail?: string) => {
+      rec.state = 'done'
+      rec.detail = detail
+      rec.ms = Date.now() - startedAt
+      onStep({...rec})
+    }
   }
 
-  const marketParam = q.get('market')
-  const market =
-    marketParam && ['spot', 'swap', 'coinm'].includes(marketParam)
-      ? (marketParam as MarketType)
-      : undefined
+  /** 某一步炸了，把它标红（错误本身继续往外抛） */
+  const markFailed = (id: string, msg: string) => {
+    const rec = steps.find(x => x.id === id)
+    if (!rec) return
+    rec.state = 'error'
+    rec.detail = msg
+    rec.ms = Date.now()
+    onStep({...rec})
+  }
 
-  const tfParam = q.get('timeframes')
-  const fallbackTfs = loadConfig().timeframes
-  let timeframes = (tfParam ? tfParam.split(',') : fallbackTfs)
-    .map(s => s.trim())
-    .filter((s): s is Timeframe => (VALID_TFS as string[]).includes(s))
-  if (timeframes.length === 0)
-    timeframes = fallbackTfs.length ? fallbackTfs : ['1h', '4h', '1d']
-
-  // 期望值用的假设胜率。页面不暴露这个输入了，用默认值；显式传参仍然有效
-  const winRate = Math.min(
-    1,
-    Math.max(0.01, Number(q.get('winRate')) || DEFAULT_WIN_RATE)
+  // 1. 读规则
+  const endRules = step('rules', '读取我的规则')
+  const rules = loadRules()
+  endRules(
+    rules.sources.length
+      ? `${rules.sources.join('、')} · ${(
+          (rules.system.length + rules.body.length) /
+          1000
+        ).toFixed(1)}K 字 · ${rules.hash}`
+      : '（没读到规则文件，用内置角色设定）'
   )
 
   const config = loadConfig({marketType: market, timeframes})
-  const rules = loadRules()
 
-  // 知识库：注入「我做对的」和「我踩过的坑」
+  // 2. 知识库经验
+  const endKb = step('knowledge', '取知识库经验')
   let lessons = ''
   try {
     lessons = await lessonsByGrade()
   } catch (e) {
     console.warn('[analyze] 读取知识库失败:', (e as Error).message)
   }
+  endKb(lessons.trim() ? `${lessons.length} 字` : '知识库为空，跳过')
 
-  const snapshot = await fetchSnapshot({
-    exchangeId: config.exchange,
-    symbol: symbolInput,
-    timeframes,
-    limit: config.candlesLimit,
-    recentTimeframe: '1h',
-    recentCount: 30,
-    marketType: config.marketType,
-    apiBase: config.apiBase
-  })
+  // 3. 拉行情
+  const endFetch = step('fetch', `拉取 ${symbolInput} 行情`)
+  let snapshot: MarketSnapshot
+  try {
+    snapshot = await fetchSnapshot({
+      exchangeId: config.exchange,
+      symbol: symbolInput,
+      timeframes,
+      limit: config.candlesLimit,
+      recentTimeframe: '1h',
+      recentCount: 30,
+      marketType: config.marketType,
+      apiBase: config.apiBase
+    })
+  } catch (e) {
+    markFailed('fetch', (e as Error).message)
+    throw e
+  }
+  endFetch(
+    `${snapshot.symbol} · ${timeframes.join('/')} · ${snapshot.series.length} 根 K 线 · 现价 ${snapshot.price}`
+  )
 
+  // 4. 构建上下文
+  const endCtx = step('context', '构建喂给 AI 的行情快照')
   const context = buildContext(snapshot)
-  const {result, meta} = await judge({
-    snapshot,
-    context,
-    rules,
-    lessons,
-    config
-  })
+  endCtx(`${context.length} 字`)
 
-  // 转成护栏模块认识的形状
+  // 5. 调用大模型
+  const endJudge = step('judge', `调用 ${config.llm.model} 判断`)
+  let result: JudgeResult
+  let meta: JudgeMeta
+  try {
+    ;({result, meta} = await judge({snapshot, context, rules, lessons, config}))
+  } catch (e) {
+    markFailed('judge', (e as Error).message)
+    throw e
+  }
+  endJudge(
+    `${meta.model} · ${meta.usage.promptTokens}+${meta.usage.completionTokens} tok · 回答 ${meta.raw.length} 字` +
+      (meta.attempts > 1 ? ` · 重试 ${meta.attempts} 次` : '')
+  )
+
+  // 6. 护栏与仓位（代码算，不采信 AI 的算术）
+  const endGuard = step('guardrails', '护栏与仓位校验（代码）')
   const decision = toDecision(result)
   const guardrails = validate(decision, snapshot, config)
+  endGuard(
+    guardrails.passed
+      ? `通过 ${guardrails.checks.length} 项检查` +
+          (typeof guardrails.rMultiple === 'number'
+            ? ` · 末段盈亏比 ${guardrails.rMultiple}R`
+            : '')
+      : `拦下：${guardrails.violations.map(v => v.desc || v.id).join('；')}`
+  )
 
-  // 记账：这次判断烧了多少 token、多少钱
+  const expectancy = expectancyOf(decision, winRate)
+  const chartTimeframe = '1h'
+
+  // 7. 记账并存档
+  const endArchive = step('archive', '记账并存档')
   const billed = await recordUsage({
     kind: 'judge',
     model: meta.model,
@@ -358,10 +514,6 @@ async function handleAnalyze(
     latencyMs: meta.latencyMs
   })
 
-  const expectancy = expectancyOf(decision, winRate)
-  const chartTimeframe = '1h'
-
-  // 存档：把这次分析完整落库（规则全文按 hash 去重存一份）
   let analysisId: number | null = null
   try {
     await saveRulesVersion({
@@ -394,8 +546,13 @@ async function handleAnalyze(
   } catch (e) {
     console.warn('[analyze] 存档失败:', (e as Error).message)
   }
+  endArchive(
+    analysisId === null
+      ? '存库失败（不影响本次结论）'
+      : `存档 #${analysisId} · 花费 ${oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)}`
+  )
 
-  sendJson(res, 200, {
+  return {
     analysisId,
     symbol: baseSymbol(snapshot.symbol),
     ccxtSymbol: snapshot.symbol,
@@ -412,6 +569,7 @@ async function handleAnalyze(
     judge: result,
     guardrails,
     expectancy,
+    steps,
     meta: {
       model: meta.model,
       rules: {
@@ -434,7 +592,70 @@ async function handleAnalyze(
         text: oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)
       }
     }
+  }
+}
+
+async function handleAnalyze(
+  url: URL,
+  res: http.ServerResponse
+): Promise<void> {
+  const params = analyzeParams(url.searchParams)
+  if (!params.symbol) {
+    sendJson(res, 400, {error: '请先选择币种'})
+    return
+  }
+  try {
+    sendJson(res, 200, await runAnalysis(params))
+  } catch (e) {
+    sendJson(res, 502, {error: (e as Error).message})
+  }
+}
+
+/**
+ * 带进度的分析（Server-Sent Events）。
+ * 一路上推 `step`，最后推 `done`（内容与 /api/analyze 完全一致）。
+ */
+async function handleAnalyzeStream(
+  url: URL,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...CORS
   })
+
+  const send = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+
+  const params = analyzeParams(url.searchParams)
+  if (!params.symbol) {
+    send('failed', {error: '请先选择币种'})
+    res.end()
+    return
+  }
+
+  // 页面切走了就别再往回写（大模型调用中途没法取消，但至少别浪费）
+  let closed = false
+  req.on('close', () => (closed = true))
+
+  try {
+    const outcome = await runAnalysis({
+      ...params,
+      onStep: s => {
+        if (!closed) send('step', s)
+      }
+    })
+    if (!closed) send('done', outcome)
+  } catch (e) {
+    if (!closed) send('failed', {error: (e as Error).message})
+  } finally {
+    res.end()
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -725,6 +946,13 @@ async function route(
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
     await handleAnalyze(url, res)
+    return
+  }
+
+  if (p === '/api/analyze/stream') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    await handleAnalyzeStream(url, req, res)
     return
   }
 

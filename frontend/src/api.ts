@@ -236,6 +236,15 @@ export interface Expectancy {
   positive: boolean
 }
 
+/** 分析过程中的一步（后端 SSE 推过来） */
+export interface AnalyzeStep {
+  id: string
+  label: string
+  state: 'running' | 'done' | 'error'
+  detail?: string
+  ms?: number
+}
+
 export interface AnalyzeResult {
   /** 存档编号；后端落库失败时为 null（分析结果照常返回） */
   analysisId: number | null
@@ -250,6 +259,8 @@ export interface AnalyzeResult {
   judge: Judge
   guardrails: Guardrails
   expectancy: Expectancy | null
+  /** 这次分析走了哪几步（时间线） */
+  steps: AnalyzeStep[]
   meta: {
     model: string
     warning: string | null
@@ -266,11 +277,74 @@ export interface AnalyzeResult {
   }
 }
 
-/** 开单分析。周期与假设胜率都用后端配置的默认值。 */
+/** 开单分析（一次性返回）。周期与假设胜率都用后端配置的默认值。 */
 export function analyze(symbol: string) {
   return get<AnalyzeResult>(
     '/api/analyze?' + new URLSearchParams({symbol}).toString()
   )
+}
+
+/**
+ * 带进度的开单分析（SSE）。
+ * 返回值是「取消」函数，组件卸载时调一下，别让 EventSource 自己重连。
+ */
+export function analyzeStream(
+  symbol: string,
+  handlers: {
+    onStep: (step: AnalyzeStep) => void
+    onDone: (result: AnalyzeResult) => void
+    onError: (message: string) => void
+  }
+): () => void {
+  const url =
+    '/api/analyze/stream?' + new URLSearchParams({symbol}).toString()
+  const es = new EventSource(url)
+  let finished = false
+
+  const stop = () => {
+    finished = true
+    es.close()
+  }
+
+  const parse = (e: MessageEvent) => {
+    try {
+      return JSON.parse(e.data)
+    } catch {
+      return null
+    }
+  }
+
+  es.addEventListener('step', e => {
+    const step = parse(e as MessageEvent) as AnalyzeStep | null
+    if (step) handlers.onStep(step)
+  })
+
+  es.addEventListener('done', e => {
+    const out = parse(e as MessageEvent) as AnalyzeResult | null
+    stop()
+    if (out) handlers.onDone(out)
+    else handlers.onError('分析结果解析失败')
+  })
+
+  es.addEventListener('failed', e => {
+    const out = parse(e as MessageEvent) as {error?: string} | null
+    stop()
+    handlers.onError(out?.error ?? '分析失败')
+  })
+
+  // 服务端正常结束也会触发 error —— 已经收过 done/failed 就忽略
+  es.onerror = () => {
+    if (finished) return
+    const state = es.readyState
+    if (state === EventSource.CLOSED) {
+      stop()
+      handlers.onError('连接中断，请重试')
+      return
+    }
+    // CONNECTING：浏览器正在自动重连，等一下再看
+  }
+
+  return stop
 }
 
 /* ---------------- 知识库 ---------------- */
