@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    // 后端是 CommonJS：package.json 里没有 "type": "module"，
+    // 所以 module=node18 依然编译成 require()，但解析用的是
+    // 现代的 node16，避免 "moduleResolution=node10 已弃用" 的告警。
+    "module": "node18",
+    "moduleResolution": "node16",
+    "lib": ["ES2021"],
+    "types": ["node"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["web", "node_modules", "public", "dist"]
+}

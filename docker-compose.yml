@@ -1,0 +1,27 @@
+# 显式指定项目名：目录名是中文，compose 无法自动推导
+name: crypto-advisor
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ca-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ca
+      POSTGRES_PASSWORD: ca_local_dev
+      POSTGRES_DB: crypto_advisor
+      # 中文排序/大小写处理
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    ports:
+      - '5432:5432'
+    volumes:
+      - ca-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ca -d crypto_advisor']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  ca-pgdata:
+    name: ca-pgdata

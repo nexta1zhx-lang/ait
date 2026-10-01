@@ -1,0 +1,36 @@
+# ============================================================
+# 硬性护栏配置（由确定性代码执行，LLM 不可覆盖）
+# 说明：LLM 负责「判断」，本文件是代码层的红线与风控参数。
+# 改完本文件即时生效，无需改代码。
+# ============================================================
+
+风控:
+  账户资金: 10000 # U；也可改为从交易所接口动态读取
+  单笔风险百分比: 1.0 # 账户资金的 1%
+  单笔风险上限百分比: 2.0 # 超过则拒绝
+  最大杠杆: 5 # 超过则拒绝
+  最小盈亏比: 1.5 # (TP1-入场)/(入场-止损) < 1.5 则告警
+  止损方式: structure # structure（结构位：前低/前高）| pct（固定百分比）
+  止损距离百分比范围: [0.2, 8.0] # 止损距入场的百分比，超出范围则告警
+  止盈分批: [1.0, 2.0, 3.0] # 以 R 为单位
+  分批减仓比例: [50, 25, 25] # 对应 TP1/TP2/TP3 的减仓百分比
+
+# 硬性红线：任一命中 -> 直接否决，无论 LLM 怎么判断。
+# when 表达式可引用上下文变量（均来自价格结构与市场热度，无技术指标）：
+#   通用：price / funding_rate / open_interest / oi_change_pct / change24h_pct
+#         amplitude24h_pct / volume24h / long_short_ratio / swing_high / swing_low
+#         last_swing_high / last_swing_low / trend_up_count / trend_down_count
+#   分周期（<tf> ∈ 5m|15m|1h|4h|1d）：
+#         close_<tf> / net_change_<tf> / range_<tf> / vol_ratio_<tf> / trend_<tf>
+硬性红线:
+  - id: funding_extreme
+    desc: 资金费率过热
+    when: 'funding_rate > 0.05'
+
+  - id: extreme_volatility
+    desc: 24h 波动过大
+    when: 'amplitude24h_pct > 15'
+
+  - id: overheated_pump
+    desc: 24h 涨幅过大（追高风险）
+    when: 'change24h_pct > 20'
