@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import {ROOT_DIR} from './config'
+import {loadContractStore, saveContractStore} from './db/contracts'
 import {MarketType} from './types'
 
 /** 单个合约信息 */
@@ -82,7 +83,7 @@ export function saveContracts(store: ContractStore): string {
   return CONTRACTS_FILE
 }
 
-export function loadContracts(): ContractStore | null {
+export function loadContractsFromFile(): ContractStore | null {
   try {
     if (!fs.existsSync(CONTRACTS_FILE)) return null
     const parsed = JSON.parse(
@@ -92,5 +93,108 @@ export function loadContracts(): ContractStore | null {
     return parsed
   } catch {
     return null
+  }
+}
+
+/**
+ * 读币种表：**数据库优先**，库里还没有（新装 / 迁移中）就退回本地 JSON 文件。
+ *
+ * ⚠️ 2026-10-03 起改了：以前只读 `data/contracts.json`（要手动 `npm run sync:contracts`
+ * 才会更新，新上币看不到）。现在存库、并由服务每天自动刷（见 `ensureContractsFresh`）。
+ * 这个函数改成 async，调用点都要 await。
+ */
+export async function loadContracts(): Promise<ContractStore | null> {
+  try {
+    const stored = await loadContractStore()
+    if (stored) return stored.store
+  } catch (e) {
+    console.warn(
+      '[contracts] 读数据库失败，回退本地文件:',
+      (e as Error).message
+    )
+  }
+  return loadContractsFromFile()
+}
+
+/** 拉一次币安 + 落库 + 顺手写一份本地文件（离线时还能兜底） */
+export async function refreshContracts(): Promise<ContractStore> {
+  const store = await fetchBinanceContracts()
+  await saveContractStore(store)
+  try {
+    saveContracts(store)
+  } catch (e) {
+    console.warn(
+      '[contracts] 写本地文件失败（不影响使用）:',
+      (e as Error).message
+    )
+  }
+  return store
+}
+
+/** 超过这个时间就认为该刷新了（用户要求「每天更新防止上新币」） */
+export const CONTRACTS_MAX_AGE_MS = 24 * 3600_000
+
+export interface ContractsFreshness {
+  /** 这次真的联网刷了吗 */
+  refreshed: boolean
+  /** 当前有多少个合约 */
+  count: number
+  /** 说人话的原因（打日志用） */
+  reason: string
+}
+
+/**
+ * 保证币种表是新的：
+ *   1. 库里已有、且没超过 maxAgeMs → 什么都不做
+ *   2. 库里没有，但本地有 `data/contracts.json` → **先灌进库**（不联网）
+ *   3. 过旧 / 没有 → 联网刷一次；失败就保留旧数据（只告警，不影响服务）
+ */
+export async function ensureContractsFresh(
+  maxAgeMs = CONTRACTS_MAX_AGE_MS
+): Promise<ContractsFreshness> {
+  let stored = await loadContractStore().catch(() => null)
+
+  // 2) 库里空的：把本地文件灌进去，先让服务有得用
+  if (!stored) {
+    const file = loadContractsFromFile()
+    if (file) {
+      // ⚠️ 带文件自己的时间：塞进去的是旧数据，接下来该刷还是要刷
+      const at = new Date(file.updatedAt)
+      await saveContractStore(file, Number.isNaN(at.getTime()) ? undefined : at)
+      stored = await loadContractStore().catch(() => null)
+      if (stored) {
+        console.log(`  币种表  首次导入本地文件：${stored.store.count} 个`)
+      }
+    }
+  }
+
+  const ageMs = stored ? Date.now() - stored.updatedAt.getTime() : Infinity
+  if (stored && ageMs < maxAgeMs) {
+    return {
+      refreshed: false,
+      count: stored.store.count,
+      reason: `数据库里是新的（${Math.round(ageMs / 3600_000)} 小时前）`
+    }
+  }
+
+  // 3) 该刷了
+  try {
+    const store = await refreshContracts()
+    return {
+      refreshed: true,
+      count: store.count,
+      reason: stored
+        ? `已自动刷新（上次 ${Math.round(ageMs / 3600_000)} 小时前）`
+        : '已自动刷新（库里原来没有）'
+    }
+  } catch (e) {
+    if (stored) {
+      return {
+        refreshed: false,
+        count: stored.store.count,
+        reason: `刷新失败（继续用旧的 ${stored.store.count} 个）：${(e as Error).message}`
+      }
+    }
+    throw e
   }
 }

@@ -54,6 +54,12 @@ export interface SeriesBlock {
   to: number
   /** 切段描述（整段速览 + 分几小段），直接喂给 AI */
   text: string
+  /**
+   * EMA42 —— **只有 15m / 1h 两块才有**。
+   * 用户 2026-10-03：「EMA42 不是必要看的，只在看回调时、看 15m 和 1h 才参考」。
+   * 4h / 1d 不给（主周期是 4h/1d 时快照里就完全没有均线这一节）。
+   */
+  ema42?: Ema42Info
 }
 
 /*
@@ -84,6 +90,8 @@ export interface MarketHeat {
   low24h: number | null
 }
 
+import type {Ema42Info} from './analysis/ema'
+
 export interface MarketSnapshot {
   symbol: string
   exchange: string
@@ -95,7 +103,7 @@ export interface MarketSnapshot {
   blocks: SeriesBlock[]
   /** 市场热度 */
   heat: MarketHeat
-  /** 主周期的 K 线 —— 只给前端画图，不发给 AI */
+  /** 主周期的 K 线 —— 给前端画图；后端只用它算 EMA42，不整段发给 AI */
   candles: Candle[]
 }
 

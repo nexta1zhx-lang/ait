@@ -1,9 +1,9 @@
 {
   "exchange": "binance",
   "marketType": "swap",
-  "updatedAt": "2026-10-01T01:58:41.021Z",
+  "updatedAt": "2026-10-02T17:48:03.698Z",
   "source": "https://fapi.binance.com/fapi/v1/exchangeInfo",
-  "count": 527,
+  "count": 528,
   "contracts": [
     {
       "symbol": "0GUSDT",
@@ -1280,6 +1280,15 @@
       "quote": "USDT",
       "ccxt": "CRV/USDT:USDT",
       "display": "CRV/USDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING"
+    },
+    {
+      "symbol": "CTUSDT",
+      "base": "CT",
+      "quote": "USDT",
+      "ccxt": "CT/USDT:USDT",
+      "display": "CT/USDT",
       "contractType": "PERPETUAL",
       "status": "TRADING"
     },

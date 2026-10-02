@@ -7,6 +7,7 @@
  *   analyses         每次分析的完整存档（输入 / 结论 / 计划 / 护栏 / 事后结果）
  *   knowledge        知识库 —— 我标过的案例 + AI 提炼的经验
  *   llm_usage        每次大模型调用的 token 与花费
+ *   contract_store   币种表（合约清单整份一行，每天自动从币安刷）
  *
  * 分层原则：
  *   · 要**筛选 / 排序 / 统计**的 → 独立列（档位、结论、币种、价格、R 倍数…）
@@ -258,6 +259,21 @@ ALTER TABLE knowledge ALTER COLUMN label DROP NOT NULL;
 -- 标签筛选走 GIN
 CREATE INDEX IF NOT EXISTS knowledge_tags_idx      ON knowledge USING GIN (tags);
 CREATE INDEX IF NOT EXISTS knowledge_move_type_idx ON knowledge (move_type);
+
+-- ---------------------------------------------------------- 币种表（合约列表）
+-- 整份币种清单存一行（id=1）：只有「整体读 / 整体换」的需求，不按行查，
+-- 存一份 JSONB 最省事，也不会出现半新半旧。
+-- 服务启动时若超过 24 小时就自动从币安拉一次，之后每天一次（新上币会自动出现）；
+-- npm run sync:contracts 仍可手动刷。
+CREATE TABLE IF NOT EXISTS contract_store (
+  id          INTEGER     PRIMARY KEY CHECK (id = 1),
+  exchange    TEXT        NOT NULL DEFAULT 'binance',
+  market_type TEXT        NOT NULL DEFAULT 'swap',
+  source      TEXT        NOT NULL DEFAULT '',
+  count       INTEGER     NOT NULL DEFAULT 0,
+  contracts   JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
 
 /**

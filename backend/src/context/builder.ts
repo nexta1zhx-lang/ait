@@ -1,3 +1,4 @@
+import {EMA_PERIOD, EMA_SLOPE_BARS, type Ema42Info} from '../analysis/ema'
 import {MarketHeat, MarketSnapshot, SeriesBlock} from '../types'
 
 /**
@@ -15,6 +16,14 @@ function fmt(n: number | null | undefined, digits = 2): string {
     maximumFractionDigits: digits,
     minimumFractionDigits: 0
   })
+}
+
+/** 价格按量级定小数位（低价币不能被四舍五入成同一个数） */
+function pxText(n: number): string {
+  if (!Number.isFinite(n)) return 'n/a'
+  const a = Math.abs(n)
+  const d = a >= 100 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 6
+  return n.toLocaleString('en-US', {maximumFractionDigits: d})
 }
 
 /** 北京时间，到分钟 */
@@ -50,6 +59,38 @@ function heatBlock(h: MarketHeat): string[] {
   ]
 }
 
+/**
+ * 均线那一节 —— **只列 15m / 1h**。
+ *
+ * 用户 2026-10-03：「EMA42 这个指标不是必要看的，没必要每次都写在分析里，
+ * 只有看回调的时候才看 15min 和一小时，只作为参考」。
+ * 所以：值在 `market.ts` 造 15m/1h 那两块时就算好了（挂在 `block.ema42` 上），
+ * 这里只负责写成一行；**没有这两个周期的块（主周期是 4h/1d）就整节不出现**。
+ */
+const SLOPE_TEXT: Record<Ema42Info['slope'], string> = {
+  up: '抬升',
+  flat: '走平',
+  down: '下压'
+}
+
+function emaBlock(snap: MarketSnapshot): string[] {
+  const rows = snap.blocks.filter(b => b.ema42)
+  if (!rows.length) return []
+  return [
+    `## 均线（EMA${EMA_PERIOD}，只作参考）`,
+    ...rows.map(b => {
+      const e = b.ema42 as Ema42Info
+      return (
+        `- ${b.timeframe}：EMA${EMA_PERIOD} = ${pxText(e.value)}，` +
+        `现价在它**${e.diffPct >= 0 ? '上方' : '下方'}** ${Math.abs(e.diffPct).toFixed(2)}%，` +
+        `近 ${EMA_SLOPE_BARS} 根${SLOPE_TEXT[e.slope]}` +
+        `（${e.slopePct >= 0 ? '+' : ''}${e.slopePct.toFixed(2)}%）`
+      )
+    }),
+    ''
+  ]
+}
+
 /** 一个周期：标题 + describeSeries 切出来的那段文字 */
 function blockSection(b: SeriesBlock): string[] {
   const head =
@@ -72,7 +113,7 @@ export function buildContext(snap: MarketSnapshot): string {
   lines.push(`- 现在: ${bjTime(snap.timestamp)}（北京）`)
   lines.push(`- 主周期: ${snap.primary}`)
   lines.push('')
-
+  lines.push(...emaBlock(snap))
   lines.push(...heatBlock(snap.heat))
   lines.push('')
 
@@ -89,9 +130,14 @@ export function buildContext(snap: MarketSnapshot): string {
     '- 每个周期都是**同一套读法**：先说整段概览，再按时间均分成几小段，'
   )
   lines.push(
-    '  每段给开高低收 / 涨跌 / 量能变化 —— 全部由 K 线与成交量直接算出来，'
+    '  每段给开高低收 / 涨跌 / 量能变化 —— 全部由 K 线与成交量直接算出来'
   )
-  lines.push('  **没有任何技术指标**（无 MACD / RSI / 布林 / ATR）')
+  lines.push(
+    `- 指标只有一个 EMA${EMA_PERIOD}，而且**只给 15m / 1h**（在「均线」那节）——`
+  )
+  lines.push(
+    '  它是**看回调时**的参考，平时不用提；其余指标（MACD / RSI / 布林 / ATR）都没有'
+  )
   lines.push(
     '- 「主周期」是我在图上看的那个，其余周期是拿来对照更大 / 更小级别的'
   )

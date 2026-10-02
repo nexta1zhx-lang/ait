@@ -3,7 +3,11 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import {loadConfig, ROOT_DIR} from './config'
-import {loadContracts} from './contracts'
+import {
+  CONTRACTS_MAX_AGE_MS,
+  ensureContractsFresh,
+  loadContracts
+} from './contracts'
 import {fullSystem, loadExtractRules, loadRules} from './rules'
 import {buildSystemPrompt} from './llm/prompt'
 import {buildExtractPrompt} from './llm/extract'
@@ -62,8 +66,13 @@ import {
   computeRecentSR,
   fetchCandles,
   fetchCandlesRange,
-  fetchSnapshot
+  fetchMarketList,
+  fetchSnapshot,
+  fetchTickerInfo,
+  type MarketRow,
+  type TickerInfo
 } from './data/market'
+import {subscribeKline, subscribeTickers} from './data/kline-stream'
 import {buildContext} from './context/builder'
 import {judge, type JudgeMeta, type JudgeResult} from './llm/client'
 import {Candle, MarketSnapshot, MarketType, Timeframe} from './types'
@@ -328,6 +337,100 @@ async function handleCandles(
     candles,
     sr: computeRecentSR(srSource, 4)
   })
+}
+
+/**
+ * 头部行情条缓存。
+ *
+ * 界面上十几秒刷一次，同一个币短时间内重复打交易所没意义；
+ * 缓存 15 秒 → 同时开两个页面也只打一次。
+ */
+const tickerCache = new Map<string, {at: number; data: TickerInfo}>()
+const TICKER_TTL_MS = 15_000
+
+/** 头部行情（价格 / 24h / 标记指数 / 资金费率 / 持仓量 / 多周期涨幅） */
+async function handleTicker(url: URL, res: http.ServerResponse): Promise<void> {
+  const q = url.searchParams
+  const symbol = (q.get('symbol') ?? '').trim().toUpperCase()
+  if (!symbol) {
+    sendJson(res, 400, {error: '请先选择币种'})
+    return
+  }
+  const marketParam = q.get('market')
+  const market =
+    marketParam && ['spot', 'swap', 'coinm'].includes(marketParam)
+      ? (marketParam as MarketType)
+      : undefined
+  const config = loadConfig({marketType: market})
+
+  const key = `${config.marketType}|${symbol}`
+  const hit = tickerCache.get(key)
+  if (hit && Date.now() - hit.at < TICKER_TTL_MS) {
+    sendJson(res, 200, hit.data)
+    return
+  }
+
+  try {
+    const data = await fetchTickerInfo({
+      exchangeId: config.exchange,
+      symbol,
+      marketType: config.marketType,
+      apiBase: config.apiBase
+    })
+    tickerCache.set(key, {at: Date.now(), data})
+    // 缓存别无限长大：只留最近用过的 50 个币
+    if (tickerCache.size > 50) {
+      const oldest = [...tickerCache.entries()].sort(
+        (a, b) => a[1].at - b[1].at
+      )[0]
+      if (oldest) tickerCache.delete(oldest[0])
+    }
+    sendJson(res, 200, data)
+  } catch (e) {
+    // 头部行情挂了不该拖垮整个页面：前端自己会把这项显示成「—」
+    sendJson(res, 502, {error: (e as Error).message})
+  }
+}
+
+/**
+ * 合约行情列表（参考币安「合约行情」页）。
+ *
+ * 界面上几秒刷一次，**必须缓存**：一次请求就是交易所全量 24h ticker，
+ * 多开几个标签页 / 多人同时看时不能各打各的。5 秒足够「实时」了。
+ */
+const marketsCache = new Map<string, {at: number; rows: MarketRow[]}>()
+const MARKETS_TTL_MS = 5_000
+
+async function handleMarkets(
+  url: URL,
+  res: http.ServerResponse
+): Promise<void> {
+  const marketParam = url.searchParams.get('market')
+  const market =
+    marketParam && ['spot', 'swap', 'coinm'].includes(marketParam)
+      ? (marketParam as MarketType)
+      : undefined
+  const config = loadConfig({marketType: market})
+  const key = `${config.exchange}|${config.marketType}|${config.apiBase ?? ''}`
+
+  const hit = marketsCache.get(key)
+  if (hit && Date.now() - hit.at < MARKETS_TTL_MS) {
+    sendJson(res, 200, {rows: hit.rows, updatedAt: hit.at})
+    return
+  }
+
+  try {
+    const rows = await fetchMarketList({
+      exchangeId: config.exchange,
+      marketType: config.marketType,
+      apiBase: config.apiBase
+    })
+    const at = Date.now()
+    marketsCache.set(key, {at, rows})
+    sendJson(res, 200, {rows, updatedAt: at})
+  } catch (e) {
+    sendJson(res, 502, {error: (e as Error).message})
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -678,6 +781,155 @@ async function handleAnalyze(
   } catch (e) {
     sendJson(res, 502, {error: (e as Error).message})
   }
+}
+
+/**
+ * K 线实时推送（SSE）。上游是币安的合约 WS，见 `data/kline-stream.ts`。
+ *
+ * 事件 `kline` 推的是一根 K 线（**正在长的那根也会推**：`timestamp` 相同就是同一根在更新）；
+ * 每 20 秒发一条注释当心跳，免得中间代理把长连接当成空闲掐了。
+ */
+async function handleKlineStream(
+  url: URL,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const q = url.searchParams
+  const symbol = (q.get('symbol') ?? '').trim().toUpperCase()
+  const tfParam = (q.get('timeframe') ?? '1h') as Timeframe
+  const timeframe = (VALID_TFS as string[]).includes(tfParam) ? tfParam : '1h'
+  if (!symbol) {
+    sendJson(res, 400, {error: '请先选择币种'})
+    return
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...CORS
+  })
+
+  const send = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  send('open', {symbol, timeframe})
+
+  const unsubscribe = subscribeKline(symbol, timeframe, candle =>
+    send('kline', {candle})
+  )
+  const beat = setInterval(() => res.write(': ping\n\n'), 20_000)
+
+  let closed = false
+  const done = () => {
+    if (closed) return
+    closed = true
+    clearInterval(beat)
+    unsubscribe()
+  }
+  req.on('close', done)
+  res.on('close', done)
+}
+
+/**
+ * 全市场行情实时推送（SSE，上游是币安的 `!ticker@arr`）。
+ *
+ * 事件 `ticker` 推的是**一批增量**：只有刚变过的两三百个币（1 秒一批）。
+ * 前端拿一次 `GET /api/markets` 当底稿，之后只吃增量，**不用再轮询接口**。
+ * 上游挂了后端会自动退回 REST 轮询（那时一批就是整张表），前端不用管。
+ */
+async function handleTickerStream(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...CORS
+  })
+
+  const send = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  send('open', {stream: 'ticker'})
+
+  const unsubscribe = subscribeTickers(patches =>
+    send('ticker', {updates: patches})
+  )
+  const beat = setInterval(() => res.write(': ping\n\n'), 20_000)
+
+  let closed = false
+  const done = () => {
+    if (closed) return
+    closed = true
+    clearInterval(beat)
+    unsubscribe()
+  }
+  req.on('close', done)
+  res.on('close', done)
+}
+
+/**
+ * 币种图标（代理上面那套开源图标集）。
+ *
+ * 为什么不让浏览器直连图标站：图标源在国内不一定连得上，但**我们的域名一定连得上**
+ * （跟 K 线 WS 中转一个道理）；顺带在内存里缓存起来，一张 32px PNG 不到 1KB，
+ * 整个市场几百个币也就几百 KB，且浏览器那边 `max-age` 七天。
+ * 找不到就 404，前端退回首字母的圆形占位。
+ */
+const ICON_CDN =
+  'https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/32/color'
+const iconCache = new Map<string, Buffer>()
+
+/**
+ * 没有这个币的图标：回 404 但**带缓存头**。
+ *
+ * 图标集里没有的小币（新上的一堆）会走到这儿，前端退回首字母圆；
+ * 不带缓存头的话，每次开页面都要为那十来个币再问一遍（浏览器控制台一片 404）。
+ */
+function sendNoIcon(res: http.ServerResponse): void {
+  res.writeHead(404, {'Cache-Control': 'public, max-age=86400', ...CORS})
+  res.end()
+}
+
+async function handleIcon(
+  sym: string,
+  res: http.ServerResponse
+): Promise<void> {
+  const key = sym.trim().toLowerCase()
+  if (!/^[a-z0-9]{1,20}$/.test(key)) {
+    sendJson(res, 400, {error: '币种不合法'})
+    return
+  }
+  let buf = iconCache.get(key)
+  if (!buf) {
+    try {
+      const r = await fetch(`${ICON_CDN}/${key}.png`)
+      if (!r.ok) {
+        sendNoIcon(res)
+        return
+      }
+      buf = Buffer.from(await r.arrayBuffer())
+      if (!buf.length) {
+        sendNoIcon(res)
+        return
+      }
+      iconCache.set(key, buf)
+    } catch (e) {
+      sendJson(res, 502, {error: (e as Error).message})
+      return
+    }
+  }
+  res.writeHead(200, {
+    'Content-Type': 'image/png',
+    'Content-Length': buf.length,
+    'Cache-Control': 'public, max-age=604800',
+    ...CORS
+  })
+  res.end(buf)
 }
 
 /**
@@ -1161,8 +1413,11 @@ async function route(
   if (p === '/api/health') {
     const db = await checkDb()
     const rules = await loadRules()
+    // ok 表示「服务能不能用」：数据库连不上就不算 ok。
+    // ⚠️ HTTP 状态码固定 200 —— 这样部署脚本能区分「进程没起来」和
+    //    「起来了但数据库不通」，两种情况要看的日志不一样。
     sendJson(res, 200, {
-      ok: true,
+      ok: db.ok,
       db,
       rules: {
         sources: rules.sources,
@@ -1333,10 +1588,17 @@ async function route(
   }
 
   if (p === '/api/contracts') {
-    const store = loadContracts()
+    let store = await loadContracts()
+    if (!store) {
+      // 全新环境（库里没有、本地也没文件）——现场拉一次，
+      // 慢几秒也比给前端一个空下拉强
+      await ensureContractsFresh().catch(() => null)
+      store = await loadContracts()
+    }
     if (!store) {
       sendJson(res, 404, {
-        error: '尚未生成本地合约列表，请先运行：npm run sync:contracts'
+        error:
+          '币种表还没准备好（库里没有，拉币安也没成功）。稍后刷新页面重试，'
       })
       return
     }
@@ -1346,6 +1608,27 @@ async function route(
 
   if (p === '/api/candles') {
     await handleCandles(url, res)
+    return
+  }
+
+  if (p === '/api/ticker') {
+    await handleTicker(url, res)
+    return
+  }
+  if (p === '/api/markets') {
+    await handleMarkets(url, res)
+    return
+  }
+  if (p === '/api/kline/stream') {
+    await handleKlineStream(url, req, res)
+    return
+  }
+  if (p === '/api/tickers/stream') {
+    await handleTickerStream(req, res)
+    return
+  }
+  if (p.startsWith('/api/icon/')) {
+    await handleIcon(p.slice('/api/icon/'.length), res)
     return
   }
 
@@ -1539,6 +1822,18 @@ async function main(): Promise<void> {
 
   const rules = await loadRules()
   const frontend = await resolveFrontend()
+
+  // 币种表：启动时过旧就后台刷一次（新上币自动出现），之后每 24 小时一次。
+  // 不 await —— 联网慢不应该拖住启动；失败了也只告警，继续用旧清单。
+  const kickContracts = () => {
+    void ensureContractsFresh()
+      .then(r => {
+        if (r.refreshed) console.log(`  币种表  ${r.reason} → ${r.count} 个`)
+      })
+      .catch(e => console.warn(`  币种表  ⚠️  ${(e as Error).message}`))
+  }
+  kickContracts()
+  setInterval(kickContracts, CONTRACTS_MAX_AGE_MS).unref()
 
   server.listen(PORT, () => {
     console.log('')

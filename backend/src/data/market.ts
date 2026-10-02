@@ -1,6 +1,7 @@
 import ccxt from 'ccxt'
 import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
 import {describeSeries} from '../analysis/describe'
+import {ema42Of} from '../analysis/ema'
 import {
   Calibers,
   Candle,
@@ -303,9 +304,10 @@ function resolveSymbol(
 }
 
 /** 已加载市场的交易所实例缓存，避免每次请求重复 loadMarkets */
-const exchangeCache = new Map<string, any>()
-
-/** 获取（并缓存）已加载市场的交易所实例 */
+const exchangeCache = new Map<
+  string,
+  any
+>() /** 获取（并缓存）已加载市场的交易所实例 */
 async function getExchange(
   exchangeId: string,
   marketType: MarketType,
@@ -651,6 +653,11 @@ export async function fetchSnapshot(
   // ---------- 每个周期切成小段读结构 ----------
   const blocks: SeriesBlock[] = raw.map(r => {
     const {text, stats} = describeSeries(r.candles)
+    // EMA42 只给 15m / 1h（用户要求：看回调时才参考，平时不用提）
+    const ema42 =
+      r.timeframe === '15m' || r.timeframe === '1h'
+        ? (ema42Of(r.candles) ?? undefined)
+        : undefined
     return {
       timeframe: r.timeframe,
       primary: r.timeframe === opts.timeframe,
@@ -658,7 +665,8 @@ export async function fetchSnapshot(
       bars: stats.bars,
       from: r.candles[0]?.timestamp ?? 0,
       to: r.candles[r.candles.length - 1]?.timestamp ?? 0,
-      text
+      text,
+      ...(ema42 ? {ema42} : {})
     }
   })
 
@@ -672,4 +680,258 @@ export async function fetchSnapshot(
     heat,
     candles: mainCandles
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 头部行情条（实时）                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 涨幅那一行看哪几档。
+ *
+ * ⚠️ 顺序就是界面上的顺序，别乱动 —— 前端按这个顺序摆。
+ */
+export const CHANGE_WINDOWS = ['d1', 'd3', 'd7', 'm1', 'm3', 'y1'] as const
+export type ChangeWindow = (typeof CHANGE_WINDOWS)[number]
+
+/** 每档往前数多少天（`y1` 要 366 根日线才够，见下面 fetchTickerInfo） */
+const CHANGE_DAYS: Record<ChangeWindow, number> = {
+  d1: 1,
+  d3: 3,
+  d7: 7,
+  m1: 30,
+  m3: 90,
+  y1: 365
+}
+
+/**
+ * 头部那条行情（币安期货页顶部那种）。
+ *
+ * 这是**轻量**取数：ticker + 资金费率 + 持仓量 + 366 根日线，四个请求并发，
+ * 跟 `fetchSnapshot`（要切段、算结构、拉多周期）不是一回事，能十几秒刷一次。
+ */
+export interface TickerInfo {
+  /** 归一化后的符号，如 `BTC/USDT:USDT` */
+  symbol: string
+  /** 交易所原始交易对，如 `BTCUSDT` */
+  pair: string
+  marketType: MarketType
+  last: number | null
+  /** 24h 涨跌额 */
+  change24h: number | null
+  /** 24h 涨跌幅 % */
+  change24hPct: number | null
+  high24h: number | null
+  low24h: number | null
+  /** 24h 成交量（币） */
+  volume24h: number | null
+  /** 24h 成交额（计价币，通常是 USDT） */
+  quoteVolume24h: number | null
+  markPrice: number | null
+  indexPrice: number | null
+  /** 当期资金费率（0.0001 = 0.01%） */
+  fundingRate: number | null
+  /**
+   * 结算周期（小时）。交易所一般给 8（少数币 4）——
+   * ccxt 的 `interval` 经常是空的，所以拿「下一次结算 − 上一次结算」自己算。
+   */
+  fundingIntervalHours: number | null
+  /** 下一次结算时刻（毫秒） */
+  nextFundingAt: number | null
+  /** 合约持仓量（币） */
+  openInterest: number | null
+  /** 合约持仓量折算成计价币 */
+  openInterestValue: number | null
+  /** 1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅 % */
+  changes: Record<ChangeWindow, number | null>
+  updatedAt: number
+}
+
+/**
+ * 拉一次头部行情。
+ *
+ * 涨跌幅口径：**第 N 天前那根日线的收盘 → 现价**（跟交易所「N 天涨幅」一致）。
+ * 日线要 366 根，因为最远的 `y1` 要拿下标 0 那根：
+ * 366 根 = 今天 + 往前 365 天。
+ */
+export async function fetchTickerInfo(opts: {
+  exchangeId: string
+  symbol: string
+  marketType?: MarketType
+  apiBase?: string
+}): Promise<TickerInfo> {
+  const marketType = opts.marketType ?? 'swap'
+  const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
+  const symbol = resolveSymbol(exchange, opts.symbol, marketType)
+
+  const [ticker, fr, oi, daily] = await Promise.all([
+    withRetry<any>('头部 ticker', () => exchange.fetchTicker(symbol)),
+    safeCall<any>(() =>
+      exchange.has['fetchFundingRate']
+        ? exchange.fetchFundingRate(symbol)
+        : null
+    ),
+    safeCall<any>(() =>
+      exchange.has['fetchOpenInterest']
+        ? exchange.fetchOpenInterest(symbol)
+        : null
+    ),
+    safeCall<any[]>(() => exchange.fetchOHLCV(symbol, '1d', undefined, 366))
+  ])
+
+  /** 交易所原始交易对（BTCUSDT），界面上跟交易所对齐 */
+  let pair = ''
+  try {
+    pair = String(exchange.market(symbol)?.id ?? '')
+  } catch {
+    pair = ''
+  }
+
+  const last = numOrNull(ticker?.last)
+  const closes = ((daily ?? []) as unknown[][])
+    .map(r => Number(r[4]))
+    .filter(v => Number.isFinite(v) && v > 0)
+
+  const changes = {} as Record<ChangeWindow, number | null>
+  for (const w of CHANGE_WINDOWS) {
+    const idx = closes.length - 1 - CHANGE_DAYS[w]
+    const base = idx >= 0 ? closes[idx] : NaN
+    changes[w] =
+      last !== null && Number.isFinite(base) && base > 0
+        ? (last / base - 1) * 100
+        : null
+  }
+
+  const nextFundingAt =
+    numOrNull(fr?.nextFundingTimestamp) ??
+    numOrNull(fr?.fundingTimestamp) ??
+    null
+
+  // 结算周期：ccxt 的 interval（'8h'）优先，没有就用「下一次 − 上一次」自己算
+  let fundingIntervalHours: number | null = null
+  const ivRaw = String(fr?.interval ?? '')
+  const ivMatch = ivRaw.match(/^(\d+(?:\.\d+)?)h$/)
+  if (ivMatch) fundingIntervalHours = Number(ivMatch[1])
+  if (fundingIntervalHours === null) {
+    const prev = numOrNull(fr?.previousFundingTimestamp)
+    if (nextFundingAt !== null && prev !== null && nextFundingAt > prev) {
+      fundingIntervalHours = Math.round((nextFundingAt - prev) / 3_600_000)
+    }
+  }
+
+  const openInterest = numOrNull(
+    oi?.openInterestAmount ?? oi?.openInterestValue ?? oi?.openInterest
+  )
+  let openInterestValue = numOrNull(oi?.openInterestValue)
+  if (openInterestValue === null && openInterest !== null) {
+    const px = numOrNull(ticker?.markPrice) ?? last
+    if (px !== null) openInterestValue = openInterest * px
+  }
+
+  return {
+    symbol,
+    pair: pair || symbol.replace(/[:/]/g, ''),
+    marketType,
+    last,
+    change24h: numOrNull(ticker?.change),
+    change24hPct: numOrNull(ticker?.percentage),
+    high24h: numOrNull(ticker?.high),
+    low24h: numOrNull(ticker?.low),
+    volume24h: numOrNull(ticker?.baseVolume),
+    quoteVolume24h: numOrNull(ticker?.quoteVolume),
+    // ticker 里就带标记 / 指数价（币安 premiumIndex 一并返回）
+    markPrice: numOrNull(ticker?.markPrice ?? fr?.markPrice),
+    indexPrice: numOrNull(ticker?.indexPrice ?? fr?.indexPrice),
+    fundingRate: fr ? numOrNull(fr.fundingRate) : null,
+    fundingIntervalHours,
+    nextFundingAt,
+    openInterest,
+    openInterestValue,
+    changes,
+    updatedAt: Date.now()
+  }
+}
+
+/** 合约行情列表的一行（列照着币安「合约行情」页来） */
+export interface MarketRow {
+  /** 界面上的币种（BTC） */
+  base: string
+  /** ccxt 统一符号（BTC/USDT:USDT） */
+  symbol: string
+  /** 交易所原始交易对（BTCUSDT） */
+  pair: string
+  last: number | null
+  change24hPct: number | null
+  high24h: number | null
+  low24h: number | null
+  /** 24h 成交量（按币算） */
+  volume24h: number | null
+  /** 24h 成交额（按计价币算，U 本位就是 USDT） */
+  quoteVolume24h: number | null
+}
+
+/**
+ * 全部合约的 24h 行情。
+ *
+ * 参考币安合约行情页：**一次请求拿全**（ccxt `fetchTickers` 对币安 U 本位
+ * 就是打一次 `/fapi/v1/ticker/24hr`），按成交额从大到小排。
+ * 只保留还在交易、计价 USDT 的合约 —— 下架的、非 USDT 的（如币本位）混进来
+ * 会让「排行榜」没意义。
+ *
+ * `limit` 只是兜底：页面上默认只渲染前若干行，数据还是全的（搜索/排序都要全）。
+ */
+export async function fetchMarketList(opts: {
+  exchangeId: string
+  marketType?: MarketType
+  apiBase?: string
+  limit?: number
+}): Promise<MarketRow[]> {
+  const marketType = opts.marketType ?? 'swap'
+  const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
+  const tickers = await withRetry<any>('合约行情', () =>
+    exchange.fetchTickers()
+  )
+  const markets: Record<string, any> = exchange.markets ?? {}
+
+  const rows: MarketRow[] = []
+  for (const [sym, m] of Object.entries(markets)) {
+    if (!m || m.active === false) continue
+    if (marketType === 'swap' && !(m.swap && m.linear)) continue
+    if (marketType === 'coinm' && !(m.swap && m.inverse)) continue
+    if (marketType === 'spot' && !m.spot) continue
+    // U 本位永续一律 USDT 计价；币本位是 USD，现货挑 USDT 对
+    if (marketType !== 'coinm' && String(m.quote).toUpperCase() !== 'USDT')
+      continue
+    /*
+     * ⚠️ 币安上了「TradFi 永续」之后（AAPLUSDT / XAUUSDT / SOXLUSDT …，
+     * contractType = TRADIFI_PERPETUAL），ccxt 一样把它们算成 swap + linear，
+     * 于是这里能捞出 740 个 —— 而全站口径（`contracts.ts` 的 `/api/contracts`、
+     * 币种下拉、「共 N 个合约」）只认 `contractType = PERPETUAL` 的那 528 个。
+     * 两把尺子不一致就是用户报的「合约数量对不上」，所以这里按同一把过滤。
+     * （别的交易所没有 contractType 这个字段，拿不到就照收，不影响。）
+     */
+    const contractType = String(m.info?.contractType ?? '').toUpperCase()
+    if (contractType && contractType !== 'PERPETUAL') continue
+
+    const t = tickers?.[sym]
+    if (!t) continue
+    const last = numOrNull(t.last)
+    if (last === null) continue
+
+    rows.push({
+      base: String(m.base ?? sym.split('/')[0]),
+      symbol: sym,
+      pair: String(m.id ?? ''),
+      last,
+      change24hPct: numOrNull(t.percentage),
+      high24h: numOrNull(t.high),
+      low24h: numOrNull(t.low),
+      volume24h: numOrNull(t.baseVolume),
+      quoteVolume24h: numOrNull(t.quoteVolume)
+    })
+  }
+
+  // 成交额大的排前面 —— 跟交易所默认榜一致
+  rows.sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
+  return opts.limit ? rows.slice(0, opts.limit) : rows
 }
