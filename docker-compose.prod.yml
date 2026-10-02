@@ -1,0 +1,112 @@
+# 生产部署：app + db 一站起。
+#
+#   cp .env.example .env        # 填 LLM_API_KEY、改掉 PGPASSWORD（见 DEPLOY.md）
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# 与根目录的 docker-compose.yml 的区别：那份只起 db，给本地开发用；
+# 这份是「代码 + 数据库」整套，线上用这一份。
+#
+# ⚠️ name 必须显式写：目录名是中文（预测），compose 推导不出项目名。
+
+name: crypto-advisor
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ca-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-ca}
+      # ⚠️ 上线前务必在 .env 里改掉，别用默认的本地密码
+      POSTGRES_PASSWORD: ${PGPASSWORD:-ca_local_dev}
+      POSTGRES_DB: ${PGDATABASE:-crypto_advisor}
+      # 中文排序 / 大小写处理
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    # 目标机器只有 909MB 内存，把 Postgres 的默认值调小：
+    # 默认 shared_buffers=128MB / max_connections=100，这里砍到 64MB / 20。
+    # 应用侧 pg 连接池上限是 10，20 个连接绰绰有余。
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=20
+    volumes:
+      - ca-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${PGUSER:-ca} -d ${PGDATABASE:-crypto_advisor}'
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ca-app
+    restart: unless-stopped
+    # environment 的优先级高于 env_file，所以 .env 里本地的
+    # PGHOST=localhost / PGPORT=5432 在这里被覆盖成容器内的 db
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      NODE_ENV: production
+      PORT: 8787
+    env_file:
+      - .env
+    volumes:
+      # 网页上「切换模型 / 补 API Key」会就地改写 .env（util/envfile.ts），
+      # 不挂出来重启就丢。
+      # ⚠️ 首次 up 之前 .env 必须已存在 —— 否则 Docker 会建出一个同名目录。
+      - ./.env:/app/.env
+    ports:
+      # 只监听本机，方便在服务器上 curl 调试；对外一律走 Caddy。
+      - '127.0.0.1:8787:8787'
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 反向代理 + 自动 HTTPS。证书存在卷里，重启不会重新申请。
+  # 域名与路由写在根目录的 Caddyfile 里。
+  caddy:
+    image: caddy:2-alpine
+    container_name: ca-caddy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp' # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ca-caddy-data:/data
+      - ca-caddy-config:/config
+    # 让 Caddy 能反代到宿主机上的服务（如 Netdata 装在宿主机时）
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    depends_on:
+      - app
+
+  # ---------------------------------------------------------------- 监控（可选）
+  # 起法：docker compose -f docker-compose.prod.yml --profile monitor up -d
+  # 首次打开会要求你创建管理员账号，所以不会像裸奔的日志面板那样被人翻。
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: ca-uptime-kuma
+    restart: unless-stopped
+    profiles: ['monitor']
+    volumes:
+      - ca-uptime-kuma:/app/data
+
+volumes:
+  ca-pgdata:
+    name: ca-pgdata
+  ca-caddy-data:
+    name: ca-caddy-data
+  ca-caddy-config:
+    name: ca-caddy-config
+  ca-uptime-kuma:
+    name: ca-uptime-kuma

@@ -61,6 +61,28 @@ npm run dev -- BTC/USDT -t 4h -d 30     # 换周期 / 换天数
 
 ---
 
+## 线上部署
+
+**已上线：<https://bitcoooin.cn>** —— AWS Lightsail（东京）+ Docker Compose + Caddy 自动 HTTPS。
+
+完整步骤与运维看 [`DEPLOY.md`](./DEPLOY.md)，日常就一件事：
+
+```bash
+bash release.sh            # 本机跑：类型检查 → 打包 → 上传 → 远端部署 → 公网验收
+bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服务器
+```
+
+它内部用 tar + scp 搬运（不要用 rsync：macOS 自带的是 openrsync，和服务器 rsync 3.x
+不保证兼容），并自动排除 `.env`、清掉服务器上的旧文件后再解包 —— 细节看 `DEPLOY.md`。
+
+两个最容易忘的：**Lightsail 防火墙要放行 80 / 443**；
+**打包必须 `--exclude='.env'`**（服务器那份里有随机化过的 `PGPASSWORD`，被覆盖就连不上库）。
+
+生产与开发的差别只有一个：`NODE_ENV=production` 时后端**跳过 Vite**、直接托管
+`frontend/dist`，所以线上不需要 `vite` / `tsx`（镜像多阶段构建，只带生产依赖）。
+
+---
+
 ## 页面
 
 | 路由         | 干什么                                                                 |
@@ -225,7 +247,14 @@ frontend/src/
 config/calibers.yaml     取数表（也能改这里）
 rules/                   早期手写提示词，现在是参考稿（真正生效的在数据库）
 data/contracts.json      合约表缓存
-docker-compose.yml       PostgreSQL 16
+
+docker-compose.yml       PostgreSQL 16（本地开发，只起 db）
+docker-compose.prod.yml  生产：app + db + caddy（线上用这份）
+Dockerfile               多阶段构建，运行阶段只带生产依赖
+Caddyfile                域名与反代（Caddy 跑在 compose 里）
+deploy.sh                服务器上一键部署（加 swap / 装 Docker / 起服务 / 自检）
+release.sh               本机一键发布（打包 → 上传 → 触发 deploy.sh → 公网验收）
+DEPLOY.md                部署与运维文档
 ```
 
 ---
@@ -236,3 +265,5 @@ docker-compose.yml       PostgreSQL 16
   用 `fapi.binance.com` / `data-api.binance.vision`。
 - `ai_docs.kind` 的 CHECK 约束改了要**同步改** `schema.ts` 里的迁移块，否则新 kind 插不进去。
 - 页面白屏十有八九是**模板里用了一个已经被删掉的函数** —— 删函数一定要全局搜模板。
+- 线上更新代码**必须** `--exclude='.env'`：服务器那份 `.env` 里有随机化过的
+  `PGPASSWORD`，被本机那份覆盖后应用就连不上数据库（日志是「⚠️ 数据库不可用」）。

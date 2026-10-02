@@ -1,0 +1,19 @@
+# 依赖与产物（镜像里重新装 / 重新构建）
+node_modules
+backend/dist
+frontend/dist
+
+# git 与本地历史（不进镜像）
+.git
+.gitignore
+
+# 密钥绝不能进构建上下文 —— 否则会留在镜像层里
+.env
+.env.local
+.env.*.local
+
+# 运行产物
+logs
+*.log
+
+.DS_Store

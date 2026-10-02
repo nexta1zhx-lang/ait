@@ -1,0 +1,39 @@
+# bitcoooin.cn 的反代（Caddy 跑在 compose 里，所以用服务名 app 访问）
+#
+# 起法：docker compose -f docker-compose.prod.yml up -d --build
+# 证书存在 caddy-data 卷里，容器重建不会重新申请，不会触发 Let's Encrypt 限流。
+#
+# 前置条件：
+#   ① DNS：bitcoooin.cn 的 A 记录 → 57.181.38.200（已确认配好）
+#   ② Lightsail 防火墙放行 80 / 443（控制台 → Networking → IPv4 Firewall）
+
+bitcoooin.cn {
+	encode gzip zstd
+
+	# 分析 / 提炼走 SSE（text/event-stream）。
+	# flush_interval -1 = 每个事件立刻写出去，否则「分析过程」会憋到跑完才显示。
+	reverse_proxy app:8787 {
+		flush_interval -1
+	}
+
+	# 访问日志走 stdout，用 docker compose logs caddy 看
+	log {
+		output stdout
+		format console
+	}
+}
+
+# ---------------------------------------------------------------- 监控（可选）
+# 起监控：docker compose -f docker-compose.prod.yml --profile monitor up -d
+# 然后①在阿里云 DNS 加下面两条 A 记录（都指向 57.181.38.200）
+# ②把下面这两段取消注释 ③docker compose -f docker-compose.prod.yml restart caddy
+#
+# ⚠️ 先加 DNS 再取消注释：域名解析不到，Caddy 申请证书会一直失败刷日志。
+#
+# status.bitcoooin.cn {
+# 	reverse_proxy uptime-kuma:3001
+# }
+#
+# logs.bitcoooin.cn {
+# 	reverse_proxy dozzle:8080
+# }
