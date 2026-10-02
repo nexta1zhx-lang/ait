@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import {Command} from 'commander'
 import {loadConfig, ROOT_DIR} from './config'
-import {loadRules} from './rules'
+import {fullSystem, loadRules} from './rules'
 import {fetchSnapshot} from './data/market'
 import {buildContext} from './context/builder'
 import {judge} from './llm/client'
@@ -136,7 +136,7 @@ program
       try {
         await saveRulesVersion({
           hash: rules.hash,
-          system: rules.system,
+          system: fullSystem(rules.system),
           body: rules.body,
           sources: rules.sources
         })

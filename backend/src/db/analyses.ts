@@ -104,7 +104,8 @@ export interface AnalysisDetail extends AnalysisRow {
     heat?: Record<string, unknown>
   }
   meta: Record<string, unknown>
-  /** 当时用的规则全文（从 rules_versions 带出来） */
+  /** 当时用的规则全文（从 rules_versions 带出来）
+   *  ⚠️ 是**全量**（数据库正文 + 输出契约 `fullSystem()`），因为 hash 也是按全量算的 */
   rules: {hash: string; sources: string[]; system: string; body: string} | null
 }
 
@@ -123,6 +124,9 @@ const s = (v: unknown): string | null =>
 /**
  * 记一份规则快照。同一个 hash 只写一次（ON CONFLICT DO NOTHING）。
  * 没有它，以后规则改了就看不出「当时 AI 读的是什么」。
+ *
+ * ⚠️ `system` 要传**全量**（`fullSystem(rules.system)` = 数据库正文 + 输出契约）——
+ * hash 是按全量算的，存半截就出现「同一个 hash 对应两份不同文本」，复盘就没意义了。
  */
 export async function saveRulesVersion(r: {
   hash: string

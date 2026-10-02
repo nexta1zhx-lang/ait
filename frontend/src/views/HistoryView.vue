@@ -582,7 +582,7 @@ onMounted(() => {
             </div>
             <div>
               <span>提示词版本</span>
-              <b title="提示词正文的 hash，改了提示词这里就变">
+              <b title="提示词 hash（正文 + 输出契约），任一处改了这里就变">
                 {{ detail.rulesHash ? detail.rulesHash.slice(0, 12) : '—' }}
               </b>
             </div>

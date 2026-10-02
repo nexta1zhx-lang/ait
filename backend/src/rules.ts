@@ -1,5 +1,6 @@
 import crypto from 'crypto'
 import {getEnabledDocs} from './db/prompts'
+import {OUTPUT_CONTRACT} from './llm/prompt'
 
 /**
  * 「我的提示词」是怎么拼出来的。
@@ -56,7 +57,7 @@ export async function loadRules(): Promise<RulesBundle> {
       bodyEnabled: enabled,
       origin: enabled ? 'db' : 'documents',
       sources,
-      hash: hashOf(system),
+      hash: hashOf(fullSystem(system)),
       warnings,
       updatedAt,
       dbError: null
@@ -69,7 +70,7 @@ export async function loadRules(): Promise<RulesBundle> {
       bodyEnabled: false,
       origin: 'documents',
       sources: [],
-      hash: hashOf(''),
+      hash: hashOf(fullSystem('')),
       warnings,
       updatedAt: null,
       dbError: (e as Error).message
@@ -86,6 +87,21 @@ function joinDocs(docs: {name: string; content: string}[]): string {
 
 function hashOf(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex').slice(0, 12)
+}
+
+/**
+ * **真正发给模型的那份全文** = 数据库正文 + 输出契约（代码里那份 JSON 骨架）。
+ *
+ * 为什么要拼一起：契约也是「提示词」的一部分 —— 改一条判定标准就是换了提示词，
+ * 只哈希数据库正文的话，**改了契约 hash 不变**，以后复盘分不出这次用的是哪一版。
+ *
+ * ⚠️ `bundle.system` **只是数据库正文**（`buildSystemPrompt` 自己会拼契约），
+ * 别拿这个函数的结果再去喂 `buildSystemPrompt`，会拼两遍。
+ * 它的用途只有两个：**算 hash** + **存档**。
+ */
+export function fullSystem(system: string): string {
+  const text = system.trim()
+  return text ? `${text}\n\n${OUTPUT_CONTRACT}` : ''
 }
 
 /**

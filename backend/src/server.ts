@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {loadConfig, ROOT_DIR} from './config'
 import {loadContracts} from './contracts'
-import {loadExtractRules, loadRules} from './rules'
+import {fullSystem, loadExtractRules, loadRules} from './rules'
 import {buildSystemPrompt} from './llm/prompt'
 import {buildExtractPrompt} from './llm/extract'
 import {
@@ -583,7 +583,7 @@ async function runAnalysis(opts: {
   try {
     await saveRulesVersion({
       hash: rules.hash,
-      system: rules.system,
+      system: fullSystem(rules.system),
       body: rules.body,
       sources: rules.sources
     })
