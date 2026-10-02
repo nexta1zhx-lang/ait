@@ -95,7 +95,9 @@ fi
 
 # ---------------------------------------------------------------- 2. SSH 可用性
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=30 -o ServerAliveCountMax=10)
-c "SSH 检查（$SSH_USER@$HOST）"
+# ⚠️ 必须写成 ${VAR}：macOS 自带的 bash 3.2 会把紧跟其后的**全角括号**当成
+#    变量名的一部分（报 `HOST）: unbound variable`），加花括号才断得干净。
+c "SSH 检查（${SSH_USER}@${HOST}）"
 if ! ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" true 2>/dev/null; then
   warn 'SSH 连不上。本机代理经常劫持出站 TCP（报 kex_exchange_identification / 连接被关），'
   warn '先关掉代理的全局 TUN（或给目标 IP 加直连），再跑一次。'
