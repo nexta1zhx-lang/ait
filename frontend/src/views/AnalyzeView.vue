@@ -15,8 +15,8 @@ import {
   chartFrom,
   chartRange,
   chartTf,
-  chartUntil,
   clearChartRange,
+  clearTestPoint,
   error,
   history,
   historyError,
@@ -30,18 +30,22 @@ import {
   loadHistory,
   loading,
   pickSymbol,
+  pointPicking,
   rangeDrawing,
   result,
   run,
   runMode,
   setHistoryPageSize,
+  setPointPicking,
   setRunMode,
   showSteps,
   spanText,
   steps,
   symbol,
   testAt,
+  testBarTime,
   testMode,
+  testPoint,
   timeframesText
 } from '../analyze'
 import {contracts, config} from '../store'
@@ -86,31 +90,26 @@ onBeforeUnmount(() => histRO?.disconnect())
 
 // 离开「实时 / 添加案例」就不用再等着我拖了（图也会退回普通模式）
 watch([leftTab, runMode], () => {
-  const ok = leftTab.value === 'add' || testMode.value
+  const ok = leftTab.value === 'add'
   if (!ok) rangeDrawing.value = false
+  if (leftTab.value !== 'live') pointPicking.value = false
 })
 
 const onChartError = (msg: string) => (error.value = msg)
 
-/** 图上是「添加案例」还是「测试」在圈范围 —— 两个 tab 共用同一段选择 */
-const chartSelectable = computed(
-  () => leftTab.value === 'add' || testMode.value
-)
-
-/** 测试模式下那一段的时间跨度 */
-const testSpan = computed(() => {
-  const r = chartRange.value
-  if (!r) return ''
-  const h = (r.to - r.from) / 3_600_000
-  return h >= 24
-    ? `${Math.round((h / 24) * 10) / 10} 天`
-    : `${Math.round(h)} 小时`
-})
+/** 「拖一段」只给「添加案例」用 —— 测试模式改成点一条结束线了 */
+const chartSelectable = computed(() => leftTab.value === 'add')
 
 /** 图上拖完一段 → 记下范围，顺手退出拖动模式（图恢复可拖） */
 function onPickRange(v: {from: number; to: number; bars: number}) {
   chartRange.value = v
   rangeDrawing.value = false
+}
+
+/** 图上点了结束线 → 记下那一刻，顺手退出选线模式 */
+function onPickPoint(at: number) {
+  testPoint.value = at
+  pointPicking.value = false
 }
 
 /* ---------------- 结论渲染 ---------------- */
@@ -235,57 +234,63 @@ const heatRows = computed(() => {
         <!-- ① 实时分析 -->
         <template v-if="leftTab === 'live'">
           <div class="scroll-body">
-            <!-- 测试模式：跟「添加案例」一样，先在图上圈一段 -->
+            <!-- 测试模式：在图上点一根，定下「我看到哪一刻」 -->
             <section v-if="testMode" class="panel test-panel">
               <h2>
-                测试 · 圈一段行情
+                测试 · 结束线
                 <span class="tag">不存档</span>
               </h2>
               <p class="hint">
-                点「画范围」，再到右边 K 线上<b>横着拖一段</b>。 AI
-                会把这一段的<b>结束时刻</b>当成「当时」来判 ——
-                只看得到那一刻之前<b>已经收盘</b>的 K 线，之后的一根都不给。
+                在右边 K 线上<b>点一根</b>，把「结束线」放在那儿 —— AI
+                会把<b>这一根收盘之后</b>当成「当时」：只看得到那一刻之前
+                <b>已经收盘</b>的 K 线，之后的一根都不给。
+                <br />
+                取数永远是「以这一刻为终点往前推」，所以只用一个时刻，
+                <b>不用划一段</b>。
               </p>
 
-              <div class="follow-row" :class="{picked: !!chartRange}">
-                <span class="k">{{ chartRange ? '范围' : '范围' }}</span>
+              <div class="follow-row" :class="{picked: testPoint !== null}">
+                <span class="k">结束线</span>
                 <span class="v">
-                  <template v-if="chartRange">
-                    {{ bjTime(chartRange.from) }} → {{ bjTime(chartRange.to) }}
-                    <em>
-                      {{ chartRange.bars }} 根 · 约 {{ testSpan }} · 判断时点是
-                      {{ bjTime(chartRange.to) }}
-                    </em>
+                  <template v-if="testPoint !== null">
+                    看到 {{ bjTime(testBarTime) }} 这根收盘
+                    <em>判断时点 = {{ bjTime(testPoint) }}</em>
                   </template>
-                  <template v-else-if="rangeDrawing">
-                    在右边图上拖一段…
-                    <em>横向拖，松手就选好（按 Esc 取消）</em>
+                  <template v-else-if="pointPicking">
+                    在右边图上点一根…
+                    <em>点一下就定好了（按 Esc 取消）</em>
                   </template>
                   <template v-else>
                     还没选
-                    <em>点右边「画范围」开始</em>
+                    <em>点右边「选结束线」开始</em>
                   </template>
                 </span>
 
                 <button
                   type="button"
                   class="ghost tiny range-btn"
-                  :class="{on: rangeDrawing}"
+                  :class="{on: pointPicking}"
                   :title="
-                    rangeDrawing
-                      ? '在图上横向拖一段，松手就算选好（Esc 取消）'
-                      : '在图上拖出一段 K 线，以这一段的结尾为判断时点'
+                    pointPicking
+                      ? '在图上点一根 K 线，点中就算选好（Esc 取消）'
+                      : '在图上点一根 K 线，定下「我看到这一根收盘」'
                   "
-                  @click="rangeDrawing = !rangeDrawing"
+                  @click="setPointPicking(!pointPicking)"
                 >
-                  {{ rangeDrawing ? '取消' : chartRange ? '重画' : '画范围' }}
+                  {{
+                    pointPicking
+                      ? '取消'
+                      : testPoint !== null
+                        ? '重选'
+                        : '选结束线'
+                  }}
                 </button>
                 <button
-                  v-if="chartRange"
+                  v-if="testPoint !== null"
                   type="button"
                   class="ghost tiny"
-                  title="清掉范围，重新圈"
-                  @click="clearChartRange"
+                  title="清掉结束线，重新选"
+                  @click="clearTestPoint"
                 >
                   清掉
                 </button>
@@ -546,14 +551,17 @@ const heatRows = computed(() => {
           :symbol="symbol"
           :timeframe="chartTf"
           :from="chartFrom"
-          :until="chartUntil"
           :selectable="chartSelectable"
           :range="chartRange"
           :drawing="rangeDrawing"
+          :pick-point="pointPicking"
+          :point-at="testMode ? testPoint : null"
           @update:timeframe="chartTf = $event"
           @update:from="chartFrom = $event"
           @update:drawing="rangeDrawing = $event"
+          @update:pick-point="setPointPicking"
           @select="onPickRange"
+          @point="onPickPoint"
           @clear:select="clearChartRange"
           @error="onChartError"
         />

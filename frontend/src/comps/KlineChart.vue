@@ -27,6 +27,15 @@ const props = defineProps<{
   until?: string
   /** 允许在图上拖出一个范围（「添加案例」才开） */
   selectable?: boolean
+  /**
+   * 测试模式：等着我在图上点一下，把**结束线**放在「我看到这一根收盘为止」。
+   *
+   * 跟 `selectable`（拖一段）是两回事：取数只用到**一个时刻**，
+   * 划一段会让人以为 AI 只看那一段。
+   */
+  pickPoint?: boolean
+  /** 结束线那一刻（毫秒，= 最后一根已收盘 K 线的收尾时刻）；null = 还没定 */
+  pointAt?: number | null
   /** 已经画好的范围（毫秒）—— 画面上会一直高亮着 */
   range?: {from: number; to: number} | null
   /** 是不是正在「等着我拖一段」。按钮在左边面板，这里只管状态 */
@@ -41,6 +50,10 @@ const emit = defineEmits<{
   /** 拖完松手：这一段就是我要的 */
   (e: 'select', v: {from: number; to: number; bars: number}): void
   (e: 'clear:select'): void
+  /** 点了结束线：`at` = 那一刻（= 点中那根的收尾时刻） */
+  (e: 'point', at: number): void
+  /** 定完了 / 按 Esc 了 → 退出选线模式 */
+  (e: 'update:pickPoint', v: boolean): void
   /** 拖完了 / 按 Esc 了 → 退出拖动模式 */
   (e: 'update:drawing', v: boolean): void
 }>()
@@ -768,9 +781,120 @@ const layerEl = ref<HTMLElement | null>(null)
 const selBox = ref<{from: number; to: number} | null>(null)
 const selHint = ref('')
 
+/* ---------------- 结束线（测试模式的「看到哪一刻」）---------------- */
+
+/** 选线模式（受控） */
+const localPicking = ref(false)
+const picking = computed(() =>
+  props.pickPoint === undefined ? localPicking.value : props.pickPoint
+)
+
+function setPicking(v: boolean) {
+  if (props.pickPoint === undefined) localPicking.value = v
+  emit('update:pickPoint', v)
+}
+
+/** 正在拖的时候线在哪（像素）；null = 没在拖 */
+const dragLineX = ref<number | null>(null)
+/** 已经落定的线在画面上的位置 */
+const selLine = ref<number | null>(null)
+/** 线上那句「看到 X 收盘」 */
+const lineHint = ref('')
+
+/** 线画在哪：拖的时候跟鼠标，不拖的时候按 `pointAt` 算 */
+const lineX = computed(() => dragLineX.value ?? selLine.value)
+
+/** 手指下面那根是哪一根（拖的时候实时提示） */
+const liveLineHint = computed(() => {
+  const x = dragLineX.value
+  if (x === null || !candles.length) return lineHint.value
+  return `看到 ${bjTime(candles[xToIndex(x)].timestamp)} 这根收盘 —— 之后的不给`
+})
+
+const pointTip = computed(() =>
+  picking.value
+    ? '在图上点一根 K 线 —— 定下「我看到这一根收盘」，按 Esc 取消'
+    : ''
+)
+
+function onLineDown(e: PointerEvent) {
+  if (!picking.value) return
+  e.preventDefault()
+  dragLineX.value = localX(e)
+  commitLine(dragLineX.value)
+  try {
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function onLineMove(e: PointerEvent) {
+  if (dragLineX.value === null) return
+  e.preventDefault()
+  dragLineX.value = localX(e)
+  commitLine(dragLineX.value)
+}
+
+/**
+ * 把 x 像素换算成「那一刻」发出去。
+ *
+ * 值 = 那一根的**收尾时刻**（开盘 + 一个周期），后端拿它当 `at`，
+ * `timestamp + step <= at` 正好把这一根算成最后一根已收盘的。
+ * 拖动过程中每动一下就发一次，面板上的「判断时点」会跟着跳。
+ */
+function commitLine(x: number) {
+  if (!candles.length) return
+  const at = candles[xToIndex(x)].timestamp + tfMs()
+  if (at !== props.pointAt) emit('point', at)
+}
+
+function onLineUp(e: PointerEvent) {
+  const x = dragLineX.value
+  if (x === null) return
+  e.preventDefault()
+  dragLineX.value = null
+  setPicking(false)
+  commitLine(x)
+}
+
+/* 已经放好的线：不用重选，直接拖它就行 */
+function onHandleDown(e: PointerEvent) {
+  if (picking.value) return
+  e.preventDefault()
+  e.stopPropagation()
+  dragLineX.value = selLine.value ?? localX(e)
+  try {
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function onHandleMove(e: PointerEvent) {
+  if (dragLineX.value === null) return
+  e.preventDefault()
+  dragLineX.value = localX(e)
+  commitLine(dragLineX.value)
+}
+
+function onHandleUp(e: PointerEvent) {
+  const x = dragLineX.value
+  if (x === null) return
+  e.preventDefault()
+  dragLineX.value = null
+  commitLine(x)
+}
+
 /** 拖到一半按 Esc 就取消（挂在 window 上，不用先点图） */
 function onKeydown(e: KeyboardEvent) {
-  if (e.key !== 'Escape' || !rangeMode.value) return
+  if (e.key !== 'Escape') return
+  if (picking.value) {
+    dragLineX.value = null
+    setPicking(false)
+    return
+  }
+  if (!rangeMode.value) return
   dragFromX.value = null
   dragToX.value = null
   dragHint.value = ''
@@ -861,6 +985,22 @@ function onRangeUp(e: PointerEvent) {
   })
 }
 
+/** 同一层透明覆盖：范围模式拖一段，选线模式点一根 */
+function onLayerDown(e: PointerEvent) {
+  if (picking.value) return onLineDown(e)
+  onRangeDown(e)
+}
+
+function onLayerMove(e: PointerEvent) {
+  if (picking.value) return onLineMove(e)
+  onRangeMove(e)
+}
+
+function onLayerUp(e: PointerEvent) {
+  if (picking.value) return onLineUp(e)
+  onRangeUp(e)
+}
+
 /** 把已经定下来的范围画到图上（平移 / 缩放后会跟着重画） */
 function drawSelection() {
   // 只有「添加案例」和「实时分析 · 测试」才关心范围
@@ -895,6 +1035,32 @@ function drawSelection() {
   if (selHint.value !== hint) selHint.value = hint
 }
 
+/**
+ * 把**结束线**画到图上。
+ *
+ * 线落在「最后一根已收盘 K 线」的**中心**（`timeToCoordinate` 给的就是那根的中心），
+ * 也就是「我看到这一根为止」，而不是一个悬在两根之间的刻度。
+ */
+function drawPoint() {
+  const at = props.pointAt
+  const clear = () => {
+    if (selLine.value !== null) selLine.value = null
+    if (lineHint.value) lineHint.value = ''
+  }
+  if (at === null || at === undefined || !refs || !candles.length)
+    return clear()
+
+  const bar = at - tfMs() // 最后一根已收盘 K 线的开盘时刻
+  const x = msToX(bar)
+  if (x === null) return clear() // 那根还没在图上（往前补回来才会出现）
+  const w = refs.chart.timeScale().width()
+  if (x < -20 || x > w + 20) return clear() // 滚出视图了
+
+  if (selLine.value !== x) selLine.value = x
+  const hint = `结束线 · 看到 ${bjTime(bar)} 这根收盘`
+  if (lineHint.value !== hint) lineHint.value = hint
+}
+
 /* ---------------- 生命周期 ---------------- */
 
 const title = computed(() => props.symbol)
@@ -906,11 +1072,9 @@ watch(() => props.from, load)
 // 进 / 出测试模式都要重画：右端从「现在」换成那一刻，或换回来
 watch(() => props.until, load)
 watch([() => props.range, () => props.timeframe], drawSelection)
-// 回补历史 / 数据换了会让范围的位置跟着变
+// 回补历史 / 数据换了 / 缩放平移，范围与结束线的位置都要跟着重算
 watch(() => candles.length, drawSelection)
-watch([() => props.range, () => props.timeframe], drawSelection)
-// 回补历史 / 缩放会让范围的位置变，跟着重画
-watch(() => candles.length, drawSelection)
+watch(() => props.pointAt, drawPoint)
 
 onBeforeUnmount(() => {
   try {
@@ -978,16 +1142,16 @@ onBeforeUnmount(() => {
       <div ref="infoEl" class="chart-info"></div>
       <div ref="deltaEl" class="cursor-delta hidden"></div>
 
-      <!-- 画范围用的透明层：拖的时候接管鼠标，平时不吃事件 -->
+      <!-- 画范围 / 放结束线用的透明层：拖的时候接管鼠标，平时不吃事件 -->
       <div
-        v-if="rangeMode || selBox"
+        v-if="rangeMode || picking || selBox || lineX !== null"
         ref="layerEl"
         class="range-layer"
-        :class="{drawing: rangeMode}"
-        @pointerdown="onRangeDown"
-        @pointermove="onRangeMove"
-        @pointerup="onRangeUp"
-        @pointercancel="onRangeUp"
+        :class="{drawing: rangeMode || picking}"
+        @pointerdown="onLayerDown"
+        @pointermove="onLayerMove"
+        @pointerup="onLayerUp"
+        @pointercancel="onLayerUp"
       >
         <div
           v-if="selBox"
@@ -1005,13 +1169,30 @@ onBeforeUnmount(() => {
             width: Math.abs(dragToX - dragFromX) + 'px'
           }"
         />
+        <!-- 结束线：一条竖线，落在「我看到这一根收盘」上；已放好的可以直接拖 -->
+        <div
+          v-if="lineX !== null"
+          class="range-line"
+          :class="{live: dragLineX !== null || picking}"
+          :style="{left: lineX + 'px'}"
+          @pointerdown="onHandleDown"
+          @pointermove="onHandleMove"
+          @pointerup="onHandleUp"
+          @pointercancel="onHandleUp"
+        >
+          <!-- 竖线本身只有 2px，单独给一条宽一点的命中区，好抓 -->
+          <span class="range-line-hit" title="按住左右拖动，改「看到哪一刻」" />
+          <span class="range-line-tag">{{ liveLineHint }}</span>
+        </div>
         <span v-if="dragHint" class="range-hint">{{ dragHint }}</span>
         <span v-else-if="selHint" class="range-hint">{{ selHint }}</span>
       </div>
 
-      <!-- 等着拖的时候给个提示，别让人不知道接下来干嘛 -->
-      <div v-if="rangeMode" class="range-tip">
-        在图上横向拖一段 —— 松手就选好了，按 Esc 取消
+      <!-- 等着拖 / 等着点的时候给个提示，别让人不知道接下来干嘛 -->
+      <div v-if="rangeMode || picking" class="range-tip">
+        {{
+          picking ? pointTip : '在图上横向拖一段 —— 松手就选好了，按 Esc 取消'
+        }}
       </div>
     </div>
 

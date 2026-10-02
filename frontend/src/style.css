@@ -1404,6 +1404,53 @@ body.fixed-viewport .split {
   background: rgba(66, 165, 245, 0.22);
 }
 
+/*
+ * 结束线：一条竖线，告诉 AI「我看到这一根收盘为止」。
+ *
+ * `pointer-events: auto` 是故意的 —— 父层 `.range-layer` 是 `none`，
+ * 所以平时点空白处照常平移图表，只有抓住这条线时才接管（可拖）。
+ */
+.range-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 2px solid var(--warn, #d29922);
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+
+/* 2px 的线太细抓不住，铺一条 15px 宽的透明命中区 */
+.range-line-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -7px;
+  width: 15px;
+}
+
+.range-line.live {
+  border-left-style: dashed;
+}
+
+/* 拖 / 选的时候别让鼠标跳到别的地方去 */
+.range-line.live {
+  cursor: grab;
+}
+
+.range-line-tag {
+  position: absolute;
+  top: 6px;
+  left: 4px;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(210, 153, 34, 0.55);
+  background: rgba(13, 17, 23, 0.92);
+  color: var(--warn, #d29922);
+  font-size: 11px;
+}
+
 .range-hint {
   position: absolute;
   left: 8px;

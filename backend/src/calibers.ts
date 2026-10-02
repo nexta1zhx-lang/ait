@@ -17,6 +17,7 @@ const DAY_MS = 24 * 60 * 60_000
 /** 取数参数的默认值 —— 和 `config/calibers.yaml` 里写的一致。 */
 export const DEFAULT_CALIBERS: Calibers = {
   others: {
+    '5m': {'15m': 2, '1h': 10, '4h': 20, '1d': 30},
     '15m': {'1h': 10, '4h': 20, '1d': 30},
     '1h': {'15m': 2, '4h': 30, '1d': 60},
     '4h': {'1d': 60},
@@ -36,7 +37,8 @@ export interface TfPlan {
 /**
  * 主周期 → 这一次要分析哪几个周期、各拉多少天。
  *
- * 规则（我自己定的，写在 `config/calibers.yaml`）：
+ * 规则（我自己定的，写在 `config/calibers.yaml`））：
+ *   看 5m  → 5m 图上 · 15m 2 天 · 1h 10 天 · 4h 20 天 · 1d 30 天
  *   看 15m → 15m 图上 · 1h 10 天 · 4h 20 天 · 1d 30 天
  *   看 1h  → 15m 2 天 · 1h 图上 · 4h 30 天 · 1d 60 天
  *   看 4h  → 4h 图上 · 1d 60 天（不带 15m / 1h）

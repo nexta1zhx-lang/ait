@@ -20,7 +20,6 @@ import {
   type AnalyzeStep
 } from './api'
 import {config, refreshConfig} from './store'
-import {bjInputValue} from './format'
 import {failRunning, mergeStep} from './steps'
 
 /* ---------------- 输入 ---------------- */
@@ -256,25 +255,44 @@ export const RUN_MODES = [
     value: 'test' as const,
     label: '测试',
     title:
-      '回到我在图上圈出来的那一段去看「当时」：只看那一刻之前已收盘的 K 线，资金费率/持仓量留空，结果不存档'
+      '回到「图上那条结束线」那一刻：「看到某根收盘」为准，只看那一刻之前已收盘的 K 线，资金费率/持仓量留空，结果不存档'
   }
 ]
 export const runMode = ref<'live' | 'test'>('live')
 export const testMode = computed(() => runMode.value === 'test')
 
 /**
- * 测试跑的「那一刻」= 我在图上圈出来那一段（`chartRange`）的**结束时刻**。
+ * 测试模式：**结束线**放在哪 —— 也就是「我看到哪一刻」。
  *
- * 段本身就是复用「添加案例」那套圈选：同一段 K 线，一个用来提炼经验、
- * 一个用来当「当时」—— 所以不另开一份状态，免得两个 tab 各记一段互相打架。
+ * 只用一个时刻，**不划一段**：取数永远是「以这一刻为终点往前推 N 根」，
+ * 划一段反而会让人以为 AI 只看那一段（其实只有结束那一刻参与取数）。
+ *
+ * 值 = 最后一根已收盘 K 线的**收尾时刻**（开盘时刻 + 一个周期），
+ * 后端拿它当 `at`，`timestamp + step <= at` 正好把那一根算进最后一根。
  */
-export const testAt = computed(() =>
-  testMode.value ? (chartRange.value?.to ?? null) : null
-)
+export const testPoint = ref<number | null>(null)
 
-/** K 线图要画到哪一刻：测试模式固定在那一小段的结尾，否则画到最新 */
-export const chartUntil = computed(() =>
-  testMode.value && chartRange.value ? bjInputValue(chartRange.value.to) : ''
+/** 是不是正等着我在图上点一下，把结束线放下去 */
+export const pointPicking = ref(false)
+
+export function setPointPicking(v: boolean): void {
+  pointPicking.value = v
+}
+
+/** 清掉结束线（模板里不给导入的 ref 直接赋值） */
+export function clearTestPoint(): void {
+  testPoint.value = null
+  pointPicking.value = false
+}
+
+/** 测试跑的「现在」= 结束线那一刻 */
+export const testAt = computed(() => (testMode.value ? testPoint.value : null))
+
+/** 结束线落在哪一根 K 线上（显示用：收尾时刻减一个周期就是那根的开盘时刻） */
+export const testBarTime = computed(() =>
+  testPoint.value === null
+    ? null
+    : testPoint.value - (TF_MS[chartTf.value] ?? 3_600_000)
 )
 
 /** 切实时 / 测试：把上一次的结论清掉，免得看成上一局的 */
@@ -285,10 +303,11 @@ export function setRunMode(v: 'live' | 'test'): void {
   steps.value = []
   error.value = ''
   if (v === 'test') {
-    // 跟「添加案例」一样：进了这个模式就直接等着我在图上拖，少点一下
-    if (!chartRange.value) rangeDrawing.value = true
+    // 进了这个模式就直接等着我在图上点，少按一次按钮
+    if (!testPoint.value) pointPicking.value = true
   } else {
-    rangeDrawing.value = false
+    // 切回实时：结束线不画了（值留着 —— 再切回测试还是那一条）
+    pointPicking.value = false
   }
 }
 
@@ -309,8 +328,8 @@ export function run(): void {
     return
   }
   if (loading.value) return
-  if (testMode.value && !chartRange.value) {
-    error.value = '测试模式：先用「画范围」在右边 K 线上拖一段'
+  if (testMode.value && !testPoint.value) {
+    error.value = '测试模式：先在右边 K 线上点一根，定下「看到哪一刻」'
     return
   }
 

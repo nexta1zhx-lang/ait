@@ -44,6 +44,40 @@ async function safeCall<T>(fn: () => Promise<T> | T): Promise<T | null> {
   }
 }
 
+/**
+ * K 线取数重试。
+ *
+ * ⚠️ 这条路上**不能容错返回空** —— 少一个周期，AI 就看不到那一层，
+ * 却不会报错，等于静默给了残缺数据。但也不能一次失败就整个分析作废：
+ * `fapi.binance.com` 会间歇性
+ * `Client network socket disconnected before secure TLS connection was established`
+ * （实测同一条请求串行打 8 次全成功，但偶尔就是会碰上一次）。
+ *
+ * 所以这里退避重试几次，还是不行才把错抛上去。
+ */
+async function withRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  times = 3
+): Promise<T> {
+  let last: unknown
+  for (let i = 1; i <= times; i++) {
+    try {
+      return await fn()
+    } catch (e) {
+      last = e
+      if (i < times) {
+        // 300ms / 900ms —— 够短，不影响体感；够长，躲过瞬时抖动
+        await new Promise(r => setTimeout(r, 300 * i * i))
+      }
+    }
+  }
+  console.warn(
+    `[market] ${label} 连续 ${times} 次失败：${(last as Error)?.message ?? last}`
+  )
+  throw last
+}
+
 export interface RecentSR {
   hours: number
   /** 压力（区间最高价） */
@@ -174,11 +208,8 @@ async function fetchCandlesAsOf(
 ): Promise<Candle[]> {
   const step = TF_MS[tf]
   // 多要几根，因为开头可能落在一根 K 线中间、末尾那根也要丢掉
-  const rows = await exchange.fetchOHLCV(
-    symbol,
-    tf,
-    at - (bars + 2) * step,
-    bars + 3
+  const rows = await withRetry<unknown[]>(`回放 ${tf}`, () =>
+    exchange.fetchOHLCV(symbol, tf, at - (bars + 2) * step, bars + 3)
   )
   return toCandles(rows ?? [])
     .filter(c => Number.isFinite(c.timestamp) && c.timestamp + step <= at)
@@ -316,11 +347,8 @@ export async function fetchCandles(
   const marketType = opts.marketType ?? 'swap'
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
   const symbol = resolveSymbol(exchange, opts.symbol, marketType)
-  const rows = await exchange.fetchOHLCV(
-    symbol,
-    opts.timeframe,
-    opts.since,
-    opts.limit
+  const rows = await withRetry<unknown[]>(`${opts.timeframe} 图表取数`, () =>
+    exchange.fetchOHLCV(symbol, opts.timeframe, opts.since, opts.limit)
   )
   return toCandles(rows)
 }
@@ -357,7 +385,9 @@ export async function fetchCandlesRange(
   let cursor = opts.from
 
   while (cursor <= opts.to && out.length < maxCandles) {
-    const rows = await exchange.fetchOHLCV(symbol, opts.timeframe, cursor, 1000)
+    const rows = await withRetry<unknown[]>(`${opts.timeframe} 分页取数`, () =>
+      exchange.fetchOHLCV(symbol, opts.timeframe, cursor, 1000)
+    )
     if (!Array.isArray(rows) || rows.length === 0) break
 
     let added = 0
@@ -491,11 +521,9 @@ export async function fetchSnapshot(
     const candlesP = Promise.all(
       plan.map(async p => {
         const days = daysOf(p.timeframe, p.days)
-        const rows = await exchange.fetchOHLCV(
-          symbol,
-          p.timeframe,
-          undefined,
-          barsFor(p.timeframe, days, cal)
+        const bars = barsFor(p.timeframe, days, cal)
+        const rows = await withRetry<unknown[]>(`${p.timeframe} 取数`, () =>
+          exchange.fetchOHLCV(symbol, p.timeframe, undefined, bars)
         )
         return {timeframe: p.timeframe, days, candles: toCandles(rows)}
       })
