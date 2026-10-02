@@ -92,7 +92,9 @@ watch([days, kind], () => {
 
 const t = computed(() => summary.value?.totals)
 const perCall = computed(() =>
-  (t.value?.calls ?? 0) > 0 ? (t.value?.costUsd ?? 0) / (t.value?.calls ?? 1) : 0
+  (t.value?.calls ?? 0) > 0
+    ? (t.value?.costUsd ?? 0) / (t.value?.calls ?? 1)
+    : 0
 )
 const hitRate = computed(() =>
   (t.value?.promptTokens ?? 0) > 0
@@ -412,7 +414,9 @@ const symbolText = (r: UsageRow) =>
         </template>
         <template #latencyMs="{row}">{{ ms(row.latencyMs) }}</template>
         <template #attempts="{row}">
-          <span v-if="row.attempts > 1" class="v warn">重试 {{ row.attempts }} 次</span>
+          <span v-if="row.attempts > 1" class="v warn"
+            >重试 {{ row.attempts }} 次</span
+          >
           <span v-else class="v ok">一次成功</span>
         </template>
       </DataTable>

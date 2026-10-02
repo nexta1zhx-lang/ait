@@ -374,64 +374,64 @@ onMounted(() => {
           </h2>
 
           <div class="only-desktop">
-          <DataTable
-            :columns="listCols"
-            :rows="rows"
-            fixed
-            initial-sort="createdAt"
-            empty="这段时间没有分析记录。去「开单分析」跑一次，结果会自动存到这里。"
-          >
-            <template #createdAt="{row}">
-              <a class="linkish" @click="open(row.id)">
-                {{ bjTime(row.createdAt) }}
-              </a>
-            </template>
-            <template #symbol="{row}">
-              <b>{{ row.symbol }}</b>
-              <div class="dim" style="font-size: 11px">
-                {{ row.timeframes.join(' · ') }}
-              </div>
-            </template>
-            <template #tags="{row}">
-              <!-- 列表里一最多摆 3 个 —— 再多就换行把行高撑起来了；
+            <DataTable
+              :columns="listCols"
+              :rows="rows"
+              fixed
+              initial-sort="createdAt"
+              empty="这段时间没有分析记录。去「开单分析」跑一次，结果会自动存到这里。"
+            >
+              <template #createdAt="{row}">
+                <a class="linkish" @click="open(row.id)">
+                  {{ bjTime(row.createdAt) }}
+                </a>
+              </template>
+              <template #symbol="{row}">
+                <b>{{ row.symbol }}</b>
+                <div class="dim" style="font-size: 11px">
+                  {{ row.timeframes.join(' · ') }}
+                </div>
+              </template>
+              <template #tags="{row}">
+                <!-- 列表里一最多摆 3 个 —— 再多就换行把行高撑起来了；
                    多的只报个数，想看全部进详情 -->
-              <span v-if="(row.tags ?? []).length" class="tags">
-                <span
-                  v-for="t in row.tags.slice(0, 3)"
-                  :key="t.name"
-                  class="tag"
-                >
-                  {{ t.name }}
-                  <i v-if="t.probability">{{ t.probability }}%</i>
+                <span v-if="(row.tags ?? []).length" class="tags">
+                  <span
+                    v-for="t in row.tags.slice(0, 3)"
+                    :key="t.name"
+                    class="tag"
+                  >
+                    {{ t.name }}
+                    <i v-if="t.probability">{{ t.probability }}%</i>
+                  </span>
+                  <span
+                    v-if="row.tags.length > 3"
+                    class="tag more"
+                    :title="
+                      row.tags
+                        .slice(3)
+                        .map(t => t.name)
+                        .join('、')
+                    "
+                  >
+                    +{{ row.tags.length - 3 }}
+                  </span>
                 </span>
-                <span
-                  v-if="row.tags.length > 3"
-                  class="tag more"
-                  :title="
-                    row.tags
-                      .slice(3)
-                      .map(t => t.name)
-                      .join('、')
-                  "
-                >
-                  +{{ row.tags.length - 3 }}
+                <span v-else class="dim">—</span>
+              </template>
+              <template #verdict="{row}">
+                <span :class="['v', verdictTone(row.verdict)]">
+                  {{ verdictText(row.verdict) }}
                 </span>
-              </span>
-              <span v-else class="dim">—</span>
-            </template>
-            <template #verdict="{row}">
-              <span :class="['v', verdictTone(row.verdict)]">
-                {{ verdictText(row.verdict) }}
-              </span>
-            </template>
-            <template #costUsd="{row}">{{ rmb(row.costUsd) }}</template>
-            <template #actions="{row}">
-              <button class="ghost tiny" @click="open(row.id)">详情</button>
-              <button class="ghost tiny danger" @click="remove(row.id)">
-                删
-              </button>
-            </template>
-          </DataTable>
+              </template>
+              <template #costUsd="{row}">{{ rmb(row.costUsd) }}</template>
+              <template #actions="{row}">
+                <button class="ghost tiny" @click="open(row.id)">详情</button>
+                <button class="ghost tiny danger" @click="remove(row.id)">
+                  删
+                </button>
+              </template>
+            </DataTable>
           </div>
 
           <!-- 手机端：7 列表格塞不下（实测 584px 挤在 390px 屏幕里）→ 卡片 -->
@@ -452,7 +452,11 @@ onMounted(() => {
                 {{ rmb(row.costUsd) }}
               </div>
               <div v-if="(row.tags ?? []).length" class="tags">
-                <span v-for="t in row.tags.slice(0, 3)" :key="t.name" class="tag">
+                <span
+                  v-for="t in row.tags.slice(0, 3)"
+                  :key="t.name"
+                  class="tag"
+                >
                   {{ t.name }}
                   <i v-if="t.probability">{{ t.probability }}%</i>
                 </span>

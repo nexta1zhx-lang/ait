@@ -9,7 +9,7 @@
  *
  * 输出 JSON 契约不在这里：那是程序接口，写死在代码里。
  */
-import {computed, onMounted, ref} from 'vue'
+import {computed, onMounted, ref, watch} from 'vue'
 import {
   createAiDoc,
   deleteAiDoc,
@@ -93,6 +93,17 @@ function flash(msg: string) {
     if (notice.value === msg) notice.value = ''
   }, 2600)
 }
+
+/**
+ * 手机上（≤1000px）是「一次只显示一块」：点开一份就把清单收起来
+ * （规则见 style 里的 `.prompts.v-*`），所以打开时要把页面带回顶部，
+ * 否则右列在屏幕外、看起来像没反应。
+ */
+watch(view, v => {
+  if (v === 'none') return
+  if (!window.matchMedia('(max-width: 1000px)').matches) return
+  window.scrollTo({top: 0, behavior: 'smooth'})
+})
 
 /* ---------------- 右列：点开看 / 编辑 / 历史 ---------------- */
 
@@ -291,7 +302,7 @@ async function openPreview() {
 </script>
 
 <template>
-  <div class="prompts">
+  <div class="prompts" :class="`v-${view}`">
     <!-- ── 左：清单（点一条，右边就显示它） ── -->
     <section class="panel list">
       <h2>AI 提示词 <span class="tag">分析预测 + 知识库提炼</span></h2>
@@ -395,6 +406,11 @@ async function openPreview() {
 
     <!-- ── 右：点出来的内容 ── -->
     <section class="panel detail">
+      <!-- 手机上才显示：清单被收起来了，给一条退路 -->
+      <button v-if="view !== 'none'" type="button" class="ghost tiny back" @click="closeView">
+        ‹ 返回清单
+      </button>
+
       <!-- 拼好的全文 -->
       <template v-if="view === 'preview'">
         <h2>
@@ -529,9 +545,37 @@ async function openPreview() {
   align-items: start;
 }
 
+/* 只在窄屏出现（桌面本来就是左右两栏并排） */
+.prompts .back {
+  display: none;
+}
+
 @media (max-width: 1000px) {
   .prompts {
     grid-template-columns: minmax(0, 1fr);
+  }
+  /* 单列时 sticky 没意义，反而会跟滚动打架 */
+  .prompts .list {
+    position: static;
+  }
+  .prompts .back {
+    display: inline-flex;
+    margin-bottom: 8px;
+  }
+  /*
+   * 一次只显示一块。
+   * 手机上清单很长（两份文档 + 两个分组标题 + 说明），
+   * 点了文档后正文落在整张清单的下方 —— 不清空就等于「点了没反应」。
+   */
+  .prompts.v-doc .list,
+  .prompts.v-edit .list,
+  .prompts.v-history .list,
+  .prompts.v-preview .list {
+    display: none;
+  }
+  /* 还没点任何一份时，右边的空态提示也不用占一屏 */
+  .prompts.v-none .detail {
+    display: none;
   }
 }
 
@@ -789,5 +833,24 @@ async function openPreview() {
   min-height: 300px;
   margin: 0;
   background: rgba(0, 0, 0, 0.18);
+}
+
+/*
+ * 窄屏覆盖必须写在最后 —— 同特异性下靠「后写的赢」，
+ * 放前面会被上面那几条基样式盖掉。
+ */
+@media (max-width: 1000px) {
+  /* 正文 / 预览：手机高度有限，不用桌面那套 420px + 11.5px */
+  .preview {
+    max-height: 56vh;
+    font-size: 11px;
+  }
+  .doc-body {
+    min-height: 200px;
+  }
+  /* 编辑框给足高度，手机上敲长篇很难受 */
+  .editor {
+    min-height: 52vh;
+  }
 }
 </style>

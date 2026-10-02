@@ -595,4 +595,31 @@ defineExpose({load, loadTags})
 .kb-panel.compact .kb-filter {
   gap: 6px;
 }
+
+/*
+ * 手机覆盖必须写在**最后** —— 同特异性下靠「后写的赢」，
+ * 放前面会被上面那些基样式（.kb-card / .kb-desc 等）盖掉。
+ */
+@media (max-width: 640px) {
+  /* 搜索 + 币种各占整行，别挤成两个小框 */
+  .kb-search {
+    flex: 1 1 100%;
+  }
+  .kb-search .kb-sym {
+    flex: 0 0 100px;
+  }
+  .kb-count {
+    margin-left: auto;
+  }
+  /* 一列到底时卡片会很长，内边距收一点，一屏能多看一张 */
+  .kb-card {
+    padding: 8px 10px 7px;
+  }
+  /* 手机上一列铺满，描述多给一行也无所谓 */
+  .kb-desc {
+    font-size: 12.5px;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+}
 </style>

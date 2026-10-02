@@ -344,6 +344,25 @@ async function remove() {
   overflow-y: auto;
 }
 
+/*
+ * 手机上整屏铺满。
+ * 原来两侧各留 24px（`.case-mask` 的 padding），390px 屏上白白少 48px 宽，
+ * 而弹窗里全是长文本 + 标签 —— 窄屏直接当整页用更好。
+ */
+@media (max-width: 640px) {
+  .case-mask {
+    padding: 0;
+  }
+  .case-modal {
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+    padding: 12px 12px 10px;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
 .cm-head {
   display: flex;
   align-items: baseline;
