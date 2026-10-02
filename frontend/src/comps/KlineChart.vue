@@ -456,12 +456,19 @@ function positionLabels() {
 
 /* ---------------- 左上角信息栏 ---------------- */
 
+/** 成交量：上百万就拿 M 说事，看着不炸眼 */
+function fmtVol(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return '—'
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`
+  return fmt(v, 0)
+}
+
 function infoHTML(
   timeSec: number,
   bar: {open: number; high: number; low: number; close: number},
   vol: number,
-  volRatio: number,
-  ema42Value: number
+  volRatio: number
 ): string {
   const p = bjPartsOf(timeSec)
   const chg = bar.open ? ((bar.close - bar.open) / bar.open) * 100 : NaN
@@ -469,10 +476,6 @@ function infoHTML(
   const chgText = Number.isFinite(chg)
     ? `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`
     : '—'
-  const aboveEma =
-    Number.isFinite(ema42Value) && ema42Value > 0
-      ? bar.close >= ema42Value
-      : null
   return [
     `<span>${p.month}/${p.day} ${p.hour}:${p.minute}</span>`,
     `<span><span class="k">开</span>${fmt(bar.open)}</span>`,
@@ -480,12 +483,9 @@ function infoHTML(
     `<span><span class="k">低</span>${fmt(bar.low)}</span>`,
     `<span><span class="k">收</span>${fmt(bar.close)}</span>`,
     `<span class="${cls}">${chgText}</span>`,
-    `<span><span class="k">量</span>${fmt(vol, 0)}${
+    `<span><span class="k">成交量</span>${fmtVol(vol)}${
       Number.isFinite(volRatio) ? ` <em>${volRatio.toFixed(2)}x</em>` : ''
-    }</span>`,
-    `<span class="${aboveEma === null ? '' : aboveEma ? 'up' : 'down'}"
-      ><span class="k">EMA42</span>${fmt(ema42Value)}</span
-    >`
+    }</span>`
   ].join('')
 }
 
@@ -499,8 +499,7 @@ function showInfoAt(i: number) {
     Math.floor(c.timestamp / 1000),
     {open: c.open, high: c.high, low: c.low, close: c.close},
     c.volume,
-    Number.isFinite(ma) && ma > 0 ? c.volume / ma : NaN,
-    emaValues[idx]
+    Number.isFinite(ma) && ma > 0 ? c.volume / ma : NaN
   )
 }
 
@@ -551,8 +550,7 @@ function updateHover(param: any) {
       timeSec,
       bar,
       vol,
-      Number.isFinite(vol) && Number.isFinite(ma) && ma > 0 ? vol / ma : NaN,
-      idx === undefined ? NaN : emaValues[idx]
+      Number.isFinite(vol) && Number.isFinite(ma) && ma > 0 ? vol / ma : NaN
     )
   }
 
@@ -777,6 +775,8 @@ const dragFromX = ref<number | null>(null)
 const dragToX = ref<number | null>(null)
 const dragHint = ref('')
 const layerEl = ref<HTMLElement | null>(null)
+/** 图表容器（量宽度用：决定结束线标签摆哪边） */
+const wrapEl = ref<HTMLElement | null>(null)
 /** 已经落定的范围在画面上的位置 */
 const selBox = ref<{from: number; to: number} | null>(null)
 const selHint = ref('')
@@ -803,6 +803,18 @@ const lineHint = ref('')
 
 /** 线画在哪：拖的时候跟鼠标，不拖的时候按 `pointAt` 算 */
 const lineX = computed(() => dragLineX.value ?? selLine.value)
+
+/** 图表容器宽度（决定「看到 X 收盘」那句标签摆线左边还是右边） */
+const wrapW = ref(0)
+/**
+ * 标签摆在线的**左侧**。
+ *
+ * 结束线一般放在最右边那根附近，标签默认向右排就会冲出右边界被切掉（`.range-layer`
+ * 是 `overflow: hidden`），所以只要线过了中线就翻到左边去。
+ */
+const lineTagLeft = computed(
+  () => lineX.value !== null && wrapW.value > 0 && lineX.value > wrapW.value / 2
+)
 
 /** 手指下面那根是哪一根（拖的时候实时提示） */
 const liveLineHint = computed(() => {
@@ -903,6 +915,20 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+
+/* 宽度变了要重算结束线标签摆哪边 */
+let wrapRo: ResizeObserver | null = null
+onMounted(() => {
+  const el = wrapEl.value
+  if (!el) return
+  wrapW.value = el.clientWidth
+  wrapRo = new ResizeObserver(entries => {
+    const w = entries[0]?.contentRect.width ?? 0
+    if (w > 0 && Math.abs(w - wrapW.value) > 0.5) wrapW.value = w
+  })
+  wrapRo.observe(el)
+})
+onBeforeUnmount(() => wrapRo?.disconnect())
 
 /** 图上 x 像素 → K 线下标（超出可见区域就夹到边界） */
 function xToIndex(x: number): number {
@@ -1136,7 +1162,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="chart-wrap">
+    <div ref="wrapEl" class="chart-wrap">
       <div ref="chartEl" class="chart"></div>
       <div ref="levelHost" class="level-labels"></div>
       <div ref="infoEl" class="chart-info"></div>
@@ -1173,7 +1199,10 @@ onBeforeUnmount(() => {
         <div
           v-if="lineX !== null"
           class="range-line"
-          :class="{live: dragLineX !== null || picking}"
+          :class="{
+            live: dragLineX !== null || picking,
+            'tag-left': lineTagLeft
+          }"
           :style="{left: lineX + 'px'}"
           @pointerdown="onHandleDown"
           @pointermove="onHandleMove"

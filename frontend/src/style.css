@@ -1438,6 +1438,12 @@ body.fixed-viewport .split {
   cursor: grab;
 }
 
+/* 线靠右边时，标签翻到线的左侧 —— 否则会冲出右边界被裁掉 */
+.range-line.tag-left .range-line-tag {
+  left: auto;
+  right: 4px;
+}
+
 .range-line-tag {
   position: absolute;
   top: 6px;
