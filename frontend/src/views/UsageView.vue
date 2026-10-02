@@ -432,10 +432,11 @@ const symbolText = (r: UsageRow) =>
 
     <footer class="hint">
       <p>
-        计价基准：DeepSeek 官方价目表（美元 / 1M token，高峰价）。高峰时段 = UTC
-        01:00-04:00 与 06:00-10:00
-        的工作日，其余时段减半。每笔都存了当时的单价快照，
-        官方调价不影响历史记录。
+        计价基准：DeepSeek 官方价目表（美元 / 1M token，高峰价）。高峰时段 =
+        **北京时间**周一至周五（不含中国法定节假日）9:00-12:00 与 14:00-18:00，
+        其余时段（含周末、节假日全天）按高峰价**减半**。每笔都存了当时的单价快照，
+        官方调价不影响历史记录；改过判定规则后用
+        <code>npm run reprice</code> 重算旧记录。
       </p>
       <p style="margin-top: 6px">
         汇率 USD_CNY = {{ rate }}（.env 可改）；单价可用 LLM_PRICE_INPUT_HIT /
@@ -454,13 +455,18 @@ const symbolText = (r: UsageRow) =>
 
 .two {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /*
+   * ⚠️ 必须写 `minmax(0, 1fr)`，不能写 `1fr`。
+   * `1fr` 的最小值是 auto = min-content，而表格的 min-content 是「所有列不许压缩」
+   * 的宽度（实测 386px）→ 轨道被撑到比屏幕还宽，整页横向溢出。
+   */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
 }
 
 @media (max-width: 760px) {
   .two {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -23,6 +23,7 @@ import {
   bjTime,
   cny,
   fixed,
+  fmt,
   int,
   ms,
   signedPct,
@@ -372,6 +373,7 @@ onMounted(() => {
             </span>
           </h2>
 
+          <div class="only-desktop">
           <DataTable
             :columns="listCols"
             :rows="rows"
@@ -430,6 +432,36 @@ onMounted(() => {
               </button>
             </template>
           </DataTable>
+          </div>
+
+          <!-- 手机端：7 列表格塞不下（实测 584px 挤在 390px 屏幕里）→ 卡片 -->
+          <ul class="hist-cards">
+            <li v-if="!rows.length" class="hc-empty dim">
+              这段时间没有分析记录
+            </li>
+            <li v-for="row in rows" :key="row.id" @click="open(row.id)">
+              <div class="hc-top">
+                <b>{{ row.symbol }}</b>
+                <span class="dim hc-tf">{{ row.timeframes.join(' · ') }}</span>
+                <span :class="['v', verdictTone(row.verdict)]">
+                  {{ verdictText(row.verdict) }}
+                </span>
+              </div>
+              <div class="hc-meta dim">
+                {{ bjTime(row.createdAt) }} · 当时价 {{ fmt(row.price) }} ·
+                {{ rmb(row.costUsd) }}
+              </div>
+              <div v-if="(row.tags ?? []).length" class="tags">
+                <span v-for="t in row.tags.slice(0, 3)" :key="t.name" class="tag">
+                  {{ t.name }}
+                  <i v-if="t.probability">{{ t.probability }}%</i>
+                </span>
+                <span v-if="row.tags.length > 3" class="tag more">
+                  +{{ row.tags.length - 3 }}
+                </span>
+              </div>
+            </li>
+          </ul>
 
           <div class="pager">
             <button class="ghost" :disabled="page <= 1" @click="go(-1)">
@@ -686,6 +718,87 @@ body.fixed-viewport .list .pager {
   body.fixed-viewport .hist-split {
     flex: 0 0 auto;
     align-items: start;
+  }
+}
+
+/* ==================== 手机端：列表换卡片 ==================== */
+/*
+ * 7 列表格在手机上没救（实测 584px 宽挤在 390px 屏幕里，只能横着拖），
+ * 所以窄屏整张表换成一叠卡片 —— 卡片用同一批数据，只是换个排法。
+ */
+.hist-cards {
+  display: none;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hist-cards > li {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.hist-cards > li:hover {
+  border-color: var(--blue);
+}
+
+.hist-cards .hc-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hist-cards .hc-top b {
+  font-size: 14px;
+}
+
+.hist-cards .hc-tf {
+  font-size: 11px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hist-cards .hc-meta {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hist-cards .tags {
+  margin-top: 0;
+}
+
+.hist-cards .hc-empty {
+  border: 0;
+  background: none;
+  cursor: default;
+}
+
+@media (max-width: 900px) {
+  .only-desktop {
+    display: none;
+  }
+  .hist-cards {
+    display: flex;
+  }
+  /*
+   * 饼图从「竖着一列」改成铺网格：手机上横着放两三张，少滚很多。
+   * ⚠️ 必须写在这里（scoped）—— scoped 会加一层属性选择器，特异性高于
+   * style.css 里的媒体查询，全局那条压不过它。
+   */
+  .charts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
   }
 }
 

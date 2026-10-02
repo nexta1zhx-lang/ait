@@ -757,6 +757,8 @@ button.danger:hover {
 
 .table-wrap {
   overflow-x: auto;
+  /* 表格的 min-content 很大，放在 flex/grid 里必须允许收缩，否则会把父级撑破 */
+  min-width: 0;
 }
 
 /* ==================== 开单分析页布局 ==================== */
@@ -1446,7 +1448,13 @@ body.fixed-viewport .split {
 
 .range-line-tag {
   position: absolute;
-  top: 6px;
+  /*
+   * **竖向正中**，不是顶部。
+   * 顶部是「开/高/低/收 + 成交量」信息栏（`.chart-info`，窄屏时能铺到图中间），
+   * 标签放上面会被它盖住 —— 实测 1024px 宽时两者完全重叠。
+   */
+  top: 50%;
+  transform: translateY(-50%);
   left: 4px;
   white-space: nowrap;
   padding: 2px 8px;
@@ -2129,4 +2137,122 @@ button.badge.balance:hover:not(:disabled) {
   color: var(--muted);
   border-style: dashed;
   cursor: help;
+}
+
+/* ==================================================================
+   手机 / 窄屏（≤900px）
+   ------------------------------------------------------------------
+   桌面是「左分析 + 右 K 线」两栏并排。手机宽度根本放不下 ——
+   实测 390px 时 K 线图被压成 **0 宽**、跑到屏幕外，整页还横向溢出。
+
+   窄屏改成：
+     · 顶部一排 tab：**K 线 / 分析**，一次只显示一块（默认 K 线）
+     · 不再一屏塞下，恢复普通整页滚动
+     · 顶部导航换行、卡片和表格收一号
+   ================================================================== */
+
+/* 只在窄屏出现的两个开关：手机 tab / 历史卡片 */
+.mobile-tabs {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  /* ---- 顶部栏：5 个导航挤不下（实测 410px 塞在 366px 里）→ 换行 + 收窄 ---- */
+  .topbar {
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .brand .sub {
+    display: none;
+  }
+  .nav {
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+  .nav a {
+    padding: 5px 9px;
+    font-size: 12px;
+  }
+  .topmeta {
+    font-size: 11px;
+  }
+
+  /* ---- 不再「一屏塞下」：手机上就是普通长文档 ---- */
+  body.fixed-viewport {
+    overflow: auto;
+  }
+  body.fixed-viewport #app {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+  body.fixed-viewport .analyze,
+  body.fixed-viewport .split {
+    flex: 0 0 auto;
+  }
+
+  /* ---- 开单分析：一次只显示一块 ---- */
+  .mobile-tabs {
+    display: flex;
+  }
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .split.m-chart > .col:not(.side) {
+    display: none;
+  }
+  .split.m-analysis > .side {
+    display: none;
+  }
+  .split > .col,
+  .split .scroll-body {
+    min-height: 0;
+    overflow: visible;
+  }
+  /* K 线撑住一屏的一大半，别缩成一条 */
+  .chart-side .chart-wrap {
+    height: 58vh;
+    min-height: 300px;
+  }
+  .chart-side {
+    min-height: 0;
+  }
+
+  /* 查询栏：币种 / 模式 / 按钮各占一整行，好点 */
+  .query-bar .field {
+    width: 100%;
+  }
+  .query-bar .btn-run {
+    flex: 1 1 auto;
+  }
+
+  /* ---- 表格：缩小一号，仍然自己横向滚 ---- */
+  .table {
+    font-size: 11px;
+  }
+  .table th,
+  .table td {
+    padding: 6px 8px;
+  }
+  .table.fixed {
+    /* 窄屏别硬按桌面那套列宽分，否则每格都窄到看不清 */
+    table-layout: auto;
+  }
+
+  /* ---- 用量页：卡片数值收一号，副行允许换行（否则全被省略号吃掉）---- */
+  .cards {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+  .card .v {
+    font-size: 17px;
+  }
+  .card .sub {
+    white-space: normal;
+    overflow: visible;
+  }
+  .stack-legend {
+    gap: 10px;
+  }
+
+  /* ---- 预测历史：饼图铺成网格（列表换卡片写在 HistoryView 里）---- */
 }

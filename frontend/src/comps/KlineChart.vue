@@ -798,8 +798,6 @@ function setPicking(v: boolean) {
 const dragLineX = ref<number | null>(null)
 /** 已经落定的线在画面上的位置 */
 const selLine = ref<number | null>(null)
-/** 线上那句「看到 X 收盘」 */
-const lineHint = ref('')
 
 /** 线画在哪：拖的时候跟鼠标，不拖的时候按 `pointAt` 算 */
 const lineX = computed(() => dragLineX.value ?? selLine.value)
@@ -816,11 +814,27 @@ const lineTagLeft = computed(
   () => lineX.value !== null && wrapW.value > 0 && lineX.value > wrapW.value / 2
 )
 
-/** 手指下面那根是哪一根（拖的时候实时提示） */
+/**
+ * 结束线标签文案。
+ *
+ * 窄图放不下整句 —— 实测图宽 328px 时整句宽 231px，标签向左排会超出左边界被裁掉
+ * （`.range-layer` 是 `overflow: hidden`）。窄了就只写关键那半句，
+ * 完整时刻左边面板和 `title` 里都有。
+ */
+function lineTagLabel(barMs: number): string {
+  if (wrapW.value > 0 && wrapW.value < 400) return `看到 ${bjShort(barMs)} 收盘`
+  return `结束线 · 看到 ${bjTime(barMs)} 这根收盘`
+}
+
+/** 线上那句「看到 X 收盘」（拖的时候跟着鼠标实时变） */
 const liveLineHint = computed(() => {
   const x = dragLineX.value
-  if (x === null || !candles.length) return lineHint.value
-  return `看到 ${bjTime(candles[xToIndex(x)].timestamp)} 这根收盘 —— 之后的不给`
+  if (x !== null && candles.length) {
+    return lineTagLabel(candles[xToIndex(x)].timestamp)
+  }
+  const at = props.pointAt
+  if (at === null || at === undefined) return ''
+  return lineTagLabel(at - tfMs())
 })
 
 const pointTip = computed(() =>
@@ -1071,7 +1085,6 @@ function drawPoint() {
   const at = props.pointAt
   const clear = () => {
     if (selLine.value !== null) selLine.value = null
-    if (lineHint.value) lineHint.value = ''
   }
   if (at === null || at === undefined || !refs || !candles.length)
     return clear()
@@ -1083,8 +1096,6 @@ function drawPoint() {
   if (x < -20 || x > w + 20) return clear() // 滚出视图了
 
   if (selLine.value !== x) selLine.value = x
-  const hint = `结束线 · 看到 ${bjTime(bar)} 这根收盘`
-  if (lineHint.value !== hint) lineHint.value = hint
 }
 
 /* ---------------- 生命周期 ---------------- */

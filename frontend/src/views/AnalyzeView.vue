@@ -55,6 +55,18 @@ import {VERDICT_TEXT, bjShort, bjTime, fixed, fmt, signedPct} from '../format'
 // 切到别的页面再回来不会丢；这里只负责首次进页面把历史拉一次。
 onMounted(() => void loadHistory(symbol.value))
 
+/**
+ * 手机端（≤900px）分两块看：**K 线 / 分析**。
+ *
+ * 窄屏放不下「左分析 + 右 K 线」两栏（实测 390px 时 K 线图被压成 0 宽），
+ * 与其挤成一坨，不如一次只显示一块。桌面端这排 tab 是隐藏的（CSS 里 `display:none`）。
+ */
+const MOBILE_TABS = [
+  {value: 'chart' as const, label: 'K 线'},
+  {value: 'analysis' as const, label: '分析'}
+]
+const mobileTab = ref<'chart' | 'analysis'>('chart')
+
 /* ---------- 历史列表：能放几行就放几行，列表自己不出滚动条 ---------- */
 const histBox = ref<HTMLElement | null>(null)
 let histRO: ResizeObserver | null = null
@@ -216,8 +228,13 @@ const heatRows = computed(() => {
 
     <div v-if="error" class="error">❌ {{ error }}</div>
 
+    <!-- 手机端才显示：一次只看一块（桌面端这排是隐藏的） -->
+    <div class="mobile-tabs">
+      <SegTabs v-model="mobileTab" :options="MOBILE_TABS" />
+    </div>
+
     <!-- ============ 左右布局 ============ -->
-    <div class="split">
+    <div class="split" :class="`m-${mobileTab}`">
       <!-- ── 左：实时分析 / 历史分析 ── -->
       <div class="col">
         <div class="tab-row">
