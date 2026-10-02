@@ -1,243 +1,131 @@
 <script setup lang="ts">
-import {computed, onBeforeUnmount, onMounted, ref} from 'vue'
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import KlineChart from '../comps/KlineChart.vue'
-import DataTable, {type Column} from '../comps/DataTable.vue'
 import SegTabs from '../comps/SegTabs.vue'
+import CollectForm from '../comps/CollectForm.vue'
+import StepsPanel from '../comps/StepsPanel.vue'
+import {tagsOf, type Heat} from '../api'
 import {
-  OUTCOME_TEXT,
-  OUTCOME_TONE,
-  analyzeStream,
-  fetchAnalyses,
-  type AnalysisRow,
-  type AnalyzeResult,
-  type AnalyzeStep,
-  type ChecklistItem,
-  type Heat,
-  type TfStat
-} from '../api'
-import {contracts, config, refreshConfig} from '../store'
-import {
-  GRADE_TEXT,
-  VERDICT_TEXT,
-  bjShort,
-  fixed,
-  fmt,
-  signedPct,
-  structureFull,
-  structureText,
-  TREND_TEXT
-} from '../format'
+  CHART_BARS,
+  LEFT_TABS,
+  LIVE_TABS,
+  RUN_MODES,
+  chartFrom,
+  chartRange,
+  chartTf,
+  chartUntil,
+  clearChartRange,
+  error,
+  history,
+  historyError,
+  historyGo,
+  historyPage,
+  historyPageSize,
+  historyPages,
+  historyTotal,
+  leftTab,
+  liveTab,
+  loadHistory,
+  loading,
+  pickSymbol,
+  rangeDrawing,
+  result,
+  run,
+  runMode,
+  setHistoryPageSize,
+  setRunMode,
+  showSteps,
+  spanText,
+  steps,
+  symbol,
+  testAt,
+  testMode,
+  timeframesText
+} from '../analyze'
+import {contracts, config} from '../store'
+import {VERDICT_TEXT, bjShort, bjTime, fixed, fmt, signedPct} from '../format'
 
-/* ---------------- 表单 ---------------- */
-
-const symbol = ref('BTC')
-const chartTf = ref('1h')
-
-const loading = ref(false)
-const error = ref('')
-const result = ref<AnalyzeResult | null>(null)
-/** 分析过程：后端用 SSE 一步步推过来 */
-const steps = ref<AnalyzeStep[]>([])
-/** 心跳，用来给「进行中」那一步算实时耗时 */
-const tick = ref(0)
-const runStartedAt = ref(0)
-const stepStartedAt = new Map<string, number>()
-let ticker: number | undefined
-let closeStream: (() => void) | null = null
-
-/** 周期和假设胜率都由后端配置决定，页面上不再让用户填 */
-const timeframesText = computed(
-  () => config.value?.timeframes ?? '15m,1h,4h,1d'
-)
-
-/** 左侧一级 tab：实时分析 / 历史分析 */
-const LEFT_TABS = [
-  {value: 'live', label: '实时分析'},
-  {value: 'history', label: '历史分析'}
-]
-const leftTab = ref<'live' | 'history'>('live')
-
-/** 实时分析内部的二级 tab */
-const LIVE_TABS = [
-  {value: 'verdict', label: 'AI 结论'},
-  {value: 'checklist', label: 'Checklist'},
-  {value: 'plan', label: '怎么做'},
-  {value: 'market', label: '市场与周期'}
-]
-const liveTab = ref<'verdict' | 'checklist' | 'plan' | 'market'>('verdict')
-
-/** 分析过程：跑的时候展开，出结论后收成一行，点一下还能展开 */
-const showSteps = ref(true)
-
-/* ---------------- 该币种的历史分析 ---------------- */
-
-const history = ref<AnalysisRow[]>([])
-const historyTotal = ref(0)
-const historyError = ref('')
-
-async function loadHistory(sym: string): Promise<void> {
-  if (!sym) return
-  historyError.value = ''
-  try {
-    const page = await fetchAnalyses({
-      symbol: sym,
-      grade: '',
-      verdict: '',
-      actionable: false,
-      pending: false,
-      days: 3650,
-      limit: 12,
-      offset: 0
-    })
-    history.value = page.rows
-    historyTotal.value = page.total
-  } catch (e) {
-    historyError.value = (e as Error).message
-    history.value = []
-  }
-}
-
+// 结论、分析过程、报错都在 ../analyze 的模块作用域里，
+// 切到别的页面再回来不会丢；这里只负责首次进页面把历史拉一次。
 onMounted(() => void loadHistory(symbol.value))
 
-/* ---------------- 跑一次分析 ---------------- */
+/* ---------- 历史列表：能放几行就放几行，列表自己不出滚动条 ---------- */
+const histBox = ref<HTMLElement | null>(null)
+let histRO: ResizeObserver | null = null
 
-function stop() {
-  closeStream?.()
-  closeStream = null
-  window.clearInterval(ticker)
-  ticker = undefined
-  loading.value = false
+/** 左边栏可视高度 ÷ 单行高度 = 这一页该放几条 */
+function measureHistoryRows(): void {
+  const box = histBox.value
+  if (!box) return
+  const h = box.clientHeight
+  if (h <= 0) return
+  // 拿真实渲染出来的行高算，别猜 CSS
+  const row = box.querySelector('li')?.getBoundingClientRect().height || 28
+  setHistoryPageSize(Math.floor(h / row))
 }
 
-/** 换币种：清掉上一只币的结论，图表与历史由各自的 loader 重拉 */
-function pickSymbol(v: string) {
-  symbol.value = v
-  result.value = null
-  steps.value = []
-  error.value = ''
-  void loadHistory(v)
-}
-
-function run() {
-  const s = symbol.value.trim().toUpperCase()
-  if (!s) {
-    error.value = '请先选择币种'
-    return
-  }
-  if (loading.value) return
-
-  symbol.value = s
-  error.value = ''
-  result.value = null
-  steps.value = []
-  stepStartedAt.clear()
-  leftTab.value = 'live'
-  liveTab.value = 'verdict'
-  showSteps.value = true
-  loading.value = true
-  runStartedAt.value = Date.now()
-  ticker = window.setInterval(() => (tick.value = Date.now()), 200)
-
-  closeStream = analyzeStream(s, {
-    onStep(step) {
-      const i = steps.value.findIndex(x => x.id === step.id)
-      if (i === -1) steps.value.push(step)
-      else steps.value[i] = step
-      if (step.state === 'running') stepStartedAt.set(step.id, Date.now())
-      tick.value = Date.now()
-    },
-    onDone(r) {
-      // 后端给的 steps 是完整终态，直接覆盖，免得漏掉最后几步的耗时
-      if (r.steps?.length) steps.value = r.steps
-      result.value = r
-      // 结论出来了就把过程和结论让出位置，需要看过程点那一行展开
-      showSteps.value = false
-      stop()
-      void refreshConfig()
-      void loadHistory(s)
-    },
-    onError(msg) {
-      error.value = msg
-      const running = steps.value.find(x => x.state === 'running')
-      if (running) {
-        running.state = 'error'
-        running.detail = msg
-      }
-      stop()
-    }
-  })
-}
-
-onBeforeUnmount(stop)
-
-/* ---------------- 分析过程渲染 ---------------- */
-
-const STEP_ICON: Record<AnalyzeStep['state'], string> = {
-  running: '◌',
-  done: '●',
-  error: '✕'
-}
-
-/** 某一步花了多久：完成看后端给的 ms，进行中按本地时钟现算 */
-function stepMs(s: AnalyzeStep): number {
-  void tick.value
-  if (s.state !== 'running') return s.ms ?? 0
-  const t0 = stepStartedAt.get(s.id) ?? runStartedAt.value
-  return Math.max(0, Date.now() - t0)
-}
-
-const totalMs = computed(() => {
-  void tick.value
-  return steps.value.reduce((sum, s) => sum + stepMs(s), 0)
+// tab 切过来时 ul 才存在，ref 一挂上就量；窗口缩放由 ResizeObserver 接着管
+watch(histBox, el => {
+  histRO?.disconnect()
+  histRO = null
+  if (!el) return
+  histRO = new ResizeObserver(() => measureHistoryRows())
+  histRO.observe(el)
+  void nextTick(measureHistoryRows)
 })
 
-function stepTime(s: AnalyzeStep): string {
-  const ms = stepMs(s)
-  if (!ms) return ''
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+// 第一页拉回来的行渲染完了，才量得到真实行高
+watch(
+  () => history.value.length,
+  () => void nextTick(measureHistoryRows)
+)
+
+onBeforeUnmount(() => histRO?.disconnect())
+
+// 离开「实时 / 添加案例」就不用再等着我拖了（图也会退回普通模式）
+watch([leftTab, runMode], () => {
+  const ok = leftTab.value === 'add' || testMode.value
+  if (!ok) rangeDrawing.value = false
+})
+
+const onChartError = (msg: string) => (error.value = msg)
+
+/** 图上是「添加案例」还是「测试」在圈范围 —— 两个 tab 共用同一段选择 */
+const chartSelectable = computed(
+  () => leftTab.value === 'add' || testMode.value
+)
+
+/** 测试模式下那一段的时间跨度 */
+const testSpan = computed(() => {
+  const r = chartRange.value
+  if (!r) return ''
+  const h = (r.to - r.from) / 3_600_000
+  return h >= 24
+    ? `${Math.round((h / 24) * 10) / 10} 天`
+    : `${Math.round(h)} 小时`
+})
+
+/** 图上拖完一段 → 记下范围，顺手退出拖动模式（图恢复可拖） */
+function onPickRange(v: {from: number; to: number; bars: number}) {
+  chartRange.value = v
+  rangeDrawing.value = false
 }
 
 /* ---------------- 结论渲染 ---------------- */
 
 const judge = computed(() => result.value?.judge)
-const guard = computed(() => result.value?.guardrails)
 
-const gradeText = computed(() => GRADE_TEXT[judge.value?.grade ?? 'unclear'])
-const gradeCls = computed(() => (judge.value?.grade ?? 'unclear').toLowerCase())
+/** AI 挑的标签（模板外的不做过滤，标出来给人看） */
+const tags = computed(() => tagsOf(result.value?.judge))
+
+/** 结论头那颗徽标 —— 不再判档，直接显示**走势概率** */
+const probText = computed(() =>
+  judge.value ? `概率 ${judge.value.probability}%` : '未判断'
+)
 const verdictInfo = computed(
   () => VERDICT_TEXT[judge.value?.verdict ?? ''] ?? ['—', '']
-)
-
-const STAT_ICON: Record<string, [string, string]> = {
-  pass: ['✅', 'ok'],
-  fail: ['❌', 'bad'],
-  warn: ['⚠️', 'warn']
-}
-const iconOf = (c: ChecklistItem) => STAT_ICON[c.status] ?? STAT_ICON.warn
-
-const passCount = computed(
-  () => judge.value?.checklist?.filter(c => c.status === 'pass').length ?? 0
-)
-
-/** K 线图上的关键价位 */
-const chartPlan = computed(() => {
-  const j = judge.value
-  if (!j) return null
-  return {entry: j.entry, stopLoss: j.stopLoss, takeProfits: j.takeProfits}
-})
-
-const exitHolding = computed(() => result.value?.judge.exitPlan?.holding ?? [])
-const exitWatching = computed(
-  () => result.value?.judge.exitPlan?.watching ?? []
-)
-
-const expRow = computed(() => result.value?.expectancy ?? null)
-const position = computed(() => guard.value?.position ?? null)
-const tps = computed(() => judge.value?.takeProfits ?? [])
-const entryPrice = computed(
-  () => judge.value?.entry?.price ?? result.value?.price ?? NaN
 )
 
 const heatRows = computed(() => {
@@ -288,21 +176,6 @@ const heatRows = computed(() => {
   })
   return rows
 })
-
-const tfCols: Column<TfStat>[] = [
-  {key: 'timeframe', label: '周期', strong: true},
-  {key: 'close', label: '收盘', align: 'right', value: r => r.close},
-  {key: 'trend', label: '趋势', value: r => r.trend},
-  {
-    key: 'netChangePct',
-    label: '净涨跌',
-    align: 'right',
-    value: r => r.netChangePct
-  },
-  {key: 'rangePct', label: '振幅', align: 'right', value: r => r.rangePct},
-  {key: 'volRatio', label: '量比', align: 'right', value: r => r.volRatio},
-  {key: 'structure', label: '结构', align: 'right'}
-]
 </script>
 
 <template>
@@ -318,11 +191,27 @@ const tfCols: Column<TfStat>[] = [
           @submit="run"
         />
       </label>
+      <label class="field mode-field" :class="{on: testMode}">
+        <span>模式</span>
+        <SegTabs
+          :model-value="runMode"
+          :options="RUN_MODES"
+          @update:model-value="setRunMode"
+        />
+      </label>
+      <label
+        class="field days-field"
+        title="我在图上看的那个周期（主周期），就看图上这一段；其余周期按它跟着取"
+      >
+        <span>范围</span>
+        <b class="days-readonly"> 图上 {{ CHART_BARS }} 根 ≈ {{ spanText }} </b>
+      </label>
       <button class="btn-run" :disabled="loading" @click="run">
-        {{ loading ? '判断中…' : '让 AI 判断' }}
+        {{ loading ? '判断中…' : testMode ? '按这段行情判断' : '让 AI 判断' }}
       </button>
       <span class="hint">
-        看周期 {{ timeframesText }} · 模型 {{ config?.model ?? '—' }}
+        看周期 {{ timeframesText }} · 图上 {{ CHART_BARS }} 根 ≈
+        {{ spanText }} · 模型 {{ config?.model ?? '—' }}
       </span>
     </section>
 
@@ -346,58 +235,84 @@ const tfCols: Column<TfStat>[] = [
         <!-- ① 实时分析 -->
         <template v-if="leftTab === 'live'">
           <div class="scroll-body">
-            <!-- 出结论后收成一行，点一下看全过程 -->
-            <button
-              v-if="result && !showSteps"
-              type="button"
-              class="panel steps-collapsed"
-              @click="showSteps = true"
-            >
-              <span class="t"
-                >分析过程 · 共 {{ (totalMs / 1000).toFixed(1) }}s</span
-              >
-              <span class="dim">
-                {{ steps.map(s2 => s2.label).join(' → ') }}
-              </span>
-              <span class="dim">展开 ▾</span>
-            </button>
+            <!-- 测试模式：跟「添加案例」一样，先在图上圈一段 -->
+            <section v-if="testMode" class="panel test-panel">
+              <h2>
+                测试 · 圈一段行情
+                <span class="tag">不存档</span>
+              </h2>
+              <p class="hint">
+                点「画范围」，再到右边 K 线上<b>横着拖一段</b>。 AI
+                会把这一段的<b>结束时刻</b>当成「当时」来判 ——
+                只看得到那一刻之前<b>已经收盘</b>的 K 线，之后的一根都不给。
+              </p>
 
-            <section v-if="!result || showSteps" class="panel">
-              <div class="steps-head">
-                <h3>分析过程</h3>
+              <div class="follow-row" :class="{picked: !!chartRange}">
+                <span class="k">{{ chartRange ? '范围' : '范围' }}</span>
+                <span class="v">
+                  <template v-if="chartRange">
+                    {{ bjTime(chartRange.from) }} → {{ bjTime(chartRange.to) }}
+                    <em>
+                      {{ chartRange.bars }} 根 · 约 {{ testSpan }} · 判断时点是
+                      {{ bjTime(chartRange.to) }}
+                    </em>
+                  </template>
+                  <template v-else-if="rangeDrawing">
+                    在右边图上拖一段…
+                    <em>横向拖，松手就选好（按 Esc 取消）</em>
+                  </template>
+                  <template v-else>
+                    还没选
+                    <em>点右边「画范围」开始</em>
+                  </template>
+                </span>
+
                 <button
-                  v-if="result"
+                  type="button"
+                  class="ghost tiny range-btn"
+                  :class="{on: rangeDrawing}"
+                  :title="
+                    rangeDrawing
+                      ? '在图上横向拖一段，松手就算选好（Esc 取消）'
+                      : '在图上拖出一段 K 线，以这一段的结尾为判断时点'
+                  "
+                  @click="rangeDrawing = !rangeDrawing"
+                >
+                  {{ rangeDrawing ? '取消' : chartRange ? '重画' : '画范围' }}
+                </button>
+                <button
+                  v-if="chartRange"
                   type="button"
                   class="ghost tiny"
-                  @click="showSteps = false"
+                  title="清掉范围，重新圈"
+                  @click="clearChartRange"
                 >
-                  收起
+                  清掉
                 </button>
-                <span v-else-if="steps.length" class="dim">
-                  {{ loading ? '进行中' : '完成' }} · 共
-                  {{ (totalMs / 1000).toFixed(1) }}s
-                </span>
               </div>
-              <ol v-if="steps.length" class="steps">
-                <li
-                  v-for="s in steps"
-                  :key="s.id"
-                  class="step"
-                  :class="[s.state, {active: s.state === 'running'}]"
-                >
-                  <span class="dot">{{ STEP_ICON[s.state] }}</span>
-                  <span class="body">
-                    <b>{{ s.label }}</b>
-                    <em v-if="s.detail">{{ s.detail }}</em>
-                  </span>
-                  <span class="ms">{{ stepTime(s) }}</span>
-                </li>
-              </ol>
-              <p v-else class="hint">
-                点「让 AI 判断」后，这里会逐步写出：读规则 → 取知识库 → 拉行情 →
-                拼上下文 → 调模型 → 护栏校验 → 存档。
-              </p>
             </section>
+
+            <!-- 测试模式：必须一眼看出来这不是实时那一局 -->
+            <div v-if="testAt" class="test-banner">
+              <b>⏱ 测试模式 · 判断时点 {{ bjTime(testAt) }}</b>
+              <span
+                >AI 只看得到这一刻之前已收盘的 K 线；资金费率 / 持仓量 /
+                多空比拿不到、留空。<b>本次不存档。</b></span
+              >
+            </div>
+
+            <StepsPanel
+              :steps="steps"
+              :done="!!result"
+              :running="loading"
+              :open="showSteps"
+              :hint="
+                testMode
+                  ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 取可用的标签 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
+                  : '点「让 AI 判断」后，这里会逐步写出：读分析预测提示词 → 取可用的标签 → 拉行情 → 拼上下文 → 调模型 → 存档。'
+              "
+              @update:open="showSteps = $event"
+            />
 
             <template v-if="result">
               <SegTabs
@@ -409,36 +324,36 @@ const tfCols: Column<TfStat>[] = [
               <!-- tab 1：AI 结论 -->
               <section v-if="liveTab === 'verdict'" class="panel">
                 <div class="grade-row">
-                  <div class="grade" :class="gradeCls">{{ gradeText }}</div>
+                  <div class="grade" :class="verdictInfo[1]">
+                    {{ probText }}
+                  </div>
                   <div class="grade-title">
                     <span class="pill" :class="verdictInfo[1]">{{
                       verdictInfo[0]
                     }}</span>
-                    <span class="conf"
-                      >把握 {{ result.judge.confidence }}/100</span
-                    >
                   </div>
                 </div>
 
-                <!-- 代码层否决 LLM：必须显眼，否则「AI 说可做」会被当成能做 -->
-                <div v-if="guard && !guard.passed" class="veto-banner">
-                  <b>⛔ 代码层护栏拦下，这笔不能做</b>
-                  <ul>
-                    <li v-for="(v, i) in guard.violations" :key="i">
-                      {{ v.desc || v.id }}
-                    </li>
-                  </ul>
-                  <span class="dim">
-                    AI 的判断覆盖不了红线 —— 这是硬性规则，不讨论。
+                <!-- 形状标签 + 每个标签的概率 -->
+                <div v-if="tags.length" class="tf-strip">
+                  <span v-for="t in tags" :key="t.name" class="tag">
+                    {{ t.name }}
+                    <i v-if="t.probability">{{ t.probability }}%</i>
                   </span>
                 </div>
 
-                <p class="hint" style="margin-top: 10px">
-                  {{ result.judge.gradeReason }}
+                <!-- 走势预测：最大概率会走成什么样 + 它的概率 -->
+                <p v-if="judge?.outlook" class="reasoning">
+                  <b>走势 {{ judge.probability }}%</b>{{ judge.outlook }}
                 </p>
-                <div v-if="result.judge.verdictReason" class="reasoning">
-                  {{ result.judge.verdictReason }}
-                </div>
+
+                <p v-if="judge?.reason" class="reasoning">
+                  <b>理由</b>{{ judge.reason }}
+                </p>
+
+                <p v-if="judge?.recommendation" class="reasoning">
+                  <b>推荐</b>{{ judge.recommendation }}
+                </p>
 
                 <div class="stats">
                   <div class="stat">
@@ -471,179 +386,24 @@ const tfCols: Column<TfStat>[] = [
                     </span>
                   </div>
                   <div class="stat">
-                    <span class="k">波段高 / 低</span>
+                    <span class="k">拉了多少行情</span>
                     <span class="v">
-                      {{ fmt(result.structure?.swingHigh) }} /
-                      {{ fmt(result.structure?.swingLow) }}
+                      {{ result.blocks.length }} 个周期 · 主周期
+                      {{ result.primary }}
                     </span>
                   </div>
                   <div class="stat">
-                    <span class="k">规则版本</span>
+                    <span class="k">提示词版本</span>
                     <span class="v">{{ result.meta.rules.hash }}</span>
                   </div>
                   <div class="stat">
-                    <span class="k">知识库</span>
-                    <span class="v">
-                      {{
-                        result.meta.knowledgeUsed ? '已注入经验' : '无经验可引'
-                      }}
-                    </span>
+                    <span class="k">可用标签</span>
+                    <span class="v">{{ result.meta.tagCount }} 个</span>
                   </div>
-                </div>
-
-                <template v-if="result.judge.knowledgeRefs?.length">
-                  <h3 style="margin-top: 16px">
-                    知识库参考 <span class="tag">来自我的案例</span>
-                  </h3>
-                  <ul class="checklist">
-                    <li
-                      v-for="k in result.judge.knowledgeRefs"
-                      :key="k.lesson"
-                      class="ok"
-                    >
-                      <span class="rule">{{ k.lesson }}</span>
-                      <span class="note">{{ k.symbol }} {{ k.timeframe }}</span>
-                    </li>
-                  </ul>
-                </template>
-              </section>
-
-              <!-- tab 2：Checklist -->
-              <section v-else-if="liveTab === 'checklist'" class="panel">
-                <h2>
-                  Checklist
-                  <span class="tag"
-                    >{{ passCount }}/{{ judge?.checklist?.length }} 通过</span
-                  >
-                </h2>
-                <ul class="checklist big">
-                  <li v-if="!judge?.checklist?.length" class="muted">
-                    （AI 没有返回 Checklist）
-                  </li>
-                  <li
-                    v-for="c in judge?.checklist ?? []"
-                    :key="c.item"
-                    :class="iconOf(c)[1]"
-                  >
-                    <span>{{ iconOf(c)[0] }}</span>
-                    <span class="rule">{{ c.item }}</span>
-                    <span v-if="c.evidence" class="note">{{ c.evidence }}</span>
-                  </li>
-                </ul>
-              </section>
-
-              <!-- tab 3：怎么做 -->
-              <section v-else-if="liveTab === 'plan'" class="panel">
-                <h2>怎么做</h2>
-                <div class="plan">
-                  <div class="plan-row">
-                    <span class="k">入场</span>
-                    <span class="v">
-                      {{ fmt(entryPrice) }}
-                      <em>{{
-                        result.judge.entry?.type === 'limit' ? '限价' : '市价'
-                      }}</em>
-                    </span>
-                  </div>
-                  <div class="plan-row">
-                    <span class="k">止损</span>
-                    <span
-                      class="v"
-                      :class="result.judge.stopLoss != null ? 'bad' : 'muted'"
-                    >
-                      <template v-if="result.judge.stopLoss != null">
-                        {{ fmt(result.judge.stopLoss) }}
-                        <em>
-                          {{
-                            signedPct(
-                              ((result.judge.stopLoss - entryPrice) /
-                                entryPrice) *
-                                100
-                            )
-                          }}
-                        </em>
-                      </template>
-                      <template v-else>写不出止损 → 不做</template>
-                    </span>
-                  </div>
-                  <div class="plan-row">
-                    <span class="k">止盈</span>
-                    <span class="v" :class="tps.length ? 'ok' : 'muted'">
-                      <template v-if="!tps.length">—</template>
-                      <template v-for="(t, i) in tps" :key="t.label">
-                        <br v-if="i" />
-                        {{ fmt(t.price) }}
-                        <em
-                          >{{ t.label }} {{ fmt(t.r, 1) }}R<span
-                            v-if="t.reducePercent"
-                          >
-                            减{{ t.reducePercent }}%</span
-                          ></em
-                        >
-                      </template>
-                    </span>
-                  </div>
-                  <div class="plan-row">
-                    <span class="k">期望值</span>
-                    <span
-                      v-if="expRow"
-                      class="v"
-                      :class="expRow.positive ? 'ok' : 'bad'"
-                    >
-                      {{ expRow.expectancyR }}R
-                      <em>
-                        胜率 {{ Math.round(expRow.winRate * 100) }}% × 加权
-                        {{ expRow.weightedR }}R
-                      </em>
-                    </span>
-                    <span v-else class="v muted">—</span>
-                  </div>
-                  <template v-if="position">
-                    <div class="plan-row">
-                      <span class="k">仓位</span>
-                      <span class="v">
-                        {{ fmt(position.quantity, 4) }}
-                        <em>名义 {{ fmt(position.notional) }} U</em>
-                      </span>
-                    </div>
-                    <div class="plan-row">
-                      <span class="k">风险</span>
-                      <span class="v">
-                        {{ fmt(position.riskAmount) }} U
-                        <em>账户 {{ position.riskPercent }}%</em>
-                      </span>
-                    </div>
-                    <div class="plan-row">
-                      <span class="k">杠杆</span>
-                      <span class="v">
-                        {{ fmt(position.requiredLeverage, 2) }}x
-                        <em>建议 {{ fmt(position.leverageUsed, 2) }}x</em>
-                      </span>
-                    </div>
-                  </template>
-                  <div v-else class="plan-row">
-                    <span class="k">仓位</span>
-                    <span class="v muted">—</span>
-                  </div>
-                  <div
-                    v-if="guard && !guard.passed && guard.violations.length"
-                    class="plan-row"
-                  >
-                    <span class="k">护栏</span>
-                    <span class="v bad">
-                      {{ guard.violations.map(v => v.desc || v.id).join('；') }}
-                    </span>
-                  </div>
-                </div>
-
-                <!-- 每次最该守住的那句话，跟计划放在一起 -->
-                <div v-if="result.judge.coachLine" class="coach-inline">
-                  <span class="k">⚠️ 当前最该守住的</span>
-                  <p class="coach-line">{{ result.judge.coachLine }}</p>
                 </div>
               </section>
 
-              <!-- tab 4：市场与周期 -->
+              <!-- tab 2（最后一个）：市场与周期 -->
               <template v-else>
                 <section class="panel">
                   <h2>市场热度 <span class="tag">交易所数据</span></h2>
@@ -657,79 +417,38 @@ const tfCols: Column<TfStat>[] = [
 
                 <section class="panel">
                   <h2>
-                    多周期趋势
-                    <span class="tag">代码统计 · AI 据此判断周期是否一致</span>
+                    各周期行情
+                    <span class="tag">发给 AI 的就是这些文字</span>
                   </h2>
-                  <DataTable :columns="tfCols" :rows="result.timeframes">
-                    <template #close="{row}">{{ fmt(row.close) }}</template>
-                    <template #trend="{row}">
-                      <span
-                        :class="
-                          row.trend === 'up'
-                            ? 'v ok'
-                            : row.trend === 'down'
-                              ? 'v bad'
-                              : 'v muted'
-                        "
-                      >
-                        {{ TREND_TEXT[row.trend] ?? row.trend }}
-                      </span>
-                    </template>
-                    <template #netChangePct="{row}">
-                      <span :class="row.netChangePct >= 0 ? 'v ok' : 'v bad'">
-                        {{ signedPct(row.netChangePct) }}
-                      </span>
-                    </template>
-                    <template #rangePct="{row}">
-                      {{ fixed(row.rangePct, 2) }}%
-                    </template>
-                    <template #volRatio="{row}">
-                      {{ fixed(row.volRatio, 2) }}
-                    </template>
-                    <template #structure="{row}">
-                      <span :title="structureFull(row.structure)">
-                        {{ structureText(row.structure) }}
-                      </span>
-                    </template>
-                  </DataTable>
+                  <div class="blocks">
+                    <details
+                      v-for="b in result.blocks"
+                      :key="b.timeframe"
+                      class="block"
+                      :open="b.primary"
+                    >
+                      <summary>
+                        <b>{{ b.timeframe }}</b>
+                        <span v-if="b.primary" class="tag">主周期</span>
+                        <span class="dim">
+                          {{
+                            b.days === null ? '图上那段' : `最近 ${b.days} 天`
+                          }}
+                          · {{ b.bars }} 根 · {{ b.from }} → {{ b.to }}
+                        </span>
+                      </summary>
+                      <pre class="block-text">{{ b.text }}</pre>
+                    </details>
+                  </div>
                 </section>
               </template>
-
-              <!-- 后续怎么跟：已开 / 还没开 分开写 -->
-              <section
-                v-if="exitHolding.length || exitWatching.length"
-                class="panel"
-              >
-                <h2>
-                  后续怎么跟
-                  <span class="tag">只用当下数据能验证的条件</span>
-                </h2>
-
-                <div v-if="exitHolding.length" class="exit-block">
-                  <span class="badge">已开单 · 必须走</span>
-                  <ul class="checklist">
-                    <li v-for="e in exitHolding" :key="e" class="bad">
-                      <span class="rule">{{ e }}</span>
-                    </li>
-                  </ul>
-                </div>
-
-                <div v-if="exitWatching.length" class="exit-block">
-                  <span class="badge">还没开 · 出现才回头看</span>
-                  <ul class="checklist">
-                    <li v-for="e in exitWatching" :key="e" class="warn">
-                      <span class="rule">{{ e }}</span>
-                    </li>
-                  </ul>
-                </div>
-              </section>
             </template>
           </div>
         </template>
 
         <!-- ② 历史分析：只在切到这个 tab 时显示 -->
-        <div v-else class="scroll-body">
-          <section class="panel">
+        <div v-else-if="leftTab === 'history'" class="scroll-body">
+          <section class="panel hist-panel">
             <h2>
               {{ symbol }} 的历史分析
               <span class="tag">共 {{ historyTotal }} 条</span>
@@ -737,12 +456,21 @@ const tfCols: Column<TfStat>[] = [
             <div v-if="historyError" class="dim">
               （读取失败：{{ historyError }}）
             </div>
-            <ul v-else-if="history.length" class="hist">
+            <ul v-else ref="histBox" class="hist">
               <li v-for="h in history" :key="h.id">
                 <RouterLink :to="`/history?id=${h.id}`">
                   <span class="t">{{ bjShort(h.createdAt) }}</span>
-                  <span class="grade" :class="(h.grade ?? '').toLowerCase()">
-                    {{ h.grade ?? '—' }}
+                  <!-- 跟「预测历史」同一套标签体系，这里左右只摆得下两个 -->
+                  <span class="tags">
+                    <span
+                      v-for="t in (h.tags ?? []).slice(0, 2)"
+                      :key="t.name"
+                      class="tag"
+                    >
+                      {{ t.name }}
+                      <i v-if="t.probability">{{ t.probability }}%</i>
+                    </span>
+                    <span v-if="!(h.tags ?? []).length" class="dim">—</span>
                   </span>
                   <span
                     class="v"
@@ -756,24 +484,58 @@ const tfCols: Column<TfStat>[] = [
                         : '—'
                     }}
                   </span>
-                  <span
-                    class="out"
-                    :class="h.outcome ? OUTCOME_TONE[h.outcome] : 'dim'"
-                  >
-                    {{ h.outcome ? OUTCOME_TEXT[h.outcome] : '未结算' }}
-                  </span>
-                  <span
-                    v-if="h.rMultiple !== null"
-                    class="r"
-                    :class="h.rMultiple > 0 ? 'ok' : 'bad'"
-                  >
-                    {{ fixed(h.rMultiple) }}R
-                  </span>
                 </RouterLink>
               </li>
             </ul>
-            <p v-else class="hint">{{ symbol }} 还没有分析记录。</p>
+            <p v-if="!historyError && !history.length" class="hint">
+              {{ symbol }} 还没有分析记录。
+              <template v-if="historyPages > 1">
+                （第 {{ historyPage }} 页是空的，翻回第 1 页看看）
+              </template>
+            </p>
+
+            <!-- 分页：一页放不下就翻 -->
+            <div v-if="historyPages > 1" class="pager">
+              <button
+                class="ghost tiny"
+                :disabled="historyPage <= 1"
+                @click="historyGo(-1)"
+              >
+                上一页
+              </button>
+              <span class="dim">
+                第 {{ historyPage }} / {{ historyPages }} 页 · 每页
+                {{ historyPageSize }}
+              </span>
+              <button
+                class="ghost tiny"
+                :disabled="historyPage >= historyPages"
+                @click="historyGo(1)"
+              >
+                下一页
+              </button>
+            </div>
+
+            <div v-if="historyTotal > history.length" class="hist-more">
+              <RouterLink :to="`/history?symbol=${symbol}`">
+                去「历史」页看全部 {{ historyTotal }} 条 →
+              </RouterLink>
+            </div>
           </section>
+        </div>
+
+        <!-- ③ 添加案例：币种/周期/时间段都跟随右侧，AI 提炼后入库 -->
+        <div v-else class="scroll-body">
+          <CollectForm
+            compact
+            :symbol="symbol"
+            :timeframe="chartTf"
+            :start-date="chartFrom"
+            :range="chartRange"
+            :drawing="rangeDrawing"
+            @draw-range="rangeDrawing = $event"
+            @clear:select="clearChartRange"
+          />
         </div>
       </div>
 
@@ -783,9 +545,17 @@ const tfCols: Column<TfStat>[] = [
           class="chart-side"
           :symbol="symbol"
           :timeframe="chartTf"
-          :plan="chartPlan"
+          :from="chartFrom"
+          :until="chartUntil"
+          :selectable="chartSelectable"
+          :range="chartRange"
+          :drawing="rangeDrawing"
           @update:timeframe="chartTf = $event"
-          @error="error = $event"
+          @update:from="chartFrom = $event"
+          @update:drawing="rangeDrawing = $event"
+          @select="onPickRange"
+          @clear:select="clearChartRange"
+          @error="onChartError"
         />
       </aside>
     </div>

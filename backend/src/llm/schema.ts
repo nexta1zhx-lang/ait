@@ -1,67 +1,48 @@
 import {z} from 'zod'
 
-export const takeProfitSchema = z.object({
-  label: z.string().catch('TP'),
-  price: z.number(),
-  r: z.number().catch(0),
-  reducePercent: z.number().catch(0)
+/**
+ * 开单判断的输出结构 —— **只有四个字段**。
+ *
+ * 2026-10-02 大简化：原来的 perTimeframe / checklist(通用前置+档位专属) /
+ * takeProfits / stopLoss / entry / direction / exitPlan / knowledgeRefs /
+ * coachLine / failedCritical / verdictReason **全删了**。
+ *
+ * 现在 AI 只回：**档位 + 标签 + 理由 + 结论**。
+ * 账户、仓位、杠杆、止损止盈、准入清单、知识库经验引用 —— 一概不需要。
+ *
+ * ⚠️ 档位取值必须和规则文档里的档位表一致 —— 不在枚举里的值会被 `.catch`
+ * 静默变成 `unclear`。改这里要同步：`frontend/src/format.ts` 的 GRADE_TEXT、
+ * `output/render.ts`、`scripts/history.ts`。
+ */
+export const judgeSchema = z.object({
+  /**
+   * 形状标签 + **每个标签的概率**（最多 4 个）。
+   *
+   * 优先从【可用的标签】（= 标签模板 ∪ 知识库里已用过的标签）里挑，
+   * 拼写要完全一致；池子里实在没有合适的才新造。
+   */
+  tags: z
+    .array(
+      z.object({
+        name: z.string(),
+        /** 这个形状 / 走势接下来出现的可能性（0~100） */
+        probability: z.number().min(0).max(100).catch(50)
+      })
+    )
+    .catch([]),
+  /** 为什么这么看：用我给的数据说话（哪几段、哪几个价位、量能怎么变的） */
+  reason: z.string().catch(''),
+  /** 接下来**最大概率**会走成什么样（方向和节奏，不写具体点位目标） */
+  outlook: z.string().catch(''),
+  /** 上面那个走势发生的概率（0~100 的整数） */
+  probability: z.number().min(0).max(100).catch(50),
+  /** go = 可做, wait = 等待, no_go = 不做 */
+  verdict: z.enum(['go', 'no_go', 'wait']).catch('wait'),
+  /** 推荐怎么做：现在做什么、什么条件下动手、什么条件下不碰 */
+  recommendation: z.string().catch('')
 })
 
-/** 开单判断的输出结构 —— 对齐我自己的体系（判档 + Checklist + 结论） */
-export const judgeSchema = z.object({
-  /** A 顺势单 / B 不该做 / C 期望突破 / unclear 说不清 */
-  grade: z.enum(['A', 'B', 'C', 'unclear']).catch('unclear'),
-  /** 判档依据：命中了哪几条 */
-  gradeReason: z.string().catch(''),
-  /** go = 可做, wait = 观望, no_go = 不可做 */
-  verdict: z.enum(['go', 'no_go', 'wait']).catch('wait'),
-  confidence: z.number().min(0).max(100).catch(50),
-  direction: z.enum(['long', 'short', 'none']).catch('none'),
-  entry: z
-    .object({
-      type: z.enum(['market', 'limit']).catch('market'),
-      price: z.number().nullable().catch(null)
-    })
-    .catch({type: 'market', price: null}),
-  stopLoss: z.number().nullable().catch(null),
-  takeProfits: z.array(takeProfitSchema).catch([]),
-  /** 逐条核对我的 Checklist */
-  checklist: z
-    .array(
-      z.object({
-        item: z.string(),
-        status: z.enum(['pass', 'fail', 'warn']).catch('warn'),
-        evidence: z.string().catch('')
-      })
-    )
-    .catch([]),
-  /** 命中的否决条款 */
-  failedCritical: z.array(z.string()).catch([]),
-  /** 差在哪一条 */
-  verdictReason: z.string().catch(''),
-  /**
-   * 后续怎么跟（只写当下数据能验证的触发条件，不预测）
-   *   holding  —— 已开单：什么情况下必须走
-   *   watching —— 还没开：出现什么条件才回头看
-   */
-  exitPlan: z
-    .object({
-      holding: z.array(z.string()).catch([]),
-      watching: z.array(z.string()).catch([])
-    })
-    .catch({holding: [], watching: []}),
-  /** 引用了知识库里哪些经验 */
-  knowledgeRefs: z
-    .array(
-      z.object({
-        symbol: z.string().catch(''),
-        timeframe: z.string().catch(''),
-        lesson: z.string().catch('')
-      })
-    )
-    .catch([]),
-  /** 结尾那句话：当前最该守住的规则 */
-  coachLine: z.string().catch('')
-})
+/** 标签最多留几个（模型偶尔会多给，这里兜一道） */
+export const MAX_TAGS = 4
 
 export type JudgeParsed = z.infer<typeof judgeSchema>

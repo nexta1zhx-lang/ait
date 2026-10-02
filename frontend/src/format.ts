@@ -102,6 +102,22 @@ export function bjTime(input: number | string | Date, withDate = true): string {
   return withDate ? `${p.year}-${p.month}-${p.day} ${time}` : time
 }
 
+/** 毫秒 → 'YYYY-MM-DDTHH:mm'（北京时间），给 <input type="datetime-local"> 用 */
+export function bjInputValue(input: number | string | Date): string {
+  const d = typeof input === 'number' ? new Date(input) : new Date(input)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = bjParts(d)
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`
+}
+
+/** 'YYYY-MM-DDTHH:mm'（按北京时间理解）→ 毫秒；非法给 0 */
+export function bjInputToMs(v: string): number {
+  if (!v) return 0
+  const withSec = v.length === 16 ? `${v}:00` : v
+  const ms = new Date(`${withSec}+08:00`).getTime()
+  return Number.isFinite(ms) ? ms : 0
+}
+
 /** MM/DD HH:mm */
 export function bjShort(input: number | string | Date): string {
   const d =
@@ -129,20 +145,77 @@ export function ago(input: number | string | Date): string {
 export const TREND_TEXT: Record<string, string> = {
   up: '↑ 上涨',
   down: '↓ 下跌',
-  range: '→ 震荡'
+  range: '→ 震荡',
+  // 极少数情况下某周期没给方向（数据不足），模型会明确回 unknown
+  unknown: '— 无方向数据'
 }
 
+/**
+ * 档位文案。
+ *
+ * ⚠️ key 必须和 `backend/src/llm/schema.ts` 的 grade 枚举一模一样 ——
+ * 对不上的会直接显示成原始值（如「C」），看着像没翻译。
+ */
 export const GRADE_TEXT: Record<string, string> = {
   A: 'A 档 · 顺势单',
+  'A-W': 'A-W 档 · 顺势双底',
+  S: 'S 档 · 突破',
+  V: 'V 档 · 超跌极速V反',
   B: 'B 档 · 不该做',
-  C: 'C 档 · 期望突破',
   unclear: '说不清'
 }
 
+/**
+ * 档位颜色：顺势三档（A / A-W / S）是绿的，逆势 V 是黄的，B 是红的。
+ * 对应 `style.css` 里的 `.grade.*`。
+ */
+export function gradeTone(g?: string | null): string {
+  if (!g) return ''
+  if (g === 'B') return 'b'
+  if (g === 'V') return 'v'
+  if (g === 'unclear') return 'unclear'
+  return g.toLowerCase()
+}
+
+/**
+ * 这段行情是什么。
+ *
+ * 由 AI 客观判断（拉升 / 下跌 / 横盘），**不套我自己的 A/B/C 档** ——
+ * 分不分级、怎么分级是我自己打标签的事。
+ */
+export const MOVE_TEXT: Record<string, {label: string; cls: string}> = {
+  up: {label: '↑ 拉升', cls: 'up'},
+  down: {label: '↓ 下跌', cls: 'down'},
+  range: {label: '→ 横盘', cls: 'range'}
+}
+
+export function moveText(m?: string | null): string {
+  if (!m) return '—'
+  return MOVE_TEXT[m]?.label ?? m
+}
+
+export function moveCls(m?: string | null): string {
+  if (!m) return 'none'
+  return MOVE_TEXT[m]?.cls ?? 'none'
+}
+
+/**
+ * 结论的中文说法 —— **只在这一份**。
+ *
+ * 筛选栏、结论分布饼图、列表/详情里的徽标全从它取，
+ * 别再各处自己写「等 / 观望」这种两套词。
+ * （key 就是 AI 输出契约里的 `verdict` 取值）
+ */
+export const VERDICT_LABEL: Record<string, string> = {
+  go: '可做',
+  wait: '观望',
+  no_go: '不可做'
+}
+
 export const VERDICT_TEXT: Record<string, [string, string]> = {
-  go: ['✅ 可做', 'go'],
-  wait: ['⏸ 观望', 'wait'],
-  no_go: ['⛔ 不可做', 'no']
+  go: [`✅ ${VERDICT_LABEL.go}`, 'go'],
+  wait: [`⏸ ${VERDICT_LABEL.wait}`, 'wait'],
+  no_go: [`⛔ ${VERDICT_LABEL.no_go}`, 'no']
 }
 
 /** 结构简称：高点↑ 低点↑ */

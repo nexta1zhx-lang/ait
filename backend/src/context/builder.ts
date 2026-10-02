@@ -1,4 +1,13 @@
-import {Candle, MarketSnapshot, StructureState, TimeframeTrend} from '../types'
+import {MarketHeat, MarketSnapshot, SeriesBlock} from '../types'
+
+/**
+ * 行情快照 → 喂给 AI 的文本。
+ *
+ * ⚠️ **这里不算任何口径**（不变量比、不找摆点、不算区间位置）——
+ * 每个周期就是把 K 线**切成小段读出来**（`analysis/describe.ts` 的
+ * `describeSeries`），跟知识库收录案例时同一套做法。
+ * AI 自己从这些数字里读形状。
+ */
 
 function fmt(n: number | null | undefined, digits = 2): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return 'n/a'
@@ -8,107 +17,88 @@ function fmt(n: number | null | undefined, digits = 2): string {
   })
 }
 
-function fmtTime(ts: number): string {
-  return new Date(ts).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+/** 北京时间，到分钟 */
+function bjTime(ts: number): string {
+  if (!Number.isFinite(ts) || ts <= 0) return 'n/a'
+  return new Date(ts + 8 * 3600_000)
+    .toISOString()
+    .replace('T', ' ')
+    .slice(0, 16)
 }
 
-function trendLabel(t: TimeframeTrend['trend']): string {
-  return t === 'up'
-    ? '上涨结构(up)'
-    : t === 'down'
-      ? '下跌结构(down)'
-      : '震荡(range)'
+/** 天数说人话：3 天 / 12 小时 / 45 分钟 */
+function daysText(days: number, tf: string): string {
+  const ms = days * 24 * 3600_000
+  if (days >= 1) return `最近 ${Number(days.toFixed(2))} 天`
+  if (ms >= 3600_000) return `最近 ${Math.round(ms / 3600_000)} 小时`
+  if (tf === '5m' || tf === '15m') return `最近 ${Math.round(ms / 60_000)} 分钟`
+  return `最近 ${Number(days.toFixed(2))} 天`
 }
 
-/** 结构描述：更高的高点 / 更高的低点 等 */
-function structureLabel(s: StructureState): string {
-  const parts: string[] = []
-  if (s.higherHighs) parts.push('更高的高点')
-  if (s.higherLows) parts.push('更高的低点')
-  if (s.lowerHighs) parts.push('更低的高点')
-  if (s.lowerLows) parts.push('更低的低点')
-  return parts.length ? parts.join(' + ') : '结构不明'
-}
-
-function tfBlock(t: TimeframeTrend): string {
+function heatBlock(h: MarketHeat): string[] {
+  const pct = (v: number | null) =>
+    v === null ? 'n/a' : `${Number(v.toFixed(2))}%`
   return [
-    `#### ${t.timeframe}`,
-    `- 收盘: ${fmt(t.close)}`,
-    `- 趋势: ${trendLabel(t.trend)}（${structureLabel(t.structure)}）`,
-    `- 区间净涨跌: ${fmt(t.netChangePct, 2)}%   区间振幅: ${fmt(t.rangePct, 2)}%`,
-    `- 量比(当前量/近20根均量): ${fmt(t.volRatio, 2)}`,
-    `- 该周期波段高 / 低: ${fmt(t.structure.swingHigh)} / ${fmt(t.structure.swingLow)}`
-  ].join('\n')
+    '## 市场热度',
+    `- 24h 涨跌 / 振幅: ${pct(h.change24hPct)} / ${pct(h.amplitude24hPct)}`,
+    `- 24h 最高 / 最低: ${fmt(h.high24h)} / ${fmt(h.low24h)}`,
+    `- 24h 成交额: ${fmt(h.quoteVolume24h, 0)}`,
+    `- 资金费率: ${h.fundingRate === null ? 'n/a（现货或无数据）' : fmt(h.fundingRate, 4)}`,
+    `- 持仓量: ${h.openInterest === null ? 'n/a' : fmt(h.openInterest, 0)}`,
+    `- 持仓量变化: ${pct(h.openInterestChangePct)}`,
+    `- 多空持仓人数比: ${h.longShortRatio === null ? 'n/a' : fmt(h.longShortRatio, 2)}`
+  ]
 }
 
-function candleRow(c: Candle): string {
-  return `${fmtTime(c.timestamp)} | ${fmt(c.open)} | ${fmt(c.high)} | ${fmt(c.low)} | ${fmt(c.close)} | ${fmt(c.volume, 0)}`
+/** 一个周期：标题 + describeSeries 切出来的那段文字 */
+function blockSection(b: SeriesBlock): string[] {
+  const head =
+    `### ${b.timeframe}（${daysText(b.days, b.timeframe)} → ${b.bars} 根` +
+    `${b.from && b.to ? ` · ${bjTime(b.from)} → ${bjTime(b.to)}` : ''}` +
+    `）${b.primary ? ' **← 主周期（图上这个）**' : ''}`
+  return [head, '', b.text.trim()]
 }
 
-/** 把行情快照压缩成 LLM 可读的上下文（趋势 + 市场热度 + 周期，无技术指标） */
+/** 把行情快照写成 LLM 可读的文本 */
 export function buildContext(snap: MarketSnapshot): string {
   const lines: string[] = []
-  const h = snap.heat
 
-  lines.push(`# 行情快照（趋势 + 市场热度 + 周期）`)
+  lines.push('# 行情快照')
   lines.push('')
-  lines.push(`## 基本信息`)
+  lines.push('## 基本信息')
   lines.push(`- 币种: ${snap.symbol}`)
   lines.push(`- 交易所: ${snap.exchange}`)
   lines.push(`- 当前价: ${fmt(snap.price)}`)
-  lines.push(`- 数据时间: ${fmtTime(snap.timestamp)}`)
+  lines.push(`- 现在: ${bjTime(snap.timestamp)}（北京）`)
+  lines.push(`- 主周期: ${snap.primary}`)
   lines.push('')
 
-  lines.push(`## 市场热度`)
-  lines.push(
-    `- 24h 涨跌: ${h.change24hPct === null ? 'n/a' : fmt(h.change24hPct, 2) + '%'}`
-  )
-  lines.push(
-    `- 24h 振幅: ${h.amplitude24hPct === null ? 'n/a' : fmt(h.amplitude24hPct, 2) + '%'}`
-  )
-  lines.push(`- 24h 最高 / 最低: ${fmt(h.high24h)} / ${fmt(h.low24h)}`)
-  lines.push(`- 24h 成交额: ${fmt(h.quoteVolume24h, 0)}`)
-  lines.push(
-    `- 资金费率: ${h.fundingRate === null ? 'n/a（现货或无数据）' : fmt(h.fundingRate, 4)}`
-  )
-  lines.push(
-    `- 持仓量: ${h.openInterest === null ? 'n/a' : fmt(h.openInterest, 0)}`
-  )
-  lines.push(
-    `- 持仓量变化: ${h.openInterestChangePct === null ? 'n/a' : fmt(h.openInterestChangePct, 2) + '%'}`
-  )
-  lines.push(
-    `- 多空持仓人数比: ${h.longShortRatio === null ? 'n/a' : fmt(h.longShortRatio, 2)}`
-  )
+  lines.push(...heatBlock(snap.heat))
   lines.push('')
 
-  lines.push(`## 趋势参考结构（近 ${snap.structure.lookback} 根 1H）`)
-  lines.push(
-    `- 区间高 / 低: ${fmt(snap.structure.swingHigh)} / ${fmt(snap.structure.swingLow)}`
-  )
-  lines.push(
-    `- 最近波段高（做空止损参考）: ${fmt(snap.structure.lastSwingHigh)}`
-  )
-  lines.push(
-    `- 最近波段低（做多止损参考）: ${fmt(snap.structure.lastSwingLow)}`
-  )
-  lines.push(`- 结构: ${structureLabel(snap.structure)}`)
+  lines.push('## 各周期行情（把 K 线切成小段读出来的）')
   lines.push('')
-
-  lines.push(`## 多周期趋势（周期共振判断）`)
-  lines.push('')
-  for (const t of snap.timeframes) {
-    lines.push(tfBlock(t))
+  for (const b of snap.blocks) {
+    lines.push(...blockSection(b))
     lines.push('')
   }
 
-  if (snap.recentCandles.length > 0) {
-    lines.push(`## 最近 K 线 (时间 | 开 | 高 | 低 | 收 | 量)`)
-    for (const c of snap.recentCandles) {
-      lines.push(candleRow(c))
-    }
-    lines.push('')
-  }
+  lines.push('## 怎么用这些数据')
+  lines.push('')
+  lines.push(
+    '- 每个周期都是**同一套读法**：先说整段概览，再按时间均分成几小段，'
+  )
+  lines.push(
+    '  每段给开高低收 / 涨跌 / 量能变化 —— 全部由 K 线与成交量直接算出来，'
+  )
+  lines.push('  **没有任何技术指标**（无 MACD / RSI / 布林 / ATR）')
+  lines.push(
+    '- 「主周期」是我在图上看的那个，其余周期是拿来对照更大 / 更小级别的'
+  )
+  lines.push('- 段与段之间的**转折**（哪一段开始放量、哪一段动能掉了、')
+  lines.push('  哪一段破了前一段的高/低点）才是重点，不要只念一遍数字')
+  lines.push('- 严禁编造：只能用上面出现过的数字，没给的说不知道')
+  lines.push('')
 
   return lines.join('\n')
 }

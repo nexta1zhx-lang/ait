@@ -1,12 +1,5 @@
 import {query, queryOne} from './client'
-import type {
-  Expectancy,
-  GuardrailResult,
-  MarketSnapshot,
-  StructureState,
-  TimeframeTrend,
-  Violation
-} from '../types'
+import type {MarketSnapshot} from '../types'
 import type {JudgeResult} from '../llm/client'
 import type {TokenUsage} from '../llm/pricing'
 
@@ -15,7 +8,7 @@ import type {TokenUsage} from '../llm/pricing'
  *
  * 一次分析 = 一行 `analyses`：
  *   输入（问的是谁、什么周期、什么假设）
- * + 结论（档位 / 结果 / 置信度）
+ * + 结论（档位 / 结果）
  * + 计划（入场 / 止损 / 止盈 / R / 仓位）
  * + 护栏（红线、一票否决）
  * + 全量存档（AI 原始输出、行情快照，回放用）
@@ -24,25 +17,11 @@ import type {TokenUsage} from '../llm/pricing'
  * 规则全文不在这里，按 hash 存在 `rules_versions`，避免每行重复 6.6K。
  */
 
-/** 事后结果分类 */
-export type OutcomeKind =
-  | 'tp1'
-  | 'tp2'
-  | 'tp3'
-  | 'sl'
-  | 'breakeven'
-  | 'expired'
-  | 'skipped'
-
-export const OUTCOME_LABEL: Record<OutcomeKind, string> = {
-  tp1: '到 TP1',
-  tp2: '到 TP2',
-  tp3: '到 TP3',
-  sl: '打止损',
-  breakeven: '平手离场',
-  expired: '到期没触发',
-  skipped: '看了没做'
-}
+/*
+ * 事后结算（outcome / R 倍数 / MFE / MAE）已于 2026-10-02 删除：
+ * 没有止损止盈就没有 R 可算，也就没有胜率统计可言。
+ * 表里那几列还留着（老记录要能读），新记录一律 null。
+ */
 
 export interface SaveAnalysisInput {
   symbol: string
@@ -50,11 +29,9 @@ export interface SaveAnalysisInput {
   exchange: string
   marketType: string
   timeframes: string[]
-  assumedWinRate: number
   chartTimeframe: string
+  /** AI 的四个字段：档位 / 标签 / 理由 / 结论 */
   judge: JudgeResult
-  guardrails: GuardrailResult
-  expectancy: Expectancy | null
   snapshot: MarketSnapshot
   meta: Record<string, unknown>
   model: string
@@ -67,6 +44,17 @@ export interface SaveAnalysisInput {
   attempts: number
 }
 
+/**
+ * 存进 `analyses.tags` 的形状标签 + 概率。
+ *
+ * ⚠️ 2026-10-02 之前的记录存的是**纯字符串数组**，读回来当 `string` 用 ——
+ * 展示前要判一下 `typeof`（前端 `tagsOf()` 就是这么兼容的）。
+ */
+export interface JudgeTagRow {
+  name: string
+  probability: number
+}
+
 export interface AnalysisRow {
   id: number
   symbol: string
@@ -74,62 +62,46 @@ export interface AnalysisRow {
   marketType: string
   timeframes: string[]
   grade: string | null
+  /** AI 那段 reason 存在这一列（列名是老名字，没改，省一次迁移） */
   gradeReason: string | null
   verdict: string | null
-  confidence: number | null
-  direction: string | null
+  /** AI 挑的形状标签 + 概率（跟知识库同一份标签池） */
+  tags: JudgeTagRow[]
   price: number | null
-  entryPrice: number | null
-  entryType: string | null
-  stopLoss: number | null
-  stopPct: number | null
-  tp1Price: number | null
-  tp2Price: number | null
-  tp3Price: number | null
-  rrFinal: number | null
-  expectancyR: number | null
-  positionQty: number | null
-  leverageUsed: number | null
-  guardPassed: boolean | null
-  veto: string[]
-  redLines: string[]
   model: string | null
   rulesHash: string | null
-  knowledgeRefs: {symbol: string; timeframe: string; lesson: string}[]
   costUsd: number | null
   latencyMs: number | null
-  outcome: OutcomeKind | null
-  rMultiple: number | null
-  outcomeAt: string | null
-  outcomeNote: string | null
   createdAt: string
 }
 
-/** 详情：附带回放用的全量 JSON + 当时的规则全文 */
+/**
+ * 详情：附带回放用的全量 JSON + 当时的规则全文。
+ *
+ * ⚠️ 表里还留着一堆**废弃列**（仓位 / 止损止盈 / R / 护栏 / 结算…）——
+ * 那是给老记录看的，新记录一律写 null；接口也不再返回它们。
+ */
 export interface AnalysisDetail extends AnalysisRow {
   ccxtSymbol: string | null
-  assumedWinRate: number | null
+  /** 老记录才有（新记录把 reason 存在 gradeReason 列） */
   verdictReason: string | null
-  positionNotional: number | null
-  riskAmount: number | null
   chartTimeframe: string | null
   promptTokens: number | null
   completionTokens: number | null
   attempts: number | null
-  mfePct: number | null
-  maePct: number | null
-  outcomePrice: number | null
-  /** AI 完整输出（checklist / exitPlan / coachLine 都在里面） */
+  /** AI 的四个字段：档位 / 标签 / 理由 / 结论 */
   result: JudgeResult
-  /** 护栏逐条明细 */
-  guardrails: GuardrailResult
-  expectancy: Expectancy | null
-  /** 行情快照：多周期统计 + 市场热度 + 价格结构 */
+  /** 行情快照：当时各周期各拉了多少根（K 线本身不存） */
   snapshot: {
     price?: number
-    timeframes?: TimeframeTrend[]
+    primary?: string
+    blocks?: {
+      timeframe: string
+      primary?: boolean
+      days?: number
+      bars?: number
+    }[]
     heat?: Record<string, unknown>
-    structure?: StructureState
   }
   meta: Record<string, unknown>
   /** 当时用的规则全文（从 rules_versions 带出来） */
@@ -173,16 +145,9 @@ export async function saveRulesVersion(r: {
 /** 存一次分析，返回 id */
 export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
   const j = input.judge
-  const g = input.guardrails
-  const p = g.position
-  const tps = j.takeProfits ?? []
-  const entry = j.entry?.price ?? null
-  const stop = j.stopLoss ?? null
-  const stopPct =
-    entry !== null && stop !== null && entry !== 0
-      ? Math.round(((stop - entry) / entry) * 100 * 10000) / 10000
-      : null
 
+  // ⚠️ 账户 / 仓位 / 止损止盈 / 护栏 / 期望值 / 清单 这一整套已于 2026-10-02 删除。
+  // 对应的列**还留在表里**（老记录要能读），新记录一律写 null / []。
   const rows = await query<{id: string}>(
     `INSERT INTO analyses (
        symbol, ccxt_symbol, exchange, market_type, timeframes, assumed_win_rate,
@@ -194,7 +159,7 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
        model, rules_hash, knowledge_refs, llm_usage_id,
        prompt_tokens, completion_tokens, cost_usd, latency_ms, attempts,
        chart_timeframe,
-       result, guardrails, expectancy, snapshot, meta
+       result, guardrails, expectancy, snapshot, meta, tags
      ) VALUES (
        $1, $2, $3, $4, $5, $6,
        $7, $8, $9, $10, $11, $12,
@@ -203,7 +168,7 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
        $25, $26, $27, $28, $29, $30,
        $31, $32, $33, $34, $35, $36,
        $37, $38, $39, $40, $41, $42,
-       $43, $44
+       $43, $44, $45
      ) RETURNING id`,
     [
       input.symbol,
@@ -211,33 +176,37 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
       input.exchange,
       input.marketType,
       input.timeframes,
-      input.assumedWinRate,
-      s(j.grade),
-      s(j.gradeReason),
+      null, // assumed_win_rate（期望值已删）
+      null, // grade（不再判档）
+      // grade_reason 列现在存的就是 AI 的那段 reason
+      s(j.reason),
       s(j.verdict),
-      s(j.verdictReason),
-      n(j.confidence),
-      s(j.direction),
+      null, // verdict_reason（已废弃）
+      // 「把握 / 置信度」已废弃：模型自报的数字没有任何依据、也不参与计算，
+      // 列留着读老记录，新记录一律写 null
+      null,
+      null, // direction（已废弃）
       input.snapshot.price ?? null,
-      entry,
-      j.entry?.type ?? null,
-      stop,
-      stopPct,
-      tps[0]?.price ?? null,
-      tps[1]?.price ?? null,
-      tps[2]?.price ?? null,
-      n(g.rMultiple),
-      input.expectancy?.expectancyR ?? null,
-      p?.quantity ?? null,
-      p?.notional ?? null,
-      p?.riskAmount ?? null,
-      p?.leverageUsed ?? null,
-      g.passed ?? null,
-      j.failedCritical ?? [],
-      (g.violations ?? []).map((v: Violation) => v.desc || v.id),
+      null, // entry_price
+      null, // entry_type
+      null, // stop_loss
+      null, // stop_pct
+      null, // tp1_price
+      null, // tp2_price
+      null, // tp3_price
+      null, // rr_final
+      null, // expectancy_r
+      null, // position_qty
+      null, // position_notional
+      null, // risk_amount
+      null, // leverage_used
+      null, // guard_passed
+      [], // veto
+      [], // red_lines
       input.model,
       input.rulesHash,
-      JSON.stringify(j.knowledgeRefs ?? []),
+      // 不再注入知识库经验，所以没有可引用的条目
+      JSON.stringify([]),
       input.llmUsageId,
       input.usage.promptTokens,
       input.usage.completionTokens,
@@ -246,15 +215,22 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
       input.attempts,
       input.chartTimeframe,
       JSON.stringify(j),
-      JSON.stringify(g),
-      input.expectancy ? JSON.stringify(input.expectancy) : null,
+      null, // guardrails（已废弃）
+      null, // expectancy（已废弃）
       JSON.stringify({
         price: input.snapshot.price,
-        timeframes: input.snapshot.timeframes,
-        heat: input.snapshot.heat,
-        structure: input.snapshot.structure
+        primary: input.snapshot.primary,
+        blocks: input.snapshot.blocks.map(b => ({
+          timeframe: b.timeframe,
+          primary: b.primary,
+          days: b.days,
+          bars: b.bars
+        })),
+        heat: input.snapshot.heat
       }),
-      JSON.stringify(input.meta)
+      JSON.stringify(input.meta),
+      // tags（新列）—— 跟知识库共用同一份标签池
+      JSON.stringify(j.tags ?? [])
     ]
   )
 
@@ -268,13 +244,8 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
 /* ------------------------------------------------------------------ */
 
 const LIST_COLS = `id, symbol, exchange, market_type, timeframes,
-  grade, grade_reason, verdict, confidence, direction,
-  price, entry_price, entry_type, stop_loss, stop_pct,
-  tp1_price, tp2_price, tp3_price, rr_final, expectancy_r,
-  position_qty, leverage_used,
-  guard_passed, veto, red_lines,
-  model, rules_hash, knowledge_refs, cost_usd, latency_ms,
-  outcome, r_multiple, outcome_at, outcome_note, created_at`
+  grade, grade_reason, verdict, tags, price, model, rules_hash, cost_usd,
+  latency_ms, created_at`
 
 interface RawRow {
   id: string
@@ -285,32 +256,12 @@ interface RawRow {
   grade: string | null
   grade_reason: string | null
   verdict: string | null
-  confidence: number | null
-  direction: string | null
+  tags: JudgeTagRow[] | null
   price: string | null
-  entry_price: string | null
-  entry_type: string | null
-  stop_loss: string | null
-  stop_pct: string | null
-  tp1_price: string | null
-  tp2_price: string | null
-  tp3_price: string | null
-  rr_final: string | null
-  expectancy_r: string | null
-  position_qty: string | null
-  leverage_used: string | null
-  guard_passed: boolean | null
-  veto: string[] | null
-  red_lines: string[] | null
   model: string | null
   rules_hash: string | null
-  knowledge_refs: {symbol: string; timeframe: string; lesson: string}[] | null
   cost_usd: string | null
   latency_ms: number | null
-  outcome: string | null
-  r_multiple: string | null
-  outcome_at: Date | null
-  outcome_note: string | null
   created_at: Date
 }
 
@@ -324,32 +275,12 @@ function mapRow(r: RawRow): AnalysisRow {
     grade: r.grade,
     gradeReason: r.grade_reason,
     verdict: r.verdict,
-    confidence: n(r.confidence),
-    direction: r.direction,
+    tags: r.tags ?? [],
     price: n(r.price),
-    entryPrice: n(r.entry_price),
-    entryType: r.entry_type,
-    stopLoss: n(r.stop_loss),
-    stopPct: n(r.stop_pct),
-    tp1Price: n(r.tp1_price),
-    tp2Price: n(r.tp2_price),
-    tp3Price: n(r.tp3_price),
-    rrFinal: n(r.rr_final),
-    expectancyR: n(r.expectancy_r),
-    positionQty: n(r.position_qty),
-    leverageUsed: n(r.leverage_used),
-    guardPassed: r.guard_passed,
-    veto: r.veto ?? [],
-    redLines: r.red_lines ?? [],
     model: r.model,
     rulesHash: r.rules_hash,
-    knowledgeRefs: r.knowledge_refs ?? [],
     costUsd: n(r.cost_usd),
     latencyMs: r.latency_ms,
-    outcome: (r.outcome as OutcomeKind) ?? null,
-    rMultiple: n(r.r_multiple),
-    outcomeAt: r.outcome_at ? r.outcome_at.toISOString() : null,
-    outcomeNote: r.outcome_note,
     createdAt: r.created_at.toISOString()
   }
 }
@@ -357,14 +288,14 @@ function mapRow(r: RawRow): AnalysisRow {
 export interface ListAnalysesOptions {
   /** 只看某个币种 */
   symbol?: string
-  /** 只看某个档位（A/B/C/unclear） */
+  /** 只看某个档位（A / A-W / S / V / B / unclear）—— 老记录才有 */
   grade?: string
   /** 只看某个结论（go/wait/no_go） */
   verdict?: string
+  /** 只看打了某个形状标签的（标签名要完全一致） */
+  tag?: string
   /** 只看可做的 */
   actionableOnly?: boolean
-  /** 只看还没结算的 */
-  pendingOnly?: boolean
   limit?: number
   offset?: number
 }
@@ -380,8 +311,10 @@ function listWhere(o: ListAnalysesOptions): {where: string; params: unknown[]} {
   if (o.symbol) add('symbol = ?', o.symbol.toUpperCase())
   if (o.grade) add('grade = ?', o.grade)
   if (o.verdict) add('verdict = ?', o.verdict)
+  // 标签是 `[{name,probability}]`，JSONB 包含判断：只要数组里有一条对象的 name 相同就算命中。
+  // 老记录里是纯字符串数组，命中不了 —— 这是故意的（那会儿的标签不是形状标签）
+  if (o.tag) add('tags @> ?::jsonb', JSON.stringify([{name: o.tag}]))
   if (o.actionableOnly) parts.push(`verdict = 'go'`)
-  if (o.pendingOnly) parts.push('outcome IS NULL')
 
   return {where: parts.length ? 'WHERE ' + parts.join(' AND ') : '', params}
 }
@@ -413,20 +346,12 @@ export async function getAnalysis(id: number): Promise<AnalysisDetail | null> {
   const r = await queryOne<
     RawRow & {
       ccxt_symbol: string | null
-      assumed_win_rate: string | null
       verdict_reason: string | null
-      position_notional: string | null
-      risk_amount: string | null
       chart_timeframe: string | null
       prompt_tokens: number | null
       completion_tokens: number | null
       attempts: number | null
-      mfe_pct: string | null
-      mae_pct: string | null
-      outcome_price: string | null
       result: JudgeResult | null
-      guardrails: GuardrailResult | null
-      expectancy: Expectancy | null
       snapshot: AnalysisDetail['snapshot'] | null
       meta: Record<string, unknown> | null
       rv_hash: string | null
@@ -451,20 +376,12 @@ export async function getAnalysis(id: number): Promise<AnalysisDetail | null> {
   return {
     ...base,
     ccxtSymbol: r.ccxt_symbol,
-    assumedWinRate: n(r.assumed_win_rate),
     verdictReason: r.verdict_reason,
-    positionNotional: n(r.position_notional),
-    riskAmount: n(r.risk_amount),
     chartTimeframe: r.chart_timeframe,
     promptTokens: r.prompt_tokens,
     completionTokens: r.completion_tokens,
     attempts: r.attempts,
-    mfePct: n(r.mfe_pct),
-    maePct: n(r.mae_pct),
-    outcomePrice: n(r.outcome_price),
     result: r.result ?? ({} as JudgeResult),
-    guardrails: r.guardrails ?? ({} as GuardrailResult),
-    expectancy: r.expectancy,
     snapshot: r.snapshot ?? {},
     meta: r.meta ?? {},
     rules: r.rv_hash
@@ -479,38 +396,8 @@ export async function getAnalysis(id: number): Promise<AnalysisDetail | null> {
 }
 
 /* ------------------------------------------------------------------ */
-/* 事后结算（复盘）                                                     */
+/* 删除                                                                */
 /* ------------------------------------------------------------------ */
-
-export async function settleAnalysis(
-  id: number,
-  o: {
-    outcome: OutcomeKind
-    outcomePrice?: number | null
-    rMultiple?: number | null
-    mfePct?: number | null
-    maePct?: number | null
-    note?: string | null
-  }
-): Promise<boolean> {
-  const rows = await query(
-    `UPDATE analyses SET
-       outcome = $2, outcome_at = now(), outcome_price = $3,
-       r_multiple = $4, mfe_pct = $5, mae_pct = $6, outcome_note = $7
-     WHERE id = $1
-     RETURNING id`,
-    [
-      id,
-      o.outcome,
-      o.outcomePrice ?? null,
-      o.rMultiple ?? null,
-      o.mfePct ?? null,
-      o.maePct ?? null,
-      o.note ?? null
-    ]
-  )
-  return rows.length > 0
-}
 
 export async function deleteAnalysis(id: number): Promise<boolean> {
   const rows = await query('DELETE FROM analyses WHERE id = $1 RETURNING id', [
@@ -523,104 +410,92 @@ export async function deleteAnalysis(id: number): Promise<boolean> {
 /* 统计                                                                */
 /* ------------------------------------------------------------------ */
 
-export interface GradeStat {
-  grade: string
+/**
+ * 存进 `analyses.tags` 的形状标签 + 概率。
+ *
+ * ⚠️ 2026-10-02 之前的记录存的是**纯字符串数组**，读回来当 `string` 用，
+ * 展示前记得判一下 `typeof`（前端 `tagsOf()` 就是这么干的）。
+ */
+export interface JudgeTagRow {
+  name: string
+  probability: number
+}
+export interface TagStat {
+  name: string
   calls: number
-  goCount: number
-  settled: number
-  winRate: number | null
-  avgR: number | null
-  totalR: number | null
+  /** 平均概率（0~100）；老记录没有概率就是 null */
+  avgProbability: number | null
 }
 
 export interface AnalysisStats {
   total: number
-  byGrade: GradeStat[]
-  /** 按币种：做过的次数 + 实际平均 R */
-  bySymbol: {
-    symbol: string
-    calls: number
-    settled: number
-    avgR: number | null
-  }[]
-  /** 还没结算的可做单 */
-  pending: number
+  byTag: TagStat[]
+  /** 按币种：做过多少次 */
+  bySymbol: {symbol: string; calls: number}[]
+  /** 按结论：go / wait / no_go（老记录没写结论的就是 unknown） */
+  byVerdict: {verdict: string; calls: number}[]
   costUsd: number
 }
 
-/** 档位统计：回答「A 档真的比 B 档好吗」 */
+/** 标签分布：每个形状标签出现了多少次、平均概率多少 */
 export async function analysisStats(days = 365): Promise<AnalysisStats> {
   const d = Math.max(1, Math.min(3650, Math.round(days)))
   const since = `now() - interval '${d} days'`
 
-  const [totals, byGrade, bySymbol] = await Promise.all([
-    query<{n: string; pending: string; cost: string}>(
+  const [totals, byTag, bySymbol, byVerdict] = await Promise.all([
+    query<{n: string; cost: string}>(
       `SELECT count(*)::text AS n,
-              count(*) FILTER (WHERE outcome IS NULL AND verdict = 'go')::text AS pending,
               COALESCE(sum(cost_usd), 0)::text AS cost
          FROM analyses WHERE created_at >= ${since}`
     ),
-    query<{
-      grade: string
-      calls: string
-      go_count: string
-      settled: string
-      wins: string
-      avg_r: string | null
-      total_r: string | null
-    }>(
-      `SELECT COALESCE(grade, 'unclear') AS grade,
+    query<{name: string; calls: string; avg_p: string | null}>(
+      // 只统计 `[{name,probability}]` 这种新结构；老记录的字符串标签直接排掉
+      `SELECT t->>'name' AS name,
               count(*)::text AS calls,
-              count(*) FILTER (WHERE verdict = 'go')::text AS go_count,
-              count(*) FILTER (WHERE outcome IS NOT NULL)::text AS settled,
-              count(*) FILTER (WHERE r_multiple > 0)::text AS wins,
-              avg(r_multiple) FILTER (WHERE outcome IS NOT NULL)::text AS avg_r,
-              sum(r_multiple) FILTER (WHERE outcome IS NOT NULL)::text AS total_r
-         FROM analyses
-        WHERE created_at >= ${since}
-        GROUP BY 1`
+              round(avg((t->>'probability')::numeric))::text AS avg_p
+         FROM analyses a, jsonb_array_elements(a.tags) t
+        WHERE a.created_at >= ${since}
+          AND jsonb_typeof(t) = 'object'
+          AND (t->>'name') IS NOT NULL
+          AND (t->>'probability') IS NOT NULL
+        GROUP BY 1
+        ORDER BY count(*) DESC, 1
+        LIMIT 20`
     ),
-    query<{
-      symbol: string
-      calls: string
-      settled: string
-      avg_r: string | null
-    }>(
-      `SELECT symbol,
-              count(*)::text AS calls,
-              count(*) FILTER (WHERE outcome IS NOT NULL)::text AS settled,
-              avg(r_multiple) FILTER (WHERE outcome IS NOT NULL)::text AS avg_r
+    query<{symbol: string; calls: string}>(
+      `SELECT symbol, count(*)::text AS calls
          FROM analyses
         WHERE created_at >= ${since}
         GROUP BY 1
         ORDER BY count(*) DESC
         LIMIT 30`
+    ),
+    query<{verdict: string; calls: string}>(
+      `SELECT COALESCE(verdict, 'unknown') AS verdict,
+              count(*)::text AS calls
+         FROM analyses
+        WHERE created_at >= ${since}
+        GROUP BY 1
+        ORDER BY count(*) DESC`
     )
   ])
 
   const t = totals[0]
   return {
     total: Number(t?.n ?? 0),
-    pending: Number(t?.pending ?? 0),
     costUsd: Number(t?.cost ?? 0),
-    byGrade: byGrade.map(r => {
-      const settled = Number(r.settled)
-      const wins = Number(r.wins)
-      return {
-        grade: r.grade,
-        calls: Number(r.calls),
-        goCount: Number(r.go_count),
-        settled,
-        winRate: settled > 0 ? wins / settled : null,
-        avgR: n(r.avg_r),
-        totalR: n(r.total_r)
-      }
-    }),
+    byTag: byTag.map(r => ({
+      name: r.name,
+      calls: Number(r.calls),
+      avgProbability: r.avg_p === null ? null : Number(r.avg_p)
+    })),
     bySymbol: bySymbol.map(r => ({
       symbol: r.symbol,
-      calls: Number(r.calls),
-      settled: Number(r.settled),
-      avgR: n(r.avg_r)
+      calls: Number(r.calls)
+    })),
+    byVerdict: byVerdict.map(r => ({
+      verdict: r.verdict,
+      calls: Number(r.calls)
     }))
   }
 }

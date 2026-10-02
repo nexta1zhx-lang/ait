@@ -2,7 +2,9 @@
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import * as LWC from 'lightweight-charts'
 import {fetchCandles, type Candle, type LevelSR} from '../api'
-import {bjShort, fmt} from '../format'
+import {CHART_BARS} from '../analyze'
+import TimeModal from './TimeModal.vue'
+import {bjInputToMs, bjInputValue, bjShort, bjTime, fmt} from '../format'
 
 /**
  * K 线图（TradingView Lightweight Charts）。
@@ -11,24 +13,132 @@ import {bjShort, fmt} from '../format'
  * 右侧会贴着价格轴显示每条线的价位相对当前价的百分比。
  */
 
-export interface ChartPlan {
-  entry?: {type: string; price: number | null}
-  stopLoss?: number | null
-  takeProfits?: {label: string; price: number}[]
-}
-
 const props = defineProps<{
   symbol: string
   timeframe: string
-  /** 上一次分析给出的关键价位 */
-  plan?: ChartPlan | null
+  /** 从哪一刻开始画：'YYYY-MM-DDTHH:mm'（北京时间）。空 = 画最近的 */
+  from?: string
+  /**
+   * 画到哪一刻为止（同上格式）。空 = 一直画到最新。
+   *
+   * 「测试」模式用：回到过去某一刻，图就不能再露出之后的行情，
+   * 否则人看到的是未来，而 AI 只看到当时 —— 两边根本不是同一局。
+   */
+  until?: string
+  /** 允许在图上拖出一个范围（「添加案例」才开） */
+  selectable?: boolean
+  /** 已经画好的范围（毫秒）—— 画面上会一直高亮着 */
+  range?: {from: number; to: number} | null
+  /** 是不是正在「等着我拖一段」。按钮在左边面板，这里只管状态 */
+  drawing?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'update:timeframe', v: string): void
+  (e: 'update:from', v: string): void
   (e: 'error', msg: string): void
   (e: 'loaded', candles: Candle[]): void
+  /** 拖完松手：这一段就是我要的 */
+  (e: 'select', v: {from: number; to: number; bars: number}): void
+  (e: 'clear:select'): void
+  /** 拖完了 / 按 Esc 了 → 退出拖动模式 */
+  (e: 'update:drawing', v: boolean): void
 }>()
+
+/** 'YYYY-MM-DDTHH:mm'（北京时间）→ 毫秒；空或无效给 0 */
+function rangeMs(v: string | undefined): number {
+  return v ? bjInputToMs(v) : 0
+}
+
+/** 拉多少根是**内部策略**，不往界面上摆（用户只看时间） */
+const DEFAULT_BARS = CHART_BARS
+/** 一遍最多拉多少根（防止区间太大把浏览器拖死） */
+const MAX_BARS = 3000
+
+/**
+ * 往前拖到底时，一次再补多少根（按周期定）。
+ *
+ * 目标是一眼能看出「又多了一段」，又不至于一次拉太多卡住：
+ * 5m≈3.5 天、15m≈10 天、1h≈41 天、4h≈100 天、1d≈400 天。
+ */
+const HISTORY_BARS: Record<string, number> = {
+  '5m': 1000,
+  '15m': 1000,
+  '1h': 1000,
+  '4h': 600,
+  '1d': 400
+}
+
+/** 一直往前翻的上限（保护浏览器，别无限堆） */
+const MAX_TOTAL_BARS = 20000
+
+const fromMs = computed(() => rangeMs(props.from))
+/** 右端时间点；没设 or 设成未来都等于「跟着现在走」 */
+const untilMs = computed(() => rangeMs(props.until))
+const testMode = computed(() => untilMs.value > 0 && untilMs.value < Date.now())
+
+/**
+ * 测试模式下最后一根**已收盘** K 线的开盘时间。
+ *
+ * 选 02:37 时，02:00~03:00 那根要丢掉 —— 它的最高/最低/收盘
+ * 都是 02:37 之后才知道的「未来」，跟 AI 看到的不一样。
+ */
+const lastClosedMs = computed(() =>
+  testMode.value ? (Math.floor(untilMs.value / tfMs()) - 1) * tfMs() : 0
+)
+
+/** 这次要画到哪一刻：测试模式钉在那一刻，否则就是现在 */
+function endMs(): number {
+  return testMode.value ? untilMs.value : Date.now()
+}
+
+/** 选了开始时间（且它确实在结束时间之前）就从那一刻画到结束时间 */
+const ranged = computed(() => fromMs.value > 0 && fromMs.value < endMs())
+
+function clearRange() {
+  emit('update:from', '')
+}
+
+/* ---------------- 时间弹窗（选年月日时分） ---------------- */
+
+const TF_MS: Record<string, number> = {
+  '5m': 5 * 60_000,
+  '15m': 15 * 60_000,
+  '1h': 60 * 60_000,
+  '4h': 4 * 60 * 60_000,
+  '1d': 24 * 60 * 60_000
+}
+
+function tfMs(): number {
+  return TF_MS[props.timeframe] ?? TF_MS['4h']
+}
+
+/** 往前补历史的步长（根） */
+function historyBars(): number {
+  return HISTORY_BARS[props.timeframe] ?? 1000
+}
+
+/** 要拉多少根：从开始时间到结束时间的跨度（没选时间就拉最近的） */
+function barsToLoad(): number {
+  if (!ranged.value) return DEFAULT_BARS
+  const span = Math.ceil((endMs() - fromMs.value) / tfMs()) + 1
+  return Math.min(MAX_BARS, Math.max(DEFAULT_BARS, span))
+}
+
+const pickerOpen = ref(false)
+
+/** 打开弹窗时给的初始值：选过就用它，没选过就按「最近 DEFAULT_BARS 根」猜一个 */
+const pickerInitial = computed(
+  () => fromMs.value || Math.max(endMs() - tfMs() * DEFAULT_BARS, 0)
+)
+
+function openPicker() {
+  pickerOpen.value = true
+}
+
+function onPickTime(ms: number) {
+  emit('update:from', bjInputValue(ms))
+}
 
 const TFS = [
   {value: '5m', label: '5分'},
@@ -45,20 +155,14 @@ const VISIBLE = ref<Record<string, boolean>>({
   volume: false,
   ema42: false,
   res: false,
-  sup: false,
-  entry: false,
-  sl: false,
-  tp: false
+  sup: false
 })
 
 const LEGEND = [
   {key: 'volume', label: '成交量', dot: 'vol'},
   {key: 'ema42', label: 'EMA42', dot: 'ema'},
   {key: 'res', label: '压力(4H)', dot: 'res'},
-  {key: 'sup', label: '支撑(4H)', dot: 'sup'},
-  {key: 'entry', label: '入场', dot: 'entry'},
-  {key: 'sl', label: '止损', dot: 'sl'},
-  {key: 'tp', label: '止盈', dot: 'tp'}
+  {key: 'sup', label: '支撑(4H)', dot: 'sup'}
 ]
 
 const chartEl = ref<HTMLElement | null>(null)
@@ -88,6 +192,15 @@ let overlay: {sr: LevelSR | null; refPrice: number} = {
   sr: null,
   refPrice: NaN
 }
+
+/** 正在往前补历史（防重入） */
+let loadingOlder = false
+/** 已经拉到头了（交易所没有更早的了） */
+let reachedStart = false
+/** 用户是否真的拖过 / 滚过图表（区分程序自己动的） */
+let userPanned = false
+/** 这次 setData 往前塞了多少根（用来把视图钉在原地） */
+let prependCount = 0
 
 /* ---------------- 指标 ---------------- */
 
@@ -213,12 +326,22 @@ function ensureChart(): boolean {
 
   refs = {chart, candle, volume, ema42}
 
-  // 视图变化时同步更新右侧百分比标签
-  chart.timeScale().subscribeVisibleLogicalRangeChange(() => positionLabels())
+  // 视图变化：右侧百分比标签重新定位 + 让信息栏/参考价跟着可见窗口走
+  chart.timeScale().subscribeVisibleLogicalRangeChange((range: any) => {
+    positionLabels()
+    syncWindowRefs()
+    // 用户拖/滚到最左边了 → 把更早的历史补进来（Binance 那种往前翻）
+    if (userPanned && range && range.from <= 3) void loadOlder()
+  })
   chart.subscribeCrosshairMove((param: any) => {
     updateHover(param)
     positionLabels()
   })
+
+  // 只有用户自己动过（拖动 / 滚轮）才算「想看更早的」，避免加载后自己触发
+  const markPanned = () => (userPanned = true)
+  chartEl.value.addEventListener('pointerdown', markPanned)
+  chartEl.value.addEventListener('wheel', markPanned, {passive: true})
 
   return true
 }
@@ -235,12 +358,6 @@ function levelList(): {p: number; color: string; title: string}[] {
     list.push({p: n, color, title})
   }
 
-  const plan = props.plan
-  push(plan?.stopLoss, '#ef5350', '止损', v.sl)
-  push(plan?.entry?.price, '#42a5f5', '入场', v.entry)
-  for (const tp of plan?.takeProfits ?? []) {
-    push(tp.price, '#26a69a', tp.label || 'TP', v.tp)
-  }
   // 最近 4 小时的压力 / 支撑（没有就不画）
   push(overlay.sr?.resistance, '#ffa726', '压力', v.res)
   push(overlay.sr?.support, '#26c6da', '支撑', v.sup)
@@ -320,6 +437,8 @@ function positionLabels() {
     item.el.style.display = ''
     item.el.style.top = y + 'px'
   }
+  // 画好的范围框要跟着视图走
+  drawSelection()
 }
 
 /* ---------------- 左上角信息栏 ---------------- */
@@ -357,26 +476,50 @@ function infoHTML(
   ].join('')
 }
 
-/** 未悬停时展示最后一根 K 线 */
-function showLatestInfo() {
+/** 未悬停时展示第 i 根 K 线 */
+function showInfoAt(i: number) {
   if (!infoEl.value || !candles.length) return
-  const i = candles.length - 1
-  const c = candles[i]
-  const ma = volMa[i]
+  const idx = Math.min(candles.length - 1, Math.max(0, i))
+  const c = candles[idx]
+  const ma = volMa[idx]
   infoEl.value.innerHTML = infoHTML(
     Math.floor(c.timestamp / 1000),
     {open: c.open, high: c.high, low: c.low, close: c.close},
     c.volume,
     Number.isFinite(ma) && ma > 0 ? c.volume / ma : NaN,
-    emaValues[emaValues.length - 1]
+    emaValues[idx]
   )
+}
+
+/** 当前可见窗口最右边那一根（没有就退回最后一根） */
+function rightmostVisibleIndex(): number {
+  if (!refs || !candles.length) return candles.length - 1
+  const r = refs.chart.timeScale().getVisibleLogicalRange()
+  const last = candles.length - 1
+  if (!r) return last
+  return Math.min(last, Math.max(0, Math.round(r.to)))
+}
+
+/**
+ * 所有显示都跟着「当前可见窗口」走：
+ * 左上角信息栏 = 窗口最右边那根；右侧 ±% = 相对它的收盘价。
+ */
+function syncWindowRefs() {
+  if (!refs || !candles.length) return
+  const i = rightmostVisibleIndex()
+  const c = candles[i]
+  if (Number.isFinite(c?.close)) {
+    overlay.refPrice = c.close
+    renderLabels()
+  }
+  showInfoAt(i)
 }
 
 /** 悬停 / 触碰：更新左上角信息栏与右侧「相对当前价」 */
 function updateHover(param: any) {
   const reset = () => {
     deltaEl.value?.classList.add('hidden')
-    showLatestInfo()
+    showInfoAt(rightmostVisibleIndex())
   }
 
   if (!refs || !param?.point || param.time === undefined) return reset()
@@ -422,8 +565,15 @@ function updateHover(param: any) {
 
 /* ---------------- 画图 ---------------- */
 
-function draw(data: Candle[], sr: LevelSR | null) {
+/**
+ * 画图。
+ *
+ * `keepView = true` 时（往前补历史）不 fitContent，而是把时间轴整体右移
+ * 「新塞进来的根数」，这样用户看的那一段不会跳。
+ */
+function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
   if (!ensureChart() || !refs) return
+  const view = keepView ? refs.chart.timeScale().getVisibleLogicalRange() : null
   candles = data
   overlay.sr = sr
 
@@ -436,6 +586,7 @@ function draw(data: Candle[], sr: LevelSR | null) {
     candleIndex = new Map()
     overlay.refPrice = NaN
     renderOverlays()
+    drawSelection()
     return
   }
 
@@ -474,8 +625,25 @@ function draw(data: Candle[], sr: LevelSR | null) {
 
   overlay.refPrice = closes[closes.length - 1]
   renderOverlays()
-  showLatestInfo()
-  refs.chart.timeScale().fitContent()
+  showInfoAt(candles.length - 1)
+
+  // 先把「用户自己动过」的标志清掉：不然 fitContent 把左边缘带到 0 时
+  // 会被当成「用户拖到头了」而多拉一段历史
+  userPanned = false
+
+  if (view) {
+    // 前面塞了 prependCount 根 → 下标整体后移，钉住原来那段
+    refs.chart.timeScale().setVisibleLogicalRange({
+      from: view.from + prependCount,
+      to: view.to + prependCount
+    })
+    prependCount = 0
+  } else {
+    refs.chart.timeScale().fitContent()
+  }
+
+  syncWindowRefs()
+  drawSelection()
   emit('loaded', data)
 }
 
@@ -483,10 +651,60 @@ async function load() {
   const symbol = props.symbol.trim()
   if (!symbol) return
   try {
-    const d = await fetchCandles(symbol, props.timeframe)
-    draw(d.candles ?? [], d.sr ?? null)
+    reachedStart = false
+    userPanned = false
+    // 选了开始时间：从那刻画到结束；测试模式没选开始时间：往前铺 DEFAULT_BARS 根
+    let range: {from: number; to: number} | undefined
+    if (ranged.value) range = {from: fromMs.value, to: endMs()}
+    else if (testMode.value)
+      range = {from: untilMs.value - tfMs() * DEFAULT_BARS, to: untilMs.value}
+    const d = await fetchCandles(symbol, props.timeframe, barsToLoad(), range)
+    // 测试模式：接口只保证 ts ≤ to，那根**还没收盘**的得自己剔掉
+    const bars =
+      testMode.value && lastClosedMs.value > 0
+        ? (d.candles ?? []).filter(c => c.timestamp <= lastClosedMs.value)
+        : (d.candles ?? [])
+    draw(bars, d.sr ?? null)
   } catch (e) {
     emit('error', (e as Error).message)
+  }
+}
+
+/**
+ * 往前补一段更早的历史（拖到左边缘时自动调）。
+ *
+ * 一次补多少根看周期（`HISTORY_BARS`）；补完把视图钉在原地，不会跳。
+ */
+async function loadOlder(): Promise<void> {
+  if (loadingOlder || reachedStart || !refs || !candles.length) return
+  if (candles.length >= MAX_TOTAL_BARS) return
+  const symbol = props.symbol.trim()
+  if (!symbol) return
+
+  const firstMs = candles[0].timestamp
+  const step = tfMs()
+  const group = historyBars()
+
+  loadingOlder = true
+  try {
+    const d = await fetchCandles(symbol, props.timeframe, group, {
+      from: firstMs - group * step,
+      to: firstMs - 1
+    })
+    const older = (d.candles ?? []).filter(c => c.timestamp < firstMs)
+    if (!older.length) {
+      reachedStart = true
+      return
+    }
+    // 这一批连一半都凑不齐，基本就是拉到交易所最早那几根了
+    if (older.length < group / 2) reachedStart = true
+    prependCount = older.length
+    // keepView：别 fitContent，把视图钉在用户正看的那一段
+    draw([...older, ...candles], overlay.sr, true)
+  } catch {
+    /* 网络/交易所抽风就先算了，下次拖动再试 */
+  } finally {
+    loadingOlder = false
   }
 }
 
@@ -519,6 +737,164 @@ function toggleLegend(key: string) {
   renderOverlays()
 }
 
+/* ---------------- 在图上拖一个范围 ---------------- */
+
+/**
+ * 「画范围」：在图上横向拖一段，松手就把这段的起止时间报给外面
+ * （「添加案例」拿它去取这一段 K 线 + 提炼经验）。
+ *
+ * 拖的时候盖一层透明层把鼠标接管过来 —— 这样拖动不会把图表带着平移，
+ * 也不会误触发「往前补历史」。松手后自动退出这个模式，图恢复可拖。
+ *
+ * 按钮不在图这边（挪到左边「添加案例」的时间那一行），这里只管状态：
+ * 外面传 `drawing` 进来，拖完 / 按 Esc 就 emit `update:drawing` 退出去。
+ */
+/** 拖动模式（受控） */
+const localDrawing = ref(false)
+const rangeMode = computed(() =>
+  props.selectable ? (props.drawing ?? localDrawing.value) : false
+)
+
+function setDrawing(v: boolean) {
+  if (props.drawing === undefined) localDrawing.value = v
+  emit('update:drawing', v)
+}
+
+const dragFromX = ref<number | null>(null)
+const dragToX = ref<number | null>(null)
+const dragHint = ref('')
+const layerEl = ref<HTMLElement | null>(null)
+/** 已经落定的范围在画面上的位置 */
+const selBox = ref<{from: number; to: number} | null>(null)
+const selHint = ref('')
+
+/** 拖到一半按 Esc 就取消（挂在 window 上，不用先点图） */
+function onKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || !rangeMode.value) return
+  dragFromX.value = null
+  dragToX.value = null
+  dragHint.value = ''
+  setDrawing(false)
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+
+/** 图上 x 像素 → K 线下标（超出可见区域就夹到边界） */
+function xToIndex(x: number): number {
+  if (!refs || !candles.length) return 0
+  const ts = refs.chart.timeScale()
+  const px = Math.max(0, Math.min(ts.width(), x))
+  const logical = ts.coordinateToLogical(px)
+  const last = candles.length - 1
+  if (logical === null || logical === undefined || !Number.isFinite(logical)) {
+    return 0
+  }
+  return Math.min(last, Math.max(0, Math.round(logical)))
+}
+
+/** 时间戳 → 图上 x 像素（这根不在图上就返回 null） */
+function msToX(ms: number): number | null {
+  if (!refs || !candles.length) return null
+  const x = refs.chart.timeScale().timeToCoordinate(Math.floor(ms / 1000))
+  return x === null || x === undefined || !Number.isFinite(x) ? null : x
+}
+
+function localX(e: PointerEvent): number {
+  const el = layerEl.value
+  if (!el) return 0
+  return e.clientX - el.getBoundingClientRect().left
+}
+
+function hintOf(x1: number, x2: number): string {
+  if (!candles.length) return ''
+  const i = xToIndex(Math.min(x1, x2))
+  const j = xToIndex(Math.max(x1, x2))
+  return `${bjTime(candles[i].timestamp)} → ${bjTime(
+    candles[j].timestamp
+  )} · ${j - i + 1} 根`
+}
+
+function onRangeDown(e: PointerEvent) {
+  if (!rangeMode.value) return
+  e.preventDefault()
+  dragFromX.value = localX(e)
+  dragToX.value = dragFromX.value
+  dragHint.value = hintOf(dragFromX.value, dragToX.value)
+  // 抓住指针，拖到图外面也不丢（拿不到就算了，不影响拖）
+  try {
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function onRangeMove(e: PointerEvent) {
+  if (dragFromX.value === null) return
+  e.preventDefault()
+  dragToX.value = localX(e)
+  dragHint.value = hintOf(dragFromX.value, dragToX.value)
+}
+
+function onRangeUp(e: PointerEvent) {
+  const a = dragFromX.value
+  if (a === null) return
+  e.preventDefault()
+  const b = dragToX.value ?? a
+  dragFromX.value = null
+  dragToX.value = null
+  dragHint.value = ''
+  setDrawing(false)
+
+  const x1 = Math.min(a, b)
+  const x2 = Math.max(a, b)
+  // 拖得太短当误触：只框一根没意义
+  if (x2 - x1 < 4 || !candles.length) return
+
+  const i = xToIndex(x1)
+  const j = xToIndex(x2)
+  if (j <= i) return
+  emit('select', {
+    from: candles[i].timestamp,
+    to: candles[j].timestamp,
+    bars: j - i + 1
+  })
+}
+
+/** 把已经定下来的范围画到图上（平移 / 缩放后会跟着重画） */
+function drawSelection() {
+  // 只有「添加案例」和「实时分析 · 测试」才关心范围
+  const r = props.selectable ? props.range : null
+  const clear = () => {
+    if (selBox.value) selBox.value = null
+    if (selHint.value) selHint.value = ''
+  }
+  if (!r || !refs || !candles.length) return clear()
+
+  // 先把端点夹到实际拿到的 K 线区间里。
+  // 测试模式下 "只留已收盘的" 会把结尾那根剔掉，端点于是不再等于
+  // 任何一根 K 线的时间，而 timeToCoordinate 只认真实存在的 bar，
+  // 会直接返回 null —— 高亮就整个没了。夹一下就能正常画出来。
+  const first = candles[0].timestamp
+  const last = candles[candles.length - 1].timestamp
+  const clamp = (ms: number) => Math.min(Math.max(ms, first), last)
+  const a = msToX(clamp(r.from))
+  const b = msToX(clamp(r.to))
+  if (a === null || b === null) return clear()
+
+  const from = Math.min(a, b)
+  const to = Math.max(a, b)
+  // 完全划到视图外面去了就不显示
+  if (to < 0 || from > refs.chart.timeScale().width()) return clear()
+
+  // 位置没变就别动 —— 这个函数会被鼠标移动高频调用
+  if (!selBox.value || selBox.value.from !== from || selBox.value.to !== to) {
+    selBox.value = {from, to}
+  }
+  const hint = `${bjTime(r.from)} → ${bjTime(r.to)} · ${r.bars} 根`
+  if (selHint.value !== hint) selHint.value = hint
+}
+
 /* ---------------- 生命周期 ---------------- */
 
 const title = computed(() => props.symbol)
@@ -526,7 +902,15 @@ const title = computed(() => props.symbol)
 onMounted(load)
 watch(() => props.symbol, load)
 watch(() => props.timeframe, load)
-watch(() => props.plan, renderOverlays, {deep: true})
+watch(() => props.from, load)
+// 进 / 出测试模式都要重画：右端从「现在」换成那一刻，或换回来
+watch(() => props.until, load)
+watch([() => props.range, () => props.timeframe], drawSelection)
+// 回补历史 / 数据换了会让范围的位置跟着变
+watch(() => candles.length, drawSelection)
+watch([() => props.range, () => props.timeframe], drawSelection)
+// 回补历史 / 缩放会让范围的位置变，跟着重画
+watch(() => candles.length, drawSelection)
 
 onBeforeUnmount(() => {
   try {
@@ -559,11 +943,76 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div class="date-row">
+      <span class="dim">从</span>
+      <button
+        type="button"
+        class="time-pick"
+        :class="{set: fromMs > 0}"
+        title="点一下选时间（年月日时分）"
+        @click="openPicker"
+      >
+        {{ fromMs ? bjTime(fromMs) : '选一个时间' }}
+      </button>
+      <span
+        v-if="testMode"
+        class="until-tag"
+        :title="`只画已收盘的 K 线；设的测试点是 ${bjTime(untilMs)}`"
+      >
+        K 线到 {{ bjTime(lastClosedMs) }}
+      </span>
+      <button
+        v-if="from"
+        type="button"
+        class="ghost tiny"
+        title="清掉时间，看最新的 K 线"
+        @click="clearRange"
+      >
+        回到最新
+      </button>
+    </div>
+
     <div class="chart-wrap">
       <div ref="chartEl" class="chart"></div>
       <div ref="levelHost" class="level-labels"></div>
       <div ref="infoEl" class="chart-info"></div>
       <div ref="deltaEl" class="cursor-delta hidden"></div>
+
+      <!-- 画范围用的透明层：拖的时候接管鼠标，平时不吃事件 -->
+      <div
+        v-if="rangeMode || selBox"
+        ref="layerEl"
+        class="range-layer"
+        :class="{drawing: rangeMode}"
+        @pointerdown="onRangeDown"
+        @pointermove="onRangeMove"
+        @pointerup="onRangeUp"
+        @pointercancel="onRangeUp"
+      >
+        <div
+          v-if="selBox"
+          class="range-box"
+          :style="{
+            left: selBox.from + 'px',
+            width: selBox.to - selBox.from + 'px'
+          }"
+        />
+        <div
+          v-if="dragFromX !== null && dragToX !== null"
+          class="range-box live"
+          :style="{
+            left: Math.min(dragFromX, dragToX) + 'px',
+            width: Math.abs(dragToX - dragFromX) + 'px'
+          }"
+        />
+        <span v-if="dragHint" class="range-hint">{{ dragHint }}</span>
+        <span v-else-if="selHint" class="range-hint">{{ selHint }}</span>
+      </div>
+
+      <!-- 等着拖的时候给个提示，别让人不知道接下来干嘛 -->
+      <div v-if="rangeMode" class="range-tip">
+        在图上横向拖一段 —— 松手就选好了，按 Esc 取消
+      </div>
     </div>
 
     <div class="chart-tools">
@@ -599,5 +1048,15 @@ onBeforeUnmount(() => {
       </span>
       <span class="dim">点一下切换显隐</span>
     </div>
+
+    <!-- 选时间：弹窗里选年月日时分，选完就从那一刻开始画 -->
+    <TimeModal
+      v-model="pickerOpen"
+      kind="point"
+      title="选一个时间"
+      hint="从这一刻开始画 K 线，一直画到最新。"
+      :initial="pickerInitial"
+      @confirm="onPickTime"
+    />
   </section>
 </template>

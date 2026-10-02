@@ -14,41 +14,55 @@ export interface Candle {
 
 export type TrendState = 'up' | 'down' | 'range'
 
-/** 价格结构（完全基于高低点，不依赖任何技术指标） */
-export interface StructureState {
-  /** 更高的高点 */
-  higherHighs: boolean
-  /** 更高的低点 */
-  higherLows: boolean
-  /** 更低的高点 */
-  lowerHighs: boolean
-  /** 更低的低点 */
-  lowerLows: boolean
-  /** 最近一个波段高（做空止损参考） */
-  lastSwingHigh: number
-  /** 最近一个波段低（做多止损参考） */
-  lastSwingLow: number
-  /** 统计区间内的最高价 */
-  swingHigh: number
-  /** 统计区间内的最低价 */
-  swingLow: number
-  /** 参与统计的 K 线根数 */
-  lookback: number
+/**
+ * 判档：A 顺势单 / A-W 顺势双底 / S 突破 / V 超跌极速V反 / B 不该做 / unclear 说不清。
+ *
+ * 2026-10-02 起开单分析**不再判档**了（改成预测走势），这个类型只给
+ * 历史记录 / 老数据兼容用，新记录不再写档位。
+ */
+export type Grade = 'A' | 'A-W' | 'S' | 'V' | 'B' | 'unclear'
+
+/**
+ * 取数参数 —— 分析时「各周期各拉多少根 K 线」，来自 `config/calibers.yaml`。
+ *
+ * ⚠️ 这里**没有任何口径公式**（不变量比、不找摆点、不算区间位置）——
+ * 行情直接把 K 线切成小段交给 AI 自己读（跟知识库收录时同一套做法）。
+ */
+export interface Calibers {
+  /**
+   * 其余周期各拉多少天：主周期 → { 那个周期: 天数 }。
+   * 主周期自己不在表里 —— 它用「图上那段有多长」的天数。
+   */
+  others: Record<string, Partial<Record<Timeframe, number>>>
+  /** 根数下限（日线只给几天时兜底） */
+  minBars: number
+  /** 根数上限（15m 别拉爆） */
+  maxBars: number
 }
 
-/** 单周期趋势快照（趋势 + 周期，不含指标） */
-export interface TimeframeTrend {
+/** 一个周期的行情块 —— 就是 `describeSeries` 切出来的那段文字 */
+export interface SeriesBlock {
   timeframe: Timeframe
-  close: number
-  trend: TrendState
-  /** 该周期统计区间的净涨跌幅 % */
-  netChangePct: number
-  /** 该周期统计区间的振幅 % */
-  rangePct: number
-  /** 量比：最新一根成交量 / 近 20 根均量 */
-  volRatio: number
-  structure: StructureState
+  /** 是不是主周期（图上那个） */
+  primary: boolean
+  /** 这个块往前看了多少天 */
+  days: number
+  /** 实际拉到的根数 */
+  bars: number
+  /** 第一根 / 最后一根的时间戳 */
+  from: number
+  to: number
+  /** 切段描述（整段速览 + 分几小段），直接喂给 AI */
+  text: string
 }
+
+/*
+ * 已删除（2026-10-02）：StructureState / TfStats / TimeframeTrend
+ *
+ * 那三个是「先把 K 线压成公式值再给 AI」那一套的产物（摆点、量比、量能水平、
+ * 区间位置…）。现在改成把 K 线**切成小段直接描述**给 AI（`analysis/describe.ts`
+ * 的 `describeSeries`，跟知识库收录时同一个做法），所以它们没人用了。
+ */
 
 /** 市场热度（来自交易所公开数据，与盘面情绪相关） */
 export interface MarketHeat {
@@ -75,106 +89,28 @@ export interface MarketSnapshot {
   exchange: string
   timestamp: number
   price: number
-  /** 各周期趋势（用于判断多周期是否共振） */
-  timeframes: TimeframeTrend[]
+  /** 主周期（你在图上看的那个） */
+  primary: Timeframe
+  /** 各周期的行情块（按周期从短到长），每块就是一段切段描述 */
+  blocks: SeriesBlock[]
   /** 市场热度 */
   heat: MarketHeat
-  /** 止损参考结构（取 1H） */
-  structure: StructureState
-  /** 上下文中包含的最近 K 线 */
-  recentCandles: Candle[]
-  /** 用于绘图的完整 K 线序列（recentTimeframe，数量为 candlesLimit） */
-  series: Candle[]
-  /** 扁平化变量命名空间，供护栏表达式引用 */
-  variables: Record<string, number>
+  /** 主周期的 K 线 —— 只给前端画图，不发给 AI */
+  candles: Candle[]
 }
 
-export interface DisciplineCheck {
-  rule: string
-  pass: boolean
-  note: string
-}
-
-export interface TakeProfit {
-  label: string
-  price: number
-  r: number
-  reducePercent: number
-}
-
-export type DecisionKind = 'open' | 'wait' | 'no_open'
-export type Direction = 'long' | 'short' | 'none'
-
-export interface LlmDecision {
-  decision: DecisionKind
-  direction: Direction
-  confidence: number
-  entry: {type: 'market' | 'limit'; price: number | null}
-  stopLoss: number | null
-  takeProfits: TakeProfit[]
-  disciplineChecks: DisciplineCheck[]
-  veto: string[]
-  reasoning: string
-  missing: string[]
-}
-
-export type Severity = 'reject' | 'warn'
-
-export interface Violation {
-  id: string
-  desc: string
-  severity: Severity
-}
-
-export interface PositionPlan {
-  riskPercent: number
-  riskAmount: number
-  stopDistance: number
-  quantity: number
-  notional: number
-  requiredLeverage: number
-  leverageUsed: number
-}
-
-export interface GuardrailCheck {
-  name: string
-  pass: boolean
-  detail: string
-}
-
-export interface GuardrailResult {
-  passed: boolean
-  violations: Violation[]
-  checks: GuardrailCheck[]
-  position: PositionPlan | null
-  minRr: number
-  rMultiple: number | null
-}
-
-/**
- * 期望值：按分批减仓比例**加权**的盈亏比，算出每笔的数学期望（单位 R）。
+/*
+ * ── 已删除（2026-10-02 大简化）──
  *
- *   E = p × 加权R − (1 − p)
+ * 原来这里有：DisciplineCheck / TakeProfit / LlmDecision / ChecklistRate /
+ * Violation / PositionPlan / GuardrailResult / Expectancy / RedLineConfig。
  *
- * E > 0 才值得做。假设胜率 p 由用户给（页面默认 0.45）。
+ * 连同 `guardrails/validator.ts` 与 `analysis/expectancy.ts` 一起整块去掉了：
+ * 账户资金、单笔风险、杠杆、盈亏比、止损距离、硬性红线、准入清单 —— 全不要了。
+ *
+ * 现在 AI 只回四个字段：档位 grade + 标签 tags + 理由 reason + 结论 verdict
+ * （见 `llm/schema.ts` 的 judgeSchema）。代码不再算仓位、不再校验。
  */
-export interface Expectancy {
-  /** 假设胜率（0~1） */
-  winRate: number
-  /** 按减仓比例加权的盈亏比 */
-  weightedR: number
-  /** 最远那一档的盈亏比 */
-  maxR: number
-  /** 数学期望（R） */
-  expectancyR: number
-  positive: boolean
-}
-
-export interface RedLineConfig {
-  id: string
-  desc: string
-  when: string
-}
 
 export interface AppConfig {
   exchange: string
@@ -182,22 +118,35 @@ export interface AppConfig {
   apiBase?: string
   marketType: MarketType
   timeframes: Timeframe[]
-  candlesLimit: number
-  accountEquity: number
-  riskPercent: number
-  maxLeverage: number
-  maxRiskPercent: number
-  minRrRatio: number
-  /** 止损距入场的百分比合理区间（用于替代 ATR 校验） */
-  stopPctRange: [number, number]
-  takeProfitR: number[]
-  reducePercents: number[]
-  redLines: RedLineConfig[]
+  /**
+   * 回溯多少天（前端那个「看最近 N 天」）。
+   * 各周期实际拉多少根 = 天数 ÷ 周期长度，再按 calibers 的上下限夹一下。
+   */
+  lookbackDays: number
+  /** 口径参数（算公式用的数字），来自 `config/calibers.yaml` */
+  calibers: Calibers
   llm: {
     apiKey: string
     baseUrl: string
     /** 真实模型 id。历史别名（deepseek-chat 等）在读配置时已归一 */
     model: string
     temperature: number
+    /**
+     * 思考力度（部分模型会把「思维链」写在隐藏字段 reasoning_content 里）。
+     *
+     * `'none'` = 关掉思考：实测快 3.7 倍、输出 token 少 4 倍，
+     * 而且思维链本来就没被代码用到（只读 message.content）。
+     * `null` = 不传这个参数，让模型自己决定。
+     */
+    reasoningEffort: ReasoningEffort
   }
 }
+
+/** 思考力度；null = 不传参数 */
+export type ReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | null

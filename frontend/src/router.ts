@@ -3,6 +3,7 @@ import AnalyzeView from './views/AnalyzeView.vue'
 import HistoryView from './views/HistoryView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
 import UsageView from './views/UsageView.vue'
+import PromptsView from './views/PromptsView.vue'
 
 export const routes = [
   {
@@ -15,13 +16,19 @@ export const routes = [
     path: '/history',
     name: 'history',
     component: HistoryView,
-    meta: {title: '历史分析', nav: '历史'}
+    meta: {title: '预测历史', nav: '预测历史'}
   },
   {
     path: '/knowledge',
     name: 'knowledge',
     component: KnowledgeView,
-    meta: {title: '知识库', nav: '知识库'}
+    meta: {title: '历史知识库', nav: '历史知识库'}
+  },
+  {
+    path: '/prompts',
+    name: 'prompts',
+    component: PromptsView,
+    meta: {title: 'AI 提示词', nav: 'AI 提示词'}
   },
   {
     path: '/usage',

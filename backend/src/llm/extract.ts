@@ -1,90 +1,133 @@
 import OpenAI from 'openai'
 import {AppConfig} from '../types'
-import {CaseFeatures, CaseGrade, CaseLabel} from '../db/knowledge'
-import {SegmentReport} from '../analysis/describe'
+import {CaseFeatures, CaseLabel, MoveType} from '../db/knowledge'
+import {SegmentReport, SeriesStats} from '../analysis/describe'
 import {TokenUsage, addUsage, emptyUsage, readUsage} from './pricing'
+import {chatParams} from './params'
 
-const SYSTEM = `你是我的交易复盘助手。
+/** 提示词正文里写这个占位符，标签规则就插在那个位置（没写就接在末尾） */
+export const TAG_SLOT = '{{标签}}'
 
-我会给你**一段真实行情**（拉升前 / 拉升段 / 拉升后 三段的客观统计），以及**我自己的标注**：
-这段是「我该做的」还是「我不该做的」，可能还有我写的一句备注。
+/**
+ * 标签清单 → 提示词里的那一段。
+ *
+ * 清单现传（模板存在数据库里、我自己随时改 `db/tags.ts`）。
+ * **清单为空就真的不给标签**，不拿内置默认来充数。
+ */
+function tagsRuleOf(templates: readonly string[]): string {
+  return templates.length
+    ? [
+        '【tags（标签）怎么写】',
+        '- **只能从下面这份清单里挑**，最多 4 个：',
+        `  ${templates.join(' / ')}`,
+        '- **绝对不许自己造新的**（造了程序也会直接丢掉），不要用同义词替换',
+        '- 挑最贴近这段行情的；一个都不贴就别硬凑，宁可少给'
+      ].join('\n')
+    : [
+        '【tags（标签）怎么写】',
+        '- 这次**没有给我可选的标签模板**，所以 `tags` 必须直接返回空数组 `[]`，',
+        '  不要自己造任何标签'
+      ].join('\n')
+}
 
-请你用**我自己的交易语言**描述这个案例，并提炼一条可复用的经验。
+/**
+ * 拼 system prompt。
+ *
+ * 正文来自**数据库**：`ai_docs` 里 kind=extract 的文档（网页「AI 提示词」页维护）。
+ * ⚠️ 代码里**没有兜底文案** —— 库里没写就直接报错，不拿内置文本充数。
+ */
+export function buildExtractPrompt(
+  base: string,
+  templates: readonly string[]
+): string {
+  const text = base.trim()
+  if (!text)
+    throw new Error(
+      '没有启用的「知识库提炼」提示词 —— 去「AI 提示词」页写一份（类型选「知识库提炼」）。'
+    )
+  const rule = tagsRuleOf(templates)
+  return text.includes(TAG_SLOT)
+    ? text.replace(TAG_SLOT, rule)
+    : `${text}\n\n${rule}`
+}
 
-【必须做到】
-1. **只能用我给的数据**，不许编造任何数字，不许提我没给过的东西。
-2. 用我的词汇描述：价格结构（更高的高点 / 更高的低点 / 更低的高点 / 更低的低点）、
-   「强力 K」「放量」「区间 / 盘整」「资金费率」「持仓量」。
-3. **不要用技术指标**（均线 / RSI / MACD / 布林 / ATR 等），我看不懂也不想看。
-4. 判档只用我体系里的三档：
-   - A = 顺势单（强势币回调不破）
-   - B = 不该做（弱势 / 区间来回 / 无动向 / 一日游 / 心态差）
-   - C = 期望突破（有盘整结构 + 有强力K放量突破，缺一不可）
-5. lesson（经验）是**最重要**的字段：
-   - 写成**祈使句**，必须**可判定**（例：「区间中段、量比不到 1 的，一律不做」）
-   - 1~2 句，不要写「注意风险」这种废话
-   - 如果是「我该做的」，就写成「什么样的特征出现时该怎么做」
-   - 如果是「我不该做的」，就写成「出现什么特征时必须拒绝」
-
-【输出】只输出一个 JSON 对象，不要代码块，不要任何解释文字：
-
-{
-  "grade": "A | B | C",
-  "title": "一句话概括这个案例，不超过 20 字",
-  "features": {
-    "pre": "拉升前的样子（结构 / 量能 / 有没有盘整）",
-    "rally": "拉升本身的样子（涨幅、快慢、放量程度）",
-    "post": "拉升后的样子（还有没有力量、回撤多少）",
-    "heat": "如果能判断，写当时热度；数据不够就写「无数据」"
-  },
-  "whatWorked": "我这次做对/做错在哪（对应我的体系条款）",
-  "lesson": "可复用的经验（祈使句，1~2 句）"
-}`
+export interface ExtractSR {
+  timeframe: string
+  bars: number
+  resistance: number
+  support: number
+}
 
 export interface ExtractInput {
   symbol: string
   timeframe: string
-  label: CaseLabel
+  /** @deprecated 已经不再分该做 / 不该做 */
+  label?: CaseLabel | null
   note: string
-  /** describeRally 生成的文字 */
-  rallyText: string
+  /** describeSeries 生成的整段行情文字 */
+  seriesText: string
   segments: SegmentReport[]
-  rallyMeta: {
-    changePct: number
-    bars: number
-    atrMultiple: number
-    volMultiple: number | null
-  }
+  /** 整段客观统计 */
+  stats: SeriesStats
   /** 可选：当时的市场热度 */
   heatText?: string
+  /**
+   * 这段行情**结束时**那一刻的 4H / 日线压力支撑。
+   * 只用那一刻之前的 K 线算的，不含之后的数据。
+   */
+  sr?: ExtractSR[]
 }
 
 export interface ExtractResult {
-  grade: CaseGrade
+  /** 这段行情是什么：拉升 / 下跌 / 横盘 */
+  moveType: MoveType
   title: string
+  /** 为什么会走成这样 */
+  why: string
   features: CaseFeatures
-  whatWorked: string
   lesson: string
+  /** AI 挑的标签（已按模板过滤，见 pickTemplates） */
+  tags: string[]
+}
+
+/** 价格：大数字不拖小数，小数字保留有效位 */
+function fmtPrice(n: number): string {
+  if (!Number.isFinite(n)) return '—'
+  const abs = Math.abs(n)
+  if (abs >= 1000) return n.toLocaleString('en-US', {maximumFractionDigits: 1})
+  if (abs >= 1) return n.toFixed(3)
+  return n.toPrecision(6)
 }
 
 function buildUser(input: ExtractInput): string {
-  const meta = input.rallyMeta
+  const s = input.stats
+  const srText = (input.sr ?? [])
+    .map(
+      x =>
+        `- ${x.timeframe}（最近 ${x.bars} 根）：压力 ${fmtPrice(
+          x.resistance
+        )} / 支撑 ${fmtPrice(x.support)}`
+    )
+    .join('\n')
   return `【币种 / 周期】${input.symbol} · ${input.timeframe}
 
-【我的标注】${
-    input.label === 'do'
-      ? '✅ 这是我该做的（正面案例）'
-      : '❌ 这是我不该做的（反面案例）'
-  }
 ${input.note.trim() ? `【我的备注】${input.note.trim()}` : '【我的备注】（没写）'}
 
-【拉升段客观指标】
-- 涨幅 ${meta.changePct.toFixed(2)}%，用了 ${meta.bars} 根
-- 力度 ${meta.atrMultiple.toFixed(2)} × ATR（越大越猛）
-- 量能 ${meta.volMultiple === null ? '无法计算' : meta.volMultiple.toFixed(2) + ' 倍'}
+【整段速览】
+- 共 ${s.bars} 根，${s.changePct >= 0 ? '+' : ''}${s.changePct.toFixed(2)}%，振幅 ${s.rangePct.toFixed(2)}%，最大回撤 -${s.maxDrawdownPct.toFixed(2)}%
+- 最高点在整段 ${Math.round(s.highAtPct)}% 处，最低点在 ${Math.round(s.lowAtPct)}% 处${
+    s.volTrend !== null
+      ? `\n- 后半段均量 / 前半段 = ${s.volTrend.toFixed(2)} 倍`
+      : ''
+  }
+${
+  srText
+    ? `\n【这段结束时的大周期压力 / 支撑】\n${srText}\n（只用那一刻之前的 K 线算的，不含之后的数据）`
+    : ''
+}
 
 【行情明细】
-${input.rallyText}
+${input.seriesText}
 ${input.heatText ? `\n【市场热度】\n${input.heatText}` : ''}
 
 请按上面的要求输出 JSON。`
@@ -97,20 +140,26 @@ function coerce(raw: string): ExtractResult | null {
     const m = t.match(/```(?:json)?\s*([\s\S]*?)```/i)
     const obj = JSON.parse(m ? m[1].trim() : t)
     if (!obj || typeof obj !== 'object') return null
-    const grade = String(obj.grade ?? '').toUpperCase()
-    if (!['A', 'B', 'C'].includes(grade)) return null
+    const mt = String(obj.moveType ?? '').toLowerCase()
+    if (!['up', 'down', 'range'].includes(mt)) return null
     const f = obj.features ?? {}
+    const tags = Array.isArray(obj.tags)
+      ? obj.tags
+          .map((t: unknown) => String(t ?? '').trim())
+          .filter((t: string) => t.length > 0 && t.length <= 12)
+          .slice(0, 8)
+      : []
     return {
-      grade: grade as CaseGrade,
+      moveType: mt as MoveType,
       title: String(obj.title ?? '').slice(0, 40),
+      why: String(obj.why ?? '').trim(),
       features: {
-        pre: String(f.pre ?? ''),
-        rally: String(f.rally ?? ''),
-        post: String(f.post ?? ''),
-        heat: String(f.heat ?? '')
+        structure: String(f.structure ?? ''),
+        volume: String(f.volume ?? ''),
+        rhythm: String(f.rhythm ?? '')
       },
-      whatWorked: String(obj.whatWorked ?? ''),
-      lesson: String(obj.lesson ?? '').trim()
+      lesson: String(obj.lesson ?? '').trim(),
+      tags
     }
   } catch {
     return null
@@ -120,13 +169,27 @@ function coerce(raw: string): ExtractResult | null {
 /** 让 AI 把一个案例提炼成「特征 + 经验」 */
 export async function extractCase(
   input: ExtractInput,
-  config: AppConfig
+  config: AppConfig,
+  /**
+   * 当前的标签模板清单（存数据库，我自己维护）。
+   * 空数组 = 这次没有模板 → 模型被要求返回空 tags。
+   */
+  tagTemplates: readonly string[] = [],
+  /**
+   * 数据库里那份「知识库提炼」提示词正文（kind=extract）。
+   * 空了就直接报错 —— 代码里没有兜底文案。
+   */
+  systemBase = ''
 ): Promise<{
   result: ExtractResult
   model: string
   usage: TokenUsage
   attempts: number
   latencyMs: number
+  /** 这一次真正发出去的输入（给「AI 分析过程」看） */
+  prompt: string
+  /** 模型原样返回的内容 */
+  raw: string
 }> {
   if (!config.llm.apiKey)
     throw new Error('未配置 LLM_API_KEY：提炼案例需要调用大模型。')
@@ -135,25 +198,30 @@ export async function extractCase(
     apiKey: config.llm.apiKey,
     baseURL: config.llm.baseUrl
   })
+  const userPrompt = buildUser(input)
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    {role: 'system', content: SYSTEM},
-    {role: 'user', content: buildUser(input)}
+    {role: 'system', content: buildExtractPrompt(systemBase, tagTemplates)},
+    {role: 'user', content: userPrompt}
   ]
 
   let usage = emptyUsage()
   let attempts = 0
+  let lastRaw = ''
   const startedAt = Date.now()
 
   for (let attempt = 0; attempt < 2; attempt++) {
     attempts++
-    const res = await client.chat.completions.create({
-      model: config.llm.model,
-      temperature: 0.2,
-      response_format: {type: 'json_object'},
-      messages
-    })
+    const res = await client.chat.completions.create(
+      chatParams({
+        model: config.llm.model,
+        temperature: 0.2,
+        reasoningEffort: config.llm.reasoningEffort,
+        messages
+      }) as never
+    )
     usage = addUsage(usage, readUsage(res))
     const raw = res.choices?.[0]?.message?.content ?? ''
+    lastRaw = raw
     const parsed = coerce(raw)
     if (parsed) {
       return {
@@ -161,14 +229,16 @@ export async function extractCase(
         model: config.llm.model,
         usage,
         attempts,
-        latencyMs: Date.now() - startedAt
+        latencyMs: Date.now() - startedAt,
+        prompt: userPrompt,
+        raw
       }
     }
     messages.push({role: 'assistant', content: raw})
     messages.push({
       role: 'user',
       content:
-        '上面不是合法 JSON 或 grade 不是 A/B/C。请只输出符合约定结构的 JSON 对象。'
+        '上面不是合法 JSON（或 moveType 不是 up/down/range）。请只输出符合约定结构的 JSON 对象。'
     })
   }
 

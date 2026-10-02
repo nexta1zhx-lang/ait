@@ -1,31 +1,22 @@
 import ccxt from 'ccxt'
+import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
+import {describeSeries} from '../analysis/describe'
 import {
+  Calibers,
   Candle,
   MarketHeat,
   MarketSnapshot,
   MarketType,
-  StructureState,
-  Timeframe,
-  TimeframeTrend,
-  TrendState
+  SeriesBlock,
+  Timeframe
 } from '../types'
 
 const CCXT: any = ccxt
 
-/** 判定趋势所用的统计窗口（按周期给不同长度） */
-const TREND_LOOKBACK: Record<Timeframe, number> = {
-  '5m': 60,
-  '15m': 60,
-  '1h': 72,
-  '4h': 60,
-  '1d': 60
-}
+export {TF_MS}
 
-/** 结构不明晰时，用净涨跌幅兜底的阈值（%） */
-const NET_CHANGE_THRESHOLD = 1.5
-
-/** 成交量均线窗口（用于量比） */
-const VOL_RATIO_WINDOW = 20
+/** 一天 —— 算 24h 高低 / 涨跌 / 振幅用 */
+const DAY_MS = 24 * 60 * 60_000
 
 function toCandles(rows: unknown[]): Candle[] {
   return (rows as unknown[][]).map(r => ({
@@ -38,150 +29,19 @@ function toCandles(rows: unknown[]): Candle[] {
   }))
 }
 
-interface Pivot {
-  index: number
-  price: number
-}
-
-/** 摆动高点：左右 wing 根都不高于它（纯价格，不是指标） */
-function findPivotHighs(candles: Candle[], wing = 2): Pivot[] {
-  const out: Pivot[] = []
-  for (let i = wing; i < candles.length - wing; i++) {
-    let ok = true
-    for (let j = i - wing; j <= i + wing; j++) {
-      if (j !== i && candles[j].high >= candles[i].high) {
-        ok = false
-        break
-      }
-    }
-    if (ok) out.push({index: i, price: candles[i].high})
-  }
-  return out
-}
-
-/** 摆动低点 */
-function findPivotLows(candles: Candle[], wing = 2): Pivot[] {
-  const out: Pivot[] = []
-  for (let i = wing; i < candles.length - wing; i++) {
-    let ok = true
-    for (let j = i - wing; j <= i + wing; j++) {
-      if (j !== i && candles[j].low <= candles[i].low) {
-        ok = false
-        break
-      }
-    }
-    if (ok) out.push({index: i, price: candles[i].low})
-  }
-  return out
-}
-
-/**
- * 纯价格结构分析（不使用任何技术指标）：
- *   更高的高点 + 更高的低点 → 上涨结构
- *   更低的高点 + 更低的低点 → 下跌结构
- */
-export function analyzeStructure(
-  candles: Candle[],
-  lookback: number
-): StructureState {
-  const empty: StructureState = {
-    higherHighs: false,
-    higherLows: false,
-    lowerHighs: false,
-    lowerLows: false,
-    lastSwingHigh: NaN,
-    lastSwingLow: NaN,
-    swingHigh: NaN,
-    swingLow: NaN,
-    lookback: 0
-  }
-  if (!Array.isArray(candles) || candles.length < 6) return empty
-
-  const slice = candles.slice(-lookback)
-  let hi = -Infinity
-  let lo = Infinity
-  for (const c of slice) {
-    if (c.high > hi) hi = c.high
-    if (c.low < lo) lo = c.low
-  }
-
-  const ph = findPivotHighs(slice, 2).slice(-2)
-  const pl = findPivotLows(slice, 2).slice(-2)
-
-  return {
-    higherHighs: ph.length === 2 && ph[1].price > ph[0].price,
-    lowerHighs: ph.length === 2 && ph[1].price < ph[0].price,
-    higherLows: pl.length === 2 && pl[1].price > pl[0].price,
-    lowerLows: pl.length === 2 && pl[1].price < pl[0].price,
-    lastSwingHigh: ph.length ? ph[ph.length - 1].price : hi,
-    lastSwingLow: pl.length ? pl[pl.length - 1].price : lo,
-    swingHigh: hi,
-    swingLow: lo,
-    lookback: slice.length
-  }
-}
-
-/** 由结构 + 净涨跌幅得出趋势状态 */
-function classifyTrendState(
-  structure: StructureState,
-  netChangePct: number
-): TrendState {
-  if (structure.higherHighs && structure.higherLows) return 'up'
-  if (structure.lowerHighs && structure.lowerLows) return 'down'
-  if (Number.isFinite(netChangePct)) {
-    if (netChangePct >= NET_CHANGE_THRESHOLD) return 'up'
-    if (netChangePct <= -NET_CHANGE_THRESHOLD) return 'down'
-  }
-  return 'range'
-}
-
-/** 由单周期 K 线得到趋势快照（纯价格结构，无任何技术指标） */
-export function buildTimeframeTrend(
-  timeframe: Timeframe,
-  candles: Candle[]
-): TimeframeTrend {
-  const close = candles[candles.length - 1]?.close ?? NaN
-  const lookback = Math.min(TREND_LOOKBACK[timeframe] ?? 60, candles.length)
-  const window = candles.slice(-lookback)
-  const first = window[0]
-  const netChangePct =
-    first && first.close ? ((close - first.close) / first.close) * 100 : NaN
-
-  let hi = -Infinity
-  let lo = Infinity
-  for (const c of window) {
-    if (c.high > hi) hi = c.high
-    if (c.low < lo) lo = c.low
-  }
-  const rangePct =
-    Number.isFinite(hi) && Number.isFinite(lo) && lo > 0
-      ? ((hi - lo) / lo) * 100
-      : NaN
-
-  // 量比：最新一根成交量 / 近 N 根均量
-  const recentVols = window.slice(-VOL_RATIO_WINDOW).map(c => c.volume)
-  const avg = recentVols.length
-    ? recentVols.reduce((a, b) => a + b, 0) / recentVols.length
-    : NaN
-  const lastVol = window[window.length - 1]?.volume ?? NaN
-  const volRatio = Number.isFinite(avg) && avg > 0 ? lastVol / avg : NaN
-
-  const structure = analyzeStructure(candles, Math.max(lookback, 30))
-
-  return {
-    timeframe,
-    close,
-    trend: classifyTrendState(structure, netChangePct),
-    netChangePct,
-    rangePct,
-    volRatio,
-    structure
-  }
-}
-
 function numOrNull(v: unknown): number | null {
   const n = Number(v)
   return Number.isFinite(n) ? n : null
+}
+
+/** 跑一个可能失败 / 可能为空的异步调用，出错就给 null（热度项全都容错） */
+async function safeCall<T>(fn: () => Promise<T> | T): Promise<T | null> {
+  try {
+    const v = await fn()
+    return (v ?? null) as T | null
+  } catch {
+    return null
+  }
 }
 
 export interface RecentSR {
@@ -214,17 +74,115 @@ export function computeRecentSR(
   return {hours, resistance: hi, support: lo, candles: win.length}
 }
 
+/** 某个时间点「当时」的大周期压力 / 支撑 */
+export interface SRAtTime {
+  timeframe: Timeframe
+  bars: number
+  resistance: number
+  support: number
+  /** 这个箱体相对中间价的宽度% */
+  widthPct: number
+}
+
+/**
+ * 算「某个时间点当时」的压力 / 支撑。
+ *
+ * 关键：只取那一刻**之前**的 N 根 K 线，绝不用之后的数据 ——
+ * 复盘案例时 AI 该看到的是「当时能看到什么」，不能被未来行情污染。
+ * 拉不到就返回 null，不耽误主流程。
+ */
+export async function fetchSRAt(opts: {
+  exchangeId: string
+  symbol: string
+  timeframe: Timeframe
+  /** 以这个时间点为「现在」（毫秒） */
+  at: number
+  /** 往前看多少根 */
+  bars: number
+  marketType?: MarketType
+  apiBase?: string
+}): Promise<SRAtTime | null> {
+  const step = TF_MS[opts.timeframe]
+  const candles = await fetchCandlesRange({
+    exchangeId: opts.exchangeId,
+    symbol: opts.symbol,
+    timeframe: opts.timeframe,
+    from: opts.at - (opts.bars + 1) * step,
+    to: opts.at,
+    marketType: opts.marketType,
+    apiBase: opts.apiBase,
+    maxCandles: opts.bars + 5
+  })
+  const win = candles.slice(-opts.bars)
+  // 至少得凑够一半，否则那段历史根本不够看
+  if (win.length < Math.max(2, Math.floor(opts.bars / 2))) return null
+
+  let hi = -Infinity
+  let lo = Infinity
+  for (const c of win) {
+    if (c.high > hi) hi = c.high
+    if (c.low < lo) lo = c.low
+  }
+  if (!Number.isFinite(hi) || !Number.isFinite(lo) || hi <= lo) return null
+
+  const mid = (hi + lo) / 2
+  return {
+    timeframe: opts.timeframe,
+    bars: win.length,
+    resistance: hi,
+    support: lo,
+    widthPct: mid > 0 ? ((hi - lo) / mid) * 100 : 0
+  }
+}
+
 export interface FetchOptions {
   exchangeId: string
   symbol: string
-  timeframes: Timeframe[]
-  limit: number
-  recentTimeframe: Timeframe
-  recentCount: number
-  /** 市场类型，默认 U 本位合约 */
+  /** 主周期 —— 你在图上看的那个 */
+  timeframe: Timeframe
+  /**
+   * 主周期往前看多少天（= 图上那段有多长）。
+   * 其余周期拉多少天由 `calibers.others` 决定。
+   */
+  days: number
   marketType?: MarketType
   /** 覆盖交易所公共 API 域名，用于默认域名不可达的场景 */
   apiBase?: string
+  /**
+   * 「以哪一刻为现在」（毫秒）。不填 = 真·现在。
+   *
+   * 填了就是**测试 / 复盘**：全部数据只能来自这一刻之前已收盘的 K 线，
+   * 实时类接口（资金费率 / 持仓量 / 多空比 / 24h 成交额）一律不取 ——
+   * 那些接口查到的永远是「现在」，拿来当过去用就是偷看未来。
+   */
+  at?: number
+  /** 取数参数（各周期拉多少根）；不传就用默认值 */
+  calibers?: Calibers
+}
+
+/**
+ * 按「某时刻」取 K 线：只要**已经收盘**的那些，绝不含那一刻正在走的那根。
+ *
+ * 这是整个测试功能的底线 —— 那根还没走完的 K 线里包含着「未来」。
+ */
+async function fetchCandlesAsOf(
+  exchange: any,
+  symbol: string,
+  tf: Timeframe,
+  at: number,
+  bars: number
+): Promise<Candle[]> {
+  const step = TF_MS[tf]
+  // 多要几根，因为开头可能落在一根 K 线中间、末尾那根也要丢掉
+  const rows = await exchange.fetchOHLCV(
+    symbol,
+    tf,
+    at - (bars + 2) * step,
+    bars + 3
+  )
+  return toCandles(rows ?? [])
+    .filter(c => Number.isFinite(c.timestamp) && c.timestamp + step <= at)
+    .slice(-bars)
 }
 
 /** 把 MarketType 映射为 ccxt 的 defaultType / fetchMarkets 选项 */
@@ -367,15 +325,6 @@ export async function fetchCandles(
   return toCandles(rows)
 }
 
-/** 各周期一根 K 线的毫秒数 */
-const TF_MS: Record<Timeframe, number> = {
-  '5m': 5 * 60_000,
-  '15m': 15 * 60_000,
-  '1h': 60 * 60_000,
-  '4h': 4 * 60 * 60_000,
-  '1d': 24 * 60 * 60_000
-}
-
 export interface FetchRangeOptions {
   exchangeId: string
   symbol: string
@@ -392,7 +341,7 @@ export interface FetchRangeOptions {
 
 /**
  * 拉取一段时间区间的 K 线（自动分页）。
- * 用于「我给出一个时间段，AI 自动抓取拉升前后的样子」。
+ * 用于「我给出一个时间段，AI 自动抓取那段行情」。
  */
 export async function fetchCandlesRange(
   opts: FetchRangeOptions
@@ -489,155 +438,210 @@ async function fetchBinanceLongShortRatio(
 }
 
 /**
- * 拉取某币种的完整行情快照：
- *   多周期趋势（价格结构） + 市场热度。不含任何技术指标。
+ * 拉取某币的完整行情快照。
+ *
+ * 跟知识库收录时**同一套做法**：不算任何口径，把每个周期的 K 线
+ * **切成小段描述**（`describeSeries`）直接交给 AI 自己读。
+ *
+ * 主周期用「图上那段有多长」的天数；其余周期按 `calibers.others` 的天数。
  */
 export async function fetchSnapshot(
   opts: FetchOptions
 ): Promise<MarketSnapshot> {
   const marketType = opts.marketType ?? 'swap'
+  const cal = opts.calibers ?? DEFAULT_CALIBERS
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
   const symbol = resolveSymbol(exchange, opts.symbol, marketType)
-  const ticker = await exchange.fetchTicker(symbol)
 
-  const timeframes: TimeframeTrend[] = []
-  const candlesByTf: Partial<Record<Timeframe, Candle[]>> = {}
-  for (const tf of opts.timeframes) {
-    const rows = await exchange.fetchOHLCV(symbol, tf, undefined, opts.limit)
-    const candles = toCandles(rows)
-    candlesByTf[tf] = candles
-    timeframes.push(buildTimeframeTrend(tf, candles))
+  /** 是不是「以过去某一刻为现在」的回放（测试 / 复盘） */
+  const replayAt = typeof opts.at === 'number' && opts.at > 0 ? opts.at : null
+
+  const plan = planFor(opts.timeframe, cal)
+  const daysOf = (tf: Timeframe, days: number | null) => days ?? opts.days
+
+  let ticker: any = null
+  let fr: any = null
+  let oi: any = null
+  let oiSeries: number[] = []
+  let ls: number | null = null
+
+  /** 每个周期拉回来的 K 线 */
+  const raw: {timeframe: Timeframe; days: number; candles: Candle[]}[] = []
+
+  if (replayAt) {
+    // 回放：只拉截止那一刻**已收盘**的 K 线。
+    // 实时类接口（ticker / 资金费率 / 持仓量 / 多空比）一个都不调 ——
+    // 它们只会返回「现在」，混进过去的数据里就是偷看未来。
+    const got = await Promise.all(
+      plan.map(async p => ({
+        timeframe: p.timeframe,
+        days: daysOf(p.timeframe, p.days),
+        candles: await fetchCandlesAsOf(
+          exchange,
+          symbol,
+          p.timeframe,
+          replayAt,
+          barsFor(p.timeframe, daysOf(p.timeframe, p.days), cal)
+        )
+      }))
+    )
+    raw.push(...got)
+  } else {
+    const tickerP = exchange.fetchTicker(symbol)
+    const candlesP = Promise.all(
+      plan.map(async p => {
+        const days = daysOf(p.timeframe, p.days)
+        const rows = await exchange.fetchOHLCV(
+          symbol,
+          p.timeframe,
+          undefined,
+          barsFor(p.timeframe, days, cal)
+        )
+        return {timeframe: p.timeframe, days, candles: toCandles(rows)}
+      })
+    )
+
+    const [t, got, [f, o, s, l]] = await Promise.all([
+      tickerP,
+      candlesP,
+      Promise.all([
+        safeCall(() =>
+          exchange.has['fetchFundingRate']
+            ? exchange.fetchFundingRate(symbol)
+            : null
+        ),
+        safeCall(() =>
+          exchange.has['fetchOpenInterest']
+            ? exchange.fetchOpenInterest(symbol)
+            : null
+        ),
+        safeCall(() => fetchOpenInterestSeries(exchange, symbol)),
+        safeCall(() => fetchLongShort(exchange, symbol))
+      ])
+    ])
+    ticker = t
+    raw.push(...got)
+    fr = f
+    oi = o
+    oiSeries = Array.isArray(s) ? s : []
+    ls = l
   }
 
-  // ---------- 市场热度（全部容错，取不到就是 null） ----------
+  /** 主周期那块（图上那个） */
+  const mainRaw = raw.find(r => r.timeframe === opts.timeframe) ?? raw[0]
+  const mainCandles = mainRaw?.candles ?? []
+  const lastClose = mainCandles[mainCandles.length - 1]?.close ?? NaN
+
+  // ---------- 市场热度 ----------
   let fundingRate: number | null = null
   let openInterest: number | null = null
   let openInterestChangePct: number | null = null
   let longShortRatio: number | null = null
+  let quoteVolume24h: number | null = null
+  let change24hPct: number | null = null
+  let amplitude24hPct: number | null = null
+  let high24h: number | null = null
+  let low24h: number | null = null
+  let price = NaN
 
-  try {
-    if (exchange.has['fetchFundingRate']) {
-      const fr = await exchange.fetchFundingRate(symbol)
-      fundingRate = numOrNull(fr.fundingRate)
-      if (openInterest === null) openInterest = numOrNull(fr.openInterestAmount)
+  if (replayAt) {
+    // 只有 K 线可查：现价 = 最后一根已收盘 K 线的收盘，
+    // 24h 高低 / 涨跌 / 振幅也从这段 K 线自己算出来
+    price = lastClose
+    const win = mainCandles.filter(c => c.timestamp >= replayAt - DAY_MS)
+    const w = win.length >= 2 ? win : mainCandles
+    if (w.length >= 2) {
+      let hi = -Infinity
+      let lo = Infinity
+      for (const c of w) {
+        if (c.high > hi) hi = c.high
+        if (c.low < lo) lo = c.low
+      }
+      if (Number.isFinite(hi) && Number.isFinite(lo) && lo > 0) {
+        high24h = hi
+        low24h = lo
+        amplitude24hPct = ((hi - lo) / lo) * 100
+      }
+      const first = w[0].open
+      const last = w[w.length - 1].close
+      if (Number.isFinite(first) && first > 0 && Number.isFinite(last)) {
+        change24hPct = ((last - first) / first) * 100
+      }
     }
-  } catch {
-    /* 忽略 */
-  }
-
-  try {
-    if (exchange.has['fetchOpenInterest']) {
-      const oi = await exchange.fetchOpenInterest(symbol)
-      openInterest = numOrNull(
-        oi.openInterestAmount ?? oi.openInterestValue ?? oi.openInterest
-      )
-    }
-  } catch {
-    /* 忽略 */
-  }
-
-  try {
-    const series = await fetchOpenInterestSeries(exchange, symbol)
-    if (series.length >= 2) {
-      const first = series[0]
-      const last = series[series.length - 1]
-      if (first > 0) openInterestChangePct = ((last - first) / first) * 100
-      if (openInterest === null) openInterest = last
-    }
-  } catch {
-    /* 忽略 */
-  }
-
-  try {
-    longShortRatio = await fetchLongShort(exchange, symbol)
-  } catch {
-    /* ccxt 不支持时忽略，走下面的兜底 */
-  }
-  if (longShortRatio === null && opts.exchangeId === 'binance') {
-    try {
-      const m = exchange.market(symbol)
-      if (m && m.id) longShortRatio = await fetchBinanceLongShortRatio(m.id)
-    } catch {
-      /* 忽略 */
-    }
-  }
-
-  const lastTf = opts.timeframes[opts.timeframes.length - 1]
-  const recent = candlesByTf[opts.recentTimeframe] ?? candlesByTf[lastTf] ?? []
-  const recentCandles = recent.slice(-opts.recentCount)
-
-  const structureSource = candlesByTf['1h'] ?? recent
-  const structure = analyzeStructure(
-    structureSource,
-    Math.max(30, Math.min(60, structureSource.length))
-  )
-
-  const price = Number(ticker.last ?? recent[recent.length - 1]?.close ?? NaN)
-  const high24h = numOrNull(ticker.high)
-  const low24h = numOrNull(ticker.low)
-  const amplitude24hPct =
-    high24h !== null && low24h !== null && low24h > 0
-      ? ((high24h - low24h) / low24h) * 100
+  } else {
+    fundingRate = fr ? numOrNull(fr.fundingRate) : null
+    // 兜底顺序：持仓量接口 → 资金费率里带的 → 持仓量历史最后一期
+    openInterest = oi
+      ? numOrNull(
+          oi.openInterestAmount ?? oi.openInterestValue ?? oi.openInterest
+        )
       : null
+    if (openInterest === null && fr)
+      openInterest = numOrNull(fr.openInterestAmount)
+    if (openInterest === null && oiSeries.length > 0)
+      openInterest = oiSeries[oiSeries.length - 1]
+
+    if (oiSeries.length >= 2) {
+      const first = oiSeries[0]
+      const last = oiSeries[oiSeries.length - 1]
+      if (first > 0) openInterestChangePct = ((last - first) / first) * 100
+    }
+
+    longShortRatio = ls
+    if (longShortRatio === null && opts.exchangeId === 'binance') {
+      try {
+        const m = exchange.market(symbol)
+        if (m && m.id) longShortRatio = await fetchBinanceLongShortRatio(m.id)
+      } catch {
+        /* 忽略 */
+      }
+    }
+
+    price = Number(ticker?.last ?? lastClose ?? NaN)
+    high24h = numOrNull(ticker?.high)
+    low24h = numOrNull(ticker?.low)
+    amplitude24hPct =
+      high24h !== null && low24h !== null && low24h > 0
+        ? ((high24h - low24h) / low24h) * 100
+        : null
+    change24hPct = numOrNull(ticker?.percentage)
+    quoteVolume24h = numOrNull(ticker?.quoteVolume ?? ticker?.baseVolume)
+  }
 
   const heat: MarketHeat = {
     fundingRate,
     openInterest,
     openInterestChangePct,
-    quoteVolume24h: numOrNull(ticker.quoteVolume ?? ticker.baseVolume),
-    change24hPct: numOrNull(ticker.percentage),
+    quoteVolume24h,
+    change24hPct,
     amplitude24hPct,
     longShortRatio,
     high24h,
     low24h
   }
 
-  const variables: Record<string, number> = {
-    price,
-    funding_rate: fundingRate ?? NaN,
-    open_interest: openInterest ?? NaN,
-    oi_change_pct: openInterestChangePct ?? NaN,
-    change24h_pct: heat.change24hPct ?? NaN,
-    amplitude24h_pct: heat.amplitude24hPct ?? NaN,
-    volume24h: heat.quoteVolume24h ?? NaN,
-    long_short_ratio: longShortRatio ?? NaN,
-    swing_high: structure.swingHigh,
-    swing_low: structure.swingLow,
-    last_swing_high: structure.lastSwingHigh,
-    last_swing_low: structure.lastSwingLow,
-    trend_up_count: 0,
-    trend_down_count: 0,
-    trend_range_count: 0
-  }
-
-  let up = 0
-  let down = 0
-  let range = 0
-  for (const t of timeframes) {
-    const p = t.timeframe
-    variables[`close_${p}`] = t.close
-    variables[`net_change_${p}`] = t.netChangePct
-    variables[`range_${p}`] = t.rangePct
-    variables[`vol_ratio_${p}`] = t.volRatio
-    variables[`trend_${p}`] = t.trend === 'up' ? 1 : t.trend === 'down' ? -1 : 0
-    if (t.trend === 'up') up++
-    else if (t.trend === 'down') down++
-    else range++
-  }
-  variables.trend_up_count = up
-  variables.trend_down_count = down
-  variables.trend_range_count = range
+  // ---------- 每个周期切成小段读结构 ----------
+  const blocks: SeriesBlock[] = raw.map(r => {
+    const {text, stats} = describeSeries(r.candles)
+    return {
+      timeframe: r.timeframe,
+      primary: r.timeframe === opts.timeframe,
+      days: r.days,
+      bars: stats.bars,
+      from: r.candles[0]?.timestamp ?? 0,
+      to: r.candles[r.candles.length - 1]?.timestamp ?? 0,
+      text
+    }
+  })
 
   return {
     symbol,
     exchange: opts.exchangeId,
-    timestamp: Date.now(),
+    timestamp: replayAt ?? Date.now(),
     price,
-    timeframes,
+    primary: opts.timeframe,
+    blocks,
     heat,
-    structure,
-    recentCandles,
-    series: recent,
-    variables
+    candles: mainCandles
   }
 }

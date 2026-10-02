@@ -1,11 +1,12 @@
+import {isPeakHour} from './cn-holidays'
+
 /**
  * Token 用量与花费计算。
  *
  * 价目表按 DeepSeek 官方页手工维护（单位：美元 / 1M token，取**高峰价**）：
  *   https://api-docs.deepseek.com/quick_start/pricing
  *
- * 高峰时段 = 01:00-04:00 与 06:00-10:00 UTC（周一~周五，中国法定节假日除外），
- * 低谷价是高峰价的一半，这里按下单时刻自动折算。
+ * **空闲时段单价 = 高峰价的一半**（高峰/空闲的判定在 `cn-holidays.ts`）。
  *
  * 价格会变。想用自己的数，在 .env 里覆盖：
  *   LLM_PRICE_INPUT_HIT / LLM_PRICE_INPUT_MISS / LLM_PRICE_OUTPUT
@@ -99,14 +100,14 @@ export function priceFor(model: string): PriceLookup {
 
 /**
  * 是否处于高峰计价时段。
- * 注意：官方还排除了中国法定节假日，这里只按「UTC 周几 + 小时」判断，
- * 节假日的调用会被高估一倍（金额很小，可以接受）。
+ *
+ * 高峰 = 北京时间**周一~周五（不含法定节假日）的 9:00-12:00 与 14:00-18:00**；
+ * 其余全部（周末、法定节假日全天，以及平日的其余时段）= 空闲，单价是高峰的一半。
+ *
+ * 判定在 `cn-holidays.ts` 里（北京时间 + 节假日表），这里只是个转发。
  */
 export function isPeak(at: Date = new Date()): boolean {
-  const day = at.getUTCDay() // 0 = 周日
-  if (day === 0 || day === 6) return false
-  const h = at.getUTCHours()
-  return (h >= 1 && h < 4) || (h >= 6 && h < 10)
+  return isPeakHour(at)
 }
 
 /* ------------------------------------------------------------------ */

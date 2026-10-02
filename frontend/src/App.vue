@@ -3,7 +3,7 @@ import {computed, onMounted, ref, watch} from 'vue'
 import {RouterLink, RouterView, useRoute} from 'vue-router'
 import {cny} from './format'
 import {
-  account,
+  balanceBadge,
   bootstrap,
   changeModel,
   config,
@@ -11,14 +11,16 @@ import {
   modelOptions,
   notices,
   refreshBalance,
+  refreshingBalance,
   rulesBadge,
   switchingModel
 } from './store'
 
 const NAV = [
   {to: '/', label: '开单分析'},
-  {to: '/history', label: '历史'},
-  {to: '/knowledge', label: '知识库'},
+  {to: '/history', label: '预测历史'},
+  {to: '/knowledge', label: '历史知识库'},
+  {to: '/prompts', label: 'AI 提示词'},
   {to: '/usage', label: '用量'}
 ]
 
@@ -26,42 +28,22 @@ const toast = ref('')
 const accountError = ref('')
 
 /**
- * 开单分析页要「一屏塞下、内部各自滚动」，其它页还是普通长文档。
- * 页面高度归 body 管，所以在这里切换一个 class，别影响别的路由。
+ * 开单分析 / 预测历史要「一屏塞下、内部各自滚动」，其它页还是普通长文档。
+ * 页面高度归 body 管，所以在这里切一个 class，别影响别的路由。
  */
 const route = useRoute()
 watch(
   () => route.path,
   p => {
-    document.body.classList.toggle('fixed-viewport', p === '/')
+    document.body.classList.toggle(
+      'fixed-viewport',
+      p === '/' || p === '/history'
+    )
   },
   {immediate: true}
 )
 
 onMounted(bootstrap)
-
-const balanceText = computed(() => {
-  const b = config.value?.balance
-  if (!b || !b.ok || b.cny === null) return '余额 —'
-  return `余额 ${cny(b.cny)}`
-})
-
-const balanceTip = computed(() => {
-  const b = account.value?.balance
-  if (!b) return '点一下刷新余额'
-  if (!b.ok) return b.error ?? '拿不到余额'
-  const info = b.infos[0]
-  if (!info) return 'DeepSeek 账户余额'
-  return [
-    `总余额 ${cny(info.total)}`,
-    `充值 ${cny(info.toppedUp)}`,
-    `赠金 ${cny(info.granted)}`,
-    b.available ? '账户可用' : '账户不可用',
-    b.cached ? '（缓存）' : ''
-  ]
-    .filter(Boolean)
-    .join(' · ')
-})
 
 let timer: number | undefined
 function flash(msg: string) {
@@ -76,20 +58,13 @@ async function onModel(v: string) {
   if (err) accountError.value = err
   else flash(`已切到 ${v}，下一次判断就用它`)
 }
-
-async function onRefresh() {
-  await refreshBalance()
-  const b = account.value?.balance
-  accountError.value = b && !b.ok ? (b.error ?? '拿不到余额') : ''
-  if (b?.ok) flash('余额已刷新')
-}
 </script>
 
 <template>
   <header class="topbar">
     <div class="brand">
       <h1>开单分析</h1>
-      <span class="sub">我的规则 + 知识库 → 该不该做</span>
+      <span class="sub">分析预测提示词 + 行情数据 → 最大概率会怎么走</span>
     </div>
 
     <nav class="nav">
@@ -98,7 +73,7 @@ async function onRefresh() {
       </RouterLink>
     </nav>
 
-    <!-- 模型切换 + 账户余额（人民币） -->
+    <!-- 模型切换 + 余额（点一下刷新） -->
     <div v-if="config" class="account">
       <label
         class="model-pick"
@@ -118,11 +93,12 @@ async function onRefresh() {
       <button
         type="button"
         class="badge balance"
-        :class="config.balance.ok ? 'ok' : 'bad'"
-        :title="balanceTip"
-        @click="onRefresh"
+        :class="balanceBadge.cls"
+        :title="balanceBadge.title"
+        :disabled="refreshingBalance"
+        @click="refreshBalance"
       >
-        {{ balanceText }}
+        {{ refreshingBalance ? '余额 …' : balanceBadge.text }}
       </button>
     </div>
 
@@ -180,18 +156,5 @@ async function onRefresh() {
   min-width: 150px;
   padding: 5px 9px;
   font-size: 12px;
-}
-
-button.balance {
-  background: transparent;
-  font-weight: 400;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-button.balance:hover:not(:disabled) {
-  border-color: var(--blue);
-  color: var(--blue);
-  filter: none;
 }
 </style>

@@ -3,7 +3,7 @@
 
 defineProps<{
   modelValue: T
-  options: {value: T; label: string}[]
+  options: {value: T; label: string; title?: string}[]
 }>()
 
 const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
@@ -16,6 +16,7 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
       :key="String(o.value)"
       type="button"
       :class="{active: o.value === modelValue}"
+      :title="o.title"
       @click="emit('update:modelValue', o.value)"
     >
       {{ o.label }}

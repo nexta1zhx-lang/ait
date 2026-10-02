@@ -4,7 +4,19 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {loadConfig, ROOT_DIR} from './config'
 import {loadContracts} from './contracts'
-import {loadRules} from './rules'
+import {loadExtractRules, loadRules} from './rules'
+import {buildSystemPrompt} from './llm/prompt'
+import {buildExtractPrompt} from './llm/extract'
+import {
+  createDoc,
+  deleteDoc,
+  getVersion,
+  listDocs,
+  listVersions,
+  restoreVersion,
+  updateDoc,
+  type DocKind
+} from './db/prompts'
 import {
   checkDb,
   closePool,
@@ -14,47 +26,47 @@ import {
 } from './db/client'
 import {
   CaseLabel,
+  MoveType,
   deleteCase,
   getCase,
-  lessonsByGrade,
-  listCases
+  listCases,
+  listTags,
+  updateCase,
+  type UpdateCaseInput
 } from './db/knowledge'
+import {
+  addTagTemplate,
+  deleteTagTemplate,
+  listTagTemplates,
+  loadTagTemplates,
+  moveTagTemplate,
+  renameTagTemplate
+} from './db/tags'
 import {recordUsage, usageCalls, usageHeadline, usageSummary} from './db/usage'
 import {
-  OUTCOME_LABEL,
   analysisStats,
   deleteAnalysis,
   getAnalysis,
   listAnalyses,
   saveAnalysis,
-  saveRulesVersion,
-  settleAnalysis,
-  type OutcomeKind
+  saveRulesVersion
 } from './db/analyses'
 import {oneLineCost, usdToCny} from './llm/pricing'
-import {
-  clearBalanceCache,
-  fetchBalance,
-  fetchModels,
-  type ModelsResult
-} from './llm/account'
+import {fetchBalance, fetchModels, type ModelsResult} from './llm/account'
 import {writeEnvVar} from './util/envfile'
 import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
-import {collectCase} from './knowledge-service'
-import {computeRecentSR, fetchCandles, fetchSnapshot} from './data/market'
-import {buildContext} from './context/builder'
-import {DEFAULT_WIN_RATE, expectancyOf} from './analysis/expectancy'
-import {judge, toDecision, type JudgeMeta, type JudgeResult} from './llm/client'
-import {validate} from './guardrails/validator'
+import {bjFull, collectCase, reeditCase} from './knowledge-service'
+import {stepRecorder, type AnalyzeStep, type OnStep} from './step'
 import {
-  Candle,
-  Expectancy,
-  GuardrailResult,
-  LlmDecision,
-  MarketSnapshot,
-  MarketType,
-  Timeframe
-} from './types'
+  TF_MS,
+  computeRecentSR,
+  fetchCandles,
+  fetchCandlesRange,
+  fetchSnapshot
+} from './data/market'
+import {buildContext} from './context/builder'
+import {judge, type JudgeMeta, type JudgeResult} from './llm/client'
+import {Candle, MarketSnapshot, MarketType, Timeframe} from './types'
 
 const PORT = Number(process.env.PORT || 8787)
 /** 前端构建产物（npm run ui:build 生成） */
@@ -211,6 +223,10 @@ function readJsonBody(
 }
 
 const str = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d)
+
+/** 提示词文档类型（认不出的返回 null，由调用方决定默认值） */
+const asDocKind = (v: unknown): DocKind | null =>
+  v === 'role' || v === 'rule' || v === 'extract' ? v : null
 const num = (v: unknown): number | undefined => {
   const n = Number(v)
   return Number.isFinite(n) ? n : undefined
@@ -255,18 +271,43 @@ async function handleCandles(
 
   const tfParam = (q.get('timeframe') ?? '1h') as Timeframe
   const timeframe = (VALID_TFS as string[]).includes(tfParam) ? tfParam : '1h'
-  const limit = Math.min(1000, Math.max(50, Number(q.get('limit')) || 300))
+  // 一屏最多 3000 根（前端「加载更多」会递加）
+  const limit = Math.min(3000, Math.max(50, Number(q.get('limit')) || 300))
   const config = loadConfig({marketType: market})
 
+  // 日期区间（毫秒）。只决定「画哪一段」，不影响分析用的数据。
+  const fromReq = Number(q.get('from')) || 0
+  const toReq = Number(q.get('to')) || 0
+  const ranged = fromReq > 0 && toReq > fromReq
+
+  // 要比交易所单次上限（1000~1500）还多的时候走分页接口按区间翻。
+  // 给了 from 就**从那一刻开始画**（不往回截）—— 用户选的时间上必须真有 K 线；
+  // 跨度超过 limit 根时，从 from 起正向取满 limit 根为止。
+  const step = TF_MS[timeframe]
+  const now = Date.now()
+  const rangeFrom = ranged ? fromReq : now - limit * step
+  const rangeTo = ranged ? toReq : now
+
   const [candles, h1] = await Promise.all([
-    fetchCandles({
-      exchangeId: config.exchange,
-      symbol,
-      timeframe,
-      limit,
-      marketType: config.marketType,
-      apiBase: config.apiBase
-    }),
+    ranged || limit > 1000
+      ? fetchCandlesRange({
+          exchangeId: config.exchange,
+          symbol,
+          timeframe,
+          from: rangeFrom,
+          to: rangeTo,
+          marketType: config.marketType,
+          apiBase: config.apiBase,
+          maxCandles: limit
+        })
+      : fetchCandles({
+          exchangeId: config.exchange,
+          symbol,
+          timeframe,
+          limit,
+          marketType: config.marketType,
+          apiBase: config.apiBase
+        }),
     timeframe === '1h'
       ? Promise.resolve<Candle[]>([])
       : fetchCandles({
@@ -283,6 +324,7 @@ async function handleCandles(
   sendJson(res, 200, {
     symbol,
     timeframe,
+    ranged,
     candles,
     sr: computeRecentSR(srSource, 4)
   })
@@ -303,19 +345,7 @@ function baseSymbol(ccxtSymbol: string): string {
 }
 
 /** 分析过程中的一步，用于前端「分析过程」时间线 */
-export interface AnalyzeStep {
-  /** 稳定 id，前端拿来匹配 */
-  id: string
-  /** 显示文案 */
-  label: string
-  state: 'running' | 'done' | 'error'
-  /** 这一步的补充说明（周期、K 线数、token、耗时…） */
-  detail?: string
-  /** 这一步花了多少毫秒 */
-  ms?: number
-}
-
-type OnStep = (step: AnalyzeStep) => void
+export type {AnalyzeStep}
 
 export interface AnalyzeOutcome {
   analysisId: number | null
@@ -323,23 +353,31 @@ export interface AnalyzeOutcome {
   ccxtSymbol: string
   exchange: string
   marketType: string
+  /** 是不是「回到某一刻」的测试跑（不存档） */
+  testMode: boolean
+  /** 测试跑的时间点（毫秒）；实时跑是 null */
+  at: number | null
   price: number
   heat: MarketSnapshot['heat']
   change24hPct: number | null
   fundingRate: number | null
   openInterest: number | null
-  structure: MarketSnapshot['structure']
-  timeframes: MarketSnapshot['timeframes']
-  series: MarketSnapshot['series']
+  /** 主周期（图上那个） */
+  primary: Timeframe
+  /** 各周期的切段描述 */
+  blocks: MarketSnapshot['blocks']
+  /** 主周期的 K 线（给前端画图） */
+  candles: MarketSnapshot['candles']
+  /** 主周期往前看了多少天 */
+  days: number
   judge: JudgeResult
-  guardrails: GuardrailResult
-  expectancy: Expectancy | null
   /** 本次分析走了哪几步（前端画时间线） */
   steps: AnalyzeStep[]
   meta: {
     model: string
     rules: {sources: string[]; hash: string; warnings: string[]}
-    knowledgeUsed: boolean
+    /** 本次给了多少个可用标签 */
+    tagCount: number
     usage: {
       callId: number | null
       promptTokens: number
@@ -364,27 +402,43 @@ function parseTimeframes(raw: string | null): Timeframe[] {
   return fallback.length ? fallback : ['1h', '4h', '1d']
 }
 
-/** 读 query 里的 symbol / market / timeframes / winRate */
+/** 读 query 里的 symbol / market / timeframe / days / at */
 function analyzeParams(q: URLSearchParams): {
   symbol: string
   market?: MarketType
-  timeframes: Timeframe[]
-  winRate: number
+  /** 主周期（图上那个） */
+  timeframe: Timeframe
+  /** 主周期往前看多少天；0 / 非法 = 用配置里的默认值 */
+  days: number
+  /** 测试时间点（毫秒）；null = 用真正的现在跑实时分析 */
+  at: number | null
 } {
   const marketParam = q.get('market')
+  const tfRaw = (q.get('timeframe') ?? '').trim()
+  const fallback = loadConfig().timeframes
+  const timeframe = (VALID_TFS as string[]).includes(tfRaw)
+    ? (tfRaw as Timeframe)
+    : (fallback[0] ?? '1h')
   return {
     symbol: (q.get('symbol') ?? '').trim().toUpperCase(),
     market:
       marketParam && ['spot', 'swap', 'coinm'].includes(marketParam)
         ? (marketParam as MarketType)
         : undefined,
-    timeframes: parseTimeframes(q.get('timeframes')),
-    // 期望值用的假设胜率。页面不暴露这个输入，用默认值；显式传参仍然有效
-    winRate: Math.min(
-      1,
-      Math.max(0.01, Number(q.get('winRate')) || DEFAULT_WIN_RATE)
-    )
+    timeframe,
+    days: Number(q.get('days')) || 0,
+    at: parseAt(q.get('at'))
   }
+}
+
+/** 测试时间点：毫秒时间戳；非法 / 未来时间一律当作没给 */
+function parseAt(raw: string | null): number | null {
+  if (!raw) return null
+  const ms = Number(raw)
+  if (!Number.isFinite(ms) || ms <= 0) return null
+  // 未来的时间点没有数据可看，直接当没填
+  if (ms > Date.now()) return null
+  return Math.floor(ms)
 }
 
 /**
@@ -394,127 +448,132 @@ function analyzeParams(q: URLSearchParams): {
 async function runAnalysis(opts: {
   symbol: string
   market?: MarketType
-  timeframes: Timeframe[]
-  winRate: number
+  /** 主周期（图上那个） */
+  timeframe: Timeframe
+  /** 主周期往前看多少天；0 = 用配置默认值 */
+  days: number
+  /** 测试时间点（毫秒）：只看到那一刻为止的数据，且不存档 */
+  at?: number | null
   onStep?: OnStep
 }): Promise<AnalyzeOutcome> {
-  const {symbol: symbolInput, market, timeframes, winRate} = opts
-  const onStep: OnStep = opts.onStep ?? (() => {})
-  const steps: AnalyzeStep[] = []
+  const {symbol: symbolInput, market, timeframe} = opts
+  const {steps, start: step, markFailed} = stepRecorder(opts.onStep)
+  const testAt = opts.at ?? null
 
-  /** 开一步 → 返回「收尾」函数（自动算耗时并置为 done） */
-  const step = (id: string, label: string) => {
-    const startedAt = Date.now()
-    const rec: AnalyzeStep = {id, label, state: 'running' as const}
-    steps.push(rec)
-    onStep({...rec})
-    return (detail?: string) => {
-      rec.state = 'done'
-      rec.detail = detail
-      rec.ms = Date.now() - startedAt
-      onStep({...rec})
-    }
+  // 1. 读分析预测提示词（数据库里那份 kind=predict）
+  const endRules = step('rules', '读分析预测提示词')
+  const rules = await loadRules()
+  if (rules.dbError) {
+    // 没有角色和规则的判断等于让 AI 自由发挥，宁可不开跑
+    markFailed('rules', rules.dbError)
+    throw new Error(
+      `读不到提示词文档（角色/规则），先确认数据库正常：${rules.dbError}`
+    )
   }
-
-  /** 某一步炸了，把它标红（错误本身继续往外抛） */
-  const markFailed = (id: string, msg: string) => {
-    const rec = steps.find(x => x.id === id)
-    if (!rec) return
-    rec.state = 'error'
-    rec.detail = msg
-    rec.ms = Date.now()
-    onStep({...rec})
-  }
-
-  // 1. 读规则
-  const endRules = step('rules', '读取我的规则')
-  const rules = loadRules()
   endRules(
-    rules.sources.length
-      ? `${rules.sources.join('、')} · ${(
-          (rules.system.length + rules.body.length) /
-          1000
-        ).toFixed(1)}K 字 · ${rules.hash}`
-      : '（没读到规则文件，用内置角色设定）'
+    rules.bodyEnabled
+      ? `${rules.sources.join('、')} · 角色 ${rules.system.length} 字 + 规则 ${rules.body.length} 字 · ${rules.hash}`
+      : '（没有启用的角色/规则文档，本次按知识库经验判断）'
   )
 
-  const config = loadConfig({marketType: market, timeframes})
+  const config = loadConfig({marketType: market, timeframes: [timeframe]})
+  const cal = config.calibers
+  /** 主周期看多少天（前端传的是「图上那段」的天数；没传就用配置默认值） */
+  const days = Math.max(1, opts.days || config.lookbackDays)
 
-  // 2. 知识库经验
-  const endKb = step('knowledge', '取知识库经验')
-  let lessons = ''
+  // 2. 可用的标签池
+  //    **复用**两处现有的东西，不另建一套标签体系：
+  //      · 标签模板（网页「历史知识库」页维护）
+  //      · 知识库里已经用过的标签
+  //    注意：只给标签词，**不给经验正文** —— 经验暂时不注入。
+  const endTags = step('tags', '取可用的标签')
+  let tags: string[] = []
   try {
-    lessons = await lessonsByGrade()
+    const [templates, used] = await Promise.all([
+      loadTagTemplates(),
+      listTags()
+    ])
+    tags = [...new Set([...templates, ...used.map(u => u.tag)])]
   } catch (e) {
-    console.warn('[analyze] 读取知识库失败:', (e as Error).message)
+    console.warn('[analyze] 读取标签池失败:', (e as Error).message)
   }
-  endKb(lessons.trim() ? `${lessons.length} 字` : '知识库为空，跳过')
+  endTags(
+    tags.length
+      ? `${tags.length} 个：${tags.slice(0, 6).join(' / ')}…`
+      : '没有标签可用'
+  )
 
   // 3. 拉行情
-  const endFetch = step('fetch', `拉取 ${symbolInput} 行情`)
+  const endFetch = step(
+    'fetch',
+    testAt
+      ? `拉取 ${symbolInput} 行情（测试：${bjFull(testAt)} 为止）`
+      : `拉取 ${symbolInput} 行情`
+  )
   let snapshot: MarketSnapshot
   try {
     snapshot = await fetchSnapshot({
       exchangeId: config.exchange,
       symbol: symbolInput,
-      timeframes,
-      limit: config.candlesLimit,
-      recentTimeframe: '1h',
-      recentCount: 30,
+      timeframe,
+      days,
       marketType: config.marketType,
-      apiBase: config.apiBase
+      apiBase: config.apiBase,
+      calibers: config.calibers,
+      // 测试模式：只看得见这一刻之前已收盘的 K 线
+      at: testAt ?? undefined
     })
   } catch (e) {
     markFailed('fetch', (e as Error).message)
     throw e
   }
   endFetch(
-    `${snapshot.symbol} · ${timeframes.join('/')} · ${snapshot.series.length} 根 K 线 · 现价 ${snapshot.price}`
+    `${snapshot.symbol} · 主周期 ${timeframe}（图上 ${days} 天）· ` +
+      snapshot.blocks.map(b => `${b.timeframe} ${b.bars} 根`).join(' / ') +
+      ` · 现价 ${snapshot.price}`
   )
 
   // 4. 构建上下文
   const endCtx = step('context', '构建喂给 AI 的行情快照')
   const context = buildContext(snapshot)
-  endCtx(`${context.length} 字`)
+  endCtx(`${context.length} 字（K 线切成小段描述，不算口径）`)
 
   // 5. 调用大模型
   const endJudge = step('judge', `调用 ${config.llm.model} 判断`)
   let result: JudgeResult
   let meta: JudgeMeta
   try {
-    ;({result, meta} = await judge({snapshot, context, rules, lessons, config}))
+    ;({result, meta} = await judge({
+      snapshot,
+      context,
+      prompt: rules.system,
+      tags,
+      config
+    }))
   } catch (e) {
     markFailed('judge', (e as Error).message)
     throw e
   }
   endJudge(
     `${meta.model} · ${meta.usage.promptTokens}+${meta.usage.completionTokens} tok · 回答 ${meta.raw.length} 字` +
+      (config.llm.reasoningEffort
+        ? ` · 思考=${config.llm.reasoningEffort}`
+        : '') +
       (meta.attempts > 1 ? ` · 重试 ${meta.attempts} 次` : '')
   )
 
-  // 6. 护栏与仓位（代码算，不采信 AI 的算术）
-  const endGuard = step('guardrails', '护栏与仓位校验（代码）')
-  const decision = toDecision(result)
-  const guardrails = validate(decision, snapshot, config)
-  endGuard(
-    guardrails.passed
-      ? `通过 ${guardrails.checks.length} 项检查` +
-          (typeof guardrails.rMultiple === 'number'
-            ? ` · 末段盈亏比 ${guardrails.rMultiple}R`
-            : '')
-      : `拦下：${guardrails.violations.map(v => v.desc || v.id).join('；')}`
-  )
-
-  const expectancy = expectancyOf(decision, winRate)
   const chartTimeframe = '1h'
 
-  // 7. 记账并存档
-  const endArchive = step('archive', '记账并存档')
+  // 6. 记账并存档
+  const endArchive = step(
+    'archive',
+    testAt ? '记账（测试跑不存档）' : '记账并存档'
+  )
   const billed = await recordUsage({
     kind: 'judge',
     model: meta.model,
     symbol: baseSymbol(snapshot.symbol),
-    timeframe: timeframes.join(','),
+    timeframe,
     usage: meta.usage,
     attempts: meta.attempts,
     latencyMs: meta.latencyMs
@@ -528,34 +587,37 @@ async function runAnalysis(opts: {
       body: rules.body,
       sources: rules.sources
     })
-    analysisId = await saveAnalysis({
-      symbol: baseSymbol(snapshot.symbol),
-      ccxtSymbol: snapshot.symbol,
-      exchange: config.exchange,
-      marketType: config.marketType,
-      timeframes,
-      assumedWinRate: winRate,
-      chartTimeframe,
-      judge: result,
-      guardrails,
-      expectancy,
-      snapshot,
-      meta: {model: meta.model},
-      model: meta.model,
-      rulesHash: rules.hash,
-      llmUsageId: billed?.id ?? null,
-      usage: meta.usage,
-      costUsd: billed?.costUsd ?? null,
-      latencyMs: meta.latencyMs,
-      attempts: meta.attempts
-    })
+    // 测试跑是「回到过去重放」，不是真实的一笔 —— 不存档，
+    // 否则历史列表和胜率统计里会混进一堆事后诸葛
+    if (!testAt) {
+      analysisId = await saveAnalysis({
+        symbol: baseSymbol(snapshot.symbol),
+        ccxtSymbol: snapshot.symbol,
+        exchange: config.exchange,
+        marketType: config.marketType,
+        timeframes: [timeframe],
+        chartTimeframe,
+        judge: result,
+        snapshot,
+        meta: {model: meta.model, days},
+        model: meta.model,
+        rulesHash: rules.hash,
+        llmUsageId: billed?.id ?? null,
+        usage: meta.usage,
+        costUsd: billed?.costUsd ?? null,
+        latencyMs: meta.latencyMs,
+        attempts: meta.attempts
+      })
+    }
   } catch (e) {
     console.warn('[analyze] 存档失败:', (e as Error).message)
   }
   endArchive(
-    analysisId === null
-      ? '存库失败（不影响本次结论）'
-      : `存档 #${analysisId} · 花费 ${oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)}`
+    testAt
+      ? `测试跑（${bjFull(testAt)}）不存档 · 花费 ${oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)}`
+      : analysisId === null
+        ? '存库失败（不影响本次结论）'
+        : `存档 #${analysisId} · 花费 ${oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)}`
   )
 
   return {
@@ -564,17 +626,18 @@ async function runAnalysis(opts: {
     ccxtSymbol: snapshot.symbol,
     exchange: config.exchange,
     marketType: config.marketType,
+    testMode: testAt !== null,
+    at: testAt,
     price: snapshot.price,
     heat: snapshot.heat,
     change24hPct: snapshot.heat.change24hPct,
     fundingRate: snapshot.heat.fundingRate,
     openInterest: snapshot.heat.openInterest,
-    structure: snapshot.structure,
-    timeframes: snapshot.timeframes,
-    series: snapshot.series,
+    primary: snapshot.primary,
+    blocks: snapshot.blocks,
+    candles: snapshot.candles,
+    days,
     judge: result,
-    guardrails,
-    expectancy,
     steps,
     meta: {
       model: meta.model,
@@ -583,7 +646,7 @@ async function runAnalysis(opts: {
         hash: rules.hash,
         warnings: rules.warnings
       },
-      knowledgeUsed: lessons.length > 0,
+      tagCount: tags.length,
       // 本次调用的 token 与花费（统计用）
       usage: {
         callId: billed?.id ?? null,
@@ -665,57 +728,403 @@ async function handleAnalyzeStream(
 }
 
 /* ------------------------------------------------------------------ */
+/* AI 提示词文档（分析预测 / 知识库提炼，全部存数据库）                   */
+/* ------------------------------------------------------------------ */
+
+/** 列表 + 「这次真正会发出去什么」的概览 */
+async function handleListAiDocs(res: http.ServerResponse): Promise<void> {
+  try {
+    const [docs, bundle, extract] = await Promise.all([
+      listDocs(),
+      loadRules(),
+      loadExtractRules()
+    ])
+    sendJson(res, 200, {
+      docs,
+      assembly: {
+        // 分析预测只读 kind=predict 那一份（不再分角色/规则两段）
+        enabled: bundle.bodyEnabled,
+        origin: bundle.origin,
+        sources: bundle.sources,
+        hash: bundle.hash,
+        predictChars: bundle.system.length,
+        // 知识库提炼那份走的是另一条链路（kind=extract），一起报出来
+        extractChars: extract.system.length,
+        extractSources: extract.sources,
+        extractHash: extract.hash,
+        updatedAt: bundle.updatedAt,
+        warnings: bundle.warnings
+      }
+    })
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleCreateAiDoc(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req).catch(() => null)
+  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+  const kind = asDocKind(body.kind) ?? 'rule'
+  const name = str(body.name).trim()
+  if (!name) return sendJson(res, 400, {error: '请给这份文档起个名字'})
+  try {
+    const doc = await createDoc({
+      kind,
+      name,
+      content: typeof body.content === 'string' ? body.content : ''
+    })
+    sendJson(res, 200, {doc})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleUpdateAiDoc(
+  id: number,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req).catch(() => null)
+  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+  const patch: Parameters<typeof updateDoc>[1] = {}
+  if (typeof body.name === 'string') patch.name = body.name
+  if (typeof body.content === 'string') patch.content = body.content
+  if (typeof body.enabled === 'boolean') patch.enabled = body.enabled
+  const kind = asDocKind(body.kind)
+  if (kind) patch.kind = kind
+  if (body.sort !== undefined) patch.sort = Number(body.sort) || 0
+  try {
+    const doc = await updateDoc(id, patch)
+    if (!doc) return sendJson(res, 404, {error: '文档不存在'})
+    sendJson(res, 200, {doc})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleDeleteAiDoc(
+  id: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    const ok = await deleteDoc(id)
+    sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '文档不存在'})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleListAiVersions(
+  docId: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    sendJson(res, 200, {versions: await listVersions(docId)})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleGetAiVersion(
+  versionId: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    const v = await getVersion(versionId)
+    if (!v) return sendJson(res, 404, {error: '版本不存在'})
+    sendJson(res, 200, {version: v})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleRestoreAiVersion(
+  versionId: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    const doc = await restoreVersion(versionId)
+    if (!doc) return sendJson(res, 404, {error: '版本不存在'})
+    sendJson(res, 200, {doc})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+/**
+ * 看看这次真正发出去的 system prompt 长什么样。
+ *
+ * `?kind=extract` 看知识库提炼那份（它不是通过 buildSystemPrompt 拼的，
+ * 而是正文 + 标签规则）。
+ */
+async function handleAiPreview(
+  url: URL,
+  res: http.ServerResponse
+): Promise<void> {
+  if (url.searchParams.get('kind') === 'extract') {
+    const [extract, templates] = await Promise.all([
+      loadExtractRules(),
+      loadTagTemplates()
+    ])
+    sendJson(res, 200, {
+      system: buildExtractPrompt(extract.system, templates),
+      enabled: extract.enabled,
+      sources: extract.sources,
+      hash: extract.hash
+    })
+    return
+  }
+  const bundle = await loadRules()
+  sendJson(res, 200, {
+    system: buildSystemPrompt(bundle.system),
+    enabled: bundle.bodyEnabled,
+    sources: bundle.sources,
+    hash: bundle.hash
+  })
+}
+
+/* ------------------------------------------------------------------ */
 /* 知识库                                                              */
 /* ------------------------------------------------------------------ */
+
+/**
+ * 把参数（POST body / SSE 的 query）整理成 collectCase 的输入。
+ * 两种入口共用一个解析，免得规则写两遍。
+ */
+function collectInput(get: (k: string) => unknown):
+  | {error: string}
+  | {
+      symbol: string
+      timeframe: Timeframe
+      note: string
+      center?: number
+      aroundBars?: number
+      from?: number
+      to?: number
+      lookbackBars?: number
+      exact?: boolean
+      dryRun?: boolean
+    } {
+  const symbol = str(get('symbol')).trim().toUpperCase()
+  if (!symbol) return {error: '请填写币种，例如 MAGMA'}
+
+  const tf = str(get('timeframe'), '4h') as Timeframe
+  const timeframe = (VALID_TFS as string[]).includes(tf) ? tf : '4h'
+
+  const from = num(get('from'))
+  const to = num(get('to'))
+  if ((from && !to) || (!from && to)) {
+    return {error: '时间段要同时给起止时间'}
+  }
+
+  return {
+    symbol,
+    timeframe,
+    note: str(get('note')),
+    // 「点选为中心」走这条：以某个时间点为中心，前后各 N 根
+    center: num(get('center')),
+    aroundBars: num(get('aroundBars')),
+    from,
+    to,
+    lookbackBars: num(get('lookbackBars')),
+    // 我在图上画了范围 → 就要这一段本身，前后不补
+    exact: get('exact') === true || get('exact') === '1',
+    // save=0（或 body 里 save:false）= 只分析不落库，调试用
+    dryRun: get('save') === false || get('save') === '0'
+  }
+}
 
 async function handleCollectCase(
   req: http.IncomingMessage,
   res: http.ServerResponse
 ): Promise<void> {
   const body = await readJsonBody(req)
-
-  const symbol = str(body.symbol).trim().toUpperCase()
-  if (!symbol) {
-    sendJson(res, 400, {error: '请填写币种，例如 MAGMA'})
+  const params = collectInput(k => body[k])
+  if ('error' in params) {
+    sendJson(res, 400, {error: params.error})
     return
   }
+  sendJson(res, 200, await collectCase(params))
+}
 
-  const tf = str(body.timeframe, '4h') as Timeframe
-  const timeframe = (VALID_TFS as string[]).includes(tf) ? tf : '4h'
-
-  const labelRaw = str(body.label, 'do')
-  const label: CaseLabel = labelRaw === 'dont' ? 'dont' : 'do'
-
-  const from = num(body.from)
-  const to = num(body.to)
-  if ((from && !to) || (!from && to)) {
-    sendJson(res, 400, {error: '时间段要同时给起止时间'})
-    return
-  }
-
-  const result = await collectCase({
-    symbol,
-    timeframe,
-    label,
-    note: str(body.note),
-    from,
-    to,
-    lookbackBars: num(body.lookbackBars),
-    dryRun: body.save === false
+/**
+ * 带进度的案例提炼（Server-Sent Events）。
+ * 一路上推 `step`，最后推 `done`（内容与 POST /api/knowledge 完全一致）。
+ */
+async function handleCollectStream(
+  url: URL,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...CORS
   })
-  sendJson(res, 200, result)
+
+  const send = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+
+  const params = collectInput(k => url.searchParams.get(k))
+  if ('error' in params) {
+    send('failed', {error: params.error})
+    res.end()
+    return
+  }
+
+  let closed = false
+  req.on('close', () => (closed = true))
+
+  try {
+    const outcome = await collectCase({
+      ...params,
+      onStep: s => {
+        if (!closed) send('step', s)
+      }
+    })
+    if (!closed) send('done', outcome)
+  } catch (e) {
+    if (!closed) send('failed', {error: (e as Error).message})
+  } finally {
+    res.end()
+  }
 }
 
 async function handleListCases(
   url: URL,
   res: http.ServerResponse
 ): Promise<void> {
-  const labelRaw = url.searchParams.get('label') ?? 'all'
+  const q = url.searchParams
+  const labelRaw = q.get('label') ?? 'all'
   const label = (['do', 'dont'] as string[]).includes(labelRaw)
     ? (labelRaw as CaseLabel)
     : 'all'
-  const cases = await listCases({label})
+  const moveRaw = q.get('moveType') ?? 'all'
+  const moveType = (['up', 'down', 'range', 'none'] as string[]).includes(
+    moveRaw
+  )
+    ? (moveRaw as MoveType | 'none')
+    : 'all'
+  const withCandles = q.get('candles') === '1'
+  const cases = await listCases({
+    label,
+    moveType,
+    tag: q.get('tag') ?? '',
+    symbol: q.get('symbol') ?? '',
+    q: q.get('q') ?? '',
+    // 卡片要画迷你图时才把 K 线一起带上
+    withCandles
+  })
+
   sendJson(res, 200, {total: cases.length, cases})
+}
+
+/** GET /api/knowledge/tags —— 标签模板（我自己维护）+ 已用统计 + 模板外的老标签 */
+async function handleListTags(res: http.ServerResponse): Promise<void> {
+  const [rows, used] = await Promise.all([listTagTemplates(), listTags()])
+  const counts = new Map(used.map(t => [t.tag, t.n]))
+  const names = rows.map(r => r.name)
+  sendJson(res, 200, {
+    tags: used,
+    templates: rows.map(r => ({...r, n: counts.get(r.name) ?? 0})),
+    // 老记录里那些不在模板里的标签（弹窗里提示清掉）
+    legacy: used.map(t => t.tag).filter(t => !names.includes(t))
+  })
+}
+
+/** 标签模板的增 / 删 / 改 / 排序 —— 全部由我自己在网页上维护 */
+async function handleAddTagTemplate(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req).catch(() => null)
+  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+  try {
+    sendJson(res, 201, await addTagTemplate(body.name))
+  } catch (e) {
+    sendJson(res, 400, {error: (e as Error).message})
+  }
+}
+
+async function handleUpdateTagTemplate(
+  id: number,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req).catch(() => null)
+  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+  try {
+    const row = await renameTagTemplate(id, body.name)
+    sendJson(res, row ? 200 : 404, row ?? {error: '模板不存在'})
+  } catch (e) {
+    sendJson(res, 400, {error: (e as Error).message})
+  }
+}
+
+async function handleMoveTagTemplate(
+  id: number,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req).catch(() => null)
+  const dir = body?.dir === 'up' ? 'up' : 'down'
+  const ok = await moveTagTemplate(id, dir)
+  sendJson(res, 200, {ok})
+}
+
+async function handleDeleteTagTemplate(
+  id: number,
+  res: http.ServerResponse
+): Promise<void> {
+  const ok = await deleteTagTemplate(id)
+  sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '模板不存在'})
+}
+
+/** PATCH /api/knowledge/:id —— 只改文案，K 线不动 */
+async function handleUpdateCase(
+  id: number,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req)
+  const patch: UpdateCaseInput = {}
+  if (typeof body.title === 'string') patch.title = body.title
+  if (typeof body.note === 'string') patch.note = body.note
+  if (typeof body.lesson === 'string') patch.lesson = body.lesson
+  if (typeof body.why === 'string') patch.why = body.why
+  if (body.label === 'do' || body.label === 'dont') patch.label = body.label
+  if (body.moveType === null) patch.moveType = null
+  else if (['up', 'down', 'range'].includes(String(body.moveType)))
+    patch.moveType = body.moveType as MoveType
+  if (Array.isArray(body.tags))
+    patch.tags = body.tags
+      .map(t => String(t ?? '').trim())
+      .filter(t => t.length > 0 && t.length <= 12)
+      .slice(0, 10)
+  if (body.features && typeof body.features === 'object')
+    patch.features = body.features as UpdateCaseInput['features']
+
+  const ok = await updateCase(id, patch)
+  sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '案例不存在'})
+}
+
+/** POST /api/knowledge/:id/reedit —— 用库里存下的 K 线重跑一次 AI 提炼 */
+async function handleReeditCase(
+  id: number,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req)
+  const result = await reeditCase(id, {
+    note: typeof body.note === 'string' ? body.note : undefined
+  })
+  sendJson(res, 200, result)
 }
 
 async function handleGetCase(
@@ -751,7 +1160,7 @@ async function route(
 
   if (p === '/api/health') {
     const db = await checkDb()
-    const rules = loadRules()
+    const rules = await loadRules()
     sendJson(res, 200, {
       ok: true,
       db,
@@ -767,18 +1176,13 @@ async function route(
   }
 
   if (p === '/api/config') {
-    const rules = loadRules()
+    const rules = await loadRules()
     const env = process.env
-    const counts = await query<{label: string; n: string}>(
-      'SELECT label, count(*)::text AS n FROM knowledge GROUP BY label'
-    ).catch(() => [] as {label: string; n: string}[])
-    const knowledge = {doCount: 0, dontCount: 0, total: 0}
-    for (const c of counts) {
-      const n = Number(c.n)
-      if (c.label === 'do') knowledge.doCount = n
-      else knowledge.dontCount = n
-      knowledge.total += n
-    }
+    // 知识库只报一个总数（已经不再分「该做 / 不该做」）
+    const rows = await query<{n: string}>(
+      'SELECT count(*)::text AS n FROM knowledge'
+    ).catch(() => [] as {n: string}[])
+    const knowledge = {total: Number(rows[0]?.n ?? 0)}
     const head = await usageHeadline().catch(() => ({
       todayCalls: 0,
       todayCostUsd: 0,
@@ -786,19 +1190,27 @@ async function route(
       allCostUsd: 0
     }))
     const cfg = loadConfig()
-    const balance = await fetchBalance(cfg).catch(() => null)
     sendJson(res, 200, {
       hasApiKey: Boolean(env.LLM_API_KEY),
       exchange: env.EXCHANGE ?? 'binance',
       marketType: env.MARKET_TYPE ?? 'swap',
       timeframes: cfg.timeframes.join(','),
+      /** 主周期默认看多少天（前端传的是「图上那段」的天数） */
+      lookback: {days: cfg.lookbackDays},
       model: cfg.llm.model,
       provider: 'deepseek',
       rules: {
         sources: rules.sources,
         hash: rules.hash,
+        /** 角色设定字数 */
         systemChars: rules.system.length,
+        /** 规则正文字数 */
         bodyChars: rules.body.length,
+        /** 本次是否真的把角色/规则发给了模型 */
+        bodyEnabled: rules.bodyEnabled,
+        /** db = 数据库里有启用的文档；documents = 库里没有 */
+        origin: rules.origin,
+        updatedAt: rules.updatedAt,
         warnings: rules.warnings
       },
       knowledge,
@@ -809,16 +1221,7 @@ async function route(
         allCalls: head.allCalls,
         allCostUsd: head.allCostUsd,
         allCostCny: usdToCny(head.allCostUsd)
-      },
-      /** 账户余额（人民币，DeepSeek 原生就是 CNY） */
-      balance: balance
-        ? {
-            ok: balance.ok,
-            cny: balance.cny,
-            available: balance.available,
-            error: balance.error
-          }
-        : {ok: false, cny: null, available: false, error: '暂时拿不到余额'}
+      }
     })
     return
   }
@@ -872,22 +1275,21 @@ async function route(
     return
   }
 
-  /* ---- 账户：余额 + 可用模型 ---- */
+  /* ---- 账户：可用模型 + 余额（`?refresh=1` 绕过 60 秒缓存）---- */
   if (p === '/api/account') {
     const config = loadConfig()
-    const force = url.searchParams.get('refresh') === '1'
-    if (force) clearBalanceCache()
-    const [balance, models] = await Promise.all([
-      fetchBalance(config, {force}),
-      fetchModels(config)
+    const refresh = url.searchParams.get('refresh') === '1'
+    const [models, balance] = await Promise.all([
+      fetchModels(config),
+      fetchBalance(config, refresh)
     ])
     sendJson(res, 200, {
       provider: 'deepseek',
       baseUrl: config.llm.baseUrl,
       hasApiKey: Boolean(config.llm.apiKey),
       model: config.llm.model,
-      balance,
-      models
+      models,
+      balance
     })
     return
   }
@@ -919,7 +1321,6 @@ async function route(
     }
 
     const saved = writeEnvVar('LLM_MODEL', model)
-    clearBalanceCache()
     const next = loadConfig()
     sendJson(res, 200, {
       ok: true,
@@ -970,8 +1371,8 @@ async function route(
           symbol: url.searchParams.get('symbol') ?? undefined,
           grade: url.searchParams.get('grade') ?? undefined,
           verdict: url.searchParams.get('verdict') ?? undefined,
+          tag: url.searchParams.get('tag') ?? undefined,
           actionableOnly: url.searchParams.get('actionable') === '1',
-          pendingOnly: url.searchParams.get('pending') === '1',
           limit: Number(url.searchParams.get('limit') ?? 30),
           offset: Number(url.searchParams.get('offset') ?? 0)
         }),
@@ -985,55 +1386,62 @@ async function route(
   }
 
   if (p.startsWith('/api/analyses/')) {
-    const m = p.match(/\/(\d+)(\/settle)?$/)
-    if (!m)
-      return sendJson(res, 400, {
-        error: '路径不对。用法：/api/analyses/12 或 /api/analyses/12/settle'
-      })
+    const m = p.match(/\/(\d+)$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
     const id = Number(m[1])
-    const settle = Boolean(m[2])
 
-    if (!settle) {
-      if (method === 'DELETE') {
-        const ok = await deleteAnalysis(id)
-        return sendJson(
-          res,
-          ok ? 200 : 404,
-          ok ? {ok: true} : {error: '记录不存在'}
-        )
-      }
-      const row = await getAnalysis(id).catch(() => null)
-      if (!row) return sendJson(res, 404, {error: '记录不存在'})
-      return sendJson(res, 200, {analysis: row})
+    if (method === 'DELETE') {
+      const ok = await deleteAnalysis(id)
+      return sendJson(
+        res,
+        ok ? 200 : 404,
+        ok ? {ok: true} : {error: '记录不存在'}
+      )
     }
-
-    if (method !== 'POST')
+    if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    let body: Record<string, unknown>
-    try {
-      body = await readJsonBody(req)
-    } catch (e) {
-      return sendJson(res, 400, {error: (e as Error).message})
+    const row = await getAnalysis(id).catch(() => null)
+    if (!row) return sendJson(res, 404, {error: '记录不存在'})
+    return sendJson(res, 200, {analysis: row})
+  }
+
+  /* ---- AI 提示词文档（角色 / 规则，全部存数据库） ---- */
+  if (p === '/api/ai-docs') {
+    if (method === 'GET') return handleListAiDocs(res)
+    if (method === 'POST') return handleCreateAiDoc(req, res)
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+  if (p === '/api/ai-preview') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    return handleAiPreview(url, res)
+  }
+  if (p.startsWith('/api/ai-docs/')) {
+    const mv = p.match(/^\/api\/ai-docs\/(\d+)\/versions$/)
+    if (mv) {
+      if (method !== 'GET')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      return handleListAiVersions(Number(mv[1]), res)
     }
-    const outcome = str(body.outcome).trim()
-    if (!(outcome in OUTCOME_LABEL)) {
-      return sendJson(res, 400, {
-        error: `outcome 只能是：${Object.keys(OUTCOME_LABEL).join(' / ')}`
-      })
+    const m = p.match(/^\/api\/ai-docs\/(\d+)$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+    if (method === 'PUT') return handleUpdateAiDoc(id, req, res)
+    if (method === 'DELETE') return handleDeleteAiDoc(id, res)
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+  if (p.startsWith('/api/ai-versions/')) {
+    const mr = p.match(/^\/api\/ai-versions\/(\d+)\/restore$/)
+    if (mr) {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      return handleRestoreAiVersion(Number(mr[1]), res)
     }
-    const ok = await settleAnalysis(id, {
-      outcome: outcome as OutcomeKind,
-      outcomePrice: num(body.price) ?? null,
-      rMultiple: num(body.rMultiple) ?? null,
-      mfePct: num(body.mfePct) ?? null,
-      maePct: num(body.maePct) ?? null,
-      note: str(body.note) || null
-    }).catch(() => false)
-    return sendJson(
-      res,
-      ok ? 200 : 404,
-      ok ? {ok: true} : {error: '记录不存在'}
-    )
+    const m = p.match(/^\/api\/ai-versions\/(\d+)$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    return handleGetAiVersion(Number(m[1]), res)
   }
 
   /* ---- 知识库 ---- */
@@ -1042,10 +1450,45 @@ async function route(
     if (method === 'POST') return handleCollectCase(req, res)
     return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
+  if (p === '/api/knowledge/tags') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    return handleListTags(res)
+  }
+  /* ---- 标签模板（我自己维护，AI 只能从这里挑） ---- */
+  if (p === '/api/tag-templates') {
+    if (method === 'GET') return handleListTags(res)
+    if (method === 'POST') return handleAddTagTemplate(req, res)
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+  if (p.startsWith('/api/tag-templates/')) {
+    const mm = p.match(/^\/api\/tag-templates\/(\d+)(\/move)?$/)
+    if (!mm) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(mm[1])
+    if (mm[2] === '/move') {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      return handleMoveTagTemplate(id, req, res)
+    }
+    if (method === 'PUT') return handleUpdateTagTemplate(id, req, res)
+    if (method === 'DELETE') return handleDeleteTagTemplate(id, res)
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+  // 带进度地收录一个案例（SSE）—— EventSource 只能发 GET，参数走 query
+  if (p === '/api/knowledge/stream') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    return handleCollectStream(url, req, res)
+  }
   if (p.startsWith('/api/knowledge/')) {
-    const m = p.match(/\/(\d+)$/)
-    const id = m ? Number(m[1]) : null
-    if (id === null) return sendJson(res, 404, {error: 'Not Found'})
+    const m = p.match(/^\/api\/knowledge\/(\d+)(\/reedit)?$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+    if (m[2] === '/reedit') {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      return handleReeditCase(id, req, res)
+    }
     if (method === 'DELETE') {
       const ok = await deleteCase(id)
       return sendJson(
@@ -1054,6 +1497,7 @@ async function route(
         ok ? {ok: true} : {error: '案例不存在'}
       )
     }
+    if (method === 'PATCH') return handleUpdateCase(id, req, res)
     return handleGetCase(id, res)
   }
 
@@ -1093,7 +1537,7 @@ async function main(): Promise<void> {
     console.error('')
   }
 
-  const rules = loadRules()
+  const rules = await loadRules()
   const frontend = await resolveFrontend()
 
   server.listen(PORT, () => {
@@ -1108,7 +1552,9 @@ async function main(): Promise<void> {
     } else {
       console.log('  前端    ⚠️  还没构建：npm run ui:build')
     }
-    console.log(`  规则    ${rules.sources.join('、') || '（空）'}`)
+    console.log(
+      `  提示词  ${rules.sources.join('、') || '（数据库里没有启用的文档）'}`
+    )
     for (const w of rules.warnings) console.log(`  ⚠️  ${w}`)
     console.log('')
     console.log('  按 Ctrl+C 停止。')

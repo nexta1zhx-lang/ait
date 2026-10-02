@@ -16,6 +16,15 @@ export interface Column<T = Record<string, any>> {
   dir?: 'asc' | 'desc'
   /** 首列加粗 */
   strong?: boolean
+  /**
+   * 列宽提示（CSS 宽度，如 `'130px'`）。
+   *
+   * 不给宽度的列会自己吸掉剩下的空间 —— 想让「内容很长的那一列」变宽，
+   * 就把**其他**列都写上宽度。
+   */
+  width?: string
+  /** 允许换行（默认 `nowrap`，长文本会把表撑得很宽） */
+  wrap?: boolean
 }
 </script>
 
@@ -29,6 +38,14 @@ const props = defineProps<{
   rows: T[]
   empty?: string
   initialSort?: string
+  /**
+   * 按 `columns[].width` 严格分列（`table-layout: fixed`）。
+   *
+   * 不打开的话浏览器会按内容自己分，写了宽度的列可能被别的列抢走空间 ——
+   * 列宽跟内容差很多（如「标签」这种要换行的）就必须开。
+   * 没写宽度的列平分剩下的宽度。
+   */
+  fixed?: boolean
 }>()
 
 const sortKey = ref(props.initialSort ?? '')
@@ -66,13 +83,14 @@ function arrow(col: Column<T>) {
 
 <template>
   <div class="table-wrap">
-    <table class="table">
+    <table class="table" :class="{fixed}">
       <thead>
         <tr>
           <th
             v-for="c in columns"
             :key="c.key"
             :class="[c.align === 'right' ? 'r' : '', 'sortable']"
+            :style="c.width ? {width: c.width} : null"
             @click="toggle(c)"
           >
             {{ c.label }}<span class="ar">{{ arrow(c) }}</span>
@@ -89,7 +107,12 @@ function arrow(col: Column<T>) {
           <td
             v-for="c in columns"
             :key="c.key"
-            :class="[c.align === 'right' ? 'r' : '', c.strong ? 's' : '']"
+            :class="[
+              c.align === 'right' ? 'r' : '',
+              c.strong ? 's' : '',
+              c.wrap ? 'wrap' : ''
+            ]"
+            :style="c.width ? {width: c.width} : null"
           >
             <slot :name="c.key" :row="row" :value="row[c.key]">
               {{ row[c.key] }}

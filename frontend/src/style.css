@@ -13,6 +13,7 @@
   --warn: #f0b429;
   --warn-soft: rgba(240, 180, 41, 0.14);
   --blue: #42a5f5;
+  --blue-soft: rgba(66, 165, 245, 0.14);
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -196,6 +197,7 @@ a.badge:hover {
   padding: 1px 7px;
 }
 
+/* 清单通过率达标 / 未达标（门槛默认 60%，不必全过） */
 .hint {
   margin: 0;
   color: var(--muted);
@@ -237,7 +239,8 @@ a.badge:hover {
 }
 
 input:not([type='checkbox']),
-select {
+select,
+textarea {
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--text);
@@ -248,11 +251,24 @@ select {
   min-width: 0;
   outline: none;
   font-family: inherit;
+  /* 暗色主题：不加这个，日期/时间选择器和滚动条会是亮的 */
+  color-scheme: dark;
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--blue);
+}
+
+::placeholder {
+  color: var(--muted);
+  opacity: 0.75;
+}
+
+textarea {
+  line-height: 1.55;
+  resize: vertical;
 }
 
 .chk {
@@ -408,17 +424,31 @@ button.danger:hover {
   white-space: nowrap;
 }
 
-.grade.a {
+/*
+ * 档位颜色：
+ *   A / A-W 顺势 —— 绿；S 突破 —— 蓝；V 逆势 —— 黄；B 不该做 —— 红。
+ * 类名由 `format.ts` 的 gradeTone() 给出，两处要一致。
+ */
+.grade.a,
+.grade.a-w {
   background: var(--ok-soft);
   color: var(--ok);
+}
+.grade.s {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+.grade.v {
+  background: var(--warn-soft);
+  color: var(--warn);
 }
 .grade.b {
   background: var(--bad-soft);
   color: var(--bad);
 }
-.grade.c {
-  background: var(--warn-soft);
-  color: var(--warn);
+.grade.unclear {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
 }
 
 .grade-title {
@@ -519,116 +549,123 @@ button.danger:hover {
   color: var(--muted);
 }
 
-/* 清单 */
-.checklist {
+/* 标签行：AI 从「标签模板 + 知识库用过的标签」里挑出来的形状标签 */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* ==================== 周期标识 ==================== */
+
+/* 结论卡上那一条「15m ↑ 1h ↑★ 4h ↑ 1d ↑」 */
+.tf-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.tf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.tf-chip b {
+  color: var(--text);
+  font-weight: 600;
+}
+.tf-chip.up span {
+  color: var(--ok);
+}
+.tf-chip.down span {
+  color: var(--bad);
+}
+/* 只给压力支撑的周期（日线）：没有方向就不涂色，免得看着像「震荡」 */
+.tf-chip.unknown span {
+  color: var(--muted);
+}
+/* 判档主要依据的那个周期要跳出来 */
+.tf-chip.primary {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+.tf-chip i {
+  font-style: normal;
+  color: var(--blue);
+}
+
+.tf-hint {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+/* 「市场与周期」里 AI 的逐周期表态 */
+.tf-notes {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
-
-.checklist li {
-  display: flex;
+.tf-notes li {
+  display: grid;
+  grid-template-columns: 54px 64px 128px minmax(0, 1fr);
   align-items: baseline;
   gap: 8px;
-  flex-wrap: wrap;
-  padding: 7px 11px;
-  border-radius: 8px;
+  padding: 6px 9px;
+  border-radius: 7px;
   background: var(--panel-2);
-  font-size: 13px;
   border-left: 2px solid transparent;
-}
-
-.checklist li.ok {
-  border-left-color: var(--ok);
-}
-.checklist li.bad {
-  border-left-color: var(--bad);
-}
-.checklist li.warn {
-  border-left-color: var(--warn);
-}
-.checklist li.muted {
-  color: var(--muted);
-  border-left-color: var(--border);
-}
-
-.checklist .rule {
-  font-weight: 600;
-}
-
-.checklist .note {
-  color: var(--muted);
   font-size: 12px;
 }
-
-/* 交易计划 */
-.plan {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+.tf-notes li.primary {
+  border-left-color: var(--blue);
 }
-
-.plan-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 0;
-  border-bottom: 1px dashed var(--border);
-  font-size: 13px;
+.tf-notes .tf-name {
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
-
-.plan-row:last-child {
-  border-bottom: 0;
-}
-
-.plan-row .k {
-  color: var(--muted);
-  flex: none;
-}
-
-.plan-row .v {
-  text-align: right;
-  font-weight: 600;
-}
-
-.plan-row .v em {
+.tf-notes .tf-name i {
   font-style: normal;
-  font-weight: 400;
+  color: var(--blue);
+}
+.tf-notes .tf-trend.up {
+  color: var(--ok);
+}
+.tf-notes .tf-trend.down {
+  color: var(--bad);
+}
+.tf-notes .tf-trend.range {
   color: var(--muted);
-  font-size: 11px;
-  margin-left: 4px;
 }
-
-/* 结尾提醒 */
-.coach-panel {
-  border-color: rgba(240, 180, 41, 0.35);
-}
-
-.coach-line {
-  margin: 0;
-  font-size: 15px;
-  line-height: 1.7;
-  color: #ffd479;
-  font-weight: 600;
-}
-
-/* 「最该守住的」跟在「怎么做」的计划后面，不单独占一块 */
-.coach-inline {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
-}
-
-.coach-inline .k {
-  display: block;
-  font-size: 11px;
+.tf-notes .tf-struct {
   color: var(--muted);
-  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tf-notes .tf-note {
+  color: var(--text);
+}
+
+@media (max-width: 1100px) {
+  .tf-notes li {
+    grid-template-columns: 54px 64px minmax(0, 1fr);
+  }
+  .tf-notes .tf-struct {
+    display: none;
+  }
 }
 
 /* 热度 / 键值列表 */
@@ -751,6 +788,144 @@ body.fixed-viewport .analyze {
   font-weight: 600;
 }
 
+/* ==================== 测试模式（回到某一刻） ==================== */
+
+/*
+ * 查询栏里的「实时 / 测试」。
+ *
+ * 得压过 .query-bar .field 那条 width: 220px —— 不然开关只有 99px，
+ * 外面却占着 220px，整行被推得七零八落。
+ */
+.query-bar .mode-field {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+/* 跟旁边的输入框对齐：一样高、一样字号，才像同一排控件 */
+.query-bar .mode-field .seg {
+  height: 33px;
+}
+
+.query-bar .mode-field .seg button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 15px;
+  font-size: 13px;
+}
+
+/* 切到测试：整个开关套一圈蓝 + 标签变色，不用去看别处就知道状态变了 */
+.query-bar .mode-field.on > span {
+  color: var(--blue);
+}
+.query-bar .mode-field.on .seg {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-soft);
+}
+.query-bar .mode-field.on .seg button:not(.active) {
+  color: var(--blue);
+}
+
+/*
+ * 「圈一段 K 线」那一行 —— 「添加案例」和「实时分析 · 测试」共用。
+ * 这里放全局（不再各写一份 scoped），两边长得必须一模一样。
+ */
+.follow-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+}
+
+.follow-row .k {
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.follow-row .v {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.follow-row .v em {
+  margin-left: 5px;
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.follow-row .ghost.tiny {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  align-self: center;
+}
+
+/* 「画范围」按钮：进了拖动模式就亮起来 */
+.follow-row .range-btn.on {
+  color: #06121f;
+  background: var(--blue);
+  border-color: var(--blue);
+}
+
+/* 画了范围就把这一行点亮，一眼看出「我圈的是这一段」 */
+.follow-row.picked {
+  border-style: solid;
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+}
+
+/* 测试模式那个小面板：跟结论卡片区分开 */
+.test-panel {
+  border-color: var(--blue);
+}
+.test-panel h2 {
+  color: var(--blue);
+}
+
+/* 左栏顶上的提醒：这一局不是实时那一局 */
+.test-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 11px;
+  border: 1px solid var(--blue);
+  border-radius: 8px;
+  background: var(--blue-soft);
+}
+.test-banner b {
+  font-size: 12px;
+  color: var(--blue);
+}
+.test-banner span {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.test-banner span b {
+  font-size: 11px;
+  color: var(--warn);
+}
+
+/* K 线图上的「K 线到 ……」 */
+.until-tag {
+  padding: 2px 8px;
+  border: 1px solid var(--blue);
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .steps {
   list-style: none;
   margin: 0;
@@ -804,6 +979,11 @@ body.fixed-viewport .analyze {
 .step.error .dot,
 .step.error b,
 .step.error em {
+  color: var(--bad);
+}
+
+/* 「出错 · 共 xxms」—— 跑挂了就别用中性灰冒充成功 */
+.steps-head .dim.bad {
   color: var(--bad);
 }
 
@@ -861,50 +1041,6 @@ body.fixed-viewport .split {
  */
 .scroll-body > * {
   flex: 0 0 auto;
-}
-
-/* 代码层护栏否决：红底，放在结论最上面 */
-.veto-banner {
-  margin-top: 10px;
-  padding: 8px 11px;
-  border: 1px solid var(--bad);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
-  color: var(--bad);
-}
-
-.veto-banner b {
-  display: block;
-  font-size: 13px;
-}
-
-.veto-banner ul {
-  margin: 4px 0;
-  padding-left: 18px;
-  line-height: 1.7;
-}
-
-.veto-banner .dim {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-/* 「后续怎么跟」的两块：已开 / 还没开 */
-.exit-block {
-  margin-top: 10px;
-}
-
-.exit-block .badge {
-  display: inline-block;
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.exit-block .checklist {
-  margin: 2px 0 0;
 }
 
 /* 二级 tab 比一级小一号，视觉上分得出层级 */
@@ -976,9 +1112,10 @@ body.fixed-viewport .split {
   padding: 0;
 }
 
+/* 开单分析左栏「历史分析」那一列：时间 / 标签 / 结论 */
 .hist a {
   display: grid;
-  grid-template-columns: 74px 26px 62px minmax(0, 1fr) 56px;
+  grid-template-columns: 74px minmax(0, 1fr) 72px;
   align-items: center;
   gap: 8px;
   padding: 4px 6px;
@@ -988,6 +1125,23 @@ body.fixed-viewport .split {
   font-size: 12px;
 }
 
+.hist .v {
+  text-align: right;
+}
+
+/* 标签只摆得下两个，不换行、超了就裁掉 */
+.hist .tags {
+  display: flex;
+  gap: 4px;
+  margin-top: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.hist .tags .tag {
+  white-space: nowrap;
+}
+
 .hist a:hover {
   background: var(--panel-2, rgba(255, 255, 255, 0.04));
 }
@@ -995,6 +1149,24 @@ body.fixed-viewport .split {
 .hist .t {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* 开单分析左栏「历史分析」那条：标签只摆得下两个，不换行 */
+.hist .v {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.hist .tags {
+  display: flex;
+  gap: 4px;
+  margin-top: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.hist .tags .tag {
+  white-space: nowrap;
 }
 
 .hist .out {
@@ -1008,8 +1180,84 @@ body.fixed-viewport .split {
   font-variant-numeric: tabular-nums;
 }
 
+/* 档位小标签：上面那套 .grade 是结论大卡片的尺寸（15px / 7px 13px），
+   直接套进来会被 padding 撑爆这一列，所以这里整份覆盖成小尺寸。
+   宽度给够 A-W（3 个字），居中不拉伸 —— 背景框才不会一条宽一条窄。 */
 .hist .grade {
+  justify-self: center;
+  min-width: 30px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
   text-align: center;
+}
+
+/*
+ * 历史分析面板：撑满左栏，标题和分页条固定，中间的列表才是唯一会滚的地方。
+ * 这样翻页按钮永远贴在面板底部 —— 不会被列表挤到看不见的地方去。
+ */
+.hist-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 得压过上面 .scroll-body > * { flex: 0 0 auto }，否则撑不满左栏 */
+.scroll-body > .hist-panel {
+  flex: 1 1 auto;
+}
+
+.hist-panel > h2 {
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+}
+
+.hist-panel .hist,
+.hist-panel .hint,
+.hist-panel .dim {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+/*
+ * 列表：吃掉剩下的高度（撑满 / 顶到边）。
+ * 不再自己滚 —— 一页放几条是页面按这块高度算出来的（见 AnalyzeView 的
+ * measureHistoryRows），所以正常情况下不会溢出，overflow 只是兜底。
+ */
+.hist-panel .hist {
+  flex: 1 1 auto;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+/* 分页条 / 「看全部」永远留在这儿，不给列表让位 */
+.hist-panel .pager,
+.hist-panel .hist-more {
+  flex: 0 0 auto;
+}
+
+.hist-panel .pager {
+  margin-top: 8px;
+}
+
+/* 「去历史页看全部」 */
+.hist-more {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  text-align: center;
+  font-size: 12px;
+}
+
+.hist-more a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.hist-more a:hover {
+  text-decoration: underline;
 }
 
 .col {
@@ -1069,11 +1317,106 @@ body.fixed-viewport .split {
   margin: 0;
 }
 
+/* K 线图的日期范围选择（只改看哪一段，不影响分析） */
+.date-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: -4px 0 8px;
+  font-size: 11px;
+}
+
+.date-row button.time-pick {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.date-row button.time-pick:hover {
+  color: var(--text);
+  border-color: var(--blue);
+}
+
+.date-row button.time-pick.set {
+  color: var(--text);
+}
+
+.date-row .ghost.tiny {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
 .chart-wrap {
   position: relative;
   height: 56vh;
   min-height: 320px;
   display: flex;
+}
+
+/* 等着我拖一段时的提示（按钮在左边面板） */
+.range-tip {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--blue);
+  background: rgba(13, 17, 23, 0.92);
+  color: var(--text);
+  font-size: 11.5px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 画范围：平时不吃鼠标事件，只有进入拖动模式才接管 */
+.range-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 26;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.range-layer.drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.range-box {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(66, 165, 245, 0.14);
+  border-left: 1px solid var(--blue);
+  border-right: 1px solid var(--blue);
+  pointer-events: none;
+}
+
+.range-box.live {
+  background: rgba(66, 165, 245, 0.22);
+}
+
+.range-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(13, 17, 23, 0.9);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .chart-wrap .chart {
@@ -1228,15 +1571,6 @@ body.fixed-viewport .split {
 .dot.sup {
   background: #26c6da;
 }
-.dot.entry {
-  background: var(--blue);
-}
-.dot.sl {
-  background: var(--bad);
-}
-.dot.tp {
-  background: var(--ok);
-}
 
 .chart-tools {
   display: flex;
@@ -1295,6 +1629,19 @@ body.fixed-viewport .split {
   color: var(--text);
   border-color: var(--blue);
   filter: none;
+}
+
+/* 清空叉号：小事一桩，做得巧一点 */
+.combo > .combo-clear {
+  padding: 0 9px;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+.combo > .combo-clear:hover {
+  color: #ff8182;
+  border-color: rgba(255, 129, 130, 0.45);
 }
 
 .combo-list {
@@ -1523,4 +1870,210 @@ body.fixed-viewport .split {
 .archived-link {
   color: var(--blue, #58a6ff);
   text-decoration: underline;
+}
+
+/* 「范围」那一格现在是只读的：就看图上这一段 */
+.days-readonly {
+  color: var(--fg2, #b8c0cc);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── 标签 + 概率（结论卡片、历史列表、历史详情都用） ── */
+.tag i {
+  font-style: normal;
+  margin-left: 5px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.62;
+}
+
+/* ── 标签快捷筛选（预测历史页） ── */
+.tag-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+.tag-filter .k {
+  color: var(--dim, #8b949e);
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--border, #2a2f3a);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg2, #b8c0cc);
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--blue, #58a6ff);
+  color: var(--fg, #e6edf3);
+}
+
+.chip.on {
+  border-color: var(--blue, #58a6ff);
+  background: rgba(88, 166, 255, 0.14);
+  color: var(--fg, #e6edf3);
+}
+
+.chip i {
+  font-style: normal;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.6;
+}
+
+.tag-filter .picked {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--blue, #58a6ff);
+  font-size: 12px;
+}
+
+/* ── 各周期行情（把 K 线切成小段读出来的文字） ── */
+.blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.block {
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  background: var(--panel2, rgba(255, 255, 255, 0.02));
+  overflow: hidden;
+}
+
+.block > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.block[open] > summary {
+  border-bottom: 1px solid var(--line, #2a2f3a);
+}
+
+.block-text {
+  margin: 0;
+  padding: 10px;
+  max-height: 340px;
+  overflow: auto;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg2, #b8c0cc);
+}
+
+/* ── 模型余额（顶栏那颗，是个按钮：点一下刷新） ── */
+/*
+ * 顶栏那个「余额 x」是个按钮（点一下刷新），这里只清掉按钮默认样式。
+ *
+ * ⚠️ 别用 `font: inherit` 简写 —— 它的特异度(0,1,1)比 `.balance`(0,1,0) 高，
+ * 会把下面写好的 font-size 一起冲掉（实测余额字被撑回 14px）。
+ * 只继承字体族就够了。
+ */
+button.badge {
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+button.badge:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/*
+ * 余额别用「背景透明 + 描边」——
+ * 顶栏底色本来就暗，那种做法在深色下几乎看不清。
+ * 给它一块实底 + 亮一点的字。
+ */
+.balance {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  background: rgba(139, 148, 158, 0.14);
+  color: #c9d1d9;
+  border-color: rgba(139, 148, 158, 0.32);
+}
+
+.balance.ok {
+  background: rgba(38, 166, 154, 0.18);
+  color: #46d3cb;
+  border-color: rgba(70, 211, 203, 0.45);
+}
+
+.balance.warn {
+  background: rgba(210, 153, 34, 0.2);
+  color: #e3b341;
+  border-color: rgba(227, 179, 65, 0.5);
+}
+
+.balance.bad {
+  background: rgba(248, 81, 73, 0.2);
+  color: #ff8182;
+  border-color: rgba(255, 129, 130, 0.5);
+}
+
+/* 悬停时保持自己的色系，别被通用的「悬停变蓝」盖掉 */
+button.badge.balance:hover:not(:disabled) {
+  filter: brightness(1.12);
+  color: inherit;
+  border-color: currentColor;
+}
+
+/* ── 表格：允许换行的列 ── */
+.table.fixed {
+  table-layout: fixed;
+}
+
+.table td.wrap {
+  white-space: normal;
+  line-height: 1.6;
+}
+
+/* 定宽布局下，nowrap 的单元格会把内容顶出去；给它截断而不是溢出 */
+.table.fixed td:not(.wrap) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 表格里那排标签 chip 不用再要顶部间距（它在单元格里） */
+.table .tags {
+  margin-top: 0;
+}
+
+/* 「+1」那种折叠计数 */
+.tag.more {
+  color: var(--muted);
+  border-style: dashed;
+  cursor: help;
 }

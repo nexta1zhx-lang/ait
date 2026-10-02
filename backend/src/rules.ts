@@ -1,109 +1,125 @@
 import crypto from 'crypto'
-import fs from 'fs'
-import path from 'path'
-import {ROOT_DIR} from './config'
+import {getEnabledDocs} from './db/prompts'
 
-/** 规则目录 —— 只读，每次分析都全部读取 */
-export const RULES_DIR = path.join(ROOT_DIR, 'rules')
-
-/** 角色设定文件（system prompt 本体） */
-export const SYSTEM_FILE = '主提示词.md'
-
-/** 文件缺失时的兜底角色设定 */
-const DEFAULT_SYSTEM = `你是我的加密货币合约交易教练。
-
-你的任务不是预测涨跌，而是按我写下的交易规则，判断当前该不该开仓。
-只引用我的规则条款，不要自创规则。行情数据里没有的东西一律不许猜。
-回答要短，像教练下指令，用清单和结论。`
-
-/** 文件缺失时的兜底规则正文 */
-const DEFAULT_BODY = `（我还没有写具体规则。请去 rules/ 目录写下我的交易体系。）`
-
+/**
+ * 「我的提示词」是怎么拼出来的。
+ *
+ * 全部来自数据库 `ai_docs`（网页「AI 提示词」页上编辑）：
+ *   kind = predict → 分析预测提示词（**只有这一份**，不再分角色/规则）
+ *   kind = extract → 知识库提炼提示词
+ * 关掉的文档不参与。
+ *
+ * 没有文件、没有内置角色、没有兜底文案 —— 库里没写就是没有。
+ */
 export interface RulesBundle {
-  /** system prompt：角色设定 + 工作方式 */
+  /** 角色设定（kind=role 的启用文档，按 sort 拼） */
   system: string
-  /** 规则正文（拼好的所有 Markdown） */
+  /** 规则正文（kind=rule 的启用文档，按 sort 拼） */
   body: string
-  /** 读取到的文件名 */
+  /** 至少有一份文档参与拼 prompt */
+  bodyEnabled: boolean
+  /** 现在只有数据库一个来源；documents=库里什么都没有 */
+  origin: 'db' | 'documents'
+  /** 展示用：参与拼接的文档名 */
   sources: string[]
   hash: string
   warnings: string[]
-}
-
-/** 下划线开头 / README = 参考资料，不注入 */
-function isSkipped(name: string): boolean {
-  const base = path.basename(name)
-  return base.startsWith('_') || base.startsWith('.') || /^readme/i.test(base)
-}
-
-/** 列出规则目录下的 .md（跳过参考文件） */
-function listRuleFiles(): string[] {
-  if (!fs.existsSync(RULES_DIR)) return []
-  return fs
-    .readdirSync(RULES_DIR)
-    .filter(f => f.toLowerCase().endsWith('.md'))
-    .filter(f => !isSkipped(f))
-    .sort()
+  /** 这批文档里最晚的更新时间 */
+  updatedAt: string | null
+  /** 读数据库失败的原因（正常时是 null）—— 上层据此决定要不要直接不分析 */
+  dbError: string | null
 }
 
 /**
- * 读取 rules/ 目录。
+ * 读数据库里的提示词文档，拼成 prompt 用的两段。
  *
- * - `主提示词.md`  → system
- * - 其余 `*.md`    → 规则正文（按文件名排序拼接）
- * - `_` 开头 / README → 跳过
+ * 数据库读不到时**不冒充内容**，直接返回空 —— 上层会提示「没有规则/角色」。
  */
-export function loadRules(): RulesBundle {
+export async function loadRules(): Promise<RulesBundle> {
   const warnings: string[] = []
-  const sources: string[] = []
 
-  if (!fs.existsSync(RULES_DIR)) {
-    warnings.push(`找不到规则目录 ${RULES_DIR}，请创建并放入你的规则文件。`)
-    const text = DEFAULT_SYSTEM
+  try {
+    const {predict, updatedAt} = await getEnabledDocs()
+    // 提示词只有一份（kind=predict）—— 不再分「角色设定 + 规则正文」两段
+    const system = joinDocs(predict)
+    const body = ''
+    const sources = predict.map(d => d.name)
+    const enabled = Boolean(system.trim())
+    if (!enabled) {
+      warnings.push(
+        'ai_docs 里没有启用的「分析预测」提示词 —— 本次不判断（去「AI 提示词」页写一份）。'
+      )
+    }
     return {
-      system: text,
-      body: DEFAULT_BODY,
+      system,
+      body,
+      bodyEnabled: enabled,
+      origin: enabled ? 'db' : 'documents',
+      sources,
+      hash: hashOf(system),
+      warnings,
+      updatedAt,
+      dbError: null
+    }
+  } catch (e) {
+    warnings.push(`读提示词文档失败：${(e as Error).message}`)
+    return {
+      system: '',
+      body: '',
+      bodyEnabled: false,
+      origin: 'documents',
       sources: [],
-      hash: hashOf(text),
-      warnings
+      hash: hashOf(''),
+      warnings,
+      updatedAt: null,
+      dbError: (e as Error).message
     }
   }
+}
 
-  let system = ''
-  const parts: string[] = []
-
-  for (const file of listRuleFiles()) {
-    let content: string
-    try {
-      content = fs.readFileSync(path.join(RULES_DIR, file), 'utf8').trim()
-    } catch (e) {
-      warnings.push(`读取 ${file} 失败：${(e as Error).message}`)
-      continue
-    }
-    if (!content) continue
-    sources.push(file)
-    if (file === SYSTEM_FILE) system = content
-    else parts.push(`<!-- ${file} -->\n\n${content}`)
-  }
-
-  if (!system) {
-    warnings.push(`没找到 rules/${SYSTEM_FILE}，正在使用内置的通用角色设定。`)
-    system = DEFAULT_SYSTEM
-  }
-  const body = parts.length > 0 ? parts.join('\n\n---\n\n') : DEFAULT_BODY
-  if (parts.length === 0) {
-    warnings.push('rules/ 下没有规则正文，AI 只能凭角色设定里的体系摘要判断。')
-  }
-
-  return {
-    system,
-    body,
-    sources,
-    hash: hashOf(system + '\n\n' + body),
-    warnings
-  }
+/** 多份文档拼成一段，带上文档名当小标题（模型和我都能看出读的是哪一节） */
+function joinDocs(docs: {name: string; content: string}[]): string {
+  return docs
+    .map(d => `## ${d.name}\n\n${d.content.trim()}`)
+    .join('\n\n---\n\n')
 }
 
 function hashOf(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex').slice(0, 12)
+}
+
+/**
+ * 知识库提炼用的提示词（`ai_docs` 里 kind=extract 的文档）。
+ *
+ * 跟开单分析那份**分开读**，互不干扰 —— 分析读 role + rule，提炼读 extract。
+ * 库里没写就是空的，`extractCase` 会直接报错（代码里没有兜底文案）。
+ */
+export interface ExtractRules {
+  system: string
+  enabled: boolean
+  sources: string[]
+  hash: string
+  dbError: string | null
+}
+
+export async function loadExtractRules(): Promise<ExtractRules> {
+  try {
+    const {extract} = await getEnabledDocs()
+    const system = joinDocs(extract)
+    return {
+      system,
+      enabled: Boolean(system.trim()),
+      sources: extract.map(d => `提炼：${d.name}`),
+      hash: hashOf(system),
+      dbError: null
+    }
+  } catch (e) {
+    return {
+      system: '',
+      enabled: false,
+      sources: [],
+      hash: hashOf(''),
+      dbError: (e as Error).message
+    }
+  }
 }

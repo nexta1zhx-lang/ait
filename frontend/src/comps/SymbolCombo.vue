@@ -64,6 +64,15 @@ function pick(base: string) {
   close()
 }
 
+/** 清空输入（叉号）。`pickSub('')` 在开单分析那边会顺手把图表和结论也清掉 */
+function clear() {
+  emit('update:modelValue', '')
+  emit('pick', '')
+  close()
+  inputEl.value?.focus()
+  inputEl.value?.select()
+}
+
 function onInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
   filter.value = v
@@ -119,6 +128,16 @@ function onBlur(e: FocusEvent) {
       @keydown="onKey"
       @blur="onBlur"
     />
+    <button
+      v-if="modelValue"
+      type="button"
+      class="combo-clear"
+      title="清空"
+      @mousedown.prevent="clear"
+      @click.prevent="clear"
+    >
+      ✕
+    </button>
     <button type="button" title="展开全部合约" @click="open ? close() : show()">
       ▾
     </button>

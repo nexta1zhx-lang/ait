@@ -299,6 +299,67 @@ export function findMainRally(
   }
 }
 
+/** 「拉伸区间」——最低点 → 之后的最高点，涨幅最大的那一段 */
+export interface RiseSpan {
+  from: number
+  to: number
+  /** 涨幅% */
+  pct: number
+  fromPrice: number
+  toPrice: number
+}
+
+/**
+ * 整段里**涨幅最大**的一段（最低点买、之后最高点卖）。
+ *
+ * 只用来在卡片图上标「拉伸区间 + 百分比」——
+ * 比 ZigZag 的单条腿直观：ZigZag 会把一波大拉升切成好几小段，
+ * 每段看起来都只有百分之几，反而看不出"这一段涨了多少"。
+ *
+ * 涨幅不到 `minPct` 就不算拉升（横盘 / 阴跌的案例不该标）。
+ */
+export function biggestRise(candles: Candle[], minPct = 5): RiseSpan | null {
+  const n = candles.length
+  if (n < 3) return null
+  let loIdx = 0
+  let best: RiseSpan | null = null
+  for (let i = 1; i < n; i++) {
+    const lo = candles[loIdx].low
+    const pct = lo > 0 ? (candles[i].high / lo - 1) * 100 : 0
+    if (!best || pct > best.pct) {
+      best = {
+        from: loIdx,
+        to: i,
+        pct,
+        fromPrice: lo,
+        toPrice: candles[i].high
+      }
+    }
+    if (candles[i].low < candles[loIdx].low) loIdx = i
+  }
+  return best && best.pct >= minPct ? best : null
+}
+
+/**
+ * 整段里**涨幅最大**的那条上升腿。保留给 `npm run swing` 用。
+ */
+export function biggestRiseLeg(
+  candles: Candle[],
+  options: SwingOptions = {}
+): Leg | null {
+  const o = {...DEFAULT_SWING, ...options}
+  if (candles.length < o.atrPeriod + 5) return null
+  const atr = atrSeries(candles, o.atrPeriod)
+  const pivots = detectPivots(candles, atr, o.zigzagAtr)
+  const legs = buildLegs(candles, pivots, atr, o.volLookback)
+  let best: Leg | null = null
+  for (const l of legs) {
+    if (l.direction !== 'up') continue
+    if (!best || l.changePct > best.changePct) best = l
+  }
+  return best
+}
+
 /** 截出入库窗口的 K 线 */
 export function sliceWindow(candles: Candle[], win: RallyWindow): Candle[] {
   return candles.slice(win.windowStart, win.windowEnd + 1)

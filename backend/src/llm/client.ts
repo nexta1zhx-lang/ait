@@ -1,7 +1,8 @@
 import OpenAI from 'openai'
-import {AppConfig, LlmDecision, MarketSnapshot} from '../types'
-import {JudgeParsed, judgeSchema} from './schema'
+import {AppConfig, MarketSnapshot} from '../types'
+import {JudgeParsed, MAX_TAGS, judgeSchema} from './schema'
 import {buildSystemPrompt, buildUserPrompt} from './prompt'
+import {chatParams} from './params'
 import {RulesBundle} from '../rules'
 import {TokenUsage, addUsage, emptyUsage, readUsage} from './pricing'
 
@@ -15,35 +16,8 @@ export interface JudgeMeta {
   latencyMs: number
 }
 
-/** 对外暴露的判断结果：AI 的输出 + 派生出的兼容字段 */
-export interface JudgeResult extends JudgeParsed {
-  /** 与护栏模块对接的字段 */
-  decision: 'open' | 'wait' | 'no_open'
-}
-
-/**
- * JudgeResult → 护栏模块认识的 LlmDecision。
- * 判断本身用的是「档位 / 结果 / Checklist」，护栏用的是「规则 / 通过 / 说明」，
- * 这里做一次翻译，避免调用方各自映射走偏。
- */
-export function toDecision(d: JudgeResult): LlmDecision {
-  return {
-    decision: d.decision,
-    direction: d.direction,
-    confidence: d.confidence,
-    entry: d.entry,
-    stopLoss: d.stopLoss,
-    takeProfits: d.takeProfits,
-    disciplineChecks: d.checklist.map(c => ({
-      rule: c.item,
-      pass: c.status === 'pass',
-      note: c.evidence
-    })),
-    veto: d.failedCritical,
-    reasoning: d.verdictReason,
-    missing: d.grade === 'B' ? d.failedCritical : []
-  }
-}
+/** 判断结果 —— 就是那四个字段，没有别的派生字段了 */
+export type JudgeResult = JudgeParsed
 
 function stripFences(s: string): string {
   const t = s.trim()
@@ -51,27 +25,23 @@ function stripFences(s: string): string {
   return m ? m[1].trim() : t
 }
 
-export function verdictToDecision(
-  v: JudgeParsed['verdict']
-): JudgeResult['decision'] {
-  return v === 'go' ? 'open' : v === 'no_go' ? 'no_open' : 'wait'
-}
-
 function normalize(d: JudgeParsed): JudgeResult {
-  return {
-    ...d,
-    confidence: Math.max(
-      0,
-      Math.min(100, Math.round(Number(d.confidence) || 0))
-    ),
-    takeProfits: (d.takeProfits ?? []).map(t => ({
-      label: t.label || 'TP',
-      price: Number(t.price),
-      r: Number(t.r) || 0,
-      reducePercent: Number(t.reducePercent) || 0
-    })),
-    decision: verdictToDecision(d.verdict)
+  // 标签：去空白、按名字去重、限个数。**不过滤**「模板外的」——
+  // 用户明确要「AI 可以自己添加标签」，新造的要原样显示出来。
+  // 同一个名字出现两次就留**概率高的**那个。
+  const byName = new Map<string, {name: string; probability: number}>()
+  for (const t of d.tags ?? []) {
+    const name = String(t?.name ?? '').trim()
+    if (!name) continue
+    const probability = Math.round(Number(t?.probability) || 0)
+    const prev = byName.get(name)
+    if (!prev || probability > prev.probability)
+      byName.set(name, {name, probability})
   }
+  const tags = [...byName.values()]
+    .sort((a, b) => b.probability - a.probability)
+    .slice(0, MAX_TAGS)
+  return {...d, tags}
 }
 
 function tryParse(raw: string): JudgeResult | null {
@@ -93,9 +63,10 @@ export interface AnalyzeInput {
   snapshot: MarketSnapshot
   /** buildContext 生成的行情快照 */
   context: string
-  rules: RulesBundle
-  /** 知识库经验条目 */
-  lessons: string
+  /** 数据库里那份「分析预测」提示词正文 */
+  prompt: string
+  /** 可用的标签池（标签模板 ∪ 知识库里用过的标签） */
+  tags: string[]
   config: AppConfig
 }
 
@@ -114,8 +85,11 @@ export async function judge(
   })
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    {role: 'system', content: buildSystemPrompt(input.rules)},
-    {role: 'user', content: buildUserPrompt(input.context, input.lessons)}
+    {role: 'system', content: buildSystemPrompt(input.prompt)},
+    {
+      role: 'user',
+      content: buildUserPrompt(input.context, input.tags)
+    }
   ]
 
   let raw = ''
@@ -125,12 +99,14 @@ export async function judge(
 
   for (let attempt = 0; attempt < 2; attempt++) {
     attempts++
-    const res = await client.chat.completions.create({
-      model: config.llm.model,
-      temperature: config.llm.temperature,
-      response_format: {type: 'json_object'},
-      messages
-    })
+    const res = await client.chat.completions.create(
+      chatParams({
+        model: config.llm.model,
+        temperature: config.llm.temperature,
+        reasoningEffort: config.llm.reasoningEffort,
+        messages
+      }) as never
+    )
     usage = addUsage(usage, readUsage(res))
     raw = res.choices?.[0]?.message?.content ?? ''
     const parsed = tryParse(raw)

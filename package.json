@@ -2,7 +2,7 @@
   "name": "crypto-entry-advisor",
   "version": "0.1.0",
   "private": true,
-  "description": "币圈开单分析：拉数据 → 算指标 → 大模型按你的交易纪律判断 → 代码护栏校验",
+  "description": "币圈开单分析：拉行情 → 算口径 → 大模型按我的规则判档 → 给结论",
   "bin": {
     "ca": "backend/dist/cli.js"
   },
@@ -27,6 +27,8 @@
     "learn": "tsx backend/src/scripts/learn.ts",
     "history": "tsx backend/src/scripts/history.ts",
     "cost": "tsx backend/src/scripts/cost.ts",
+    "reprice": "tsx backend/src/scripts/reprice.ts",
+    "peak": "tsx backend/src/scripts/peak.ts",
     "clean": "npm run clean:backend && npm run clean:frontend",
     "clean:backend": "rm -rf backend/dist",
     "clean:frontend": "rm -rf frontend/dist"

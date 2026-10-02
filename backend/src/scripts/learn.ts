@@ -23,8 +23,14 @@ function parseDate(s: string): number {
   return t
 }
 
-const fmt = (n: number, d = 4) =>
-  Number.isFinite(n)
+const MOVE_TEXT: Record<string, string> = {
+  up: '拉升',
+  down: '下跌',
+  range: '横盘'
+}
+
+const fmt = (n: number | undefined, d = 4) =>
+  typeof n === 'number' && Number.isFinite(n)
     ? n.toLocaleString('en-US', {maximumFractionDigits: d})
     : '—'
 
@@ -53,78 +59,93 @@ async function main(): Promise<void> {
   const tf = (process.argv[3] ?? '4h') as Timeframe
   if (!symbol || symbol.startsWith('--')) {
     console.log('用法：')
-    console.log('  npm run learn -- MAGMA 4h --do "回调不破，右侧进的"')
-    console.log('  npm run learn -- ROBO 1h --dont "突破一点后续没力量"')
+    console.log('  npm run learn -- MAGMA 4h --note "回调不破，右侧进的"')
+    console.log('  npm run learn -- ROBO 1h --from 2026-09-01 --to 2026-09-05')
     console.log('')
     console.log('参数：')
-    console.log('  --do / --dont   这是我该做的 / 这是我不该做的（二选一）')
+    console.log('  --note          我的一句备注（可选）')
     console.log('  --from --to     只看这段时间（可选，默认最近 500 根）')
+    console.log('  --exact         区间原样用，前后不补（配合 --from/--to）')
     console.log('  --dry-run       只预览不落库')
     process.exitCode = 1
     return
   }
 
-  const doNote = arg('--do')
-  const dontNote = arg('--dont')
-  if (doNote === undefined && dontNote === undefined) {
-    throw new Error('必须写 --do 或 --dont 来标注这个案例')
-  }
-  const label = doNote !== undefined ? 'do' : 'dont'
-  const note = doNote ?? dontNote ?? ''
+  const note = arg('--note') ?? ''
 
   const from = arg('--from')
   const to = arg('--to')
   const dryRun = process.argv.includes('--dry-run')
+  const exact = process.argv.includes('--exact')
 
-  console.log(
-    `• ${symbol} ${tf}  ${label === 'do' ? '✅ 我该做的' : '❌ 我不该做的'}`
-  )
+  console.log(`• ${symbol} ${tf}`)
   if (from && to) console.log(`• 时间段 ${from} → ${to}`)
-  console.log('• 拉行情 + 找拉升段 ...')
+  console.log('• 拉行情 + 算大周期压力支撑 ...')
 
   const r = await collectCase({
     symbol,
     timeframe: tf,
-    label,
     note,
     from: from && to ? parseDate(from) : undefined,
     to: from && to ? parseDate(to) : undefined,
-    dryRun
+    exact,
+    dryRun,
+    onStep: s => {
+      console.log(
+        `  ${s.state === 'running' ? '◌' : s.state === 'done' ? '●' : '✕'} ${
+          s.label
+        }${s.detail ? `  ${s.detail}` : ''}${s.ms ? `  ${s.ms}ms` : ''}`
+      )
+    }
   })
 
   console.log(`• 模型: ${r.meta.model}`)
   if (r.meta.warning) console.log(`  ⚠️  ${r.meta.warning}`)
 
   console.log('')
-  console.log('=== 判档 ===')
-  console.log(`  ${r.grade} 档   ${r.title}`)
+  console.log('=== 这段行情是什么 ===')
+  console.log(`  ${MOVE_TEXT[r.moveType] ?? r.moveType}   ${r.title}`)
+  if (r.tags.length) console.log(`  标签      ${r.tags.join(' · ')}`)
 
   console.log('')
-  console.log('=== 找到的拉升段 ===')
-  console.log(`  涨幅      ${fmt(r.rallyMeta.changePct, 2)}%`)
-  console.log(`  根数      ${r.rallyMeta.bars}`)
-  console.log(`  力度      ${fmt(r.rallyMeta.atrMultiple, 2)} × ATR`)
+  console.log('=== 客观统计 ===')
+  console.log(`  涨跌幅    ${fmt(r.stats.changePct, 2)}%`)
+  console.log(`  振幅      ${fmt(r.stats.rangePct, 2)}%`)
+  console.log(`  最大回撤  -${fmt(r.stats.maxDrawdownPct, 2)}%`)
   console.log(
-    `  量能      ${r.rallyMeta.volMultiple === null ? '—' : fmt(r.rallyMeta.volMultiple, 2) + ' 倍'}`
+    `  最高/最低 在整段 ${r.stats.highAtPct}% / ${r.stats.lowAtPct}% 处`
+  )
+  console.log(
+    `  量能趋势  ${
+      r.stats.volTrend === null || r.stats.volTrend === undefined
+        ? '—'
+        : fmt(r.stats.volTrend, 2) + ' 倍（后半段/前半段）'
+    }`
   )
 
   console.log('')
-  console.log('=== 入库窗口（拉升前后两段）===')
+  console.log('=== 入库窗口 ===')
   console.log(
     `  ${bj(r.window.start)} → ${bj(r.window.end)}  共 ${r.window.bars} 根`
   )
-  console.log(`  ├ 前段 ${r.rallyFrom} 根（拉升前）`)
-  console.log(`  ├ 拉升 第 ${r.rallyFrom}~${r.rallyTo} 根`)
-  console.log(`  └ 后段 ${r.window.bars - r.rallyTo - 1} 根（拉升后）`)
+  console.log(`  （一共拉了 ${r.candleCount} 根）`)
 
   console.log('')
   console.log('=== AI 提炼 ===')
-  if (r.features.pre) console.log(`拉升前：${r.features.pre}`)
-  if (r.features.rally) console.log(`拉升：  ${r.features.rally}`)
-  if (r.features.post) console.log(`拉升后：${r.features.post}`)
-  if (r.whatWorked) console.log(`\n我的对错：${r.whatWorked}`)
+  if (r.meta.sr.length) {
+    console.log(
+      `大周期压力支撑：${r.meta.sr
+        .map(x => `${x.timeframe} ${x.support}~${x.resistance}`)
+        .join('  ')}`
+    )
+  }
+  if (r.why) console.log(`为什么会这样走：\n${r.why}`)
+  if (r.features.structure) console.log(`\n结构：${r.features.structure}`)
+  if (r.features.volume) console.log(`量能：${r.features.volume}`)
+  if (r.features.rhythm) console.log(`节奏：${r.features.rhythm}`)
   console.log('')
   console.log(`★ 经验：${r.lesson}`)
+  if (r.tags.length) console.log(`★ 标签：${r.tags.join(' · ')}`)
 
   console.log('')
   console.log(r.caseId ? `✓ 已入库（案例 #${r.caseId}）` : '• dry-run，未入库')

@@ -8,8 +8,9 @@ import {
   type AppConfig,
   type Contract
 } from './api'
+import {cny} from './format'
 
-/** 全局状态：配置、账户（余额 / 模型）、合约列表。三个页面共用。 */
+/** 全局状态：配置、账户（模型列表）、合约列表。三个页面共用。 */
 
 export const config = ref<AppConfig | null>(null)
 export const account = ref<AccountResult | null>(null)
@@ -52,11 +53,6 @@ export async function refreshConfig(): Promise<void> {
   account.value = await fetchAccount().catch(() => account.value)
 }
 
-/** 刷新余额（绕过服务端 60 秒缓存） */
-export async function refreshBalance(): Promise<void> {
-  account.value = await fetchAccount(true).catch(() => account.value)
-}
-
 /** 切换模型：写回 .env，下一次判断就用新的 */
 export async function changeModel(model: string): Promise<string | null> {
   if (!model || model === config.value?.model) return null
@@ -91,19 +87,26 @@ export const notices = computed(() => {
     )
   }
   if (!c.rules?.sources?.length) {
-    out.push('rules/ 目录里没读到规则文件，AI 只能凭通用常识判断。')
+    out.push('数据库里没有启用的「分析预测」提示词，分析会直接报错。')
   }
   return out
 })
 
 export const rulesBadge = computed(() => {
   const r = config.value?.rules
-  if (!r?.sources?.length) return {text: '⚠️ 规则未加载', cls: 'bad', title: ''}
-  const chars = ((r.systemChars || 0) + (r.bodyChars || 0)) / 1000
+  const sources = r?.sources ?? []
+  if (!sources.length) {
+    return {
+      text: '⚠️ 没有分析预测提示词',
+      cls: 'bad',
+      title: '数据库里还没有启用的「分析预测」提示词 —— 去「AI 提示词」页写一份'
+    }
+  }
+  const chars = ((r?.systemChars || 0) + (r?.bodyChars || 0)) / 1000
   return {
-    text: `规则 ${r.sources.length} 个文件 · ${chars.toFixed(1)}K · ${r.hash}`,
+    text: `分析预测 ${sources.length} 份 · ${chars.toFixed(1)}K · ${r?.hash ?? ''}`,
     cls: 'ok',
-    title: r.sources.join('\n')
+    title: `${sources.join('\n')}\n\n在「AI 提示词」页维护`
   }
 })
 
@@ -112,7 +115,7 @@ export const kbBadge = computed(() => {
   return {
     text: `知识库 ${total} 条`,
     cls: total > 0 ? 'ok' : '',
-    title: '我标过的案例'
+    title: '我录过的行情案例'
   }
 })
 
@@ -131,3 +134,54 @@ export const currentPrice = computed(
   () =>
     modelOptions.value.find(m => m.id === config.value?.model)?.price ?? null
 )
+
+/* ---------------- 模型余额 ---------------- */
+
+export const refreshingBalance = ref(false)
+
+/**
+ * 顶栏那个「余额 ¥7.18」。
+ * 后端有 60 秒缓存，点一下才是真刷新（`?refresh=1`）。
+ */
+export const balanceBadge = computed(() => {
+  const b = account.value?.balance
+  if (!b || !b.ok || !b.main) {
+    return {
+      text: b ? '余额 —' : '余额 …',
+      amount: '',
+      cls: 'warn',
+      title: b?.error ?? '还没拿到余额'
+    }
+  }
+  const m = b.main
+  const low = m.totalBalance > 0 && m.totalBalance < 5
+  const money =
+    m.currency === 'CNY'
+      ? cny(m.totalBalance)
+      : `${m.totalBalance.toFixed(2)} ${m.currency}`
+  return {
+    text: `余额 ${money}`,
+    amount: money,
+    cls: m.totalBalance <= 0 ? 'bad' : low ? 'warn' : 'ok',
+    title:
+      `模型账户（${m.currency}）· 最后查询 ${new Date(b.fetchedAt).toLocaleTimeString('zh-CN')}` +
+      '\n点一下刷新' +
+      (m.grantedBalance > 0
+        ? `\n赠送 ${m.grantedBalance} · 充值 ${m.toppedUpBalance}`
+        : '')
+  }
+})
+
+/** 手动刷新余额（绕过后端 60 秒缓存） */
+export async function refreshBalance(): Promise<void> {
+  if (refreshingBalance.value) return
+  refreshingBalance.value = true
+  try {
+    const r = await fetchAccount(true)
+    account.value = r
+  } catch {
+    /* 拿不到就维持原样，title 里已经写了原因 */
+  } finally {
+    refreshingBalance.value = false
+  }
+}

@@ -6,33 +6,30 @@ import {loadConfig, ROOT_DIR} from './config'
 import {loadRules} from './rules'
 import {fetchSnapshot} from './data/market'
 import {buildContext} from './context/builder'
-import {judge, toDecision} from './llm/client'
+import {judge} from './llm/client'
 import {oneLineCost} from './llm/pricing'
-import {DEFAULT_WIN_RATE, expectancyOf} from './analysis/expectancy'
-import {lessonsByGrade} from './db/knowledge'
+import {listTags} from './db/knowledge'
+import {loadTagTemplates} from './db/tags'
 import {recordUsage} from './db/usage'
 import {saveAnalysis, saveRulesVersion} from './db/analyses'
-import {validate} from './guardrails/validator'
 import {render} from './output/render'
 import {ask, askHidden, isInteractive} from './util/prompt'
 import {saveKeyToEnv} from './util/llmkey'
-import {LlmDecision, MarketType, Timeframe} from './types'
+import {MarketType, Timeframe} from './types'
 
 const program = new Command()
 
 program
   .name('ca')
-  .description(
-    '币圈开单分析：拉数据 → 算指标 → 大模型按你的交易纪律判断 → 代码护栏校验'
-  )
+  .description('币圈开单分析：拉行情 → 切段读给模型 → 预测最大概率的走法')
   .argument('<symbol>', '交易对，如 BTC/USDT')
   .option('-e, --exchange <id>', '交易所（ccxt id，如 binance / okx）')
   .option(
     '-m, --market <type>',
     '市场类型: spot（现货）| swap（U 本位合约）| coinm（币本位）'
   )
-  .option('-t, --timeframes <list>', '周期，逗号分隔', '15m,1h,4h,1d')
-  .option('-n, --recent <count>', '上下文中包含的最近 K 线数量', '30')
+  .option('-t, --timeframe <tf>', '主周期（图上那个）：5m|15m|1h|4h|1d', '1h')
+  .option('-d, --days <n>', '主周期往前看多少天（= 图上那段有多长）')
   .option('--api-base <url>', '覆盖交易所公共 API 域名（默认域名不可达时使用）')
   .option('--json', '输出完整 JSON（便于程序消费，进度输出到 stderr）')
   .option('--api-key <key>', '直接传入 LLM API Key（本次生效，不写入 .env）')
@@ -41,22 +38,23 @@ program
   .action(async (symbol: string, opts: Record<string, unknown>) => {
     const log = (m: string) => process.stderr.write(m + '\n')
     try {
-      const timeframes = String(opts.timeframes)
-        .split(',')
-        .map(s => s.trim())
-        .filter(Boolean) as Timeframe[]
-      const recentCount = Math.max(1, Number(opts.recent) || 30)
+      const tfRaw = String(opts.timeframe ?? '')
+      const timeframe = (
+        ['5m', '15m', '1h', '4h', '1d'].includes(tfRaw) ? tfRaw : '1h'
+      ) as Timeframe
 
       const config = loadConfig({
         exchange: opts.exchange ? String(opts.exchange) : undefined,
-        timeframes,
+        timeframes: [timeframe],
         apiBase: opts.apiBase ? String(opts.apiBase) : undefined,
         marketType: opts.market
           ? (String(opts.market) as MarketType)
           : undefined
       })
-      const rules = loadRules()
-      log(`• 我的规则: ${rules.sources.join('、') || '（空）'} (${rules.hash})`)
+      const rules = await loadRules()
+      log(
+        `• 我的提示词: ${rules.sources.join('、') || '（数据库里没有启用项）'}`
+      )
       for (const w of rules.warnings) log(`  ⚠️  ${w}`)
 
       // 解析 API Key：命令行 > .env > 交互式输入
@@ -83,15 +81,15 @@ program
       log(
         `• 拉取 ${symbol} 行情 (${config.exchange} / ${config.marketType}) ...`
       )
+      const days = Math.max(1, Number(opts.days) || config.lookbackDays)
       const snapshot = await fetchSnapshot({
         exchangeId: config.exchange,
         symbol,
-        timeframes,
-        limit: config.candlesLimit,
-        recentTimeframe: '1h',
-        recentCount,
+        timeframe,
+        days,
         marketType: config.marketType,
-        apiBase: config.apiBase
+        apiBase: config.apiBase,
+        calibers: config.calibers
       })
 
       const context = buildContext(snapshot)
@@ -103,10 +101,14 @@ program
 
       log(`• 调用大模型 (${config.llm.model}) ...`)
 
-      // 知识库经验（表不存在时忽略）
-      let lessons = ''
+      // 可用的标签池：复用「标签模板 + 知识库里用过的标签」（跟网页同一条路径）
+      let tags: string[] = []
       try {
-        lessons = await lessonsByGrade()
+        const [templates, used] = await Promise.all([
+          loadTagTemplates(),
+          listTags()
+        ])
+        tags = [...new Set([...templates, ...used.map(u => u.tag)])]
       } catch {
         /* 忽略 */
       }
@@ -114,27 +116,22 @@ program
       const {result, meta} = await judge({
         snapshot,
         context,
-        rules,
-        lessons,
+        prompt: rules.system,
+        tags,
         config
       })
-
-      const decision = toDecision(result)
-      const guardrails = validate(decision, snapshot, config)
-
       // 记账：这次判断烧了多少 token、多少钱
       const billed = await recordUsage({
         kind: 'judge',
         model: meta.model,
         symbol: symbol.split('/')[0],
-        timeframe: timeframes.join(','),
+        timeframe,
         usage: meta.usage,
         attempts: meta.attempts,
         latencyMs: meta.latencyMs
       })
 
       // 存档：跟网页走同一张表，这样命令行做的分析也能在历史里看到
-      const expectancy = expectancyOf(decision, DEFAULT_WIN_RATE)
       let analysisId: number | null = null
       try {
         await saveRulesVersion({
@@ -148,14 +145,11 @@ program
           ccxtSymbol: snapshot.symbol,
           exchange: config.exchange,
           marketType: config.marketType,
-          timeframes,
-          assumedWinRate: DEFAULT_WIN_RATE,
+          timeframes: [timeframe],
           chartTimeframe: '1h',
           judge: result,
-          guardrails,
-          expectancy,
           snapshot,
-          meta: {model: meta.model, via: 'cli'},
+          meta: {model: meta.model, via: 'cli', days},
           model: meta.model,
           rulesHash: rules.hash,
           llmUsageId: billed?.id ?? null,
@@ -193,9 +187,7 @@ program
               costUsd: billed?.costUsd ?? 0
             },
             context,
-            judge: result,
-            decision,
-            guardrails
+            judge: result
           },
           null,
           2
@@ -210,9 +202,8 @@ program
               symbol,
               exchange: config.exchange,
               price: snapshot.price,
+              days,
               judge: result,
-              decision,
-              guardrails,
               llm: {
                 model: meta.model,
                 usage: meta.usage,
@@ -229,12 +220,12 @@ program
         )
       } else {
         process.stdout.write(
-          render(snapshot, decision, guardrails, {
+          render(snapshot, result, {
             model: meta.model,
             disciplineEmpty: rules.sources.length === 0,
             disciplineHash: rules.hash,
             logFile,
-            judge: result,
+            days,
             usageText: `${oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)}${
               billed === null ? '（未记入统计）' : ''
             }`

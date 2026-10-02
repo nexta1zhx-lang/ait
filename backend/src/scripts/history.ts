@@ -6,18 +6,13 @@
  *   npm run history -- --grade A      只看 A 档
  *   npm run history -- --symbol BTC   只看某个币
  *   npm run history -- --go           只看「可做」的
- *   npm run history -- --pending      只看还没结算的
- *   npm run history -- --stats        档位统计（A 档真的比 B 档好吗）
+ *   npm run history -- --stats        档位分布
  *   npm run history -- 12             看第 12 条的完整详情
+ *
+ * 2026-10-02 大简化之后，AI 只回四个字段（档位 / 标签 / 理由 / 结论），
+ * 所以这里不再有 计划 / 止损止盈 / 仓位 / 护栏 / 清单 / 结算与 R 倍数。
  */
-import {
-  OUTCOME_LABEL,
-  analysisStats,
-  getAnalysis,
-  listAnalyses,
-  settleAnalysis,
-  type OutcomeKind
-} from '../db/analyses'
+import {analysisStats, getAnalysis, listAnalyses} from '../db/analyses'
 import {dbHelpMessage, ensureSchema} from '../db/client'
 import {formatCny as cny, formatUsd as usd} from '../llm/pricing'
 
@@ -46,7 +41,7 @@ const rpad = (s: string, n: number) => {
   return ' '.repeat(Math.max(0, n - w)) + s
 }
 
-/** 北京时间 */
+/** 北京时间 MM-DD HH:mm */
 function bj(iso: string): string {
   const d = new Date(iso)
   const p: Record<string, string> = {}
@@ -66,12 +61,11 @@ function bj(iso: string): string {
 const VERDICT_TEXT: Record<string, string> = {
   go: '✅可做',
   wait: '⏸观望',
-  no_go: '⛔不可做'
+  no_go: '⛔不做'
 }
-const GRADE_CLS: Record<string, string> = {A: 'A', B: 'B', C: 'C', unclear: '?'}
 
-const f = (n: number | null, d = 4) =>
-  n === null || !Number.isFinite(n)
+const f = (n: number | null | undefined, d = 4) =>
+  n === null || n === undefined || !Number.isFinite(n)
     ? '—'
     : n.toLocaleString('en-US', {maximumFractionDigits: d})
 
@@ -81,7 +75,6 @@ async function showList(o: {
   grade?: string
   symbol?: string
   go: boolean
-  pending: boolean
   limit: number
   offset: number
 }) {
@@ -89,7 +82,6 @@ async function showList(o: {
     grade: o.grade,
     symbol: o.symbol,
     actionableOnly: o.go,
-    pendingOnly: o.pending,
     limit: o.limit,
     offset: o.offset
   })
@@ -101,26 +93,21 @@ async function showList(o: {
 
   console.log('')
   console.log(
-    `   ${pad('时间', 14)}${pad('币种', 10)}${pad('档', 4)}${pad('结论', 12)}` +
-      `${rpad('入场', 12)}${rpad('止损', 12)}${rpad('期望R', 8)}${rpad('结果', 10)}`
+    `   ${pad('时间', 14)}${pad('币种', 10)}${pad('标签', 34)}${pad('结论', 12)}`
   )
   for (const r of rows) {
-    const plan = r.entryPrice === null ? '—' : f(r.entryPrice)
-    const sl = r.stopLoss === null ? '—' : f(r.stopLoss)
-    const e =
-      r.expectancyR === null
-        ? '—'
-        : `${r.expectancyR > 0 ? '+' : ''}${r.expectancyR}`
-    const out =
-      r.outcome === null
-        ? '未结算'
-        : `${OUTCOME_LABEL[r.outcome]}${r.rMultiple !== null ? ` ${r.rMultiple}R` : ''}`
+    // 标签按概率从高到低，这里只印前两个，够认出形状了
+    // （老记录存的是纯字符串，没概率）
+    const tags =
+      r.tags
+        .slice(0, 2)
+        .map(t => (typeof t === 'string' ? t : `${t.name} ${t.probability}%`))
+        .join(' / ') || '—'
     console.log(
-      `   ${pad(bj(r.createdAt), 14)}${pad(r.symbol, 10)}${pad(
-        GRADE_CLS[r.grade ?? 'unclear'] ?? '?',
-        4
-      )}${pad(VERDICT_TEXT[r.verdict ?? ''] ?? r.verdict ?? '—', 12)}` +
-        `${rpad(plan, 12)}${rpad(sl, 12)}${rpad(e, 8)}${rpad(out, 10)}`
+      `   ${pad(bj(r.createdAt), 14)}${pad(r.symbol, 10)}${pad(tags, 34)}${pad(
+        VERDICT_TEXT[r.verdict ?? ''] ?? r.verdict ?? '—',
+        12
+      )}`
     )
   }
 
@@ -143,38 +130,21 @@ async function showDetail(id: number) {
     return
   }
 
+  const r = a.result ?? ({} as NonNullable<typeof a.result>)
   const L: string[] = []
   L.push('')
   L.push(`=== #${a.id}  ${a.symbol}  ${bj(a.createdAt)}（北京时间）===`)
   L.push('')
-  L.push(
-    `判档      ${a.grade ?? '—'}${a.gradeReason ? '  ' + a.gradeReason : ''}`
-  )
-  L.push(
-    `结论      ${VERDICT_TEXT[a.verdict ?? ''] ?? a.verdict ?? '—'}   把握 ${
-      a.confidence ?? '—'
-    }/100`
-  )
-  if (a.verdictReason) L.push(`理由      ${a.verdictReason}`)
+  L.push(`判档      ${a.grade ?? '—'}`)
+  L.push(`结论      ${VERDICT_TEXT[a.verdict ?? ''] ?? a.verdict ?? '—'}`)
+  if (r.tags?.length) L.push(`标签      ${r.tags.join(' / ')}`)
+  if (r.reason) L.push(`理由      ${r.reason}`)
   L.push('')
+  const days = (a.meta as {days?: number})?.days
   L.push(
-    `行情      现价 ${f(a.price)}   周期 ${a.timeframes.join(',')}   图表 ${a.chartTimeframe ?? '—'}`
+    `行情      现价 ${f(a.price)}   周期 ${a.timeframes.join(',')}` +
+      (days ? `   回溯 ${days} 天` : '')
   )
-  L.push('')
-  L.push('计划')
-  L.push(
-    `  入场    ${f(a.entryPrice)}（${a.entryType === 'limit' ? '限价' : '市价'}）`
-  )
-  L.push(
-    `  止损    ${f(a.stopLoss)}${a.stopPct !== null ? `（${a.stopPct}%）` : ''}`
-  )
-  L.push(`  止盈    ${f(a.tp1Price)} / ${f(a.tp2Price)} / ${f(a.tp3Price)}`)
-  L.push(`  末段R   ${f(a.rrFinal, 2)}      期望值 ${f(a.expectancyR, 2)}R`)
-  L.push(`  仓位    ${f(a.positionQty, 4)}   杠杆 ${f(a.leverageUsed, 2)}x`)
-  L.push('')
-  L.push(`护栏      ${a.guardPassed ? '通过' : '拦截'}`)
-  for (const v of a.veto) L.push(`  否决项  ${v}`)
-  for (const v of a.redLines) L.push(`  红线    ${v}`)
   L.push('')
   L.push(
     `成本      ${cny(a.costUsd ?? 0)}（${usd(a.costUsd ?? 0)}）   ${
@@ -187,118 +157,33 @@ async function showDetail(id: number) {
       `规则      ${a.rulesHash}${a.rules ? `（${a.rules.sources.join('、')}）` : ''}`
     )
   }
-
-  if (a.knowledgeRefs.length) {
-    L.push('')
-    L.push('引用的知识库经验')
-    for (const k of a.knowledgeRefs)
-      L.push(`  · [${k.symbol} ${k.timeframe}] ${k.lesson}`)
-  }
-
-  const checks = a.result?.checklist ?? []
-  if (checks.length) {
-    L.push('')
-    L.push('Checklist')
-    for (const c of checks) {
-      const icon =
-        c.status === 'pass' ? '✅' : c.status === 'fail' ? '❌' : '⚠️'
-      L.push(`  ${icon} ${c.item}${c.evidence ? ' —— ' + c.evidence : ''}`)
-    }
-  }
-
-  const holding = a.result?.exitPlan?.holding ?? []
-  const watching = a.result?.exitPlan?.watching ?? []
-  if (holding.length || watching.length) {
-    L.push('')
-    L.push('后续怎么跟')
-    if (holding.length) {
-      L.push('  已开单 —— 必须走')
-      for (const e of holding) L.push(`    · ${e}`)
-    }
-    if (watching.length) {
-      L.push('  还没开 —— 回头看')
-      for (const e of watching) L.push(`    · ${e}`)
-    }
-  }
-  if (a.result?.coachLine) {
-    L.push('')
-    L.push(`⚠️  当前最该守住的: ${a.result.coachLine}`)
-  }
-
-  L.push('')
-  L.push(
-    `结果      ${
-      a.outcome === null
-        ? '还没结算（结算：npm run history -- settle ' +
-          a.id +
-          ' --outcome tp1 --r 1.5）'
-        : `${OUTCOME_LABEL[a.outcome]}  ${a.rMultiple ?? '—'}R  ${
-            a.outcomeAt ? bj(a.outcomeAt) : ''
-          }`
-    }`
-  )
-  if (a.outcomeNote) L.push(`备注      ${a.outcomeNote}`)
   L.push('')
 
   process.stdout.write(L.join('\n'))
-}
-
-async function doSettle(id: number) {
-  const outcome = arg('--outcome')
-  if (!outcome || !(outcome in OUTCOME_LABEL)) {
-    console.error(`❌ 需要 --outcome <${Object.keys(OUTCOME_LABEL).join('|')}>`)
-    process.exitCode = 1
-    return
-  }
-  const num = (v: string | undefined) => {
-    const n = Number(v)
-    return Number.isFinite(n) ? n : null
-  }
-  const ok = await settleAnalysis(id, {
-    outcome: outcome as OutcomeKind,
-    rMultiple: num(arg('--r')),
-    mfePct: num(arg('--mfe')),
-    maePct: num(arg('--mae')),
-    note: arg('--note') ?? null
-  })
-  console.log(
-    ok
-      ? `✓ #${id} 已结算为 ${OUTCOME_LABEL[outcome as OutcomeKind]}`
-      : `❌ 没有 id=${id} 的记录`
-  )
 }
 
 async function showStats(days: number) {
   const s = await analysisStats(days)
 
   console.log('')
-  console.log(`=== 档位表现（最近 ${days} 天）===`)
+  console.log(`=== 标签分布（最近 ${days} 天）===`)
   console.log('')
   console.log(`总记录    ${s.total} 条`)
   console.log(`花费      ${cny(s.costUsd)}（${usd(s.costUsd)}）`)
-  console.log(`待复盘    ${s.pending} 条「可做」但还没结算`)
   console.log('')
 
-  if (!s.byGrade.length) {
+  if (!s.byTag.length) {
     console.log('（还没有记录）')
     console.log('')
     return
   }
 
-  console.log(
-    `   ${pad('档位', 8)}${rpad('次数', 6)}${rpad('可做', 6)}${rpad('已结算', 8)}${rpad('胜率', 8)}${rpad('均R', 8)}${rpad('总R', 8)}`
-  )
-  for (const g of s.byGrade) {
+  console.log(`   ${pad('标签', 14)}${rpad('次数', 6)}${rpad('平均概率', 9)}`)
+  for (const t of s.byTag) {
     console.log(
-      `   ${pad(g.grade, 8)}${rpad(String(g.calls), 6)}${rpad(
-        String(g.goCount),
-        6
-      )}${rpad(String(g.settled), 8)}${rpad(
-        g.winRate === null ? '—' : (g.winRate * 100).toFixed(0) + '%',
-        8
-      )}${rpad(g.avgR === null ? '—' : g.avgR.toFixed(2), 8)}${rpad(
-        g.totalR === null ? '—' : g.totalR.toFixed(2),
-        8
+      `   ${pad(t.name, 14)}${rpad(String(t.calls), 6)}${rpad(
+        t.avgProbability === null ? '—' : `${t.avgProbability}%`,
+        9
       )}`
     )
   }
@@ -307,21 +192,8 @@ async function showStats(days: number) {
   if (s.bySymbol.length) {
     console.log('按币种（做最多的在前）')
     for (const x of s.bySymbol.slice(0, 10)) {
-      console.log(
-        `   ${pad(x.symbol, 12)}${rpad(String(x.calls), 6)} 次   ${
-          x.settled
-            ? `均R ${x.avgR?.toFixed(2)}（${x.settled} 次）`
-            : '还没结算'
-        }`
-      )
+      console.log(`   ${pad(x.symbol, 12)}${rpad(String(x.calls), 6)} 次`)
     }
-    console.log('')
-  }
-
-  const settled = s.byGrade.reduce((a, g) => a + g.settled, 0)
-  if (settled === 0) {
-    console.log('提示：结算了才能算胜率。跑完一单之后：')
-    console.log('  npm run history -- settle <id> --outcome tp2 --r 1.75')
     console.log('')
   }
 }
@@ -334,19 +206,6 @@ async function main(): Promise<void> {
   const days = Number(arg('--days')) || 365
   if (has('--stats')) return showStats(days)
 
-  // settle <id> --outcome tp1 --r 1.5
-  if (process.argv[2] === 'settle') {
-    const id = Number(process.argv[3])
-    if (!Number.isFinite(id)) {
-      console.error(
-        '用法：npm run history -- settle <id> --outcome tp1 --r 1.5'
-      )
-      process.exitCode = 1
-      return
-    }
-    return doSettle(id)
-  }
-
   // 纯数字 = 看详情
   const idArg = process.argv[2]
   if (idArg && /^\d+$/.test(idArg)) return showDetail(Number(idArg))
@@ -355,7 +214,6 @@ async function main(): Promise<void> {
     grade: arg('--grade'),
     symbol: arg('--symbol'),
     go: has('--go'),
-    pending: has('--pending'),
     limit: Number(arg('--limit')) || 20,
     offset: Number(arg('--offset')) || 0
   })

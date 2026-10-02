@@ -1,20 +1,56 @@
 /**
  * 全部表结构（幂等 DDL）。
  *
- *   rules_versions  规则版本（按内容 hash 去重，历史分析可还原当时读了什么）
- *   analyses        每次分析的完整存档（输入 / 结论 / 计划 / 护栏 / 事后结果）
- *   knowledge       知识库 —— 我标过的案例 + AI 提炼的经验
- *   llm_usage       每次大模型调用的 token 与花费
+ *   ai_docs          AI 的「角色设定 / 规则正文」文档（可多份、可启停、可排序）
+ *   ai_doc_versions  每份文档的历史版本（保存一次留一版，可回滚）
+ *   rules_versions   每次分析**实际用的**那份提示词快照（按内容 hash 去重）
+ *   analyses         每次分析的完整存档（输入 / 结论 / 计划 / 护栏 / 事后结果）
+ *   knowledge        知识库 —— 我标过的案例 + AI 提炼的经验
+ *   llm_usage        每次大模型调用的 token 与花费
  *
  * 分层原则：
  *   · 要**筛选 / 排序 / 统计**的 → 独立列（档位、结论、币种、价格、R 倍数…）
  *   · 只用来**回放详情**的 → JSONB（AI 完整输出 / 行情快照 / 护栏明细）
  *   · 会**重复的长文本** → 单独一张表按 hash 去重（规则全文 6.6K，不能每行一份）
  *
- * 规则本身不存数据库，是 rules/ 目录下的 Markdown 文件；
- * 这里只留一份快照，保证「规则改了以后，旧分析还能还原现场」。
+ * 提示词**全部存数据库**：`rules/` 目录、代码里的内置角色都已去掉。
+ * 每次分析读「启用的文档」拼成 system prompt，并按 hash 存进 rules_versions。
  */
 export const SCHEMA_SQL = `
+-- ---------------------------------------------------------------- AI 文档
+CREATE TABLE IF NOT EXISTS ai_docs (
+  id         BIGSERIAL   PRIMARY KEY,
+  -- role / rule = 旧版（角色设定 + 规则正文，已不再参与拼装）
+  -- predict = 分析预测（开单分析读这一份）；extract = 知识库提炼
+  kind       TEXT        NOT NULL DEFAULT 'rule'
+                         CHECK (kind IN ('role', 'rule', 'extract', 'predict')),
+  name       TEXT        NOT NULL,
+  content    TEXT        NOT NULL DEFAULT '',
+  -- 关掉就不参与拼 prompt（方便我存多个版本轮流试）
+  enabled    BOOLEAN     NOT NULL DEFAULT TRUE,
+  -- 同一类里按这个排序拼接
+  sort       INTEGER     NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ai_docs_pick_idx ON ai_docs (kind, enabled, sort, id);
+
+-- ---------------------------------------------------------------- 文档历史
+-- 每次保存留一版，可以看旧文、可以回滚
+CREATE TABLE IF NOT EXISTS ai_doc_versions (
+  id       BIGSERIAL   PRIMARY KEY,
+  doc_id   BIGINT      NOT NULL REFERENCES ai_docs (id) ON DELETE CASCADE,
+  kind     TEXT        NOT NULL,
+  name     TEXT        NOT NULL,
+  content  TEXT        NOT NULL,
+  chars    INTEGER     NOT NULL DEFAULT 0,
+  saved_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ai_doc_versions_idx
+  ON ai_doc_versions (doc_id, saved_at DESC);
+
 -- ---------------------------------------------------------------- 规则版本
 -- 规则全文的版本快照。按内容 hash 去重，所以同一个版本只存一份。
 CREATE TABLE IF NOT EXISTS rules_versions (
@@ -72,21 +108,26 @@ CREATE TABLE IF NOT EXISTS analyses (
   exchange      TEXT        NOT NULL DEFAULT 'binance',
   market_type   TEXT        NOT NULL DEFAULT 'swap',
   timeframes    TEXT[]      NOT NULL DEFAULT '{}',  -- {15m,1h,4h,1d}
-  -- 期望值用的假设胜率（0~1）
+  -- @deprecated 期望值已删（没有止损止盈就没有 R），老记录才有值
   assumed_win_rate NUMERIC(5,4),
 
   -- ────────── 结论：要能筛选 / 统计，所以提成列 ──────────
-  -- A 顺势单 / B 不该做 / C 期望突破 / unclear 说不清
+  -- A 顺势单 / A-W 顺势双底 / S 突破 / V 超跌极速V反 / B 不该做 / unclear 说不清
   grade         TEXT,
+  -- 现在存的就是 AI 那段 reason
   grade_reason  TEXT,
   -- go 可做 / wait 观望 / no_go 不可做
   verdict       TEXT,
+  -- @deprecated 新记录把 reason 存在 grade_reason，这里是 null
   verdict_reason TEXT,
+  -- @deprecated 模型自报的数字没有依据也不参与计算
   confidence    INTEGER,
-  -- long / short / none
+  -- @deprecated 方向已删（不再给仓位/止损，方向由理由里说）
   direction     TEXT,
 
-  -- ────────── 计划：以后算「到底走没走到」要用 ──────────
+  -- ────────── 计划：@deprecated 整组已废弃 ──────────
+  -- 账户资金 / 仓位 / 杠杆 / 止损止盈 / 盈亏比 / 期望值 已于 2026-10-02 全部删除。
+  -- 下列列一律保留（供读老记录），新记录全部写 null。
   -- 分析那一刻的现价
   price         NUMERIC,
   entry_price   NUMERIC,
@@ -107,9 +148,9 @@ CREATE TABLE IF NOT EXISTS analyses (
   risk_amount       NUMERIC,
   leverage_used     NUMERIC,
 
-  -- ────────── 护栏：代码层的红线，跟 AI 的判断分开存 ──────────
+  -- ────────── 护栏：@deprecated 已整体删除 ──────────
   guard_passed  BOOLEAN,
-  -- 触发的一票否决（B 档 5 条里的哪几条）
+  -- 触发的一票否决
   veto          TEXT[]      NOT NULL DEFAULT '{}',
   -- 触发的硬红线
   red_lines     TEXT[]      NOT NULL DEFAULT '{}',
@@ -117,7 +158,7 @@ CREATE TABLE IF NOT EXISTS analyses (
   -- ────────── 来源与成本 ──────────
   model         TEXT,
   rules_hash    TEXT        REFERENCES rules_versions (hash) ON DELETE SET NULL,
-  -- 这次引用了知识库里的哪些经验
+  -- @deprecated 知识库经验不再注入提示词，新记录恒为 []
   knowledge_refs JSONB      NOT NULL DEFAULT '[]'::jsonb,
   -- 对应 llm_usage 里那一笔，方便对账
   llm_usage_id  BIGINT      REFERENCES llm_usage (id) ON DELETE SET NULL,
@@ -130,19 +171,18 @@ CREATE TABLE IF NOT EXISTS analyses (
   chart_timeframe TEXT,
 
   -- ────────── 全量存档：只管回放，不参与查询 ──────────
-  -- AI 的完整输出（checklist / exitPlan / coachLine 都在里面）
+  -- AI 的原始输出（现在就是四个字段：档位 / 标签 / 理由 / 结论）
   result        JSONB       NOT NULL DEFAULT '{}'::jsonb,
-  -- 护栏逐条明细
-  guardrails    JSONB       NOT NULL DEFAULT '{}'::jsonb,
-  -- 期望值计算过程
+  -- @deprecated 护栏已删，新记录写 null
+  guardrails    JSONB,
+  -- @deprecated 期望值已删
   expectancy    JSONB,
   -- 行情快照：多周期统计 + 市场热度 + 价格结构
   snapshot      JSONB       NOT NULL DEFAULT '{}'::jsonb,
   meta          JSONB       NOT NULL DEFAULT '{}'::jsonb,
 
-  -- ────────── 事后结果：复盘用，先留位（null = 还没结算）──────────
-  -- tp1 / tp2 / tp3 到止盈 | sl 打止损 | breakeven 平手
-  -- | expired 到期未触发 | skipped 看了但没做（这其实最常见）
+  -- ────────── 事后结果：@deprecated 结算已删 ──────────
+  -- 没有止损止盈就没有 R 可算，也就没有胜率统计。列全部保留（读老记录），新记录恒为 null。
   outcome       TEXT,
   outcome_at    TIMESTAMPTZ,
   outcome_price NUMERIC,
@@ -161,6 +201,10 @@ CREATE INDEX IF NOT EXISTS analyses_grade_idx   ON analyses (grade, verdict);
 CREATE INDEX IF NOT EXISTS analyses_model_idx   ON analyses (model);
 CREATE INDEX IF NOT EXISTS analyses_rules_idx   ON analyses (rules_hash);
 
+-- 分析记录也带标签了（跟知识库共用同一份标签池）
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb;
+CREATE INDEX IF NOT EXISTS analyses_tags_idx ON analyses USING GIN (tags);
+
 -- ---------------------------------------------------------------- 知识库
 CREATE TABLE IF NOT EXISTS knowledge (
   id           BIGSERIAL   PRIMARY KEY,
@@ -170,7 +214,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
   timeframe    TEXT        NOT NULL,
   -- do = 这是我该做的；dont = 这是我不该做的
   label        TEXT        NOT NULL CHECK (label IN ('do', 'dont')),
-  -- A 顺势单 / B 不该做 / C 期望突破
+  -- A 顺势单 / A-W 顺势双底 / S 突破 / V 超跌极速V反 / B 不该做
   grade        TEXT,
   title        TEXT        NOT NULL DEFAULT '',
   note         TEXT        NOT NULL DEFAULT '',
@@ -190,6 +234,30 @@ CREATE TABLE IF NOT EXISTS knowledge (
 CREATE INDEX IF NOT EXISTS knowledge_created_idx ON knowledge (created_at DESC);
 CREATE INDEX IF NOT EXISTS knowledge_symbol_idx  ON knowledge (symbol);
 CREATE INDEX IF NOT EXISTS knowledge_label_idx   ON knowledge (label, grade);
+
+-- ---------------------------------------------------------- 标签模板
+-- 案例标签只能从这份清单里挑；清单由我自己在网页上维护（空表时播种默认 10 个）
+CREATE TABLE IF NOT EXISTS tag_templates (
+  id         BIGSERIAL   PRIMARY KEY,
+  name       TEXT        NOT NULL,
+  sort       INTEGER     NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tag_templates_name_idx ON tag_templates (name);
+
+-- ──────────────────────────────────────────────────────────── 新列（幂等）
+-- 这段行情是什么：up 拉升 / down 下跌 / range 横盘。
+-- 以前是 grade(A/B/C)，那是套我自己的体系；现在 AI 不判档了，只客观说走势。
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS move_type TEXT;
+-- 为什么走成这样（AI 的分析过程）
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS why       TEXT NOT NULL DEFAULT '';
+-- 标签：只能从固定的 10 个模板里挑，AI 不许自己造词
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS tags      JSONB NOT NULL DEFAULT '[]'::jsonb;
+-- 「该做 / 不该做」这一维已经去掉：新记录 label 为空，老记录保留原值
+ALTER TABLE knowledge ALTER COLUMN label DROP NOT NULL;
+-- 标签筛选走 GIN
+CREATE INDEX IF NOT EXISTS knowledge_tags_idx      ON knowledge USING GIN (tags);
+CREATE INDEX IF NOT EXISTS knowledge_move_type_idx ON knowledge (move_type);
 `
 
 /**
@@ -203,6 +271,34 @@ export const MIGRATE_SQL = `
 -- 模拟判断模式已删除，两边的 mock 列一起清掉
 ALTER TABLE IF EXISTS llm_usage DROP COLUMN IF EXISTS mock;
 ALTER TABLE IF EXISTS analyses  DROP COLUMN IF EXISTS mock;
+
+-- 护栏（guardrails）已整体删除：列留着读老记录，新记录写 null，所以要去掉 NOT NULL
+ALTER TABLE IF EXISTS analyses ALTER COLUMN guardrails DROP NOT NULL;
+
+-- 规则已经改成 ai_docs（多份文档 + 版本），中间那版单行表废弃
+DROP TABLE IF EXISTS rules;
+
+-- 知识库提炼的提示词也搬进了 ai_docs → kind 多一个 'extract'。
+-- 老库的 CHECK 只允许 role/rule，得先把它拆了重加（名字不定，按定义找）。
+DO $$
+DECLARE c RECORD;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+     WHERE table_schema = current_schema() AND table_name = 'ai_docs'
+  ) THEN
+    FOR c IN
+      SELECT conname FROM pg_constraint
+       WHERE conrelid = 'ai_docs'::regclass
+         AND contype = 'c'
+         AND pg_get_constraintdef(oid) LIKE '%kind%'
+    LOOP
+      EXECUTE format('ALTER TABLE ai_docs DROP CONSTRAINT %I', c.conname);
+    END LOOP;
+    ALTER TABLE ai_docs ADD CONSTRAINT ai_docs_kind_check
+      CHECK (kind IN ('role', 'rule', 'extract', 'predict'));
+  END IF;
+END $$;
 
 DO $$
 BEGIN

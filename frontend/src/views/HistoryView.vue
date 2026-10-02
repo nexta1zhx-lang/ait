@@ -1,25 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
-import StatCards, { type StatCard } from "../comps/StatCards.vue";
-import SegTabs from "../comps/SegTabs.vue";
-import DataTable, { type Column } from "../comps/DataTable.vue";
-import SymbolCombo from "../comps/SymbolCombo.vue";
+import {computed, onMounted, ref, watch} from 'vue'
+import {useRoute, useRouter} from 'vue-router'
+import SegTabs from '../comps/SegTabs.vue'
+import DataTable, {type Column} from '../comps/DataTable.vue'
+import SymbolCombo from '../comps/SymbolCombo.vue'
+import PieChart, {type PieItem} from '../comps/PieChart.vue'
 import {
-  OUTCOME_TEXT,
-  OUTCOME_TONE,
   deleteAnalysis,
   fetchAnalyses,
   fetchAnalysis,
-  settleAnalysis,
+  tagsOf,
   type AnalysisDetail,
   type AnalysisRow,
   type AnalysisStats,
-  type GradeStat,
-  type OutcomeKind,
-} from "../api";
+  type JudgeResultLike
+} from '../api'
 import {
   GRADE_TEXT,
+  VERDICT_LABEL,
   VERDICT_TEXT,
   ago,
   bjTime,
@@ -27,410 +25,295 @@ import {
   fixed,
   int,
   ms,
-  pct,
   signedPct,
   structureFull,
   tok,
-  usd,
-} from "../format";
-import { contracts } from "../store";
+  usd
+} from '../format'
+import {contracts} from '../store'
 
-const route = useRoute();
-const router = useRouter();
+const route = useRoute()
+const router = useRouter()
 
 /* ---------------- 筛选 ---------------- */
 
 const RANGES = [
-  { value: 7, label: "7 天" },
-  { value: 30, label: "30 天" },
-  { value: 90, label: "90 天" },
-  { value: 365, label: "1 年" },
-  { value: 3650, label: "全部" },
-];
+  {value: 7, label: '7 天'},
+  {value: 30, label: '30 天'},
+  {value: 90, label: '90 天'},
+  {value: 365, label: '1 年'},
+  {value: 3650, label: '全部'}
+]
 
-const GRADES = [
-  { value: "", label: "全部档位" },
-  { value: "A", label: "A 档" },
-  { value: "B", label: "B 档" },
-  { value: "C", label: "C 档" },
-];
-
+/** 结论筛选 —— 选项直接取自 `VERDICT_LABEL`，跟 AI 给的那三个结论一字不差 */
 const VERDICTS = [
-  { value: "", label: "全部结论" },
-  { value: "go", label: "可做" },
-  { value: "wait", label: "等" },
-  { value: "no_go", label: "不可做" },
-];
+  {value: '', label: '全部结论'},
+  ...(['go', 'wait', 'no_go'] as const).map(v => ({
+    value: v as string,
+    label: VERDICT_LABEL[v]
+  }))
+]
 
-const days = ref(90);
+const days = ref(90)
 const symbol = ref(
-  typeof route.query.symbol === "string" ? route.query.symbol : "",
-);
-const grade = ref("");
-const verdict = ref("");
-const actionable = ref(false);
-const pending = ref(false);
+  typeof route.query.symbol === 'string' ? route.query.symbol : ''
+)
+const grade = ref('')
+const verdict = ref('')
+/** 只看某个形状标签（空 = 全部）—— 点下面那排标签就切 */
+const tag = ref(typeof route.query.tag === 'string' ? route.query.tag : '')
+const actionable = ref(false)
+
+/** 再点一下同一个标签 = 取消筛选 */
+function pickTag(name: string): void {
+  tag.value = tag.value === name ? '' : name
+}
+
+/** 结论筛选（跟上面那个 SegTabs 是同一个状态）—— 点饼图就等于点那个 tab */
+function pickVerdict(v: string): void {
+  verdict.value = verdict.value === v ? '' : v
+}
+
+/** 币种筛选（跟 SymbolCombo 同一个状态） */
+function pickSymbol(s: string): void {
+  symbol.value = symbol.value.trim().toUpperCase() === s ? '' : s
+}
+
+/** 一键清掉所有筛选（时间范围保留） */
+function clearFilters(): void {
+  symbol.value = ''
+  verdict.value = ''
+  tag.value = ''
+  actionable.value = false
+}
+
+/** 现在是「在看哪几条」的一句话（没有筛选就是空） */
+const filterText = computed(() => {
+  const parts: string[] = []
+  if (symbol.value.trim()) parts.push(`币 ${symbol.value.trim().toUpperCase()}`)
+  if (verdict.value) parts.push(`结论 ${verdictText(verdict.value)}`)
+  if (tag.value) parts.push(`标签 ${tag.value}`)
+  if (actionable.value) parts.push('只看可做')
+  return parts.length ? `正在看：${parts.join(' · ')}` : ''
+})
 
 /* ---------------- 列表 ---------------- */
 
-const rows = ref<AnalysisRow[]>([]);
-const total = ref(0);
-const stats = ref<AnalysisStats | null>(null);
-const rate = ref(7.1);
-const limit = ref(20);
-const offset = ref(0);
-const loading = ref(true);
-const error = ref("");
-const updatedAt = ref<number | null>(null);
+const rows = ref<AnalysisRow[]>([])
+const total = ref(0)
+const stats = ref<AnalysisStats | null>(null)
+const rate = ref(7.1)
+const limit = ref(20)
+const offset = ref(0)
+const loading = ref(true)
+const error = ref('')
+const updatedAt = ref<number | null>(null)
 
 const query = computed(() => ({
   symbol: symbol.value.trim().toUpperCase(),
   grade: grade.value,
   verdict: verdict.value,
+  tag: tag.value,
   actionable: actionable.value,
-  pending: pending.value,
   days: days.value,
   limit: limit.value,
-  offset: offset.value,
-}));
+  offset: offset.value
+}))
 
 async function load() {
-  loading.value = true;
-  error.value = "";
+  loading.value = true
+  error.value = ''
   try {
-    const page = await fetchAnalyses(query.value);
-    rows.value = page.rows;
-    total.value = page.total;
-    stats.value = page.stats;
-    rate.value = page.rate || 7.1;
-    updatedAt.value = Date.now();
+    const page = await fetchAnalyses(query.value)
+    rows.value = page.rows
+    total.value = page.total
+    stats.value = page.stats
+    rate.value = page.rate || 7.1
+    updatedAt.value = Date.now()
   } catch (e) {
-    error.value = (e as Error).message;
+    error.value = (e as Error).message
   } finally {
-    loading.value = false;
+    loading.value = false
   }
 }
 
 /** 只换页，不动汇总 */
 async function loadPage() {
   try {
-    const page = await fetchAnalyses(query.value, { offset: offset.value });
-    rows.value = page.rows;
-    total.value = page.total;
+    const page = await fetchAnalyses(query.value, {offset: offset.value})
+    rows.value = page.rows
+    total.value = page.total
   } catch (e) {
-    error.value = (e as Error).message;
+    error.value = (e as Error).message
   }
 }
 
-onMounted(load);
-watch([days, symbol, grade, verdict, actionable, pending], () => {
-  offset.value = 0;
-  load();
-});
+onMounted(load)
+watch([days, symbol, grade, verdict, tag, actionable], () => {
+  offset.value = 0
+  load()
+})
 
-const rmb = (usdValue: unknown) => cny((Number(usdValue) || 0) * rate.value);
+const rmb = (usdValue: unknown) => cny((Number(usdValue) || 0) * rate.value)
 
-/* ---------------- KPI ---------------- */
+/* ---------------- 左边三张饼图 ---------------- */
 
-const goCount = computed(
-  () => stats.value?.byGrade.reduce((s, g) => s + g.goCount, 0) ?? 0,
-);
-const settledAll = computed(() => {
-  const g = stats.value?.byGrade ?? [];
-  const settled = g.reduce((s, x) => s + x.settled, 0);
-  const totalR = g.reduce((s, x) => s + (x.totalR ?? 0), 0);
-  const wins = g.reduce(
-    (s, x) => s + Math.round((x.winRate ?? 0) * x.settled),
-    0,
-  );
-  return { settled, totalR, wins };
-});
+const verdictItems = computed<PieItem[]>(() =>
+  (stats.value?.byVerdict ?? []).map(v => ({
+    key: v.verdict,
+    // 老记录没写结论（null）→ 单独归一类；其余一律用同一份中文说法
+    label: VERDICT_LABEL[v.verdict] ?? '没写结论',
+    value: v.calls
+  }))
+)
 
-const cards = computed<StatCard[]>(() => {
-  const s = stats.value;
-  const { settled, totalR, wins } = settledAll.value;
-  return [
-    {
-      label: "分析次数",
-      value: int(s?.total),
-      sub: "每次分析都完整存档",
-    },
-    {
-      label: "给出「可做」",
-      value: int(goCount.value),
-      sub: s?.total
-        ? `占 ${pct(goCount.value / s.total)}，其余都是等/不做`
-        : "还没有分析",
-      tone: "blue",
-    },
-    {
-      label: "已结算",
-      value: `${settled} / ${int(s?.total)}`,
-      sub: settled ? `胜 ${wins} 次 · 胜率 ${pct(wins / settled)}` : "还没复盘",
-      tone: settled ? "" : "warn",
-    },
-    {
-      label: "累计 R",
-      value: settled ? fixed(totalR) : "—",
-      sub: settled ? `平均每单 ${fixed(totalR / settled)}R` : "结算后才有",
-      tone: totalR > 0 ? "ok" : totalR < 0 ? "bad" : "",
-    },
-    {
-      label: "待复盘",
-      value: int(s?.pending),
-      sub: "「可做」但还没填结果",
-      tone: s?.pending ? "warn" : "",
-    },
-    {
-      label: "累计花费",
-      value: rmb(s?.costUsd),
-      sub: `原价 ${usd(s?.costUsd)}`,
-    },
-  ];
-});
+const tagItems = computed<PieItem[]>(() =>
+  (stats.value?.byTag ?? []).map(t => ({
+    key: t.name,
+    label: t.name,
+    value: t.calls,
+    note: t.avgProbability === null ? undefined : `均 ${t.avgProbability}%`
+  }))
+)
 
-/* ---------------- 档位对比 ---------------- */
-
-const gradeCols: Column<GradeStat>[] = [
-  { key: "grade", label: "档位", strong: true },
-  { key: "calls", label: "次数", align: "right", value: (r) => r.calls },
-  { key: "goCount", label: "可做", align: "right", value: (r) => r.goCount },
-  { key: "settled", label: "已结算", align: "right", value: (r) => r.settled },
-  {
-    key: "winRate",
-    label: "胜率",
-    align: "right",
-    value: (r) => r.winRate ?? -1,
-  },
-  { key: "avgR", label: "平均 R", align: "right", value: (r) => r.avgR ?? 0 },
-  {
-    key: "totalR",
-    label: "累计 R",
-    align: "right",
-    value: (r) => r.totalR ?? 0,
-  },
-];
-
-const symbolCols: Column<{
-  symbol: string;
-  calls: number;
-  settled: number;
-  avgR: number | null;
-}>[] = [
-  { key: "symbol", label: "币种", strong: true },
-  { key: "calls", label: "次数", align: "right", value: (r) => r.calls },
-  { key: "settled", label: "已结算", align: "right", value: (r) => r.settled },
-  { key: "avgR", label: "平均 R", align: "right", value: (r) => r.avgR ?? 0 },
-];
+const symbolItems = computed<PieItem[]>(() =>
+  (stats.value?.bySymbol ?? []).map(s => ({
+    key: s.symbol,
+    label: s.symbol,
+    value: s.calls
+  }))
+)
 
 /* ---------------- 列表 ---------------- */
 
 const listCols: Column<AnalysisRow>[] = [
-  { key: "createdAt", label: "时间", strong: true },
-  { key: "symbol", label: "币种" },
-  { key: "grade", label: "档" },
-  { key: "verdict", label: "结论" },
+  {key: 'createdAt', label: '时间', strong: true, width: '132px'},
+  {key: 'symbol', label: '币种', width: '100px'},
+  // 唯一不给宽度的列 —— 它平分剩下的宽度，标签排不完就在格子里换行
   {
-    key: "confidence",
-    label: "把握",
-    align: "right",
-    value: (r) => r.confidence ?? 0,
+    key: 'tags',
+    label: '标签',
+    wrap: true,
+    value: r => (r.tags ?? []).map(t => t.name).join(',')
+  },
+  {key: 'verdict', label: '结论', width: '84px'},
+  {
+    key: 'price',
+    label: '当时价',
+    align: 'right',
+    width: '100px',
+    value: r => r.price ?? 0
   },
   {
-    key: "entryPrice",
-    label: "入场",
-    align: "right",
-    value: (r) => r.entryPrice ?? 0,
+    key: 'costUsd',
+    label: '花费',
+    align: 'right',
+    width: '72px',
+    value: r => r.costUsd ?? 0
   },
-  {
-    key: "stopLoss",
-    label: "止损",
-    align: "right",
-    value: (r) => r.stopLoss ?? 0,
-  },
-  {
-    key: "expectancyR",
-    label: "期望 R",
-    align: "right",
-    value: (r) => r.expectancyR ?? 0,
-  },
-  { key: "outcome", label: "结果" },
-  {
-    key: "rMultiple",
-    label: "R",
-    align: "right",
-    value: (r) => r.rMultiple ?? 0,
-  },
-  {
-    key: "costUsd",
-    label: "花费",
-    align: "right",
-    value: (r) => r.costUsd ?? 0,
-  },
-  { key: "actions", label: "操作" },
-];
+  {key: 'actions', label: '操作', width: '96px'}
+]
 
-const gradeText = (g: string | null) =>
-  g ? (GRADE_TEXT[g] ?? `${g} 档`) : "—";
+const gradeText = (g: string | null) => (g ? (GRADE_TEXT[g] ?? `${g} 档`) : '—')
 const verdictText = (v: string | null) =>
-  v ? (VERDICT_TEXT[v]?.[0] ?? v) : "—";
+  v ? (VERDICT_TEXT[v]?.[0] ?? v) : '—'
 const verdictTone = (v: string | null) =>
-  v ? (VERDICT_TEXT[v]?.[1] ?? "") : "dim";
-const num = (v: number | null) => (v === null ? "—" : fixed(v, 4));
+  v ? (VERDICT_TEXT[v]?.[1] ?? '') : 'dim'
+const num = (v: number | null) => (v === null ? '—' : fixed(v, 4))
+
+/* 新记录的预测内容都在 result 里（标签用 tagsOf 取，兼容老记录） */
+const strOf = (r: JudgeResultLike | null, k: string) => {
+  const v = r?.[k]
+  return typeof v === 'string' ? v.trim() : ''
+}
+const outlookOf = (r: JudgeResultLike | null) => strOf(r, 'outlook')
+const recOf = (r: JudgeResultLike | null) => strOf(r, 'recommendation')
+/** 走势概率；老记录没有 → 0（页面上就不显示百分比） */
+const probOf = (r: JudgeResultLike | null) => {
+  const n = Number(r?.probability)
+  return Number.isFinite(n) ? Math.round(n) : 0
+}
 
 /* ---------------- 详情 ---------------- */
 
-const detail = ref<AnalysisDetail | null>(null);
-const detailLoading = ref(false);
-const detailError = ref("");
+const detail = ref<AnalysisDetail | null>(null)
+const detailLoading = ref(false)
+const detailError = ref('')
 
 async function open(id: number) {
-  detailLoading.value = true;
-  detailError.value = "";
-  detail.value = null;
+  detailLoading.value = true
+  detailError.value = ''
+  detail.value = null
   try {
-    const r = await fetchAnalysis(id);
-    detail.value = r.analysis;
-    void router.replace({ query: { ...route.query, id: String(id) } });
+    const r = await fetchAnalysis(id)
+    detail.value = r.analysis
+    void router.replace({query: {...route.query, id: String(id)}})
   } catch (e) {
-    detailError.value = (e as Error).message;
+    detailError.value = (e as Error).message
   } finally {
-    detailLoading.value = false;
+    detailLoading.value = false
   }
 }
 
 function close() {
-  detail.value = null;
-  detailError.value = "";
-  const q = { ...route.query };
-  delete q.id;
-  void router.replace({ query: q });
+  detail.value = null
+  detailError.value = ''
+  const q = {...route.query}
+  delete q.id
+  void router.replace({query: q})
 }
 
-/* ---------------- 结算 ---------------- */
-
-const settling = ref(false);
-const settleMsg = ref("");
-const form = ref({
-  outcome: "tp1" as OutcomeKind,
-  price: "",
-  rMultiple: "",
-  mfePct: "",
-  maePct: "",
-  note: "",
-});
-
-const OUTCOMES = (Object.keys(OUTCOME_TEXT) as OutcomeKind[]).map((k) => ({
-  value: k,
-  label: OUTCOME_TEXT[k],
-}));
-
-/** 选了结果先把 R 猜好，省得每次手算（止损 = -1，TP1/2/3 用计划里的 R） */
-function guessR() {
-  const d = detail.value;
-  if (!d) return "";
-  const o = form.value.outcome;
-  if (o === "sl") return "-1";
-  if (o === "breakeven" || o === "skipped") return "0";
-  if (o === "tp1")
-    return d.result?.takeProfits?.[0] ? fixed(d.result.takeProfits[0].r) : "";
-  if (o === "tp2")
-    return d.result?.takeProfits?.[1] ? fixed(d.result.takeProfits[1].r) : "";
-  if (o === "tp3")
-    return d.result?.takeProfits?.[2] ? fixed(d.result.takeProfits[2].r) : "";
-  return "";
-}
-
-watch(
-  () => form.value.outcome,
-  () => {
-    const g = guessR();
-    if (g) form.value.rMultiple = g;
-  },
-);
-
-async function submitSettle() {
-  const d = detail.value;
-  if (!d) return;
-  settling.value = true;
-  settleMsg.value = "";
-  try {
-    await settleAnalysis(d.id, {
-      outcome: form.value.outcome,
-      price: form.value.price === "" ? null : Number(form.value.price),
-      rMultiple:
-        form.value.rMultiple === "" ? null : Number(form.value.rMultiple),
-      mfePct: form.value.mfePct === "" ? null : Number(form.value.mfePct),
-      maePct: form.value.maePct === "" ? null : Number(form.value.maePct),
-      note: form.value.note || null,
-    });
-    settleMsg.value = "已结算";
-    await load();
-    await open(d.id);
-  } catch (e) {
-    settleMsg.value = (e as Error).message;
-  } finally {
-    settling.value = false;
-  }
-}
+/* ---------------- 删除 ---------------- */
 
 async function remove(id: number) {
-  if (!window.confirm(`删除第 ${id} 条分析记录？不可恢复。`)) return;
+  if (!window.confirm(`删除第 ${id} 条分析记录？不可恢复。`)) return
   try {
-    await deleteAnalysis(id);
-    if (detail.value?.id === id) close();
-    await load();
+    await deleteAnalysis(id)
+    if (detail.value?.id === id) close()
+    await load()
   } catch (e) {
-    error.value = (e as Error).message;
+    error.value = (e as Error).message
   }
 }
 
 /* ---------------- 分页 ---------------- */
 
-const page = computed(() => Math.floor(offset.value / limit.value) + 1);
-const pages = computed(() => Math.max(1, Math.ceil(total.value / limit.value)));
+const page = computed(() => Math.floor(offset.value / limit.value) + 1)
+const pages = computed(() => Math.max(1, Math.ceil(total.value / limit.value)))
 
 function go(delta: number) {
-  const next = offset.value + delta * limit.value;
-  if (next < 0 || next >= total.value) return;
-  offset.value = next;
-  loadPage();
+  const next = offset.value + delta * limit.value
+  if (next < 0 || next >= total.value) return
+  offset.value = next
+  loadPage()
 }
 
 /* 进来带 ?id= 就直接打开详情 */
 onMounted(() => {
-  const id = Number(route.query.id);
-  if (Number.isInteger(id) && id > 0) void open(id);
-});
+  const id = Number(route.query.id)
+  if (Number.isInteger(id) && id > 0) void open(id)
+})
 </script>
 
 <template>
-  <div class="col">
-    <!-- 筛选 -->
-    <section
-      class="panel"
-      style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap"
-    >
+  <div class="hist">
+    <!-- 顶部筛选：时间范围是全局的（左右都受影响），其余对应右边列表 -->
+    <section class="panel filter-bar">
       <SegTabs v-model="days" :options="RANGES" />
       <div style="width: 150px">
         <SymbolCombo v-model="symbol" :contracts="contracts" />
       </div>
-      <SegTabs v-model="grade" :options="GRADES" />
       <SegTabs v-model="verdict" :options="VERDICTS" />
       <label class="chk">
         <input v-model="actionable" type="checkbox" />
         只看「可做」
-      </label>
-      <label class="chk">
-        <input v-model="pending" type="checkbox" />
-        只看未结算
       </label>
       <span style="flex: 1"></span>
       <span v-if="updatedAt" class="dim">
         {{ ago(new Date(updatedAt).toISOString()) }}更新
       </span>
       <button class="ghost" :disabled="loading" @click="load">
-        {{ loading ? "加载中…" : "刷新" }}
+        {{ loading ? '加载中…' : '刷新' }}
       </button>
     </section>
 
@@ -440,137 +323,128 @@ onMounted(() => {
       <div class="dim">数据库没起来？在项目目录执行 npm run db:up</div>
     </div>
 
-    <StatCards :cards="cards" />
+    <div class="hist-split">
+      <!-- ── 左：三张饼图（点扇区或图例就筛，跟上面的筛选联动） ── -->
+      <aside class="col charts">
+        <section class="panel">
+          <h2>
+            结论分布 <span class="tag">最近 {{ days }} 天</span>
+          </h2>
+          <PieChart
+            :items="verdictItems"
+            :active-key="verdict"
+            empty-text="这段时间没有记录"
+            @pick="pickVerdict"
+          />
+        </section>
 
-    <!-- 档位对比 -->
-    <section class="panel">
-      <h2>
-        档位表现 <span class="tag">最近 {{ days }} 天</span>
-      </h2>
-      <DataTable
-        :columns="gradeCols"
-        :rows="stats?.byGrade ?? []"
-        initial-sort="grade"
-        empty="还没有分析记录"
-      >
-        <template #grade="{ row }">
-          <span :class="['grade', row.grade]">{{ row.grade }}</span>
-        </template>
-        <template #winRate="{ row }">
-          <span v-if="row.settled === 0" class="dim">待复盘</span>
-          <span v-else :class="row.winRate >= 0.5 ? 'v ok' : 'v bad'">
-            {{ pct(row.winRate) }}
-          </span>
-        </template>
-        <template #avgR="{ row }">
-          <span v-if="row.settled === 0" class="dim">—</span>
-          <span v-else :class="row.avgR > 0 ? 'v ok' : 'v bad'">
-            {{ fixed(row.avgR) }}R
-          </span>
-        </template>
-        <template #totalR="{ row }">
-          <span v-if="row.settled === 0" class="dim">—</span>
-          <span v-else :class="row.totalR > 0 ? 'v ok' : 'v bad'">
-            {{ fixed(row.totalR) }}R
-          </span>
-        </template>
-      </DataTable>
-      <p class="hint" style="margin-top: 10px">
-        这张表是用来打脸的：如果 A 档的胜率和平均 R 长期不比 B
-        档高，说明规则里的分档 跟实际结果对不上，该回去改
-        <code>rules/</code> 里的档位定义，而不是改这里。
-        没结算的记录不参与胜率统计。
-      </p>
-    </section>
+        <section class="panel">
+          <h2>标签分布 <span class="tag">按出现次数</span></h2>
+          <PieChart
+            :items="tagItems"
+            :active-key="tag"
+            :top="7"
+            empty-text="还没有带概率的标签"
+            @pick="pickTag"
+          />
+        </section>
 
-    <!-- 按币种 -->
-    <section v-if="(stats?.bySymbol ?? []).length" class="panel">
-      <h2>做过哪些币</h2>
-      <DataTable
-        :columns="symbolCols"
-        :rows="stats?.bySymbol ?? []"
-        initial-sort="calls"
-        empty="无数据"
-      />
-    </section>
+        <section class="panel">
+          <h2>币种分布 <span class="tag">按分析次数</span></h2>
+          <PieChart
+            :items="symbolItems"
+            :active-key="symbol.trim().toUpperCase()"
+            :top="7"
+            empty-text="还没有记录"
+            @pick="pickSymbol"
+          />
+        </section>
+      </aside>
 
-    <!-- 列表 -->
-    <section class="panel">
-      <h2>
-        分析记录 <span class="tag">共 {{ int(total) }} 条</span>
-      </h2>
-      <DataTable
-        :columns="listCols"
-        :rows="rows"
-        initial-sort="createdAt"
-        empty="这段时间没有分析记录。去「开单分析」跑一次，结果会自动存到这里。"
-      >
-        <template #createdAt="{ row }">
-          <a class="linkish" @click="open(row.id)">
-            {{ bjTime(row.createdAt) }}
-          </a>
-        </template>
-        <template #symbol="{ row }">
-          <b>{{ row.symbol }}</b>
-          <div class="dim" style="font-size: 11px">
-            {{ row.timeframes.join(" · ") }}
+      <!-- ── 右：记录列表 ── -->
+      <div class="col list">
+        <section class="panel">
+          <h2>
+            分析记录 <span class="tag">共 {{ int(total) }} 条</span>
+            <span v-if="filterText" class="picked">
+              {{ filterText }}
+              <button class="ghost tiny" @click="clearFilters">清掉筛选</button>
+            </span>
+          </h2>
+
+          <DataTable
+            :columns="listCols"
+            :rows="rows"
+            fixed
+            initial-sort="createdAt"
+            empty="这段时间没有分析记录。去「开单分析」跑一次，结果会自动存到这里。"
+          >
+            <template #createdAt="{row}">
+              <a class="linkish" @click="open(row.id)">
+                {{ bjTime(row.createdAt) }}
+              </a>
+            </template>
+            <template #symbol="{row}">
+              <b>{{ row.symbol }}</b>
+              <div class="dim" style="font-size: 11px">
+                {{ row.timeframes.join(' · ') }}
+              </div>
+            </template>
+            <template #tags="{row}">
+              <!-- 列表里一最多摆 3 个 —— 再多就换行把行高撑起来了；
+                   多的只报个数，想看全部进详情 -->
+              <span v-if="(row.tags ?? []).length" class="tags">
+                <span
+                  v-for="t in row.tags.slice(0, 3)"
+                  :key="t.name"
+                  class="tag"
+                >
+                  {{ t.name }}
+                  <i v-if="t.probability">{{ t.probability }}%</i>
+                </span>
+                <span
+                  v-if="row.tags.length > 3"
+                  class="tag more"
+                  :title="
+                    row.tags
+                      .slice(3)
+                      .map(t => t.name)
+                      .join('、')
+                  "
+                >
+                  +{{ row.tags.length - 3 }}
+                </span>
+              </span>
+              <span v-else class="dim">—</span>
+            </template>
+            <template #verdict="{row}">
+              <span :class="['v', verdictTone(row.verdict)]">
+                {{ verdictText(row.verdict) }}
+              </span>
+            </template>
+            <template #costUsd="{row}">{{ rmb(row.costUsd) }}</template>
+            <template #actions="{row}">
+              <button class="ghost tiny" @click="open(row.id)">详情</button>
+              <button class="ghost tiny danger" @click="remove(row.id)">
+                删
+              </button>
+            </template>
+          </DataTable>
+
+          <div class="pager">
+            <button class="ghost" :disabled="page <= 1" @click="go(-1)">
+              上一页
+            </button>
+            <span class="dim">
+              第 {{ page }} / {{ pages }} 页 · 每页 {{ limit }}
+            </span>
+            <button class="ghost" :disabled="page >= pages" @click="go(1)">
+              下一页
+            </button>
           </div>
-        </template>
-        <template #grade="{ row }">
-          <span :class="['grade', row.grade ?? '']">{{
-            row.grade ?? "—"
-          }}</span>
-        </template>
-        <template #verdict="{ row }">
-          <span :class="['v', verdictTone(row.verdict)]">
-            {{ verdictText(row.verdict) }}
-          </span>
-        </template>
-        <template #confidence="{ row }">{{ row.confidence ?? "—" }}</template>
-        <template #entryPrice="{ row }">{{ num(row.entryPrice) }}</template>
-        <template #stopLoss="{ row }">
-          {{ num(row.stopLoss) }}
-          <div v-if="row.stopPct !== null" class="dim" style="font-size: 11px">
-            {{ pct(row.stopPct) }}
-          </div>
-        </template>
-        <template #expectancyR="{ row }">
-          <span v-if="row.expectancyR === null" class="dim">—</span>
-          <span v-else :class="row.expectancyR > 0 ? 'v ok' : 'v bad'">
-            {{ fixed(row.expectancyR) }}R
-          </span>
-        </template>
-        <template #outcome="{ row }">
-          <span v-if="!row.outcome" class="dim">未结算</span>
-          <span v-else :class="['v', OUTCOME_TONE[row.outcome]]">
-            {{ OUTCOME_TEXT[row.outcome] }}
-          </span>
-        </template>
-        <template #rMultiple="{ row }">
-          <span v-if="row.rMultiple === null" class="dim">—</span>
-          <span v-else :class="row.rMultiple > 0 ? 'v ok' : 'v bad'">
-            {{ fixed(row.rMultiple) }}
-          </span>
-        </template>
-        <template #costUsd="{ row }">{{ rmb(row.costUsd) }}</template>
-        <template #actions="{ row }">
-          <button class="ghost tiny" @click="open(row.id)">详情</button>
-          <button class="ghost tiny danger" @click="remove(row.id)">删</button>
-        </template>
-      </DataTable>
-
-      <div class="pager">
-        <button class="ghost" :disabled="page <= 1" @click="go(-1)">
-          上一页
-        </button>
-        <span class="dim">
-          第 {{ page }} / {{ pages }} 页 · 每页 {{ limit }}
-        </span>
-        <button class="ghost" :disabled="page >= pages" @click="go(1)">
-          下一页
-        </button>
+        </section>
       </div>
-    </section>
+    </div>
 
     <!-- 详情 -->
     <div v-if="detail || detailLoading" class="overlay" @click.self="close">
@@ -588,170 +462,37 @@ onMounted(() => {
 
           <!-- 结论 -->
           <div class="detail-head">
-            <span :class="['grade', detail.grade ?? '']">
-              {{ gradeText(detail.grade) }}
+            <span class="grade" :class="verdictTone(detail.verdict)">
+              {{
+                probOf(detail.result)
+                  ? `概率 ${probOf(detail.result)}%`
+                  : gradeText(detail.grade)
+              }}
             </span>
             <span :class="['v', verdictTone(detail.verdict)]">
               {{ verdictText(detail.verdict) }}
             </span>
-            <span class="dim">把握 {{ detail.confidence ?? "—" }}/100</span>
-            <span
-              v-if="detail.direction && detail.direction !== 'none'"
-              class="v blue"
-            >
-              方向 {{ detail.direction === "long" ? "做多" : "做空" }}
+          </div>
+
+          <!-- 形状标签 + 概率 -->
+          <div v-if="tagsOf(detail.result).length" class="tags">
+            <span v-for="t in tagsOf(detail.result)" :key="t.name" class="tag">
+              {{ t.name }}
+              <i v-if="t.probability">{{ t.probability }}%</i>
             </span>
           </div>
 
+          <p v-if="outlookOf(detail.result)" class="quote">
+            <b>走势</b>{{ outlookOf(detail.result) }}
+          </p>
           <p v-if="detail.gradeReason" class="quote">
-            <b>判档理由</b>{{ detail.gradeReason }}
+            <b>理由</b>{{ detail.gradeReason }}
           </p>
           <p v-if="detail.verdictReason" class="quote">
-            <b>结论理由</b>{{ detail.verdictReason }}
+            <b>老记录的结论理由</b>{{ detail.verdictReason }}
           </p>
-
-          <!-- 计划 -->
-          <h3>计划</h3>
-          <div class="kv">
-            <div>
-              <span>入场</span><b>{{ num(detail.entryPrice) }}</b>
-            </div>
-            <div>
-              <span>止损</span><b>{{ num(detail.stopLoss) }}</b>
-            </div>
-            <div>
-              <span>TP1</span><b>{{ num(detail.tp1Price) }}</b>
-            </div>
-            <div>
-              <span>TP2</span><b>{{ num(detail.tp2Price) }}</b>
-            </div>
-            <div>
-              <span>TP3</span><b>{{ num(detail.tp3Price) }}</b>
-            </div>
-            <div>
-              <span>末段 R</span
-              ><b>{{
-                detail.rrFinal === null ? "—" : fixed(detail.rrFinal)
-              }}</b>
-            </div>
-            <div>
-              <span>期望值</span>
-              <b :class="(detail.expectancyR ?? 0) > 0 ? 'v ok' : 'v bad'">
-                {{
-                  detail.expectancyR === null
-                    ? "—"
-                    : fixed(detail.expectancyR) + "R"
-                }}
-              </b>
-            </div>
-            <div>
-              <span>假设胜率</span>
-              <b>{{
-                detail.assumedWinRate === null
-                  ? "—"
-                  : pct(detail.assumedWinRate)
-              }}</b>
-            </div>
-            <div>
-              <span>止损幅度</span>
-              <b>{{ detail.stopPct === null ? "—" : pct(detail.stopPct) }}</b>
-            </div>
-            <div>
-              <span>仓位</span
-              ><b>{{
-                detail.positionQty === null ? "—" : fixed(detail.positionQty, 6)
-              }}</b>
-            </div>
-            <div>
-              <span>名义价值</span>
-              <b>{{
-                detail.positionNotional === null
-                  ? "—"
-                  : "$" + int(detail.positionNotional)
-              }}</b>
-            </div>
-            <div>
-              <span>杠杆</span>
-              <b>{{
-                detail.leverageUsed === null
-                  ? "—"
-                  : fixed(detail.leverageUsed) + "x"
-              }}</b>
-            </div>
-          </div>
-
-          <!-- 护栏 -->
-          <h3>
-            护栏
-            <span :class="detail.guardPassed ? 'v ok' : 'v bad'">
-              {{ detail.guardPassed ? "通过" : "被拦下" }}
-            </span>
-          </h3>
-          <ul v-if="detail.veto.length" class="list bad">
-            <li v-for="(v, i) in detail.veto" :key="i">否决：{{ v }}</li>
-          </ul>
-          <ul v-if="detail.redLines.length" class="list bad">
-            <li v-for="(v, i) in detail.redLines" :key="i">红线：{{ v }}</li>
-          </ul>
-          <p v-if="!detail.veto.length && !detail.redLines.length" class="dim">
-            没有触发否决项与红线
-          </p>
-
-          <!-- Checklist -->
-          <h3>
-            Checklist
-            <span class="tag">
-              {{
-                detail.result?.checklist?.filter((c) => c.status === "pass")
-                  .length ?? 0
-              }}
-              / {{ detail.result?.checklist?.length ?? 0 }} 通过
-            </span>
-          </h3>
-          <ul class="checklist">
-            <li
-              v-for="(c, i) in detail.result?.checklist ?? []"
-              :key="i"
-              :class="c.status"
-            >
-              <b>
-                {{
-                  c.status === "pass" ? "✅" : c.status === "warn" ? "⚠️" : "❌"
-                }}
-                {{ c.item }}
-              </b>
-              <div class="dim">{{ c.evidence }}</div>
-            </li>
-          </ul>
-
-          <!-- 平仓触发 -->
-          <template
-            v-if="
-              (detail.result?.exitPlan?.holding ?? []).length ||
-              (detail.result?.exitPlan?.watching ?? []).length
-            "
-          >
-            <h3>后续怎么跟</h3>
-            <template v-if="(detail.result?.exitPlan?.holding ?? []).length">
-              <p class="dim" style="margin: 6px 0 0">已开单 · 必须走</p>
-              <ul class="list bad">
-                <li v-for="(t, i) in detail.result.exitPlan.holding" :key="i">
-                  {{ t }}
-                </li>
-              </ul>
-            </template>
-            <template v-if="(detail.result?.exitPlan?.watching ?? []).length">
-              <p class="dim" style="margin: 6px 0 0">还没开 · 出现才回头看</p>
-              <ul class="list">
-                <li v-for="(t, i) in detail.result.exitPlan.watching" :key="i">
-                  {{ t }}
-                </li>
-              </ul>
-            </template>
-          </template>
-
-          <p v-if="detail.result?.coachLine" class="coach">
-            {{ detail.result.coachLine }}
+          <p v-if="recOf(detail.result)" class="quote">
+            <b>推荐</b>{{ recOf(detail.result) }}
           </p>
 
           <!-- 行情快照 -->
@@ -762,17 +503,29 @@ onMounted(() => {
               ><b>{{ num(detail.snapshot?.price ?? detail.price) }}</b>
             </div>
             <div>
-              <span>指标周期</span>
-              <b>{{ detail.timeframes.join(" · ") }}</b>
+              <span>看的周期</span>
+              <b>{{ detail.timeframes.join(' · ') }}</b>
             </div>
             <div>
-              <span>图表周期</span><b>{{ detail.chartTimeframe ?? "—" }}</b>
+              <span>图表周期</span><b>{{ detail.chartTimeframe ?? '—' }}</b>
             </div>
           </div>
-          <p class="dim">{{ structureFull(detail.snapshot?.structure) }}</p>
+          <p v-if="detail.snapshot?.structure" class="dim">
+            {{ structureFull(detail.snapshot?.structure) }}
+          </p>
+
+          <!-- 各周期行情：新记录存的是切段读出来的文字 -->
+          <div v-if="(detail.snapshot?.blocks ?? []).length" class="tf-grid">
+            <div v-for="b in detail.snapshot?.blocks ?? []" :key="b.timeframe">
+              <b>{{ b.timeframe }}</b>
+              <span class="dim" style="font-size: 11px">
+                {{ b.bars }} 根{{ b.primary ? ' · 主周期' : '' }}
+              </span>
+            </div>
+          </div>
 
           <div
-            v-if="(detail.snapshot?.timeframes ?? []).length"
+            v-else-if="(detail.snapshot?.timeframes ?? []).length"
             class="tf-grid"
           >
             <div
@@ -787,11 +540,11 @@ onMounted(() => {
                 "
               >
                 {{
-                  t.trend === "up"
-                    ? "上升"
-                    : t.trend === "down"
-                      ? "下跌"
-                      : "震荡"
+                  t.trend === 'up'
+                    ? '上升'
+                    : t.trend === 'down'
+                      ? '下跌'
+                      : '震荡'
                 }}
               </span>
               <div class="dim" style="font-size: 11px">
@@ -800,17 +553,6 @@ onMounted(() => {
               </div>
             </div>
           </div>
-
-          <!-- 引用的知识库 -->
-          <template v-if="detail.knowledgeRefs.length">
-            <h3>引用的知识库经验</h3>
-            <ul class="list">
-              <li v-for="(k, i) in detail.knowledgeRefs" :key="i">
-                <span class="tag">{{ k.symbol }} {{ k.timeframe }}</span>
-                {{ k.lesson }}
-              </li>
-            </ul>
-          </template>
 
           <!-- 成本与来源 -->
           <h3>成本与来源</h3>
@@ -833,123 +575,32 @@ onMounted(() => {
               <span>耗时</span><b>{{ ms(detail.latencyMs) }}</b>
             </div>
             <div>
-              <span>尝试次数</span><b>{{ detail.attempts ?? "—" }}</b>
+              <span>尝试次数</span><b>{{ detail.attempts ?? '—' }}</b>
             </div>
             <div>
-              <span>模型</span><b>{{ detail.model ?? "—" }}</b>
+              <span>模型</span><b>{{ detail.model ?? '—' }}</b>
             </div>
             <div>
-              <span>规则版本</span>
-              <b title="规则文件内容的 hash，改了规则这里就变">
-                {{ detail.rulesHash ? detail.rulesHash.slice(0, 12) : "—" }}
+              <span>提示词版本</span>
+              <b title="提示词正文的 hash，改了提示词这里就变">
+                {{ detail.rulesHash ? detail.rulesHash.slice(0, 12) : '—' }}
               </b>
             </div>
-            <div>
-              <span>护栏档</span
-              ><b>{{ detail.guardrails?.minRr ?? "—" }}R 起</b>
-            </div>
           </div>
 
-          <!-- 结算 -->
-          <h3>复盘结算</h3>
-          <div v-if="detail.outcome" class="quote">
-            <b>已结算：</b>{{ OUTCOME_TEXT[detail.outcome] }}
-            <template v-if="detail.rMultiple !== null">
-              · {{ fixed(detail.rMultiple) }}R
-            </template>
-            <template v-if="detail.outcomePrice !== null">
-              · 出场 {{ fixed(detail.outcomePrice, 4) }}
-            </template>
-            <template v-if="detail.outcomeAt">
-              · {{ bjTime(detail.outcomeAt) }}
-            </template>
-            <div
-              v-if="detail.mfePct !== null || detail.maePct !== null"
-              class="dim"
-            >
-              最大浮盈 {{ detail.mfePct === null ? "—" : pct(detail.mfePct) }} ·
-              最大浮亏 {{ detail.maePct === null ? "—" : pct(detail.maePct) }}
-            </div>
-            <div v-if="detail.outcomeNote" class="dim">
-              {{ detail.outcomeNote }}
-            </div>
-          </div>
-
-          <div class="settle">
-            <label>
-              <span>结果</span>
-              <select v-model="form.outcome">
-                <option v-for="o in OUTCOMES" :key="o.value" :value="o.value">
-                  {{ o.label }}
-                </option>
-              </select>
-            </label>
-            <label>
-              <span>出场价</span>
-              <input
-                v-model="form.price"
-                type="number"
-                step="any"
-                placeholder="选填"
-              />
-            </label>
-            <label>
-              <span>实际 R</span>
-              <input
-                v-model="form.rMultiple"
-                type="number"
-                step="0.01"
-                placeholder="如 1.75"
-              />
-            </label>
-            <label>
-              <span>最大浮盈 %</span>
-              <input
-                v-model="form.mfePct"
-                type="number"
-                step="any"
-                placeholder="选填"
-              />
-            </label>
-            <label>
-              <span>最大浮亏 %</span>
-              <input
-                v-model="form.maePct"
-                type="number"
-                step="any"
-                placeholder="选填"
-              />
-            </label>
-            <label class="wide">
-              <span>备注</span>
-              <input
-                v-model="form.note"
-                placeholder="为什么提前走 / 为什么没进"
-              />
-            </label>
-          </div>
           <div style="display: flex; align-items: center; gap: 10px">
-            <button class="primary" :disabled="settling" @click="submitSettle">
-              {{ settling ? "保存中…" : "保存结算" }}
-            </button>
             <button class="ghost danger" @click="remove(detail.id)">
               删除这条
             </button>
-            <span v-if="settleMsg" class="dim">{{ settleMsg }}</span>
           </div>
-          <p class="hint">
-            R 的口径：止损 = −1R，TP1/2/3 = 计划里那档的 R。
-            <b>「看了没做」也建议记一笔</b> ——
-            事后涨了你没做，才是最能暴露问题的那类记录。
-          </p>
 
-          <!-- 规则原文 -->
+          <!-- 当时的提示词正文 -->
           <details v-if="detail.rules?.body" class="rules">
             <summary>
-              当时的规则原文
+              当时的提示词正文
               <span class="tag">
                 {{ detail.rules.hash.slice(0, 12) }} ·
-                {{ detail.rules.sources.join("、") }}
+                {{ detail.rules.sources.join('、') }}
               </span>
             </summary>
             <pre>{{ detail.rules.body }}</pre>
@@ -959,10 +610,6 @@ onMounted(() => {
             <summary>原始 JSON（排查用）</summary>
             <pre>{{ JSON.stringify(detail.result, null, 2) }}</pre>
           </details>
-
-          <p class="dim" style="margin-top: 8px">
-            知识库引用 {{ detail.knowledgeRefs.length }} 条
-          </p>
         </template>
       </div>
     </div>
@@ -970,6 +617,96 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 左饼图 / 右列表 */
+.hist {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hist-split {
+  display: grid;
+  grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+/*
+ * 整页塞下时（`body.fixed-viewport`，跟开单分析同一套）：
+ * 顶部筛选固定，左右两列各自内部滚 —— 页面本身不滚。
+ *
+ * ⚠️ 只在**宽屏（两列）**下这么做。窄屏是单列，网格一旦有确定高度，
+ * 两行会被**均分**（各 122px），内容直接溢出到看不见 —— 那时候改成整页滚。
+ */
+@media (min-width: 1101px) {
+  body.fixed-viewport .hist {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  body.fixed-viewport .hist-split {
+    flex: 1 1 auto;
+    min-height: 0;
+    align-items: stretch;
+  }
+
+  body.fixed-viewport .hist-split > .col {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+  }
+}
+
+.charts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 列表在栏内滚的时候，翻页条钉在底部，不用滚到底才能翻页 */
+body.fixed-viewport .list .pager {
+  position: sticky;
+  bottom: 0;
+  margin-bottom: 0;
+  padding-bottom: 4px;
+  background: var(--panel, #14171c);
+}
+
+/* 窄屏退成单列：整页滚，两列不再各自内部滚 */
+@media (max-width: 1100px) {
+  .hist-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body.fixed-viewport .hist {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  body.fixed-viewport .hist-split {
+    flex: 0 0 auto;
+    align-items: start;
+  }
+}
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* 「正在看：… 清掉筛选」那一小块 */
+.picked {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--blue, #58a6ff);
+}
+
 .overlay {
   position: fixed;
   inset: 0;
@@ -1038,41 +775,10 @@ onMounted(() => {
   color: var(--fg-dim, #9aa4b2);
 }
 
-.list,
-.checklist {
+.list {
   margin: 6px 0;
   padding-left: 18px;
   line-height: 1.7;
-}
-
-.checklist {
-  list-style: none;
-  padding-left: 0;
-}
-
-.checklist > li {
-  border-left: 3px solid var(--line, #2a2f38);
-  padding: 4px 0 4px 10px;
-  margin-bottom: 6px;
-}
-
-.checklist > li.pass {
-  border-color: var(--ok, #3fb950);
-}
-
-.checklist > li.fail {
-  border-color: var(--bad, #f85149);
-}
-
-.checklist > li.warn {
-  border-color: var(--warn, #d29922);
-}
-
-.coach {
-  border: 1px solid var(--warn, #d29922);
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: rgba(210, 153, 34, 0.08);
 }
 
 .tf-grid {
@@ -1086,35 +792,6 @@ onMounted(() => {
   border: 1px solid var(--line, #2a2f38);
   border-radius: 8px;
   padding: 6px 9px;
-}
-
-.settle {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.settle label {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 11px;
-  color: var(--fg-dim, #9aa4b2);
-}
-
-.settle label.wide {
-  grid-column: 1 / -1;
-}
-
-.settle input,
-.settle select {
-  background: var(--input-bg, #0d1014);
-  border: 1px solid var(--line, #2a2f38);
-  border-radius: 6px;
-  color: inherit;
-  padding: 5px 7px;
-  font-size: 13px;
 }
 
 .rules {
