@@ -2,12 +2,18 @@
 /**
  * 添加案例。
  *
- * 币种、周期、**时间段**全都跟着右边 K 线走：
- *   · 在图上拖了一段 → 就提炼那一段，一根不多一根不少
- *   · 没拖 → 就按「点选的那个时间 / 现在」为中心，前后各拉 200 根
+ * 币种、周期跟着右边 K 线走，**时间段只能在图上拖一段**：
+ *   · 拖了 → 就提炼那一段，一根不多一根不少
+ *   · 没拖 → 不给分析（复盘得有明确的起止，不能拿「现在」凑一段）
  *
- * 系统会一并算出**这段行情结束时**那一刻的 4H / 日线压力支撑一起喂给 AI
- * （只用那一刻之前的 K 线，不吃未来数据），再让它提炼成一条能复用的经验。
+ * ⚠️ 2026-10-03 用户要求：
+ *   ① 「取消复盘的时间绑定」—— 以前这里会跟着右侧 K 线日历选的那个时间走，
+ *      现在完全脱钩（那个日历只负责看盘）；
+ *   ② 「不拖就不分析」—— 原来没拖就以「现在」为中心前后各拉 200 根，
+ *      那条路也砍了。
+ *
+ * 提炼时会一并算出**这一段结束时**那一刻的 4H / 日线压力支撑喂给 AI
+ * （只用那一刻之前的 K 线，不吃未来数据）。
  * 收录过程一步步显示在「分析过程」里。
  */
 import {computed, onBeforeUnmount, ref} from 'vue'
@@ -15,7 +21,7 @@ import SymbolCombo from './SymbolCombo.vue'
 import StepsPanel from './StepsPanel.vue'
 import {collectStream, type AnalyzeStep, type CollectResult} from '../api'
 import {contracts, refreshConfig} from '../store'
-import {bjInputToMs, bjTime, fmt, moveCls, moveText} from '../format'
+import {bjTime, fmt, moveCls, moveText} from '../format'
 import {failRunning, mergeStep} from '../steps'
 
 const props = defineProps<{
@@ -23,9 +29,9 @@ const props = defineProps<{
   /** 传了就跟它走（开单分析里跟着右侧的币种 / K 线周期） */
   symbol?: string
   timeframe?: string
-  /** 右侧 K 线选的开始时间（'YYYY-MM-DDTHH:mm'，北京时间）—— 没画范围时用它 */
-  startDate?: string
-  /** 右侧图上画好的范围（毫秒）—— 有它就只提炼这一段 */
+  /** 右侧 K 线选的周期 —— 跟它走 */
+  timeframe?: string
+  /** 右侧图上画好的范围（毫秒）—— **必须有**，没有就不让提炼 */
   range?: {from: number; to: number; bars: number} | null
   /** 是不是正等着我在图上拖一段 */
   drawing?: boolean
@@ -38,9 +44,6 @@ const emit = defineEmits<{
   /** 把图上画的范围清掉 */
   (e: 'clear:select'): void
 }>()
-
-/** 没画范围时前后各拉多少根 —— 跟后端的 DEFAULT_AROUND_BARS 保持一致 */
-const AROUND_BARS = 200
 
 const TIMEFRAMES = [
   {value: '5m', label: '5 分钟'},
@@ -67,21 +70,10 @@ const timeframeValue = computed(() =>
 
 const note = ref('')
 
-/** 右侧给没给时间：给了就换算成毫秒，没给/不合法就用现在 */
-function msOf(d: string | undefined): number {
-  const ms = d ? bjInputToMs(d) : 0
-  return ms > 0 ? ms : Date.now()
-}
-
-/** 没画范围时的中心时间（毫秒）—— 右侧 K 线一变就跟着变 */
-const center = computed(() => msOf(props.startDate))
-
 const collecting = ref(false)
 const error = ref('')
 const collected = ref<CollectResult | null>(null)
 const steps = ref<AnalyzeStep[]>([])
-
-const centerText = computed(() => bjTime(center.value))
 
 /* ---------------- 收录（带进度） ---------------- */
 
@@ -95,18 +87,23 @@ async function collect() {
     return
   }
 
+  // 没画范围就没得提炼：复盘要有明确的起止，「现在」不是一段行情
+  const r = props.range
+  if (!r) {
+    error.value =
+      '先在右边图上拖一段行情（点「画范围」），不然不知道该复盘哪一段'
+    return
+  }
+
   closeStream?.()
   collecting.value = true
   error.value = ''
   collected.value = null
   steps.value = []
 
-  const r = props.range
   const base = {symbol: s, timeframe: timeframeValue.value, note: note.value}
   closeStream = collectStream(
-    r
-      ? {...base, from: r.from, to: r.to, exact: true}
-      : {...base, center: center.value, aroundBars: AROUND_BARS},
+    {...base, from: r.from, to: r.to, exact: true},
     {
       onStep(step) {
         mergeStep(steps.value, step)
@@ -140,11 +137,11 @@ async function collect() {
         <span class="tag">AI 提炼</span>
       </h2>
       <p class="hint">
-        <b>币种、周期、时间段都跟着右边 K 线走</b>。点下面的「画范围」，
-        再在右边图上拖一段，就只提炼那一段；不画的话，我会以那个时间为中心<b
-          >前后各拉 {{ AROUND_BARS }} 根</b
-        >。 不管哪种，都会一并算出<b>这段行情结束时</b>那一刻的 4H 和日线压力
-        支撑喂给 AI（只吃那一刻之前的数据）。
+        时间段<b>只能</b>在右边图上拖一段：点下面的「画范围」，再在右边图上横向拖，
+        就只提炼那一段，一根不多一根不少。<b>不拖就不分析</b> ——
+        复盘总得有明确的起止，不能拿「现在」凑一段。
+        提炼时会一并算出<b>这一段结束时</b>那一刻的 4H 和日线压力 支撑喂给
+        AI（只吃那一刻之前的数据）。
       </p>
 
       <div class="fields">
@@ -175,10 +172,10 @@ async function collect() {
           </label>
         </template>
 
-        <!-- 时间段：画了范围就用范围，没画就用点选的时间。
-             「画范围」按钮就放这儿 —— 时间/范围本来就该在同一处选 -->
+        <!-- 时间段：只能在图上拖一段。不跟 K 线日历绑（那个日历只负责看盘），
+             也不拿「现在」凑数 —— 不拖就不分析。 -->
         <div class="follow-row" :class="{picked: !!range}">
-          <span class="k">{{ range ? '范围' : '时间' }}</span>
+          <span class="k">{{ range ? '范围' : '时间段' }}</span>
           <span class="v">
             <template v-if="range">
               {{ bjTime(range.from) }} → {{ bjTime(range.to) }}
@@ -189,10 +186,8 @@ async function collect() {
               <em>横向拖，松手就选好（按 Esc 取消）</em>
             </template>
             <template v-else>
-              {{ centerText }}
-              <em v-if="following">{{
-                startDate ? '跟着右边 K 线选的' : '右边没选时间 → 用现在'
-              }}</em>
+              还没画
+              <em>不拖就没得分析：点「画范围」，再去右边图上横向拖一段</em>
             </template>
           </span>
 
@@ -230,10 +225,21 @@ async function collect() {
         </label>
       </div>
 
-      <!-- 底部：直接开拉 -->
+      <!-- 底部：直接开拉（没画范围就不让点） -->
       <div class="collect-bottom">
-        <button class="btn-block go" :disabled="collecting" @click="collect">
-          {{ collecting ? '拉取 + 提炼中…' : '拉取行情并提炼' }}
+        <button
+          class="btn-block go"
+          :disabled="collecting || !range"
+          :title="range ? '' : '先在右边图上拖一段行情'"
+          @click="collect"
+        >
+          {{
+            collecting
+              ? '拉取 + 提炼中…'
+              : range
+                ? '拉取行情并提炼'
+                : '先在图上拖一段'
+          }}
         </button>
       </div>
 

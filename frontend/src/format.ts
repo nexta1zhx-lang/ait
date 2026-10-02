@@ -118,6 +118,51 @@ export function bjInputToMs(v: string): number {
   return Number.isFinite(ms) ? ms : 0
 }
 
+/** ---------------------------------------------------------------- 推荐做法分段 */
+/**
+ * AI 的 `recommendation` 要求写成固定三行（`现在：` / `动手：` / `别碰：`）。
+ * 这里把它拆成一段段好按行渲染：
+ *   - 模型可能写成三行，也可能挤成一行、还可能带 **加粗** —— 都容错
+ *   - 老记录是一整段没前缀的 → 原样返回一段（`k` 为空，当普通段落渲染）
+ */
+export interface RecPart {
+  /** 前缀；老记录没前缀就是空串 */
+  k: string
+  v: string
+  /** 配色用 */
+  tone: 'now' | 'do' | 'dont' | 'plain'
+}
+
+const REC_TONE: Record<string, RecPart['tone']> = {
+  现在: 'now',
+  开单: 'do',
+  // 2026-10-03 之前的写法，老记录里还是「动手」，一起认
+  动手: 'do',
+  别碰: 'dont'
+}
+
+export function splitRec(text: string | undefined | null): RecPart[] {
+  const raw = (text ?? '').trim()
+  if (!raw) return []
+  // 先统一成「一个前缀一行」，两种写法就都能吃下了
+  const marked = raw.replace(
+    /\s*\*{0,2}\s*(现在|开单|动手|别碰)\s*\*{0,2}\s*[:：]\s*/g,
+    (_m, k: string) => `\n${k}:`
+  )
+  const parts: RecPart[] = []
+  for (const line of marked.split('\n')) {
+    const s = line.trim()
+    if (!s) continue
+    const m = s.match(/^(现在|开单|动手|别碰)[:：]\s*(.*)$/)
+    if (m && m[2].trim()) {
+      parts.push({k: m[1], v: m[2].trim(), tone: REC_TONE[m[1]] ?? 'plain'})
+    } else {
+      parts.push({k: '', v: s, tone: 'plain'})
+    }
+  }
+  return parts
+}
+
 /** MM/DD HH:mm */
 export function bjShort(input: number | string | Date): string {
   const d =
@@ -138,6 +183,73 @@ export function ago(input: number | string | Date): string {
   if (s < 3600) return `${Math.round(s / 60)} 分钟前`
   if (s < 86400) return `${Math.round(s / 3600)} 小时前`
   return `${Math.round(s / 86400)} 天前`
+}
+
+/** ---------------------------------------------------------------- 结论文字高亮 */
+/**
+ * 结论里的「关键字加粗 + 变色」。
+ *
+ * 用户 2026-10-03：「能否在关键字加粗颜色变化」。两件事一起做：
+ *   ① 模型习惯写 `**开多**` 来标重点，以前页面上是**原样显示星号**（因为用 `{{ }}` 插值），
+ *      现在把它变成真加粗 + 上色；
+ *   ② 没标的词按词表自动上色（方向 / 风险 / 关键位）。
+ *
+ * ⚠️ 输出是 HTML（模板里要 `v-html`），所以**先转义再插标签** ——
+ *    AI 的输出也当不可信文本看，别让它写出真的标签来。
+ * ⚠️ 只跑**一遍**正则（用替换函数），插入的标签不会被重新扫描，不会把标签自己包进去。
+ */
+
+/**
+ * 上色词表：`[词, 色调]`。顺序无所谓，代码里会按长度从长到短排（「假突破」必须赢「突破」）。
+ *
+ * ⚠️ 2026-10-03 用户说「颜色有太多啦啦」—— 之前涨/跌/风险/关键位四个色全上，
+ * 一段正文里五颜六色很吵。现在**只留两类**：
+ *   · 模型自己用 `**…**` 标的重点（蓝）
+ *   · 风险 / 纪律词（琥珀，这类真的要知道）
+ * 方向词（涨/跌）和结构词（支撑/压力）不再上色 —— 推荐那三行本来就有绿/红标签。
+ * 要重新加回某一类，就把词表补上、CSS 里 `.kw-xxx` 补上即可。
+ */
+const KW_TONES: [string, string][] = [
+  ['不要追', 'warn'],
+  ['别追高', 'warn'],
+  ['止损', 'warn'],
+  ['止盈', 'warn'],
+  ['风险', 'warn'],
+  ['假突破', 'warn'],
+  ['轻仓', 'warn'],
+  ['观望', 'warn'],
+  ['别碰', 'warn']
+]
+
+/** 排好序的词表（长的优先） + 词→色调 */
+const KW_SORTED = [...KW_TONES].sort((a, b) => b[0].length - a[0].length)
+const KW_MAP = new Map(KW_TONES)
+
+/** `**…**`（模型标的重点）也算一个「词」，一起在这一个正则里匹配 */
+const KW_RE = new RegExp(
+  `\\*\\*[^*\\n]{1,60}\\*\\*|${KW_SORTED.map(([w]) => w).join('|')}`,
+  'g'
+)
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/** 结论文字 → 可 `v-html` 的 HTML（关键字加粗上色） */
+export function richText(src: string | undefined | null): string {
+  const raw = (src ?? '').trim()
+  if (!raw) return ''
+  return escapeHtml(raw).replace(KW_RE, m => {
+    if (m.startsWith('**')) {
+      const t = m.slice(2, -2).trim()
+      return t ? `<b class="kw kw-key">${t}</b>` : ''
+    }
+    return `<span class="kw kw-${KW_MAP.get(m) ?? 'key'}">${m}</span>`
+  })
 }
 
 /* ---------------- 业务文案 ---------------- */

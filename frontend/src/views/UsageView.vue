@@ -13,6 +13,7 @@ import {
   type UsageSummary
 } from '../api'
 import {ago, bjTime, cny, int, ms, pct, tok, usd} from '../format'
+import AccountBar from '../comps/AccountBar.vue'
 
 /* ---------------- 筛选 ---------------- */
 
@@ -271,6 +272,12 @@ const symbolText = (r: UsageRow) =>
 
 <template>
   <div class="col">
+    <!--
+      模型 + 余额：**只管窄屏**（宽屏在顶栏）。顶栏窄屏收起来了，
+      所以这一块是手机上切模型/看余额的唯一入口 —— 显隐交给 CSS（.usage-account）。
+    -->
+    <AccountBar class="usage-account" />
+
     <!-- 筛选 -->
     <section
       class="panel"

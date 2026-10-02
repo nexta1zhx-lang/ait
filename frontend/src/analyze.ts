@@ -11,7 +11,7 @@
  * 派生出来的字段（判档文案、热度行…）仍然留在组件里现算 —— 它们只是
  * 从这些状态推出来的，重新挂载时自然就是对的。
  */
-import {computed, ref} from 'vue'
+import {computed, ref, watch} from 'vue'
 import {
   analyzeStream,
   fetchAnalyses,
@@ -83,18 +83,19 @@ const TF_MS: Record<string, number> = {
 /**
  * 图上初次加载多少根 K 线 —— **AI 看的主周期就是这一段**。
  *
- * `KlineChart` 也用它（零封口同一条常量，不然两边会漂）。
+ * `KlineChart` 也用它（封口同一条常量，不然两边会漂）。
+ * 2026-10-03 用户要求「图表默认显示 200 根」：从 300 降到 200（1h ≈ 8.3 天）。
  */
-export const CHART_BARS = 300
+export const CHART_BARS = 200
 
 /**
  * 主周期要看多少天 —— **不给用户填，就是图上那段**。
  *
- * 图上初次加载 `CHART_BARS` 根，换成天数交给后端（1h × 300 根 = 12.5 天），
+ * 图上初次加载 `CHART_BARS` 根，换成天数交给后端（1h × 200 根 ≈ 8.33 天），
  * 后端再换回根数。其余周期看多少天由 `config/calibers.yaml` 决定。
  *
  * ⚠️ 先往下取到 3 位小数：后端的 `barsFor` 是 `ceil(天 × 每天根数)`，
- * 不截断的话 5m 会因为浮点误差多算出 1 根（300.00000000000006 → 301）。
+ * 不截断的话 5m 会因为浮点误差多算出 1 根（200.00000000000003 → 201）。
  */
 export const lookbackDays = computed(() =>
   Math.max(
@@ -120,13 +121,38 @@ export const error = ref('')
 
 /* ---------------- tab ---------------- */
 
-/** 左侧一级 tab：实时分析 / 历史分析 / 添加案例 */
+/**
+ * 左侧一级 tab：合约行情 / 实时分析 / 测试 / 历史分析 / 添加案例。
+ *
+ * 「合约行情」摆在最前面（用户 2026-10-03：在实时分析**左侧**加一格）——
+ * 参考币安合约行情页：一眼扫全市场，点一行就切币。
+ */
 export const LEFT_TABS = [
+  {value: 'market' as const, label: '合约行情'},
   {value: 'live' as const, label: '实时分析'},
+  {value: 'test' as const, label: '测试'},
   {value: 'history' as const, label: '历史分析'},
   {value: 'add' as const, label: '添加案例'}
 ]
-export const leftTab = ref<'live' | 'history' | 'add'>('live')
+export type LeftTab = (typeof LEFT_TABS)[number]['value'] | 'chart'
+
+/** 窄屏断点 —— 跟 CSS 里 ≤900px 那套对齐（手机上「K 线」是单独一格） */
+export const MOBILE_MAX = 900
+
+/**
+ * 一级 tab 默认选哪一格 —— **宽屏窄屏都是「合约行情」**（用户 2026-10-03：
+ * 移动端和 pc 都默认显示合约行情）。一进来先扫全市场，点一行就切币去看图。
+ * 模块只初始化一次 —— 之后一律按用户自己选的记住。
+ */
+export const leftTab = ref<LeftTab>('market')
+
+/**
+ * 「K 线」这一格 —— **只在手机端**存在。
+ *
+ * 手机一屏放不下「图 + 分析」两块，所以让它跟实时分析 / 测试 / … 并排成一个 tab；
+ * 桌面端图就常驻在右栏，再加一个「K 线」tab 是多余的（所以桌面端这个选项不渲染）。
+ */
+export const CHART_TAB = {value: 'chart' as const, label: 'K 线'}
 
 /** 实时分析内部的二级 tab（大简化后只剩两个） */
 export const LIVE_TABS = [
@@ -244,22 +270,11 @@ export function stopRun(): void {
 
 /* ---------------- 测试模式：回到过去某一刻 ---------------- */
 
-/** 跑哪种：实时（看当下）/ 测试（回到我圈出来的那一段） */
-export const RUN_MODES = [
-  {
-    value: 'live' as const,
-    label: '实时',
-    title: '用当下最新的行情判断，结果会存档'
-  },
-  {
-    value: 'test' as const,
-    label: '测试',
-    title:
-      '回到「图上那条结束线」那一刻：「看到某根收盘」为准，只看那一刻之前已收盘的 K 线，资金费率/持仓量留空，结果不存档'
-  }
-]
-export const runMode = ref<'live' | 'test'>('live')
-export const testMode = computed(() => runMode.value === 'test')
+/**
+ * 「测试」现在是**左侧一级 tab**（2026-10-03 用户要求：查询栏那个实时/测试开关去掉）。
+ * 选中它就等于「回到结束线那一刻跑一局」，结果不存档。
+ */
+export const testMode = computed(() => leftTab.value === 'test')
 
 /**
  * 测试模式：**结束线**放在哪 —— 也就是「我看到哪一刻」。
@@ -295,21 +310,21 @@ export const testBarTime = computed(() =>
     : testPoint.value - (TF_MS[chartTf.value] ?? 3_600_000)
 )
 
-/** 切实时 / 测试：把上一次的结论清掉，免得看成上一局的 */
-export function setRunMode(v: 'live' | 'test'): void {
-  if (v === runMode.value) return
-  runMode.value = v
-  result.value = null
-  steps.value = []
-  error.value = ''
-  if (v === 'test') {
-    // 进了这个模式就直接等着我在图上点，少按一次按钮
-    if (!testPoint.value) pointPicking.value = true
-  } else {
-    // 切回实时：结束线不画了（值留着 —— 再切回测试还是那一条）
-    pointPicking.value = false
+/**
+ * 切 tab 时顺手做两件事（就放这里，组件里不用再挂一个 watch）：
+ *   1. **实时 ↔ 测试** 是两种跑法，切了就清掉上一局的结论，免得看成上一局的；
+ *   2. 进「测试」就直接等我在图上点结束线（少按一次）；其它 tab 一律退出选线/拖动。
+ */
+watch(leftTab, (v, prev) => {
+  const running = (x: LeftTab) => x === 'live' || x === 'test'
+  if (running(v) && running(prev)) {
+    result.value = null
+    steps.value = []
+    error.value = ''
   }
-}
+  pointPicking.value = v === 'test' && !testPoint.value
+  if (v !== 'add') rangeDrawing.value = false
+})
 
 /** 换币种：清掉上一只币的结论，历史由 loader 重拉（并回到第 1 页） */
 export function pickSymbol(v: string): void {
@@ -337,7 +352,9 @@ export function run(): void {
   error.value = ''
   result.value = null
   steps.value = []
-  leftTab.value = 'live'
+  // ⚠️ 这里**不能**动 leftTab：测试已经是左侧一级 tab 了（2026-10-03），
+  // 一点「判断」就切回实时的话，testMode 立刻变 false、testAt 变 null ——
+  // 测试跑会被当成实时跑存档（踩过：#100 就是这么来的）。
   liveTab.value = 'verdict'
   showSteps.value = true
   loading.value = true

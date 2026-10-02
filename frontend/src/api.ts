@@ -267,6 +267,142 @@ export const fetchCandles = (
   )
 }
 
+/* ---------------- 头部行情条 ---------------- */
+
+/** 底部涨幅那一行的档位（跟后端 CHANGE_WINDOWS 一一对应） */
+export type ChangeWindow = 'd1' | 'd3' | 'd7' | 'm1' | 'm3' | 'y1'
+
+/** 顶部那条行情（价格 / 24h / 标记指数 / 资金费率 / 持仓量 / 多周期涨幅） */
+export interface TickerInfo {
+  symbol: string
+  pair: string
+  marketType: string
+  last: number | null
+  change24h: number | null
+  change24hPct: number | null
+  high24h: number | null
+  low24h: number | null
+  volume24h: number | null
+  quoteVolume24h: number | null
+  markPrice: number | null
+  indexPrice: number | null
+  fundingRate: number | null
+  fundingIntervalHours: number | null
+  nextFundingAt: number | null
+  openInterest: number | null
+  openInterestValue: number | null
+  changes: Record<ChangeWindow, number | null>
+  updatedAt: number
+}
+
+/** 拉头部行情（后端有 15 秒缓存，刷勤一点也不会真打交易所） */
+export const fetchTicker = (symbol: string, market?: string) => {
+  const qs = new URLSearchParams({symbol})
+  if (market) qs.set('market', market)
+  return get<TickerInfo>(`/api/ticker?${qs}`)
+}
+
+/**
+ * 订阅 K 线实时推送（SSE）。
+ *
+ * 上游是币安合约 WS（后端中转，见 `backend/src/data/kline-stream.ts`）；
+ * 推来的就是一根 K 线，**正在长的那根也会推**（`timestamp` 跟当前最后一根相同就是同一根在更新）。
+ * 返回取消函数；`EventSource` 断了会自己重连，不用管。
+ */
+export function klineStream(
+  symbol: string,
+  timeframe: string,
+  onCandle: (c: Candle) => void
+): () => void {
+  const qs = new URLSearchParams({symbol, timeframe})
+  const es = new EventSource(`/api/kline/stream?${qs}`)
+  es.addEventListener('kline', e => {
+    try {
+      const d = JSON.parse((e as MessageEvent).data) as {candle?: Candle}
+      if (d?.candle) onCandle(d.candle)
+    } catch {
+      /* 一条坏消息不影响后面的 */
+    }
+  })
+  return () => es.close()
+}
+
+/* ---------------- 合约行情列表 ---------------- */
+
+/** 合约行情列表的一行（列照着币安「合约行情」页来） */
+export interface MarketRow {
+  base: string
+  symbol: string
+  pair: string
+  last: number | null
+  change24hPct: number | null
+  high24h: number | null
+  low24h: number | null
+  volume24h: number | null
+  quoteVolume24h: number | null
+}
+
+/**
+ * 全部合约的 24h 行情（后端 5 秒缓存，按成交额从大到小）。
+ *
+ * 币安那边一次请求就是**全量**（740 个合约 ~100KB），所以别刷太勤：
+ * 页面上 5 秒一次刚好，跟后端缓存同一档。
+ */
+export const fetchMarkets = (market?: string) => {
+  const qs = new URLSearchParams()
+  if (market) qs.set('market', market)
+  const q = qs.toString()
+  return get<{rows: MarketRow[]; updatedAt: number}>(
+    `/api/markets${q ? `?${q}` : ''}`
+  )
+}
+
+/** 一批行情增量里的一个币（后端把币安的字符串都转成数字了） */
+export interface TickerPatch {
+  /** 交易所原始交易对（BTCUSDT），拿来跟 `MarketRow.pair` 对上 */
+  pair: string
+  last: number
+  change24hPct: number
+  high24h: number
+  low24h: number
+  volume24h: number
+  quoteVolume24h: number
+}
+
+/**
+ * 订阅**全市场行情**实时推送（SSE）。
+ *
+ * 上游是币安的 `!ticker@arr`（一条流管所有币，后端中转）：
+ * **每秒一批，但每批里只有刚变过的两三百个币**，所以必须先拿一次
+ * `fetchMarkets()` 当底稿，再拿增量按 `pair` 往里盖。
+ * 返回取消函数；`EventSource` 断了会自己重连。
+ */
+export function tickerStream(
+  onBatch: (updates: TickerPatch[]) => void
+): () => void {
+  const es = new EventSource('/api/tickers/stream')
+  es.addEventListener('ticker', e => {
+    try {
+      const d = JSON.parse((e as MessageEvent).data) as {
+        updates?: TickerPatch[]
+      }
+      if (d?.updates?.length) onBatch(d.updates)
+    } catch {
+      /* 一条坏消息不影响后面的 */
+    }
+  })
+  return () => es.close()
+}
+
+/**
+ * 币种图标（后端代理那套开源图标集，顺带缓存）。
+ *
+ * 走我们自己的域名：图标源在国内不一定连得上，自己的域名一定连得上。
+ * 拿不到会 404，组件那边退回首字母的圆形占位。
+ */
+export const iconUrl = (base: string): string =>
+  `/api/icon/${encodeURIComponent(base.trim().toLowerCase())}`
+
 /* ---------------- 分析 ---------------- */
 
 export interface Structure {

@@ -2,16 +2,21 @@
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
+import MarketPanel from '../comps/MarketPanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
+import SettingsSheet from '../comps/SettingsSheet.vue'
 import SegTabs from '../comps/SegTabs.vue'
 import CollectForm from '../comps/CollectForm.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
-import {tagsOf, type Heat} from '../api'
+import RecIcon from '../comps/RecIcon.vue'
+import TickerHead from '../comps/TickerHead.vue'
+import TickerChanges from '../comps/TickerChanges.vue'
+import {tagsOf, type Heat, collectStream} from '../api'
 import {
-  CHART_BARS,
+  CHART_TAB,
   LEFT_TABS,
   LIVE_TABS,
-  RUN_MODES,
+  MOBILE_MAX,
   chartFrom,
   chartRange,
   chartTf,
@@ -34,52 +39,113 @@ import {
   rangeDrawing,
   result,
   run,
-  runMode,
   setHistoryPageSize,
   setPointPicking,
-  setRunMode,
   showSteps,
-  spanText,
   steps,
   symbol,
   testAt,
   testBarTime,
   testMode,
-  testPoint,
-  timeframesText
+  testPoint
 } from '../analyze'
-import {contracts, config} from '../store'
-import {VERDICT_TEXT, bjShort, bjTime, fixed, fmt, signedPct} from '../format'
+import {contracts, refreshConfig} from '../store'
+import {stopTicker, watchTicker} from '../ticker'
+import {
+  VERDICT_TEXT,
+  bjShort,
+  bjTime,
+  fixed,
+  fmt,
+  richText,
+  signedPct,
+  splitRec
+} from '../format'
 
 // 结论、分析过程、报错都在 ../analyze 的模块作用域里，
 // 切到别的页面再回来不会丢；这里只负责首次进页面把历史拉一次。
 onMounted(() => void loadHistory(symbol.value))
 
-/**
- * 手机端（≤900px）分两块看：**K 线 / 分析**。
- *
- * 窄屏放不下「左分析 + 右 K 线」两栏（实测 390px 时 K 线图被压成 0 宽），
- * 与其挤成一坨，不如一次只显示一块。桌面端这排 tab 是隐藏的（CSS 里 `display:none`）。
+/*
+ * 顶部行情条 / 底部涨幅：跟着币种走，进来就拉、换币立刻重拉。
+ * ⚠️ 只有这个页面看得到它，所以离开就把定时器停掉 —— 别在后台一直打交易所。
  */
-const MOBILE_TABS = [
-  {value: 'chart' as const, label: 'K 线'},
-  {value: 'analysis' as const, label: '分析'}
-]
-const mobileTab = ref<'chart' | 'analysis'>('chart')
+watch(symbol, s => watchTicker(s), {immediate: true})
+onBeforeUnmount(stopTicker)
+onMounted(() => window.addEventListener('resize', onViewport))
+onBeforeUnmount(() => window.removeEventListener('resize', onViewport))
+
+/**
+ * 手机端（≤900px）：一级 tab = **K 线 / 实时分析 / 历史分析**。
+ *
+ * 窄屏放不下「左分析 + 右 K 线」两栏；而 K 线那块现在头顶行情条、脚下涨幅行，
+ * 自己就是一整屏 —— 所以手机上它自己占一格，不再另开一排开关。
+ *
+ * 「测试 / 添加案例」在手机端**不摆出来**：这两件都要在图上看点/拖，
+ * 一屏放不下就来回切，反倒没法用（添加案例挪到 K 线那格的「＋」里去了）。
+ *
+ * 桌面端图常驻右栏，这几格照旧。
+ * 断点 `MOBILE_MAX` 跟 CSS 里那套对齐，定义在 `../analyze`（默认选中哪一格也在那儿）。
+ */
+const isMobile = ref(window.innerWidth <= MOBILE_MAX)
+
+/** 窄屏不摆的那两格（都要在图上看点 / 拖，一屏放不下） */
+const MOBILE_HIDDEN_TABS: string[] = ['test', 'add']
+
+/** 跑分析那颗按钮的文案（桌面 / 手机两处按钮共用一个，不会写漂） */
+const runLabel = computed(() =>
+  loading.value ? '分析中…' : testMode.value ? '按这段行情判断' : '分析'
+)
+
+/**
+ * ⚠️ 用 `resize` + `innerWidth` 判断，别用 `matchMedia` 的 change ——
+ * 那个事件在部分环境（实测内置浏览器）根本不触发，拖宽了「K 线」还赖在 tab 行里。
+ */
+function onViewport(): void {
+  const m = window.innerWidth <= MOBILE_MAX
+  if (m === isMobile.value) return
+  isMobile.value = m
+  // 「K 线」这一格桌面端没有；「测试 / 添加案例」反过来只有桌面有
+  if (!m && leftTab.value === 'chart') leftTab.value = 'live'
+  if (m && MOBILE_HIDDEN_TABS.includes(leftTab.value)) leftTab.value = 'live'
+}
+
+/**
+ * 窄屏的 tab 顺序：**合约行情排第一个**（用户要求：它也是默认落的那一格），
+ * 然后是「K 线」和桌面那套去掉「测试 / 添加案例」（那两个只桌面能用）。
+ */
+const tabs = computed(() => {
+  if (!isMobile.value) return LEFT_TABS
+  const market = LEFT_TABS.filter(t => t.value === 'market')
+  const rest = LEFT_TABS.filter(
+    t => t.value !== 'market' && !MOBILE_HIDDEN_TABS.includes(t.value)
+  )
+  return [...market, CHART_TAB, ...rest]
+})
 
 /* ---------- 历史列表：能放几行就放几行，列表自己不出滚动条 ---------- */
 const histBox = ref<HTMLElement | null>(null)
 let histRO: ResizeObserver | null = null
 
-/** 左边栏可视高度 ÷ 单行高度 = 这一页该放几条 */
+/** 左边栏可视高度 ÷ 单行高度（含行距）= 这一页该放几条 */
 function measureHistoryRows(): void {
   const box = histBox.value
   if (!box) return
   const h = box.clientHeight
   if (h <= 0) return
-  // 拿真实渲染出来的行高算，别猜 CSS
-  const row = box.querySelector('li')?.getBoundingClientRect().height || 28
-  setHistoryPageSize(Math.floor(h / row))
+  const lis = box.querySelectorAll('li')
+  /*
+   * ⚠️ 拿第 1、2 行的 `offsetTop` 差当「一步」，而不是只量单行高度：
+   * 行之间现在有 `margin-top`（用户：「行加间距」），只按行高算会多摆一行、
+   * 最后那行被 `overflow: hidden` 切掉。
+   * 首行没有上边距，所以「一步」= 行高 + 行距 ✓
+   */
+  const step =
+    lis.length > 1
+      ? lis[1].offsetTop - lis[0].offsetTop
+      : lis[0]?.getBoundingClientRect().height || 28
+  if (step <= 0) return
+  setHistoryPageSize(Math.max(1, Math.floor(h / step)))
 }
 
 // tab 切过来时 ul 才存在，ref 一挂上就量；窗口缩放由 ResizeObserver 接着管
@@ -98,19 +164,130 @@ watch(
   () => void nextTick(measureHistoryRows)
 )
 
-onBeforeUnmount(() => histRO?.disconnect())
-
-// 离开「实时 / 添加案例」就不用再等着我拖了（图也会退回普通模式）
-watch([leftTab, runMode], () => {
-  const ok = leftTab.value === 'add'
-  if (!ok) rangeDrawing.value = false
-  if (leftTab.value !== 'live') pointPicking.value = false
+onBeforeUnmount(() => {
+  histRO?.disconnect()
+  collectClose?.()
+  if (toastTimer) clearTimeout(toastTimer)
 })
 
-const onChartError = (msg: string) => (error.value = msg)
+/*
+ * 图表报错：**「找不到交易对」这种不弹红字**。
+ * 币种输入框每敲一个字都会带着 symbol 去重画图，用户只是在筛选，
+ * 或者选了个库里没有的币 —— 这时候蹦一条红色报错没有任何用，
+ * 图空着、上面行情显示「—」就够了（用户 2026-10-03：「合约搜索没有 前端不要提示报错文字」）。
+ * 真出错（交易所挂了 / 网络断）还是要提示，别吞。
+ */
+const onChartError = (msg: string) => {
+  if (/找不到交易对/.test(msg)) {
+    error.value = ''
+    return
+  }
+  error.value = msg
+}
 
-/** 「拖一段」只给「添加案例」用 —— 测试模式改成点一条结束线了 */
-const chartSelectable = computed(() => leftTab.value === 'add')
+/**
+ * 合约行情里点了一行 → 换币种。
+ *
+ * `pickSymbol`（analyze.ts）会把结论清掉、历史重拉；这里只管窄屏：
+ * 图是单独一格，选完直接跳过去看图 —— 不然在手机上点完像没反应。
+ */
+function onPickMarket(base: string): void {
+  pickSymbol(base)
+  if (isMobile.value) leftTab.value = 'chart'
+}
+
+/* ---------------- 手机端「＋ 添加案例」---------------- */
+/*
+ * 窄屏不再有「添加案例」那一格（那套表单要在图上看过程、还要填备注，手机上来不及）：
+ * 「AI 分析」右边一颗「＋」→ 点开变成「✕」，旁边冒出「添加案例」，图上也就能拖范围了。
+ * 提炼时**不摆那串步骤**（手机屏放不下），就转个圈；完了弹一下结果。
+ */
+const collectMode = ref(false)
+const collecting = ref(false)
+/** 配置面板（K 线头部最右边那颗按钮点开，从底部弹出来） */
+const cfgOpen = ref(false)
+/**
+ * 这张图现在在屏幕上吗。
+ *
+ * 图是常驻的（切 tab 不销毁），所以要靠这个告诉它「算是被关掉了」——
+ * 它会趁这个时机把当前那段缩放存进对应币种（用户：「关闭 K 线图时保存」）。
+ * 桌面端图一直在右栏，恒 true；窄屏只有「K 线 / 测试」两格露着图。
+ */
+const chartActive = computed(
+  () => !isMobile.value || leftTab.value === 'chart' || leftTab.value === 'test'
+)
+/** 一次性提示（几秒后自己消失，点一下也消失） */
+const toast = ref<{text: string; tone: 'ok' | 'bad'} | null>(null)
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+let collectClose: (() => void) | null = null
+
+function showToast(text: string, tone: 'ok' | 'bad' = 'ok'): void {
+  toast.value = {text, tone}
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(
+    () => (toast.value = null),
+    tone === 'bad' ? 8000 : 4000
+  )
+}
+
+function toggleCollect(): void {
+  collectMode.value = !collectMode.value
+  if (collectMode.value) {
+    // 图上开始能横向拖一段
+    rangeDrawing.value = true
+    showToast('在图上横向拖一段，再点「添加案例」')
+  } else {
+    rangeDrawing.value = false
+    clearChartRange()
+  }
+}
+
+/** 把图上拖出来的那一段提炼成经验（不带备注、不看步骤） */
+function runCollect(): void {
+  const r = chartRange.value
+  const s = symbol.value.trim().toUpperCase()
+  if (!s) return showToast('先选币种', 'bad')
+  if (!r) return showToast('先在图上拖一段行情', 'bad')
+  if (collecting.value) return
+
+  collecting.value = true
+  collectClose = collectStream(
+    {
+      symbol: s,
+      timeframe: chartTf.value,
+      note: '',
+      from: r.from,
+      to: r.to,
+      exact: true
+    },
+    {
+      // 步骤一律丢掉 —— 手机上只看结果
+      onStep() {},
+      onDone(res) {
+        collecting.value = false
+        collectClose = null
+        collectMode.value = false
+        rangeDrawing.value = false
+        clearChartRange()
+        showToast(
+          `已存进知识库：${res.symbol} ${res.timeframe} · ${res.window.bars} 根 · ` +
+            (res.tags?.[0] ?? '没挑到标签')
+        )
+        void refreshConfig()
+      },
+      onError(msg) {
+        collecting.value = false
+        collectClose = null
+        showToast(`提炼失败：${msg}`, 'bad')
+      }
+    }
+  )
+}
+
+/** 「拖一段」只给「添加案例」用 —— 手机端那颗「＋」展开时也算 */
+const chartSelectable = computed(
+  () => leftTab.value === 'add' || collectMode.value
+)
 
 /** 图上拖完一段 → 记下范围，顺手退出拖动模式（图恢复可拖） */
 function onPickRange(v: {from: number; to: number; bars: number}) {
@@ -131,13 +308,16 @@ const judge = computed(() => result.value?.judge)
 /** AI 挑的标签（模板外的不做过滤，标出来给人看） */
 const tags = computed(() => tagsOf(result.value?.judge))
 
-/** 结论头那颗徽标 —— 不再判档，直接显示**走势概率** */
+/** 结论头那颗徽标 —— 不再判档，直接显示**走势概率**（= outlook 那条走法的概率） */
 const probText = computed(() =>
-  judge.value ? `概率 ${judge.value.probability}%` : '未判断'
+  judge.value ? `走势概率 ${judge.value.probability}%` : '未判断'
 )
 const verdictInfo = computed(
   () => VERDICT_TEXT[judge.value?.verdict ?? ''] ?? ['—', '']
 )
+
+/** 推荐做法拆成「现在 / 动手 / 别碰」几行（老记录没前缀就一段） */
+const recParts = computed(() => splitRec(judge.value?.recommendation))
 
 const heatRows = computed(() => {
   const h: Heat | undefined = result.value?.heat
@@ -192,53 +372,32 @@ const heatRows = computed(() => {
 <template>
   <div class="analyze">
     <!-- ============ 查询 ============ -->
-    <section class="panel query-bar">
-      <label class="field">
-        <span>币种</span>
-        <SymbolCombo
-          v-model="symbol"
-          :contracts="contracts"
-          @pick="pickSymbol"
-          @submit="run"
-        />
-      </label>
-      <label class="field mode-field" :class="{on: testMode}">
-        <span>模式</span>
-        <SegTabs
-          :model-value="runMode"
-          :options="RUN_MODES"
-          @update:model-value="setRunMode"
-        />
-      </label>
-      <label
-        class="field days-field"
-        title="我在图上看的那个周期（主周期），就看图上这一段；其余周期按它跟着取"
-      >
-        <span>范围</span>
-        <b class="days-readonly"> 图上 {{ CHART_BARS }} 根 ≈ {{ spanText }} </b>
-      </label>
-      <button class="btn-run" :disabled="loading" @click="run">
-        {{ loading ? '判断中…' : testMode ? '按这段行情判断' : '让 AI 判断' }}
-      </button>
-      <span class="hint">
-        看周期 {{ timeframesText }} · 图上 {{ CHART_BARS }} 根 ≈
-        {{ spanText }} · 模型 {{ config?.model ?? '—' }}
-      </span>
-    </section>
+    <!-- 币种下拉与「AI 分析」按钮都移到右边 K 线的头部了（2026-10-03 用户要求） -->
 
     <div v-if="error" class="error">❌ {{ error }}</div>
 
-    <!-- 手机端才显示：一次只看一块（桌面端这排是隐藏的） -->
-    <div class="mobile-tabs">
-      <SegTabs v-model="mobileTab" :options="MOBILE_TABS" />
-    </div>
-
-    <!-- ============ 左右布局 ============ -->
-    <div class="split" :class="`m-${mobileTab}`">
-      <!-- ── 左：实时分析 / 历史分析 ── -->
+    <!-- ============ 左右布局（手机端「K 线」也是这里的一格） ============ -->
+    <div
+      class="split"
+      :class="[
+        leftTab === 'chart'
+          ? 'm-chart'
+          : leftTab === 'test'
+            ? 'm-test'
+            : 'm-analysis',
+        // 「历史分析」「合约行情」各自再挂一个类：窄屏要让它跟「K 线」一样吃满整屏
+        leftTab === 'history' ? 'm-history' : '',
+        leftTab === 'market' ? 'm-market' : ''
+      ]"
+    >
+      <!--
+        ── 左：一级 tab + 内容 ──
+        ⚠️ 这一栏**必须常驻**：切到手机上那格「K 线」时，tab 行就在这里面，
+        整栏藏了就没地方切回去了。所以只把内容清空（见下面的分支）。
+      -->
       <div class="col">
         <div class="tab-row">
-          <SegTabs v-model="leftTab" :options="LEFT_TABS" />
+          <SegTabs v-model="leftTab" :options="tabs" />
           <RouterLink
             v-if="leftTab === 'live' && result?.analysisId"
             class="archived-link"
@@ -248,8 +407,28 @@ const heatRows = computed(() => {
           </RouterLink>
         </div>
 
-        <!-- ① 实时分析 -->
-        <template v-if="leftTab === 'live'">
+        <!--
+          ① 合约行情（参考币安合约行情页）：点一行就切币种。
+          ⚠️ 这一块**常驻**（用 v-show 而不是 v-if）：在手机上「行情 → K 线 → 再回行情」时，
+          列表的滚动位置 / 搜索词 / 榜单都得是走之前那样（用户 2026-10-03）。
+          不占资源：不在这一格时传 `active=false`，组件会把推送和轮询都停掉。
+        -->
+        <div v-show="leftTab === 'market'" class="scroll-body">
+          <section class="panel mkt-panel">
+            <h2>
+              合约行情
+              <span class="tag">点一行切币种</span>
+            </h2>
+            <MarketPanel
+              :symbol="symbol"
+              :active="leftTab === 'market'"
+              @pick="onPickMarket"
+            />
+          </section>
+        </div>
+
+        <!-- ② 实时分析 / 测试（两块共用同一套渲染：测试多一块「结束线」面板） -->
+        <template v-if="leftTab === 'live' || leftTab === 'test'">
           <div class="scroll-body">
             <!-- 测试模式：在图上点一根，定下「我看到哪一刻」 -->
             <section v-if="testMode" class="panel test-panel">
@@ -269,9 +448,12 @@ const heatRows = computed(() => {
               <div class="follow-row" :class="{picked: testPoint !== null}">
                 <span class="k">结束线</span>
                 <span class="v">
-                  <template v-if="testPoint !== null">
+                  <!-- 用 testBarTime 判空（它和 testPoint 同生同灭），这样 bjTime 的参数才是 number -->
+                  <template v-if="testBarTime !== null">
                     看到 {{ bjTime(testBarTime) }} 这根收盘
-                    <em>判断时点 = {{ bjTime(testPoint) }}</em>
+                    <em v-if="testPoint !== null">
+                      判断时点 = {{ bjTime(testPoint) }}
+                    </em>
                   </template>
                   <template v-else-if="pointPicking">
                     在右边图上点一根…
@@ -331,7 +513,7 @@ const heatRows = computed(() => {
               :hint="
                 testMode
                   ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 取可用的标签 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
-                  : '点「让 AI 判断」后，这里会逐步写出：读分析预测提示词 → 取可用的标签 → 拉行情 → 拼上下文 → 调模型 → 存档。'
+                  : '点「AI 分析」后，这里会逐步写出：读分析预测提示词 → 取可用的标签 → 拉行情 → 拼上下文 → 调模型 → 存档。'
               "
               @update:open="showSteps = $event"
             />
@@ -364,18 +546,42 @@ const heatRows = computed(() => {
                   </span>
                 </div>
 
-                <!-- 走势预测：最大概率会走成什么样 + 它的概率 -->
-                <p v-if="judge?.outlook" class="reasoning">
-                  <b>走势 {{ judge.probability }}%</b>{{ judge.outlook }}
-                </p>
+                <!-- ① 推荐：最该照做的（绿，字最大）—— AI 按「现在/开单/别碰」三行给 -->
+                <section v-if="recParts.length" class="concl rec">
+                  <span class="concl-h">推荐</span>
+                  <span class="concl-sub">最该照做的</span>
+                  <template v-for="(p, i) in recParts" :key="i">
+                    <div v-if="p.k" class="rec-row" :class="p.tone">
+                      <span class="rec-k">
+                        <!-- 矢量图标（会动）：现在=呼吸光点 / 开单=上冲箭头 / 别碰=摇头禁止符 -->
+                        <RecIcon :tone="p.tone" />
+                        <span>{{ p.k }}</span>
+                      </span>
+                      <!-- richText：关键字加粗 + 上色（见 format.ts） -->
+                      <span class="rec-v" v-html="richText(p.v)" />
+                    </div>
+                    <p v-else class="rec-plain" v-html="richText(p.v)" />
+                  </template>
+                </section>
 
-                <p v-if="judge?.reason" class="reasoning">
-                  <b>理由</b>{{ judge.reason }}
-                </p>
+                <!-- ② 走势：最可能这么走（蓝，带概率） -->
+                <section v-if="judge?.outlook" class="concl out">
+                  <span class="concl-h">走势</span>
+                  <span class="concl-sub">最可能这么走</span>
+                  <span v-if="judge.probability" class="concl-pct">
+                    {{ judge.probability }}%
+                  </span>
+                  <p v-html="richText(judge.outlook)" />
+                </section>
 
-                <p v-if="judge?.recommendation" class="reasoning">
-                  <b>推荐</b>{{ judge.recommendation }}
-                </p>
+                <!-- ③ 理由：道理讲给想深挖的人听（灰，默认收起） -->
+                <details v-if="judge?.reason" class="concl why">
+                  <summary>
+                    <span class="concl-h">理由</span>
+                    <span class="concl-sub">为什么这么看（点开）</span>
+                  </summary>
+                  <p v-html="richText(judge.reason)" />
+                </details>
 
                 <div class="stats">
                   <div class="stat">
@@ -480,7 +686,16 @@ const heatRows = computed(() => {
             </div>
             <ul v-else ref="histBox" class="hist">
               <li v-for="h in history" :key="h.id">
-                <RouterLink :to="`/history?id=${h.id}`">
+                <!--
+                  色调类（go/wait/no）挂在行上：左边那条色条、结论文字的颜色都靠它
+                  （以前只挂在结论文字上，那文字又没配色，整行看上去是灰的）。
+                -->
+                <RouterLink
+                  :to="`/history?id=${h.id}`"
+                  :class="
+                    h.verdict ? (VERDICT_TEXT[h.verdict]?.[1] ?? '') : 'dim'
+                  "
+                >
                   <span class="t">{{ bjShort(h.createdAt) }}</span>
                   <!-- 跟「预测历史」同一套标签体系，这里左右只摆得下两个 -->
                   <span class="tags">
@@ -546,13 +761,13 @@ const heatRows = computed(() => {
           </section>
         </div>
 
-        <!-- ③ 添加案例：币种/周期/时间段都跟随右侧，AI 提炼后入库 -->
-        <div v-else class="scroll-body">
+        <!-- ③ 添加案例：币种/周期跟右侧，时间段只认「图上拖的那一段」
+             （不再跟 K 线日历选的那个时间绑在一起） -->
+        <div v-else-if="leftTab === 'add'" class="scroll-body">
           <CollectForm
             compact
             :symbol="symbol"
             :timeframe="chartTf"
-            :start-date="chartFrom"
             :range="chartRange"
             :drawing="rangeDrawing"
             @draw-range="rangeDrawing = $event"
@@ -568,6 +783,7 @@ const heatRows = computed(() => {
           :symbol="symbol"
           :timeframe="chartTf"
           :from="chartFrom"
+          :active="chartActive"
           :selectable="chartSelectable"
           :range="chartRange"
           :drawing="rangeDrawing"
@@ -581,8 +797,112 @@ const heatRows = computed(() => {
           @point="onPickPoint"
           @clear:select="clearChartRange"
           @error="onChartError"
-        />
+        >
+          <!-- 顶部：行情条（币种下拉就摆在它左边，跟交易所一个位置） -->
+          <template #top>
+            <TickerHead>
+              <template #symbol>
+                <SymbolCombo
+                  v-model="symbol"
+                  :contracts="contracts"
+                  @pick="pickSymbol"
+                  @submit="run"
+                />
+                <!--
+                  窄屏：「分析」就**贴在币种旁边**（用户 2026-10-03：「ai 分析改为分析
+                  靠在币种旁边」）。放 `#symbol` 里而不是 `#actions` —— 后者整组带
+                  `margin-left: auto`，会被推到最右边。桌面端不露（看下面那颗）。
+                -->
+                <button class="btn-run tk-run" :disabled="loading" @click="run">
+                  {{ runLabel }}
+                </button>
+              </template>
+              <!-- 最右侧那组：＋ / 添加案例 / 配置 -->
+              <template #actions>
+                <!--
+                  手机端「＋」：点开变成「✕」，左边冒出「添加案例」，
+                  图上同时可以横向拖一段。
+                -->
+                <button
+                  v-if="!collectMode"
+                  class="ghost tiny tk-only-mobile tk-plus"
+                  title="添加案例：在图上拖一段，提炼成经验"
+                  @click="toggleCollect"
+                >
+                  ＋
+                </button>
+                <template v-else>
+                  <button
+                    class="ghost tiny tk-only-mobile tk-add"
+                    :disabled="collecting"
+                    title="添加案例：把图上拖出来的这段提炼成经验"
+                    @click="runCollect"
+                  >
+                    ✓
+                  </button>
+                  <button
+                    class="ghost tiny tk-only-mobile tk-plus on"
+                    title="退出添加案例"
+                    @click="toggleCollect"
+                  >
+                    ✕
+                  </button>
+                </template>
+                <!-- 最右边：配置（点开从底部弹出来） -->
+                <button
+                  class="ghost tiny tk-cfg"
+                  title="配置"
+                  aria-label="配置"
+                  @click="cfgOpen = true"
+                >
+                  <!-- 滑块图标：两条横线 + 旋钮（跟常见的「调节」图标一致，也跟齿轮分得清） -->
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 8h7M17 8h3M4 16h3M13 16h7" />
+                    <circle cx="14" cy="8" r="2.6" />
+                    <circle cx="10" cy="16" r="2.6" />
+                  </svg>
+                </button>
+              </template>
+            </TickerHead>
+          </template>
+          <!-- 右边：跑分析（桌面端在这儿，手机端在上面币种旁） -->
+          <template #head-end>
+            <button class="btn-run head-run" :disabled="loading" @click="run">
+              {{ runLabel }}
+            </button>
+          </template>
+          <!-- 底部：1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅 -->
+          <template #bottom>
+            <TickerChanges />
+          </template>
+        </KlineChart>
       </aside>
     </div>
+
+    <!--
+      提炼中：就转个圈。手机上不看那串步骤（一屏放不下，还得往下滑），
+      完了弹一下结果。
+    -->
+    <div v-if="collecting" class="collect-mask">
+      <div class="collect-mask-card">
+        <span class="spin" />
+        <b>AI 正在提炼这段行情…</b>
+        <span class="dim">拉行情 → 算压力支撑 → 读结构 → 提炼经验</span>
+      </div>
+    </div>
+
+    <!-- 一次性提示：成了 / 失败了都说一声，几秒后自己消失 -->
+    <div
+      v-if="toast"
+      class="toast"
+      :class="toast.tone"
+      title="点一下关掉"
+      @click="toast = null"
+    >
+      {{ toast.text }}
+    </div>
+
+    <!-- 配置：从底部弹出来（入口在 K 线头部最右边那颗齿轮） -->
+    <SettingsSheet :open="cfgOpen" @close="cfgOpen = false" />
   </div>
 </template>

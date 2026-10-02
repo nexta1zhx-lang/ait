@@ -407,7 +407,12 @@ async function openPreview() {
     <!-- ── 右：点出来的内容 ── -->
     <section class="panel detail">
       <!-- 手机上才显示：清单被收起来了，给一条退路 -->
-      <button v-if="view !== 'none'" type="button" class="ghost tiny back" @click="closeView">
+      <button
+        v-if="view !== 'none'"
+        type="button"
+        class="ghost tiny back"
+        @click="closeView"
+      >
         ‹ 返回清单
       </button>
 

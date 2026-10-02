@@ -1,31 +1,54 @@
 <script setup lang="ts">
-import {computed, onMounted, ref, watch} from 'vue'
+import {onMounted, watch} from 'vue'
 import {RouterLink, RouterView, useRoute} from 'vue-router'
-import {cny} from './format'
-import {
-  balanceBadge,
-  bootstrap,
-  changeModel,
-  config,
-  kbBadge,
-  modelOptions,
-  notices,
-  refreshBalance,
-  refreshingBalance,
-  rulesBadge,
-  switchingModel
-} from './store'
+import AccountBar from './comps/AccountBar.vue'
+import {bootstrap, notices} from './store'
 
+/*
+ * 主菜单：宽屏在顶栏，窄屏在底部（样式见 style.css 的窄屏那段）。
+ *
+ * `d` 是 24×24 viewBox 里的 path —— 窄屏底栏要「图标 + 文字」，项目里没引图标库，
+ * 就手写几条最简描边路径（跟 KlineChart 里那个日历图标一个路子），
+ * 描边颜色统一走 `currentColor`，高亮时跟文字一起变蓝。
+ */
 const NAV = [
-  {to: '/', label: '开单分析'},
-  {to: '/history', label: '预测历史'},
-  {to: '/knowledge', label: '历史知识库'},
-  {to: '/prompts', label: 'AI 提示词'},
-  {to: '/usage', label: '用量'}
+  {
+    to: '/',
+    label: '开单分析',
+    // 两根 K 线
+    d: ['M5 9h4v6H5z', 'M7 5v4M7 15v4', 'M15 6h4v8h-4z', 'M17 3v3M17 14v7']
+  },
+  {
+    to: '/history',
+    label: '预测历史',
+    // 表盘
+    d: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M12 7.5v5l3.2 2']
+  },
+  {
+    to: '/knowledge',
+    label: '历史知识库',
+    // 摊开的书
+    d: [
+      'M12 6.6C10.6 5.1 8.7 4.5 6.6 4.5H4.2v12.7h2.4c2.1 0 4 .6 5.4 2.1z',
+      'M12 6.6c1.4-1.5 3.3-2.1 5.4-2.1h2.4v12.7h-2.4c-2.1 0-4 .6-5.4 2.1z'
+    ]
+  },
+  {
+    to: '/prompts',
+    label: 'AI 提示词',
+    // 对话气泡
+    d: [
+      'M20.5 15a2 2 0 0 1-2 2H8l-4.5 4V6a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z',
+      'M8.5 9h7M8.5 12.5h4.5'
+    ]
+  },
+  {
+    to: '/usage',
+    label: '用量',
+    // 柱状图
+    d: ['M6 20v-6M12 20V4M18 20v-9', 'M3.5 20h17']
+  }
 ]
-
-const toast = ref('')
-const accountError = ref('')
 
 /**
  * 开单分析 / 预测历史要「一屏塞下、内部各自滚动」，其它页还是普通长文档。
@@ -44,117 +67,36 @@ watch(
 )
 
 onMounted(bootstrap)
-
-let timer: number | undefined
-function flash(msg: string) {
-  toast.value = msg
-  window.clearTimeout(timer)
-  timer = window.setTimeout(() => (toast.value = ''), 4000)
-}
-
-async function onModel(v: string) {
-  accountError.value = ''
-  const err = await changeModel(v)
-  if (err) accountError.value = err
-  else flash(`已切到 ${v}，下一次判断就用它`)
-}
 </script>
 
 <template>
   <header class="topbar">
-    <div class="brand">
-      <h1>开单分析</h1>
-      <span class="sub">分析预测提示词 + 行情数据 → 最大概率会怎么走</span>
-    </div>
-
     <nav class="nav">
       <RouterLink v-for="n in NAV" :key="n.to" :to="n.to">
         {{ n.label }}
       </RouterLink>
     </nav>
-
-    <!-- 模型切换 + 余额（点一下刷新） -->
-    <div v-if="config" class="account">
-      <label
-        class="model-pick"
-        title="切换判断用的模型（会写进 .env，重启也保留）"
-      >
-        <span class="dim">模型</span>
-        <select
-          :value="config.model"
-          :disabled="switchingModel"
-          @change="onModel(($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="m in modelOptions" :key="m.id" :value="m.id">
-            {{ m.id }}{{ m.priced ? '' : '（无价目）' }}
-          </option>
-        </select>
-      </label>
-      <button
-        type="button"
-        class="badge balance"
-        :class="balanceBadge.cls"
-        :title="balanceBadge.title"
-        :disabled="refreshingBalance"
-        @click="refreshBalance"
-      >
-        {{ refreshingBalance ? '余额 …' : balanceBadge.text }}
-      </button>
-    </div>
-
-    <div class="topmeta">
-      <span class="badge" :class="rulesBadge.cls" :title="rulesBadge.title">
-        {{ rulesBadge.text }}
-      </span>
-      <span class="badge" :class="kbBadge.cls">{{ kbBadge.text }}</span>
-      <RouterLink
-        to="/usage"
-        class="badge"
-        :class="config && config.usage.allCalls > 0 ? 'ok' : ''"
-        :title="
-          config
-            ? `今日 ${config.usage.todayCalls} 次 / 累计 ${config.usage.allCalls} 次真实调用`
-            : ''
-        "
-      >
-        <template v-if="config && config.usage.allCalls > 0">
-          花费 今日 {{ cny(config.usage.todayCostCny) }} · 累计
-          {{ cny(config.usage.allCostCny) }}（{{ config.usage.allCalls }} 次）
-        </template>
-        <template v-else>花费 暂无付费调用</template>
-      </RouterLink>
-      <span class="dim">仅供纪律辅助，非投资建议</span>
-    </div>
+    <!--
+      模型 / 余额：宽屏就在这儿（跟导航同一行）。
+      窄屏整个顶栏收起来，它们只留在「用量」页（用户 2026-10-03：只针对移动端）。
+    -->
+    <AccountBar />
   </header>
 
-  <div v-if="toast" class="notice">{{ toast }}</div>
-  <div v-if="accountError" class="error">{{ accountError }}</div>
+  <!--
+    窄屏底部导航：图标 + 文字，平铺分列（每格等宽）。
+    桌面端 `display: none`，菜单还在顶栏（见 style.css 的 `.tabbar`/窄屏那段）。
+  -->
+  <nav class="tabbar">
+    <RouterLink v-for="n in NAV" :key="n.to" :to="n.to">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path v-for="(d, i) in n.d" :key="i" :d="d" />
+      </svg>
+      <span>{{ n.label }}</span>
+    </RouterLink>
+  </nav>
+
   <div v-if="notices.length" class="notice">{{ notices.join('\n') }}</div>
 
   <RouterView />
 </template>
-
-<style scoped>
-.account {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.model-pick {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.model-pick > span {
-  font-size: 12px;
-}
-
-.model-pick select {
-  width: auto;
-  min-width: 150px;
-  padding: 5px 9px;
-  font-size: 12px;
-}
-</style>

@@ -37,6 +37,87 @@ body {
   line-height: 1.5;
 }
 
+/*
+ * 全局滚动条：细、淡。
+ *
+ * ⚠️ **悬停不能变白**（用户：「pc 滚动条触碰会变白」）——
+ * 浏览器默认的 thumb 一碰就变成接近纯白，很刺眼；这里显式写好 hover 的颜色
+ * （比默认淡很多，只略微亮一点），UA 那套就不会盖上来。
+ * Firefox 走 `scrollbar-*` 两个属性，`::-webkit-*` 它不认，两边都写。
+ */
+html {
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  /* 2px 透明边框 + content-box 裁剪 = 看着只有 6px 粗，不抢眼 */
+  background: rgba(255, 255, 255, 0.13);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/*
+ * 点击时不要再闪一下底色。
+ *
+ * 手机上点按钮 / tab，浏览器默认会画一层灰蓝高亮（`-webkit-tap-highlight-color`），
+ * 跟我们的活动态叠在一起看着像「闪了一下」（用户 2026-10-03：「所有 tab 点击时
+ * 不要有点击时的背景闪一下的效果」）。原生高亮一律去掉；
+ * ⚠️ 别连 `:focus-visible` 的描边一起去掉，键盘用户还要用它。
+ */
+html,
+body,
+a,
+button,
+input,
+select,
+textarea,
+label,
+summary,
+[role='button'] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/*
+ * ⚠️ 手机上「点两下整页就放大」——那是浏览器自带的**双击缩放**（viewport 里没禁）。
+ * 这个页面能点的东西密密麻麻（历史分析的明细行、tab、按钮），连点一下就整页变大，
+ * 看着就像「刚点的那个 tab 被放大了」（用户 2026-10-03：点击历史明细会放大 tab）。
+ *
+ * `touch-action: manipulation` 只关掉「双击缩放」，**捏合缩放留着**（真想放大还能放大）。
+ * 别在这儿加 !important，也别覆盖 `.range-box .rb-*` 那几条 `touch-action: none`
+ * —— 图上画范围、拖抓手全靠它（none 跟 manipulation 取交集还是 none，本来就安全）。
+ */
+body,
+a,
+button,
+input,
+select,
+textarea,
+label,
+summary,
+[role='button'] {
+  touch-action: manipulation;
+}
+
 #app {
   /* 全屏铺满：分析页要同时放表格、图表和步骤清单，限宽会到处挤 */
   width: 100%;
@@ -139,6 +220,56 @@ a {
 .nav a.router-link-active {
   background: var(--blue);
   color: #06121f;
+}
+
+/*
+ * 窄屏底部导航（图标 + 文字，平铺分列）。
+ * 桌面端不显示、菜单在顶栏；窄屏那段（@media max-width: 900px）才把它竖起来。
+ */
+.tabbar {
+  display: none;
+}
+
+/*
+ * 模型 + 余额（`comps/AccountBar.vue`）——宽屏在顶栏，窄屏在「用量」页。
+ * 样式放全局（组件在两个页面用，写 scoped 两边都得再拄一份）。
+ */
+.account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.model-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-pick > span {
+  font-size: 12px;
+}
+
+.model-pick select {
+  width: auto;
+  min-width: 150px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+/* 切完模型就地回一句（不用再弹全局提示条了） */
+.acct-msg {
+  font-size: 12px;
+}
+
+.acct-msg.bad {
+  color: var(--bad);
+}
+
+/* 「用量」页里那份默认不显示，只有窄屏（顶栏收起）才露 */
+.account.usage-account {
+  display: none;
 }
 
 .topmeta {
@@ -359,10 +490,22 @@ button.danger:hover {
   border-right: 0;
 }
 
-.seg button:hover:not(:disabled) {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
-  filter: none;
+/*
+ * ⚠️ 这里有两个坑，一起踩过（用户 2026-10-03：「移动端 k 线等 tab 高亮有问题」）：
+ *
+ *  1. 特异性：`button:hover:not(:disabled)` 比 `button.active` **重**，
+ *     鼠标停在活动那一格上会把它的蓝底顶掉（实测背景从 rgb(66,165,245) 变 transparent）。
+ *     → hover 必须排除 `.active`。
+ *  2. 手机点一下就**一直留着 :hover**（直到点别处），而点中的那一格正是要变活动的那个
+ *     —— 高亮当场就没了，看起来就是「点哪个都不亮」。
+ *     → 整条 hover 只用 `@media (hover: hover)` 包住，触屏设备根本不应用。
+ */
+@media (hover: hover) {
+  .seg button:hover:not(:disabled):not(.active) {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.04);
+    filter: none;
+  }
 }
 
 .seg button.active {
@@ -485,17 +628,185 @@ button.danger:hover {
   color: var(--bad);
 }
 
-.reasoning {
+/* ==================== 结论三段：推荐 / 走势 / 理由 ====================
+   以前三段共用一套「左蓝条 + 同样字号」的样式，糊成一整段看不出主次。
+   现在按重要度给三套（推荐最大、走势带概率、理由默认收起）。
+   实时分析页和历史详情共用这套类名，两处要一起改。
+
+   ⚠️ 2026-10-03 用户要求「取消左侧边框线」：
+   那条 `border-left` 色条全删了，身份改由**整圈细描边 + 标题色 / 徽标色**带
+   —— 三块照样分得出来，但左边不再是三条竖着的彩线。 */
+.concl {
+  margin-top: 8px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
   background: var(--panel-2);
-  border-left: 2px solid var(--blue);
-  border-radius: 0 8px 8px 0;
-  padding: 9px 12px;
-  font-size: 13px;
-  line-height: 1.7;
+}
+
+/*
+ * 结论文字里的关键字：加粗 + 变色（用户 2026-10-03：「能否在关键字加粗颜色变化」）。
+ *
+ * ⚠️ 紧接着用户又说「颜色有太多啦啦」：**只留两色** ——
+ *   · `.kw-key`（蓝）：模型自己用 `**…**` 标的重点
+ *   · `.kw-warn`（琥珀）：风险 / 纪律词（止损 / 观望 / 别碰…）
+ * 生成逻辑在 `format.ts` 的 `richText()`（模板里用 `v-html`）。
+ * 涨 / 跌 / 结构词不上色 —— 推荐那三行本来就有绿 / 红标签，不重复。
+ */
+.concl .kw {
+  font-weight: 700;
+}
+.concl .kw-key {
+  color: var(--blue);
+}
+.concl .kw-warn {
+  color: var(--warn);
+}
+
+.concl p {
+  margin: 6px 0 0;
+  font-size: 13.5px;
+  line-height: 1.75;
   color: #cdd9e5;
-  margin: 10px 0 0;
   white-space: pre-wrap;
 }
+
+.concl-h {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.concl-sub {
+  margin-left: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.concl-pct {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* ① 推荐：最重要的一块（三行动作各自配色，标题绿） */
+.concl.rec {
+  border-color: rgba(38, 166, 154, 0.38);
+}
+.concl.rec .concl-h {
+  font-size: 14px;
+  color: var(--ok);
+}
+.concl.rec p {
+  font-size: 14px;
+  color: var(--text);
+}
+
+/*
+ * 推荐拆成「现在 / 开单 / 别碰」三行：一行一个动作。
+ *
+ * ⚠️ 2026-10-03 用户：「推荐的背景块色也去掉，采用别的方式区分」——
+ * 原来三行各铺一条淡底色块（.rec-row.now/.do/.dont 的 background）**全删**，
+ * 区分改由两样更克制的东西承担：
+ *   ① 行首那颗**实心彩色胶囊**（蓝 / 绿 / 红）—— 身份全靠它，一眼一行一个动作
+ *   ② 行与行之间一条**细分隔线** —— 只有线、没有块，不再是一堆色块堆在一起
+ * 没有前缀的老记录走 .rec-plain，跟以前一样是一整段。
+ */
+.rec-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 7px;
+}
+.rec-row + .rec-row,
+.rec-row + .rec-plain,
+.rec-plain + .rec-row {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+/*
+ * ⚠️ 2026-10-03 用户：「现在 开单 别碰改为矢量图标 会动的」——
+ * 原来那颗**实心彩色胶囊**（文字写在胶囊里）拆开了：
+ *   · 图标：`RecIcon.vue`（蓝=呼吸光点 / 绿=上冲箭头 / 红=摇头禁止符，都带微动效）
+ *   · 文字：跟着图标走，颜色改成对应色调（不再是白字压在实色块上）
+ * 现在整行只有「一个小图标 + 两个字 + 正文」，没有底色、没有描边。
+ * ⚠️ `align-self: flex-start` + `margin-top` 是让图标和**正文第一行**对齐
+ *   （正文 line-height 1.7×13.5 ≈ 23px，居中会偏高一点）。
+ */
+.rec-k {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 48px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.rec-row.now .rec-k {
+  color: var(--blue);
+}
+.rec-row.do .rec-k {
+  color: var(--ok);
+}
+.rec-row.dont .rec-k {
+  color: var(--bad);
+}
+.rec-v {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+/* ② 走势 */
+.concl.out {
+  border-color: rgba(66, 165, 245, 0.34);
+}
+.concl.out .concl-h {
+  color: var(--blue);
+}
+.concl.out .concl-pct {
+  background: var(--blue);
+  color: #0d1117;
+}
+
+/* ③ 理由：默认收起（最轻的一块） */
+.concl.why {
+  background: transparent;
+}
+.concl.why > summary {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+}
+.concl.why > summary::-webkit-details-marker {
+  display: none;
+}
+.concl.why > summary::before {
+  content: '▸';
+  margin-right: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.concl.why[open] > summary::before {
+  content: '▾';
+}
+.concl.why .concl-h {
+  color: var(--muted);
+}
+.concl.why p {
+  color: #b9c4d0;
+}
+
+/* 两个百分号的含义（走势概率 / 标签概率） */
 
 /* 统计小格 */
 .stats {
@@ -761,6 +1072,205 @@ button.danger:hover {
   min-width: 0;
 }
 
+/* ==================== 合约行情（参考币安合约行情页） ==================== */
+.mkt {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.mkt-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mkt-bar .seg button {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
+.mkt-search {
+  flex: 1 1 90px;
+  min-width: 0;
+  padding: 5px 9px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.mkt-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mkt-meta > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * 列表的滚动结构（用户 2026-10-03：「吸顶效果不好，改为布局」）：
+ *
+ *   .mkt-table（flex 列，**自己不滚**）
+ *     ├─ .mkt-head  表头，固定不动
+ *     └─ .mkt-body  表身，自己滚
+ *
+ * 比 `position: sticky` 稳：不会因为行背景、边框折叠而抽动，
+ * ⚠️ 代价是「表头 / 表身」成了两张表 —— 列宽靠两边相同的 `colgroup` 对齐，
+ * 表头还要补上表身滚动条的宽度（组件里的 `sbw`）。
+ */
+.mkt-table {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mkt-head {
+  flex: 0 0 auto;
+  /* 表头底下那条线：在 `thead th` 上（`.table th` 自带） */
+}
+
+.mkt-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/*
+ * 面板撑满左栏：标题 / 榜单 / 计数固定，**只有列表滚**
+ * （跟「历史分析」那个面板一套做法）。
+ */
+.scroll-body > .mkt-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.mkt-panel > h2 {
+  flex: 0 0 auto;
+}
+
+.mkt-panel > .mkt {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.mkt-table .table th,
+.mkt-table .table td {
+  padding: 7px 8px;
+}
+
+/* 币种那一格：图标 + 名字 */
+.mkt-table .icell {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.mkt-table .icell-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 图标：32px 的源图缩到 20px（高分屏也清晰）；拿不到就退回首字母圆 */
+.mkt-table .ico {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: contain;
+}
+
+.mkt-table .ico-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+}
+
+.mkt-row {
+  cursor: pointer;
+}
+
+/* 当前币种那一行：淡蓝底 + 左边一条蓝，跟交易所一个样 */
+.mkt-row.on td {
+  background: var(--blue-soft);
+}
+
+.mkt-row.on td:first-child {
+  box-shadow: inset 2px 0 0 var(--blue);
+}
+
+/* 24h 涨跌幅：一块小色底（用户：加上背景），涨绿跌红好扫 */
+.mkt-table .chg {
+  display: inline-block;
+  min-width: 62px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  /*
+   * 负的右边距正好抵掉胶囊自己的右内边距：
+   * 这样**数字**贴着列右边缘，跟表头「24h」对齐
+   * （不抵的话数字比表头往里缩 6px + 单元格 8px 内边距，看着就是没对齐）。
+   */
+  margin-right: -6px;
+}
+
+/*
+ * PC：行情列表的滚动条往**外**挪一点。
+ * 容器默认缩在面板 16px 内边距里，滚动条看着往里凹；这里把右边缘拉到面板边上。
+ * ⚠️ 只能在宽屏写：窄屏那格的列表已经通栏到屏幕边（再 -16px 就横向滋出了）。
+ */
+@media (min-width: 901px) {
+  .mkt-table {
+    margin-right: -16px;
+  }
+}
+
+.mkt-table .chg.up {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.mkt-table .chg.down {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+.mkt-table .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.mkt-table .up {
+  color: var(--ok);
+}
+
+.mkt-table .down {
+  color: var(--bad);
+}
+
+/* 窄屏的那套（高度 / 通栏）在下面的 @media (max-width: 900px) 段里 */
+
 /* ==================== 开单分析页布局 ==================== */
 .analyze {
   display: flex;
@@ -939,12 +1449,27 @@ body.fixed-viewport .analyze {
 
 .step {
   display: grid;
-  grid-template-columns: 14px 190px minmax(0, 1fr) 52px;
+  /* ⚠️ 三列：点 | 正文（里面再分「标签 190px + 明细 1fr」）| 耗时。
+     原来这里写的是四列（14px 190px 1fr 52px），但 DOM 只有三个子元素
+     （dot / body / ms）—— 结果 body 被塞进 190px 那一列，明细只能在那
+     190px 里折成四五行（用户反馈「样式超出」）。 */
+  grid-template-columns: 14px minmax(0, 1fr) 52px;
   align-items: baseline;
   gap: 8px;
   padding: 2px 0;
   font-size: 12px;
   line-height: 1.6;
+}
+
+/*
+ * 步骤名一行，**明细压到它下面一行**。
+ * 以前是「标签 190px + 明细 1fr」并排 —— 左栏本来就窄，明细只剩百来像素，
+ * 「15 个：假突破 / 放量突破 / 回踩不破 …」这种会被切成好几行还挤出格子。
+ * 现在明细独占整行宽度，看着舒服也放得下。
+ */
+.step .body {
+  display: block;
+  min-width: 0;
 }
 
 .step .dot {
@@ -954,17 +1479,20 @@ body.fixed-viewport .analyze {
 }
 
 .step b {
+  display: block;
   font-weight: 500;
   color: var(--text);
 }
 
 .step em {
+  display: block;
+  margin-top: 2px;
   font-style: normal;
   color: var(--muted);
   font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* 拉行情那步会写成「CAP/USDT:USDT · 主周期 1h（图上 8.33 天）· 15m … / 1d 60 根」
+     —— 太长，以前是 nowrap+ellipsis（用户反馈「样式超出」），改成就地折行 */
+  overflow-wrap: anywhere;
 }
 
 .step .ms {
@@ -1086,6 +1614,9 @@ body.fixed-viewport .split {
   width: 100%;
   text-align: left;
   font: inherit;
+  /* ⚠️ 别用 font: inherit 的那份字号（面板里是 14px）—— 收起后这一行是「标题行」，
+     跟上面的 h3（12px）、下面每条步骤（12px）对齐看着才不突兀，14px 显得特别大 */
+  font-size: 12px;
   color: inherit;
   cursor: pointer;
   padding: 8px 12px;
@@ -1097,6 +1628,10 @@ body.fixed-viewport .split {
 }
 
 .steps-collapsed .dim {
+  /* ⚠️ 必须 min-width:0 + 允许收缩：flex 子项默认 min-width:auto，
+     配上 nowrap 就会顶破面板（实测「分析过程」那一行溢出） */
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1114,53 +1649,89 @@ body.fixed-viewport .split {
   padding: 0;
 }
 
-/* 开单分析左栏「历史分析」那一列：时间 / 标签 / 结论 */
+/*
+ * 开单分析左栏「历史分析」那一列：时间 / 标签 / 结论。
+ *
+ * ⚠️ 三列宽度是**量出来**分的：时间「10/03 03:42」11px 只要 65px；
+ * 结论「⏸ 观望」35px、「⛔ 不可做」约 48px —— 按内容宽（auto）就够。
+ * 省下来的宽度全给标签列：以前结论那列写死 72px、标签列只剩 128px，
+ * 而两个标签（「上沿受阻 68%」+「假突破 72%」）要 170px 上下，
+ * 于是 flex **折成了两行** —— 一行 26px 变 50px，
+ * 连带 measureHistoryRows 量出来的行数砍半、列表高度全乱。
+ */
 .hist a {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr) 72px;
+  grid-template-columns: 66px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
-  border-radius: 6px;
+  gap: 6px;
+  /* 行高比原来（4px / 27px）大一圈：手机上点得中、扫得快（用户：「历史分析高度加大」） */
+  padding: 8px 6px;
+  border-radius: 8px;
   color: inherit;
   text-decoration: none;
-  font-size: 12px;
+  font-size: 12.5px;
+}
+
+/*
+ * 行与行之间：**底部一条区分线** + 一点缝（用户：「行加间距」+「行底部加条区分线」）。
+ * 线画在 `li` 上（跟整行一样宽），最后一行的不画。
+ */
+.hist li {
+  border-bottom: 1px solid var(--border);
+}
+
+.hist li:last-child {
+  border-bottom: 0;
+}
+
+.hist li + li {
+  margin-top: 5px;
+}
+
+/*
+ * 结论文字上色。
+ * ⚠️ 之前给整行加过一条左边色条，用户不要了（「取消左边边框色」）——
+ * 配色就留在文字 + 标签底上。颜色跟结论卡片那套（`.pill.go/.wait/.no`）一致。
+ */
+.hist .v.go {
+  color: var(--ok);
+  font-weight: 600;
+}
+.hist .v.wait {
+  color: var(--warn);
+  font-weight: 600;
+}
+.hist .v.no {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.hist .t {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .hist .v {
   text-align: right;
-}
-
-/* 标签只摆得下两个，不换行、超了就裁掉 */
-.hist .tags {
-  display: flex;
-  gap: 4px;
-  margin-top: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.hist .tags .tag {
   white-space: nowrap;
+  font-size: 11px;
 }
 
 .hist a:hover {
   background: var(--panel-2, rgba(255, 255, 255, 0.04));
 }
 
-.hist .t {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 开单分析左栏「历史分析」那条：标签只摆得下两个，不换行 */
-.hist .v {
-  text-align: right;
-  white-space: nowrap;
-}
-
+/*
+ * 标签：**一排两个，永远不折行**。
+ * ⚠️ 光写 `display: flex` 不够 —— 全局 `.tags` 是 `flex-wrap: wrap`，
+ * 这里必须显式 nowrap，否则栏一窄就又折成两行。
+ * 真挤不下时让 tag 自己缩窄 + 尾巴省略号，也好过顶到下一行。
+ */
 .hist .tags {
   display: flex;
+  flex-wrap: nowrap;
   gap: 4px;
   margin-top: 0;
   min-width: 0;
@@ -1168,7 +1739,16 @@ body.fixed-viewport .split {
 }
 
 .hist .tags .tag {
+  flex: 0 1 auto;
+  min-width: 0;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* 给点底色：跟左边那条结论色条呼应（用户：「加点配色」） */
+  background: var(--panel-2);
+  border-color: transparent;
+  /* 比别处的 tag 紧一点：一行摆两个，省下这 6px 就都容得下 */
+  padding: 2px 6px;
 }
 
 .hist .out {
@@ -1304,6 +1884,13 @@ body.fixed-viewport .split {
 .chart-panel {
   display: flex;
   flex-direction: column;
+  /*
+   * 左右内边距收一点（用户：「k 线……左右间距放小」）：
+   * `.panel` 默认是 `14px 16px`，图这一块 16px 的左右留白显得空，改成 8px ——
+   * 画布能多占 16px 宽。上下保持 14px（标题 / 底部涨幅行需要呼吸）。
+   */
+  padding-left: 8px;
+  padding-right: 8px;
 }
 
 .chart-head {
@@ -1319,46 +1906,234 @@ body.fixed-viewport .split {
   margin: 0;
 }
 
-/* K 线图的日期范围选择（只改看哪一段，不影响分析） */
-.date-row {
+/* 头部右侧一组：周期按钮 + 外层塞进来的按钮（如「AI 分析」） */
+.chart-head-right {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin: -4px 0 8px;
-  font-size: 11px;
+  gap: 10px;
+  flex: 0 0 auto;
 }
 
-.date-row button.time-pick {
-  padding: 3px 8px;
-  font-size: 11px;
-  font-family: var(--mono);
+/* 头部右边那颗「AI 分析」 */
+.chart-head .btn-run {
+  padding: 6px 16px;
+  white-space: nowrap;
+}
+
+/*
+ * 手机端才露的那颗「AI 分析」（摆在顶部行情条里、币种旁边）。
+ * 桌面端图宽，按钮留在周期那一行；窄屏那一行要腾给周期，所以把按钮搬上来。
+ */
+.tk-head .tk-run {
+  display: none;
+  padding: 5px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 「＋ / 添加案例 / ✕」同样只在窄屏露（桌面走左边那格完整的表单） */
+.tk-head .tk-only-mobile {
+  display: none;
+}
+
+/*
+ * 配置按钮（K 线头部「AI 分析 / ＋」那一行最右边）。
+ * ⚠️ 跟「＋」不一样：桌面端也露（桌面也得能改配置），所以**不加** `tk-only-mobile`。
+ */
+.tk-head .tk-cfg {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
   cursor: pointer;
 }
 
-.date-row button.time-pick:hover {
+/*
+ * 「AI 分析 / ＋ / 配置」这一组：整组顶到这一行的最右边。
+ * ⚠️ `margin-left: auto` 要加在**这一组**上；只给最后一颗加的话，＋ 会停在中途。
+ */
+.tk-head .tk-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.tk-head .tk-cfg svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tk-head .tk-cfg:hover {
   color: var(--text);
   border-color: var(--blue);
 }
 
-.date-row button.time-pick.set {
-  color: var(--text);
+/* 提炼中：转圈遮罩（**不透明**，别让底下的行情穿透上来） */
+.collect-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0d1117;
 }
 
-.date-row .ghost.tiny {
+.collect-mask-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 22px 28px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  font-size: 13px;
+}
+
+.collect-mask-card .dim {
+  font-size: 11px;
+}
+
+/* 转圈本身：两个半圆边框转起来就行 */
+.spin {
+  width: 26px;
+  height: 26px;
+  border: 3px solid rgba(66, 165, 245, 0.22);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 一次性提示（成功 / 失败），点一下就关；**底色不透明** */
+.toast {
+  position: fixed;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%);
+  z-index: 220;
+  max-width: min(92vw, 560px);
+  padding: 9px 16px;
+  border-radius: 10px;
+  background: var(--panel);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+
+.toast.ok {
+  background: #123028;
+  border: 1px solid #2f8f83;
+  color: #8ff0e2;
+}
+
+.toast.bad {
+  background: #33191b;
+  border: 1px solid #a8464a;
+  color: #ffb3b0;
+}
+
+/* K 线图下面那一行：左边「看哪一刻」（日历图标） + 中间指标开关 + 右边 A / L */
+.chart-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.chart-foot .legend {
+  margin-top: 0;
+  gap: 4px 6px;
+}
+
+.chart-foot .foot-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+/* 日历图标：只在选了时间后变蓝，平时安安静静 */
+.chart-foot button.time-pick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.chart-foot button.time-pick:hover {
+  color: var(--text);
+  border-color: var(--blue);
+  filter: none;
+}
+
+.chart-foot button.time-pick.set {
+  color: var(--blue);
+  border-color: rgba(66, 165, 245, 0.5);
+  background: var(--blue-soft);
+}
+
+.chart-foot .foot-time {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chart-foot .ghost.tiny {
   padding: 3px 8px;
   font-size: 11px;
 }
 
+/*
+ * 换币 / 换周期时的淡入淡出。
+ *
+ * 整段重画是「一套数据换另一套」（价格轴精度、可见区间、蜡烛全变），
+ * 硬切会闪一下；这里让旧画面淡下去、新画面淡上来就顺了。
+ * ⚠️ 时长要跟组件里的 `FADE_MIN_MS`（140ms）对得上。
+ */
 .chart-wrap {
   position: relative;
   height: 56vh;
   min-height: 320px;
   display: flex;
+  transition: opacity 0.16s ease;
+}
+
+.chart-wrap.fading {
+  /* 淡到 0.3：旧币的蜡烛已经看不清了（不会误读成新币），但又不是「黑一下」 */
+  opacity: 0.3;
+  /* 淡出中别让它还能拖 / 画范围（那是上一个币的图） */
+  pointer-events: none;
 }
 
 /* 等着我拖一段时的提示（按钮在左边面板） */
@@ -1404,6 +2179,56 @@ body.fixed-viewport .split {
 
 .range-box.live {
   background: rgba(66, 165, 245, 0.22);
+}
+
+/*
+ * 画好的范围还能改：左右边缘各一条抓手、中间一条可平移的带子。
+ * `pointer-events: auto` 是故意的 —— 父层 / 外层都是 none，
+ * 平时点图照旧平移图表，只有抓住这几条带子才接管。
+ */
+.range-box .rb-edge,
+.range-box .rb-mid {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.range-box .rb-edge {
+  width: 18px;
+  cursor: ew-resize;
+}
+
+.range-box .rb-edge.left {
+  left: -9px;
+}
+
+.range-box .rb-edge.right {
+  right: -9px;
+}
+
+/* 抓手本身：一条竖杠，看得见才好抓 */
+.range-box .rb-edge::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 5px;
+  height: 34px;
+  border-radius: 3px;
+  background: var(--blue);
+}
+
+.range-box .rb-mid {
+  left: 9px;
+  right: 9px;
+  cursor: grab;
+}
+
+.range-box .rb-mid:active {
+  cursor: grabbing;
 }
 
 /*
@@ -1635,9 +2460,8 @@ body.fixed-viewport .split {
 
 .chart-tools {
   display: flex;
-  justify-content: flex-end;
   gap: 6px;
-  margin-top: 8px;
+  margin-left: auto;
 }
 
 .chart-tools button {
@@ -1651,10 +2475,13 @@ body.fixed-viewport .split {
   color: var(--muted);
 }
 
-.chart-tools button:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--blue);
-  filter: none;
+/* 同上（分段按钮那两个坑）：hover 别把活动态的蓝底顶掉，也别在触屏上留着 */
+@media (hover: hover) {
+  .chart-tools button:hover:not(:disabled):not(.active) {
+    color: var(--text);
+    border-color: var(--blue);
+    filter: none;
+  }
 }
 
 .chart-tools button.active {
@@ -1663,46 +2490,226 @@ body.fixed-viewport .split {
   border-color: var(--blue);
 }
 
+/* ==================== K 线块顶部的行情条 ==================== */
+/*
+ * 排法跟交易所一样：左 = 币种，中 = 现价 + 涨跌，右 = 一串指标（两列）。
+ * 窄屏自动换行，不会横向溢出。
+ */
+.tk-head {
+  display: flex;
+  align-items: center;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  margin: -2px 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tk-head .tk-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.tk-head .tk-left .combo {
+  width: 190px;
+}
+
+.tk-head .tk-mid {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.tk-head .tk-last {
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.tk-head .tk-chg {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tk-head .tk-last.up,
+.tk-head .tk-chg.up {
+  color: var(--ok);
+}
+
+.tk-head .tk-last.down,
+.tk-head .tk-chg.down {
+  color: var(--bad);
+}
+
+.tk-head .tk-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, auto));
+  gap: 3px 18px;
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.tk-head .tk-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tk-head .tk-item .k {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.tk-head .tk-item .v {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tk-head .tk-fund {
+  color: var(--warn);
+  font-style: normal;
+}
+
+.tk-head .tk-err {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+/* ==================== K 线块底部的多周期涨幅 ==================== */
+/* 平分整行，档位之间用竖线隔开（跟交易所一样） */
+.tk-changes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 0;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.tk-changes .tk-chg-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 6px;
+}
+
+/* 档位之间的间隔线 */
+.tk-changes .tk-chg-item + .tk-chg-item {
+  border-left: 1px solid var(--border);
+}
+
+.tk-changes .k {
+  color: var(--muted);
+}
+
+.tk-changes .v {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tk-changes .v.up {
+  color: var(--ok);
+}
+
+.tk-changes .v.down {
+  color: var(--bad);
+}
+
 /* ==================== 币种下拉 ==================== */
 .combo {
   position: relative;
+}
+
+/* 输入框本体：边框 / 底色都在这一层，里面的叉号和箭头只是叠上去 */
+.combo-box {
+  position: relative;
   display: flex;
-  gap: 6px;
-}
-
-.combo input {
-  flex: 1;
-  min-width: 0;
-}
-
-.combo > button {
-  flex: none;
-  padding: 0 10px;
-  border-radius: 8px;
+  align-items: center;
   border: 1px solid var(--border);
   background: var(--panel-2);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 400;
+  border-radius: 8px;
 }
 
-.combo > button:hover {
-  color: var(--text);
+.combo-box:focus-within {
   border-color: var(--blue);
-  filter: none;
 }
 
-/* 清空叉号：小事一桩，做得巧一点 */
-.combo > .combo-clear {
-  padding: 0 9px;
-  color: var(--muted);
+.combo-box input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  border: 0;
   background: transparent;
+  border-radius: 8px;
+  /* 右边留出箭头的位置；有叉号时再多留一点 */
+  padding: 8px 28px 8px 10px;
+}
+
+.combo-box.clearable input {
+  padding-right: 50px;
+}
+
+.combo-box input:focus {
   border-color: transparent;
 }
 
-.combo > .combo-clear:hover {
+/* 叉号 / 箭头：绝对定位叠在框内右侧，不吃布局宽度 */
+.combo-box > button {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.combo-box > button:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.09);
+  filter: none;
+}
+
+.combo-box .combo-clear {
+  right: 27px;
+}
+
+.combo-box .combo-clear:hover {
   color: #ff8182;
-  border-color: rgba(255, 129, 130, 0.45);
+  background: rgba(255, 129, 130, 0.14);
+}
+
+/* 展开箭头：做大一点，手机上也好点 */
+.combo-box .combo-caret {
+  right: 2px;
+  width: 25px;
+  height: 24px;
+  font-size: 16px;
 }
 
 .combo-list {
@@ -1933,15 +2940,6 @@ body.fixed-viewport .split {
   text-decoration: underline;
 }
 
-/* 「范围」那一格现在是只读的：就看图上这一段 */
-.days-readonly {
-  color: var(--fg2, #b8c0cc);
-  font-size: 12px;
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 /* ── 标签 + 概率（结论卡片、历史列表、历史详情都用） ── */
 .tag i {
   font-style: normal;
@@ -2146,35 +3144,92 @@ button.badge.balance:hover:not(:disabled) {
    实测 390px 时 K 线图被压成 **0 宽**、跑到屏幕外，整页还横向溢出。
 
    窄屏改成：
-     · 顶部一排 tab：**K 线 / 分析**，一次只显示一块（默认 K 线）
+     · K 线**通栏**摆最上面（宽度整屏、高度占屏幕一半），往下滑就是分析
+       —— 不再用「K 线 / 分析」二选一那排 tab
      · 不再一屏塞下，恢复普通整页滚动
      · 顶部导航换行、卡片和表格收一号
    ================================================================== */
 
-/* 只在窄屏出现的两个开关：手机 tab / 历史卡片 */
-.mobile-tabs {
-  display: none;
-}
-
 @media (max-width: 900px) {
-  /* ---- 顶部栏：5 个导航挤不下（实测 410px 塞在 366px 里）→ 换行 + 收窄 ---- */
+  /*
+   * 主菜单搬到**底部**（图标 + 文字平铺分列），顶栏就只剩「模型 + 余额」：
+   * 现在靠右摆（就一个子项，默认的 space-between 会把它顶到左边去）。
+   * （用户 2026-10-03：「模型价格 靠右布局；开单分析等等菜单在移动端放在底部，
+   *   采用图标+文字的方式放在底下平铺分列」）
+   */
+  :root {
+    /*
+     * 底栏是悬浮层（不贴边）：真实高度 ≈ 49 + 上下边框 2 + 离底边 8 = **59**。
+     * ⚠️ 这个数就是「内容区给底栏让出多少」——少给就压在内容上，
+     * 多给就是内容跟底栏之间多一条缝，所以按实测来。
+     */
+    --tabbar-h: 59px;
+  }
+  /*
+   * 窄屏顶栏**整个**收起来：菜单搬到下面的 `.tabbar`，
+   * 「模型 + 余额」只留在「用量」页（用户 2026-10-03：只针对移动端）。
+   */
   .topbar {
-    gap: 8px;
-    margin-bottom: 10px;
+    display: none;
+  }
+  .account.usage-account {
+    display: flex;
   }
   .brand .sub {
     display: none;
   }
-  .nav {
-    flex-wrap: wrap;
-    gap: 2px;
-  }
-  .nav a {
-    padding: 5px 9px;
-    font-size: 12px;
-  }
   .topmeta {
     font-size: 11px;
+  }
+  /*
+   * 底部导航也是**悬浮层**（跟顶部 tab 一套）：不贴边、圆角、半透明 + 模糊，
+   * 内容是透过来糊糊的影子。⚠️ 不要阴影（用户：「阴影取消下」）。
+   */
+  .tabbar {
+    position: fixed;
+    z-index: 40;
+    left: 10px;
+    right: 10px;
+    bottom: calc(8px + env(safe-area-inset-bottom));
+    /* 平铺分列：每格等宽 */
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 16px;
+    background: rgba(22, 27, 34, 0.72);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+    overflow: hidden;
+  }
+  .tabbar a {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 2px 7px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 10px;
+    line-height: 1.2;
+  }
+  .tabbar a svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  /* 高亮**只靠颜色**：图标 + 文字变蓝。别加顶上那条横线（用户 2026-10-03 要求去掉） */
+  .tabbar a.router-link-active {
+    color: var(--blue);
+  }
+  /* 固定底栏不能盖住内容：所有页（含整屏那几页）都给底栏留出高度 */
+  #app,
+  body.fixed-viewport #app {
+    padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   }
 
   /* ---- 不再「一屏塞下」：手机上就是普通长文档 ---- */
@@ -2191,31 +3246,393 @@ button.badge.balance:hover:not(:disabled) {
     flex: 0 0 auto;
   }
 
-  /* ---- 开单分析：一次只显示一块 ---- */
-  .mobile-tabs {
-    display: flex;
+  /* ---- 开单分析：一次看一块（「K 线」也是一级 tab 里的一格）---- */
+  /*
+   * 整站一个底色（用户：「整体内容一个背景 不要留黑边」）。
+   *
+   * `--bg`(#0d1117) 比面板 `--panel`(#161b22) 暗一档 —— 页边距、栏目缝、
+   * tab 行的圆角里只要露出一条，就是用户说的「黑边」。窄屏干脆整页铺 `--panel`。
+   */
+  body,
+  #app {
+    background: var(--panel);
   }
+  /*
+   * 分析区也跟着铺一层：窄屏这里整块是一张面，里面的面板全透明
+   * （圆角 / 边框 / 底色都不要），缝里透出来的也是同色。
+   */
   .split {
     grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin: 0 -14px;
+    padding: 0 14px;
+    background: var(--panel);
   }
-  .split.m-chart > .col:not(.side) {
-    display: none;
+  .split .panel {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+  }
+  /*
+   * 分段控件在窄屏一律**去掉外壳**（不要边框那一层「卡片」），
+   * 但活动那格**保留圆角**：淡蓝圆角块 + 蓝字。
+   * 这里选中了 `.seg`（一级 tab / 周期 / 榜单 / 二级 tab 都是它）。
+   */
+  .seg {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    overflow: visible;
+  }
+  .seg button {
+    border-right: 0;
+    border-radius: 8px;
+  }
+  .seg button.active {
+    background: rgba(66, 165, 245, 0.18);
+    color: var(--blue);
+  }
+
+  /*
+   * 一级 tab（合约行情 / K 线 / 实时分析 / 历史分析）：做成**悬浮层**——
+   * 圆角 + 半透明 + 一层很淡的投影，浮在刚才那张面上，不再是“通栏色带”。
+   * 所以也不会再出现“圆角处露出深色底”那种黑边。
+   */
+  .tab-row {
+    margin: 0;
+    gap: 0;
+    padding: 2px 0 4px;
+  }
+  .tab-row .seg {
+    width: 100%;
+    flex-wrap: nowrap;
+    padding: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .tab-row .seg button {
+    position: relative;
+    flex: 1 1 0;
+    padding: 8px 6px;
+    border: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    text-align: center;
+    background: transparent;
+    color: var(--muted);
+  }
+  .tab-row .seg button.active {
+    background: var(--blue);
+    color: #06121f;
+  }
+  /* 悬浮层跟内容之间留一小口气（两面同色，看上去其实是一条头发缝） */
+  .tab-row + * {
+    margin-top: -6px;
+  }
+  /* 内容区的面板把上沿拉平，别在悬浮层下面冒出圆角 */
+  .split .scroll-body > .panel {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
   }
   .split.m-analysis > .side {
     display: none;
+  }
+  /*
+   * 「测试」那一格：**图必须留着** ——
+   * 结束线就是要在这张图上点出来的，藏了就没地方点了。
+   * 图上「看哪一刻」的那些行情条还在，所以给高一点、下半屏留给控制面板。
+   */
+  .split.m-test .side {
+    order: -1;
+    height: 52vh;
+    min-height: 320px;
+  }
+  .split.m-test .chart-side .chart-wrap {
+    min-height: 160px;
   }
   .split > .col,
   .split .scroll-body {
     min-height: 0;
     overflow: visible;
   }
-  /* K 线撑住一屏的一大半，别缩成一条 */
-  .chart-side .chart-wrap {
-    height: 58vh;
-    min-height: 300px;
-  }
-  .chart-side {
+  /*
+   * K 线自己一个 tab 时，就是这一屏的主角：**通栏**（把页面左右留白一起吃掉，
+   * 边框圆角都不要）+ 铺满除顶部导航 / 切换 tab 之外的整屏高度。
+   * 图表本体自己不带左右内边距，改成头部 / 底部各自补上，这样画布能贴边。
+   */
+  .chart-side.chart-panel {
+    margin: 0 -14px;
+    padding: 10px 0 12px;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
     min-height: 0;
+  }
+  .split.m-chart .side {
+    /* 高度交给上面的 grid 分配（见下面 .split.m-chart） */
+    height: auto;
+    min-height: 0;
+  }
+  /*
+   * 「K 线」那一格：图要**占满剩下那一截**。
+   *
+   * 不用「屏幕高减一个拍脑袋的数」那套 —— 窄屏顶部导航会折行，减多了底部留一大截、
+   * 减少了又把内容顶出去。直接让整页固定一屏，用 flex 把剩下的高度一路分给画布：
+   *   #app(100vh) → .analyze → .split(tab 行 auto + 图 1fr) → 面板 → 画布
+   * `:has()` 是为了**只在「K 线」这一格**生效（别的 tab 还是普通长文档、照旧整页滚）。
+   * 不支持 :has() 的浏览器，落回下面那个 min-height 兜底。
+   */
+  body.fixed-viewport:has(.split.m-chart) #app {
+    height: 100vh;
+    height: 100dvh;
+    overflow: auto;
+  }
+  /* ⚠️ 这两层都得松绑：窄屏默认让它们是 `flex: 0 0 auto`（文档按内容长），
+     只在「K 线」这一格改成按剩余高度分配，不然高度传不下去。 */
+  body.fixed-viewport:has(.split.m-chart) .analyze,
+  body.fixed-viewport:has(.split.m-chart) .split {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .split.m-chart {
+    grid-template-rows: auto minmax(0, 1fr);
+    min-height: calc(100vh - 170px);
+    min-height: calc(100dvh - 170px);
+  }
+  /*
+   * 「历史分析」那一格：跟「K 线」一样吃满除 tab 行之外的整屏。
+   *
+   * 为什么非给个确定高度：这一格的列表条数是**量容器高度算出来的**
+   * （AnalyzeView 的 measureHistoryRows）。容器高度由内容撑 → 12 条 → 分量出来还是 12 条，
+   * 就卡在这个死循环里，一屏只摆 12 行、底下空一大片（用户：「历史界面高度不对」）。
+   * 高度定死之后，列表把整格填满，行数自然跟着算对。
+   *
+   * ⚠️ 这一格**只有一栏**（`.side` 那格在窄屏是 display:none），所以模板就写一行；
+   * 千万别写成 `auto minmax(0,1fr)` 再配 `grid-row: 2` —— 空的第一行照样占掉一个
+   * `gap: 10px`，整栏（含 tab 行）会被往下推 10px（用户：「点击历史分析 tab tab 栏有偏移」，
+   * 实测三个 tab 的 tab 行 y = 64 / 64 / **74**）。
+   */
+  body.fixed-viewport:has(.split.m-history) #app {
+    height: 100vh;
+    height: 100dvh;
+    overflow: auto;
+  }
+  body.fixed-viewport:has(.split.m-history) .analyze,
+  body.fixed-viewport:has(.split.m-history) .split {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .split.m-history {
+    grid-template-rows: minmax(0, 1fr);
+    min-height: calc(100vh - 170px);
+    min-height: calc(100dvh - 170px);
+  }
+  /*
+   * 「合约行情」那一格：跟「历史分析」同一套 ——
+   * 给个确定高度（吃满除 tab 行之外的整屏），列表再把自己撑满。
+   * 不给高度的话面板是「按内容撑」的：列表限高 62vh 之后
+   * 底下会空出一大截（用户：「移动端合约行情高度不对」）。
+   */
+  body.fixed-viewport:has(.split.m-market) #app {
+    height: 100vh;
+    height: 100dvh;
+    overflow: auto;
+  }
+  body.fixed-viewport:has(.split.m-market) .analyze,
+  body.fixed-viewport:has(.split.m-market) .split {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .split.m-market {
+    grid-template-rows: minmax(0, 1fr);
+    min-height: calc(100vh - 170px);
+    min-height: calc(100dvh - 170px);
+  }
+  /*
+   * 列表**通栏**：把面板左右的留白吃掉，滚动条就能贴到屏幕边缘
+   * （用户：「滚动条往外一点」）；字那边的内边距移给头部 / 榜单 / 每行首尾单元格。
+   */
+  .split.m-market .mkt-panel {
+    margin: 0 -14px;
+    padding-left: 0;
+    padding-right: 0;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+  .split.m-market .mkt-panel > h2,
+  .split.m-market .mkt-bar,
+  .split.m-market .mkt-meta {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .split.m-market .mkt-table th:first-child,
+  .split.m-market .mkt-table td:first-child {
+    padding-left: 14px;
+  }
+  .split.m-market .mkt-table th:last-child,
+  .split.m-market .mkt-table td:last-child {
+    padding-right: 14px;
+  }
+  /* 行高 / 图标都放大一点：手指点得中，图标也看得清 */
+  .split.m-market .mkt-table .table th,
+  .split.m-market .mkt-table .table td {
+    padding: 11px 8px;
+    font-size: 13px;
+  }
+  .split.m-market .mkt-table .ico {
+    width: 22px;
+    height: 22px;
+  }
+  .split.m-market .mkt-table .ico-letter {
+    font-size: 12px;
+  }
+  .split.m-market .mkt-table .icell {
+    gap: 8px;
+  }
+  /*
+   * 历史分析：**去掉圆角的框**（用户 2026-10-03）。
+   * 跟行情列表一个做法：通栏 + 无边框 + 直角，看着跟上面的 tab 带子连成一块。
+   */
+  .split.m-history .hist-panel {
+    margin: 0 -14px;
+    border: 0;
+    border-radius: 0;
+  }
+  /* 画布**贴边**（只在头部 / 底部那些行上补内边距），跟「宽度全屏」对得上 */
+  .chart-side .chart-head,
+  .chart-side .chart-foot,
+  .chart-side .tk-head,
+  .chart-side .tk-changes {
+    /* 8px：跟图那块的左右留白一致（用户：「左右间距放小」） */
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .chart-side .chart-wrap {
+    flex: 1 1 auto;
+    height: auto;
+    /* 窄屏上限低一点：头顶有行情条、脚下有两行涨幅，别把它们顶出面板 */
+    min-height: 150px;
+  }
+  /*
+   * 周期切换：窄屏走「简约模式」但**靠左排**——
+   * 去掉分段框和分隔线，按钮就排在左边（原来那种摊满整行的排法太散）。
+   * （AI 按钮已经被挑到上面币种旁边了，这一行整行都归周期用）
+   */
+  .chart-head-right {
+    /* 外面这层默认是「只占自己那么宽」，窄屏让它铺满这一行 */
+    flex: 1 1 100%;
+  }
+  .chart-head .seg {
+    width: auto;
+    justify-content: flex-start;
+    gap: 2px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+  /* 简约就简约到底：直角、无框、无分隔线（圆角留着的只是 hover 底色，看着发圆） */
+  .chart-head .seg button {
+    border-right: 0;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 0;
+    color: var(--muted);
+  }
+  .chart-head .seg button.active {
+    background: transparent;
+    color: var(--blue);
+    box-shadow: inset 0 -2px 0 var(--blue);
+  }
+  /* 币种 + 永续 + AI 分析 一行放不下就折行，别撑破 */
+  .tk-head .tk-left {
+    flex-wrap: wrap;
+  }
+  /* 窄屏：AI 分析跟币种并排；周期那一行的那颗收起来 */
+  .tk-head .tk-run,
+  .tk-head .tk-only-mobile {
+    display: inline-flex;
+    align-items: center;
+  }
+  .tk-head .tk-only-mobile {
+    padding: 5px 9px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  /*
+   * 「＋ / ✓ / ✕」这三颗小按钮：**同一个盒子、同样的字号**。
+   * 字形本身宽窄不一样（＋ 和 ✕ 比 ✓ 宽），靠格子居中才排得齐 ——
+   * 光靠 padding 撑，两个按钮宽度总是差 2px，看着就是没对齐。
+   */
+  .tk-head .tk-plus,
+  .tk-head .tk-add {
+    width: 30px;
+    height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .tk-plus.on {
+    color: var(--bad);
+    border-color: rgba(239, 83, 80, 0.5);
+  }
+  /*
+   * 确认提炼：一颗钩，绿一点，跟旁边那颗红叉分得清。
+   * ⚠️ 得带 `.tk-head` —— 光写 `.tk-add` 干不过 `button.ghost` 那条（元素 + 类）。
+   */
+  .tk-head .tk-add {
+    color: var(--ok);
+    border-color: rgba(38, 166, 154, 0.45);
+  }
+  .chart-head .head-run {
+    display: none;
+  }
+  /* 顶部行情条：窄屏改成一列两列混排，别挤成一条 */
+  .tk-head {
+    gap: 8px 12px;
+  }
+  /*
+   * 行情条：**价格独占一行**（用户：「价格换行 +号和配置最右侧显示」）。
+   * 所以第一行是 [币种 + 永续 …… ＋ / 配置]，第二行才是大价格，
+   * 第三行是那一串指标。得把三块的 order 都定下来，不然 stats 会跑到价格前面。
+   */
+  .tk-head .tk-left {
+    flex: 1 1 auto;
+    order: 1;
+  }
+  .tk-head .tk-mid {
+    flex: 1 0 100%;
+    order: 2;
+  }
+  .tk-head .tk-left .combo {
+    width: 150px;
+  }
+  .tk-head .tk-last {
+    font-size: 19px;
+  }
+  .tk-head .tk-stats {
+    flex: 1 0 100%;
+    margin-left: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 3px 12px;
+    order: 3;
+  }
+  .tk-changes {
+    gap: 4px 0;
+  }
+  /* 一行 3 档 × 2 行 */
+  .tk-changes .tk-chg-item {
+    flex: 0 0 calc(100% / 3);
+  }
+  .tk-changes .tk-chg-item:nth-child(3n + 1) {
+    border-left: 0;
   }
 
   /* 查询栏：币种 / 模式 / 按钮各占一整行，好点 */
@@ -2255,4 +3672,139 @@ button.badge.balance:hover:not(:disabled) {
   }
 
   /* ---- 预测历史：饼图铺成网格（列表换卡片写在 HistoryView 里）---- */
+}
+
+/* ==================== 配置（从底部弹出来） ==================== */
+/*
+ * 入口在 K 线头部最右边那颗齿轮（`SettingsSheet.vue`）。
+ * 组件用 `<Teleport to="body">`，所以样式必须写在全局，不能写 scoped。
+ */
+.sheet-mask {
+  position: fixed;
+  inset: 0;
+  /* 盖住底栏(40)、抽屉(60)、行情弹层(50)、提炼遮罩(200)、toast(220) */
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.sheet {
+  position: fixed;
+  z-index: 301;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 80vh;
+  overflow: auto;
+  padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.5);
+  animation: sheet-up 0.18s ease;
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+.sheet-head b {
+  font-size: 14px;
+}
+
+.sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.sheet-row.col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.sheet-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sheet-text b {
+  font-size: 13px;
+}
+
+.sheet-text p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.sheet-text em {
+  color: var(--blue);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.sheet-seg button {
+  flex: 1 1 0;
+  text-align: center;
+}
+
+.sheet-foot {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 开关（就这一个，够了；以后要多写几个就复用） */
+.switch {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 26px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.switch span {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+
+.switch.on {
+  background: rgba(66, 165, 245, 0.22);
+  border-color: rgba(66, 165, 245, 0.55);
+}
+
+.switch.on span {
+  transform: translateX(20px);
+  background: var(--blue);
 }

@@ -4,6 +4,7 @@ import {useRoute, useRouter} from 'vue-router'
 import SegTabs from '../comps/SegTabs.vue'
 import DataTable, {type Column} from '../comps/DataTable.vue'
 import SymbolCombo from '../comps/SymbolCombo.vue'
+import RecIcon from '../comps/RecIcon.vue'
 import PieChart, {type PieItem} from '../comps/PieChart.vue'
 import {
   deleteAnalysis,
@@ -26,7 +27,9 @@ import {
   fmt,
   int,
   ms,
+  richText,
   signedPct,
+  splitRec,
   structureFull,
   tok,
   usd
@@ -240,6 +243,9 @@ const probOf = (r: JudgeResultLike | null) => {
 const detail = ref<AnalysisDetail | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
+
+/** 推荐做法拆成「现在 / 动手 / 别碰」几行（老记录没前缀就是一段） */
+const recParts = computed(() => splitRec(recOf(detail.value?.result ?? null)))
 
 async function open(id: number) {
   detailLoading.value = true
@@ -501,7 +507,7 @@ onMounted(() => {
             <span class="grade" :class="verdictTone(detail.verdict)">
               {{
                 probOf(detail.result)
-                  ? `概率 ${probOf(detail.result)}%`
+                  ? `走势概率 ${probOf(detail.result)}%`
                   : gradeText(detail.grade)
               }}
             </span>
@@ -518,18 +524,48 @@ onMounted(() => {
             </span>
           </div>
 
-          <p v-if="outlookOf(detail.result)" class="quote">
-            <b>走势</b>{{ outlookOf(detail.result) }}
-          </p>
-          <p v-if="detail.gradeReason" class="quote">
-            <b>理由</b>{{ detail.gradeReason }}
-          </p>
-          <p v-if="detail.verdictReason" class="quote">
-            <b>老记录的结论理由</b>{{ detail.verdictReason }}
-          </p>
-          <p v-if="recOf(detail.result)" class="quote">
-            <b>推荐</b>{{ recOf(detail.result) }}
-          </p>
+          <!-- ① 推荐 / ② 走势 / ③ 理由（默认收起）—— 跟实时分析同一套样式
+               （文字都用 richText 过一遍：关键字加粗 + 上色） -->
+          <section v-if="recParts.length" class="concl rec">
+            <span class="concl-h">推荐</span>
+            <span class="concl-sub">最该照做的</span>
+            <template v-for="(p, i) in recParts" :key="i">
+              <div v-if="p.k" class="rec-row" :class="p.tone">
+                <span class="rec-k">
+                  <RecIcon :tone="p.tone" />
+                  <span>{{ p.k }}</span>
+                </span>
+                <span class="rec-v" v-html="richText(p.v)" />
+              </div>
+              <p v-else class="rec-plain" v-html="richText(p.v)" />
+            </template>
+          </section>
+
+          <section v-if="outlookOf(detail.result)" class="concl out">
+            <span class="concl-h">走势</span>
+            <span class="concl-sub">最可能这么走</span>
+            <span v-if="probOf(detail.result)" class="concl-pct">
+              {{ probOf(detail.result) }}%
+            </span>
+            <p v-html="richText(outlookOf(detail.result))" />
+          </section>
+
+          <details
+            v-if="detail.gradeReason || detail.verdictReason"
+            class="concl why"
+          >
+            <summary>
+              <span class="concl-h">理由</span>
+              <span class="concl-sub">为什么这么看（点开）</span>
+            </summary>
+            <p
+              v-if="detail.gradeReason"
+              v-html="richText(detail.gradeReason)"
+            />
+            <p v-if="detail.verdictReason">
+              老记录的结论理由：<span v-html="richText(detail.verdictReason)" />
+            </p>
+          </details>
 
           <!-- 行情快照 -->
           <h3>当时的行情</h3>

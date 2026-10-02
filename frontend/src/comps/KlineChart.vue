@@ -1,10 +1,24 @@
 <script setup lang="ts">
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import * as LWC from 'lightweight-charts'
-import {fetchCandles, type Candle, type LevelSR} from '../api'
+import {fetchCandles, klineStream, type Candle, type LevelSR} from '../api'
 import {CHART_BARS} from '../analyze'
+import {
+  getChartWindow,
+  keepChartZoom,
+  rememberShown,
+  saveChartWindow,
+  type ChartWindow
+} from '../settings'
 import TimeModal from './TimeModal.vue'
-import {bjInputToMs, bjInputValue, bjShort, bjTime, fmt} from '../format'
+import {
+  bjInputToMs,
+  bjInputValue,
+  bjShort,
+  bjTime,
+  decimalsFor,
+  fmt
+} from '../format'
 
 /**
  * K 线图（TradingView Lightweight Charts）。
@@ -16,13 +30,20 @@ import {bjInputToMs, bjInputValue, bjShort, bjTime, fmt} from '../format'
 const props = defineProps<{
   symbol: string
   timeframe: string
-  /** 从哪一刻开始画：'YYYY-MM-DDTHH:mm'（北京时间）。空 = 画最近的 */
+  /**
+   * 看哪一刻：'YYYY-MM-DDTHH:mm'（北京时间）。空 = 看最新的。
+   *
+   * 选中的这一刻会摆在图的**正中间**，左右各 `CENTER_BARS` 根。
+   * 只决定「看哪一段」，**不影响 AI 判断用的数据**。
+   */
   from?: string
   /**
    * 画到哪一刻为止（同上格式）。空 = 一直画到最新。
    *
-   * 「测试」模式用：回到过去某一刻，图就不能再露出之后的行情，
-   * 否则人看到的是未来，而 AI 只看到当时 —— 两边根本不是同一局。
+   * ⚠️ **现在没有调用方**（2026-10-03 用户拍板）：测试的截断**只作用在喂给 AI 的
+   * 数据上**（后端按 `at` 取数，只吃那一刻之前已收盘的 K 线），**图上照旧画全** ——
+   * 人看得到之后怎么走，才好评判 AI 当时判断得对不对。
+   * 这段留着是为了以后真要做「回放视图」（逐步揭示）时能直接用。
    */
   until?: string
   /** 允许在图上拖出一个范围（「添加案例」才开） */
@@ -36,10 +57,18 @@ const props = defineProps<{
   pickPoint?: boolean
   /** 结束线那一刻（毫秒，= 最后一根已收盘 K 线的收尾时刻）；null = 还没定 */
   pointAt?: number | null
-  /** 已经画好的范围（毫秒）—— 画面上会一直高亮着 */
-  range?: {from: number; to: number} | null
+  /** 已经画好的范围（毫秒）—— 画面上会一直高亮着。
+   *  ⚠️ 要带 `bars`：画范围的提示文案要用它，跟 `select` 事件给的一致 */
+  range?: {from: number; to: number; bars: number} | null
   /** 是不是正在「等着我拖一段」。按钮在左边面板，这里只管状态 */
   drawing?: boolean
+  /**
+   * 这张图现在是不是正被看着（窄屏切到别的 tab 就 false）。
+   *
+   * 图是**常驻**的（切 tab 不销毁），所以不能拿卸载当「关掉 K 线图」——
+   * 靠这个属性：变成 false 时把当前那段范围存进对应币种（用户说的「关闭/切换时保存」）。
+   */
+  active?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -65,8 +94,16 @@ function rangeMs(v: string | undefined): number {
 
 /** 拉多少根是**内部策略**，不往界面上摆（用户只看时间） */
 const DEFAULT_BARS = CHART_BARS
-/** 一遍最多拉多少根（防止区间太大把浏览器拖死） */
-const MAX_BARS = 3000
+
+/**
+ * 「看某一刻」时，那一刻摆在图的**正中间**，左右各显示多少根。
+ *
+ * 就是图上那 `CHART_BARS` 根一分为二 —— 用户要求「左右各 100 根」。
+ */
+const CENTER_BARS = Math.floor(CHART_BARS / 2)
+
+/** 左右各多拉一点做缓冲：不然最边上那几根常常是空的 */
+const CENTER_MARGIN = 8
 
 /**
  * 往前拖到底时，一次再补多少根（按周期定）。
@@ -105,8 +142,13 @@ function endMs(): number {
   return testMode.value ? untilMs.value : Date.now()
 }
 
-/** 选了开始时间（且它确实在结束时间之前）就从那一刻画到结束时间 */
-const ranged = computed(() => fromMs.value > 0 && fromMs.value < endMs())
+/**
+ * 选了「看哪一刻」→ 以它为中心画（测试模式另有结束线，不走这套）。
+ *
+ * ⚠️ 以前这里是「从这一刻一直画到最新」：选个三天前的时间，
+ * 整段会被 fitContent 压成一片，什么结构都看不出来（逻辑错误）。
+ */
+const centered = computed(() => fromMs.value > 0 && !testMode.value)
 
 function clearRange() {
   emit('update:from', '')
@@ -131,11 +173,16 @@ function historyBars(): number {
   return HISTORY_BARS[props.timeframe] ?? 1000
 }
 
-/** 要拉多少根：从开始时间到结束时间的跨度（没选时间就拉最近的） */
+/**
+ * 要拉多少根。
+ *
+ * 以某一刻为中心 = 左右各 `CENTER_BARS` 根（+ 缓冲）；
+ * 其余情况就是最近的 `DEFAULT_BARS` 根 —— 不再是「从那一刻一直拉到现在」。
+ */
 function barsToLoad(): number {
-  if (!ranged.value) return DEFAULT_BARS
-  const span = Math.ceil((endMs() - fromMs.value) / tfMs()) + 1
-  return Math.min(MAX_BARS, Math.max(DEFAULT_BARS, span))
+  if (centered.value) return (CENTER_BARS + CENTER_MARGIN) * 2 + 1
+  // 至少够铺满默认那一屏（再多给一点，缩放时不用立刻又去拉）
+  return Math.max(DEFAULT_BARS, CHART_BARS + 50)
 }
 
 const pickerOpen = ref(false)
@@ -208,6 +255,32 @@ let overlay: {sr: LevelSR | null; refPrice: number} = {
 
 /** 正在往前补历史（防重入） */
 let loadingOlder = false
+
+/*
+ * 实时推送（用户 2026-10-03：k 线实时更新改为 ws）。
+ * `hovering` 是十字光标是否停在图上 —— 停着的时候不许抢用户看的那根。
+ */
+let stopStream: (() => void) | null = null
+let hovering = false
+/**
+ * 正在**整段重画**（切币 / 换周期 / 换时间）：
+ * 这期间推送来的 K 线先别往图上盖 —— 图里还是上一个币的数据，
+ * 盖上去就是「新币的一根插在旧币尾巴上」，看着就是一闪。
+ */
+let reloading = false
+/** 每次整段重画的序号：半路又切一次时，旧的那次结果直接作废 */
+let loadSeq = 0
+/** 换币 / 换周期时图上淡一下（硬切会「闪」） */
+const fading = ref(false)
+/** 淡出至少留这么久，免得请求太快时看着像原地一颠 */
+const FADE_MIN_MS = 140
+/**
+ * 图上此刻的可见区间（跟 `settings` 里存的那份不同：这份是「正在看」，那份是「记住的」）。
+ * 换币 / 切走 / 关页时拿它去存（用户：在关闭 K 线图或者切换 K 线图保存）。
+ */
+let liveRange: ChartWindow | null = null
+/** 上一次的图宽度：用来判断「刚从藏着变成露出来」（0 → 非 0） */
+let lastWidth = 0
 /** 已经拉到头了（交易所没有更早的了） */
 let reachedStart = false
 /** 用户是否真的拖过 / 滚过图表（区分程序自己动的） */
@@ -284,8 +357,21 @@ function ensureChart(): boolean {
     layout: {
       background: {type: LWC.ColorType.Solid, color: '#0b0f14'},
       textColor: '#8b949e',
-      fontSize: 11,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace'
+      /*
+       * 轴上的字（价格刻度 / 时间刻度 / 十字光标标签）一起跟着这个走。
+       * ⚠️ LWC 只能全局设一个字号，**不能只把价格轴调小**。
+       * 11 → 10（2026-10-03「字体放小」）→ 9（用户又说「坐标 y 轴间距再小」）：
+       * 字小了，LWC 会把刻度排得更密（刻度间距跟着小），轴也跟着变窄。
+       */
+      fontSize: 9,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      /*
+       * 去掉图左下角那个 TradingView 水印 / 链接（用户 2026-10-03 要求）。
+       * 这是 LWC 自带的 `layout.attributionLogo`（默认 true）。
+       * 注意：LWC 的 README 里把那个链接写成「license 要求」，关掉之前建议先确认一下授权
+       * —— 这是产品 / 法务上的选择，不是技术问题。
+       */
+      attributionLogo: false
     },
     grid: {
       vertLines: {color: 'rgba(255,255,255,0.05)'},
@@ -296,7 +382,11 @@ function ensureChart(): boolean {
       borderColor: 'rgba(255,255,255,0.12)',
       timeVisible: true,
       secondsVisible: false,
-      rightOffset: 4,
+      /*
+       * 最新一根右边留几根空档。原来是 4 根（约 24px），
+       * 用户 2026-10-03：「右侧间距取消」→ 0，最后一根直接贴到价格轴。
+       */
+      rightOffset: 0,
       tickMarkFormatter: (time: number, type: number) =>
         formatTickMark(time, type)
     },
@@ -343,6 +433,26 @@ function ensureChart(): boolean {
   chart.timeScale().subscribeVisibleLogicalRangeChange((range: any) => {
     positionLabels()
     syncWindowRefs()
+    /*
+     * 记下「当前这个币正在看的那一段」——
+     * 真正落盘不在这里（拖一下一下写 localStorage 太磨人），
+     * 而是在换币 / 切走 / 关页时由 `saveNow()` 存进对应币种。
+     */
+    if (range) liveRange = {from: range.from, to: range.to}
+    const w = chart.timeScale().width()
+    if (w > 0) {
+      reportShown()
+      /*
+       * 刚刚从「藏着」变成「露出来」（窄屏切回这一格）：重铺一次。
+       * ⚠️ 0 宽度下 `setVisibleLogicalRange` 算出来的段是歪的（实测铺 200 根，
+       * 显出来只剩 141），所以一变可见就得按该有的样子重铺。
+       * 重铺又会回调一次本函数，但那时 `lastWidth` 已经不为 0，不会递归。
+       */
+      if (lastWidth === 0) applyView()
+      lastWidth = w
+    } else {
+      lastWidth = 0
+    }
     // 用户拖/滚到最左边了 → 把更早的历史补进来（Binance 那种往前翻）
     if (userPanned && range && range.from <= 3) void loadOlder()
   })
@@ -465,19 +575,16 @@ function fmtVol(v: number): string {
 }
 
 function infoHTML(
-  timeSec: number,
   bar: {open: number; high: number; low: number; close: number},
   vol: number,
   volRatio: number
 ): string {
-  const p = bjPartsOf(timeSec)
   const chg = bar.open ? ((bar.close - bar.open) / bar.open) * 100 : NaN
   const cls = Number.isFinite(chg) ? (chg >= 0 ? 'up' : 'down') : ''
   const chgText = Number.isFinite(chg)
     ? `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`
     : '—'
   return [
-    `<span>${p.month}/${p.day} ${p.hour}:${p.minute}</span>`,
     `<span><span class="k">开</span>${fmt(bar.open)}</span>`,
     `<span><span class="k">高</span>${fmt(bar.high)}</span>`,
     `<span><span class="k">低</span>${fmt(bar.low)}</span>`,
@@ -496,7 +603,6 @@ function showInfoAt(i: number) {
   const c = candles[idx]
   const ma = volMa[idx]
   infoEl.value.innerHTML = infoHTML(
-    Math.floor(c.timestamp / 1000),
     {open: c.open, high: c.high, low: c.low, close: c.close},
     c.volume,
     Number.isFinite(ma) && ma > 0 ? c.volume / ma : NaN
@@ -530,6 +636,7 @@ function syncWindowRefs() {
 /** 悬停 / 触碰：更新左上角信息栏与右侧「相对当前价」 */
 function updateHover(param: any) {
   const reset = () => {
+    hovering = false
     deltaEl.value?.classList.add('hidden')
     showInfoAt(rightmostVisibleIndex())
   }
@@ -538,6 +645,7 @@ function updateHover(param: any) {
 
   const bar = param.seriesData?.get(refs.candle)
   if (!bar) return reset()
+  hovering = true
 
   const timeSec = Number(param.time)
   const idx = candleIndex.get(timeSec)
@@ -547,7 +655,6 @@ function updateHover(param: any) {
 
   if (infoEl.value) {
     infoEl.value.innerHTML = infoHTML(
-      timeSec,
       bar,
       vol,
       Number.isFinite(vol) && Number.isFinite(ma) && ma > 0 ? vol / ma : NaN
@@ -576,10 +683,102 @@ function updateHover(param: any) {
 
 /* ---------------- 画图 ---------------- */
 
+/** 选中那一刻落在数据里的下标（比数据还早 / 还晚就贴到边上） */
+function centerIndexOf(data: Candle[]): number {
+  if (!data.length) return 0
+  const i = Math.floor((fromMs.value - data[0].timestamp) / tfMs())
+  return Math.min(data.length - 1, Math.max(0, i))
+}
+
+/* ---------------- 视图：显示哪一段 ---------------- */
+
+/**
+ * 右侧留几根空位。
+ *
+ * 原来是 4（配合 `timeScale.rightOffset: 4`），用户 2026-10-03：「右侧间距取消」→ 0。
+ * ⚠️ 这个值跟 chart 选项里的 `rightOffset` **要一致**，不然程序设的区间跟默认视图不一样宽；
+ * 也影响配置面板里「显示多少根」的数字（200 + 这个值）。
+ */
+const RIGHT_GAP = 0
+/** 最少显示几根 —— 切币时数据短了也不会把图压成一条缝 */
+const MIN_SPAN = 10
+
+/** 时间轴上我们用到的那一个方法（不想为它把 LWC 的类型也引进来） */
+interface TimeScaleLike {
+  setVisibleLogicalRange(r: {from: number; to: number}): void
+}
+
+/** 右边缘贴齐最新一根，往左铺 `n` 根（配置里的「显示多少根 K 线」） */
+function showLastN(ts: TimeScaleLike, len: number, n: number): void {
+  if (len < 2) return
+  const span = Math.max(MIN_SPAN, Math.min(n, len - 1))
+  try {
+    ts.setVisibleLogicalRange({from: len - 1 - span, to: len - 1 + RIGHT_GAP})
+  } catch {
+    /* 图已经拆了（切页 / 换币），这一帧就算了 */
+  }
+}
+
+/**
+ * 沿用「当前记下的那段 K 线范围」（保持 K 线缩放样式打开时走这条）。
+ *
+ * 数据长度可能跟记的时候不一样（换币 / 换周期），所以两头都要夹：
+ * `to` 不超最后一根，跨度至少 `MIN_SPAN` 根。
+ */
+function applyWindow(ts: TimeScaleLike, len: number, w: ChartWindow): void {
+  if (len < 2) return
+  const max = len - 1 + RIGHT_GAP
+  const span = Math.max(MIN_SPAN, Math.min(Math.round(w.to - w.from), len - 1))
+  let to = Math.min(Math.round(w.to), max)
+  let from = to - span
+  if (from < 0) {
+    from = 0
+    to = Math.min(max, span)
+  }
+  try {
+    ts.setVisibleLogicalRange({from, to})
+  } catch {
+    /* 图已经拆了 */
+  }
+}
+
+/**
+ * 按当前配置把视图铺一次（居中那种情况不走这里，它是用户明确点的）。
+ *
+ * 「保持 K 线缩放样式」打开 + 这个币记过 → 沿用记的那段；否则右边缘贴齐最新一根，
+ * 往左铺 `DEFAULT_BARS` 根。
+ */
+function applyView(): void {
+  if (!refs || !candles.length) return
+  const rec = getChartWindow(props.symbol)
+  if (keepChartZoom.value && rec) {
+    applyWindow(refs.chart.timeScale(), candles.length, rec)
+  } else {
+    showLastN(refs.chart.timeScale(), candles.length, DEFAULT_BARS)
+  }
+}
+
+/**
+ * 告诉配置面板「现在看多少根 / 是哪个币」。
+ *
+ * ⚠️ 不能只在可见区间变化时上报：区间**没变**的话 LWC 不回调
+ * （比如切到另一个币、铺出来恰好是同一段），面板就会一直显示上一个币的数字。
+ */
+function reportShown(): void {
+  if (!refs) return
+  const ts = refs.chart.timeScale()
+  const w = ts.width()
+  if (w <= 0) return // 图没露出来（窄屏切到别的 tab），这时报的区间没意义
+  const r = ts.getVisibleLogicalRange()
+  if (!r) return
+  liveRange = {from: r.from, to: r.to}
+  rememberShown(r.to - r.from + 1, `${props.symbol} · ${props.timeframe}`)
+}
+
 /**
  * 画图。
  *
- * `keepView = true` 时（往前补历史）不 fitContent，而是把时间轴整体右移
+ * `keepView = true` 时（往前补历史）不重设视图，而是把时间轴整体右移
  * 「新塞进来的根数」，这样用户看的那一段不会跳。
  */
 function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
@@ -602,6 +801,25 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
   }
 
   const t = (c: Candle) => Math.floor(c.timestamp / 1000)
+
+  /*
+   * 价格轴刻度按**这个币的价格量级**定精度。
+   *
+   * ⚠️ 不设的话 LWC 用默认的 precision: 2 / minMove: 0.01 —— 对低价币就是灾难：
+   * 1000PEPE（≈ 0.0043）整段行情都落在同一个 0.01 格子里，刻度会重复 / 错位
+   * （用户反馈「价格坐标轴划分不对」）。
+   * `localization.priceFormatter` 只改**文字**，改不了**划分**，必须设系列自己的 priceFormat。
+   * 精度沿用全站同一套规则 `decimalsFor()`，这样轴刻度 / 十字光标 / 右侧 ±% 标签一致。
+   */
+  const axisDecimals = decimalsFor(data[data.length - 1]?.close)
+  const priceFormat = {
+    type: 'price' as const,
+    precision: axisDecimals,
+    minMove: 1 / 10 ** axisDecimals
+  }
+  refs.candle.applyOptions({priceFormat})
+  // EMA42 跟蜡烛共用右侧价格轴，格式得一致（否则轴上的精度会跟着最后一个系列跑）
+  refs.ema42.applyOptions({priceFormat})
 
   refs.candle.setData(
     data.map(c => ({
@@ -649,27 +867,72 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
       to: view.to + prependCount
     })
     prependCount = 0
+  } else if (centered.value) {
+    /*
+     * 选中的那一刻摆在正中间：左右各 CENTER_BARS 根。
+     *
+     * ⚠️ 要分两步、而且**中间得隔一帧**：
+     *   ① 先把「每根多宽」定成 时间轴宽度 ÷ 要放下的根数；
+     *   ② 再设可见区间。
+     * 两次调用挤在同一帧里的话，LWC 会拿**上一个** barSpacing 去卡，
+     * 结果右边缘是对的、左边缘被吃掉三十多根（实测 7 → 38）。
+     *
+     * 右边要是已经没有行情了（选的是很近的一刻），那头就留白 ——
+     * 留白的意思是「还没发生」，比把刻度硬挤到右边缘诚实。
+     */
+    const ts = refs.chart.timeScale()
+    const i = centerIndexOf(data)
+    const w = ts.width()
+    if (w > 0) ts.applyOptions({barSpacing: w / (CENTER_BARS * 2 + 1)})
+    const put = () => {
+      try {
+        ts.setVisibleLogicalRange({
+          from: i - CENTER_BARS,
+          to: i + CENTER_BARS
+        })
+      } catch {
+        /* 图已经拆了（切页/换币），这一帧就算了 */
+      }
+    }
+    requestAnimationFrame(put)
   } else {
-    refs.chart.timeScale().fitContent()
+    /* 这个币记过就用记的那段，没记过就铺最近 DEFAULT_BARS 根 */
+    applyView()
   }
 
   syncWindowRefs()
   drawSelection()
+  // 顺手把「现在看多少根」报给配置面板（区间没变也要报，否则切币后数字会停在旧的那个币）
+  reportShown()
   emit('loaded', data)
 }
 
 async function load() {
   const symbol = props.symbol.trim()
   if (!symbol) return
+  const seq = ++loadSeq
+  /*
+   * 换币 / 换周期 / 换时间都要整段重画，这里做一次「淡出 → 换数据 → 淡入」。
+   * 不淡的话，旧币还是一整套价格区间，新数据一上来（价格轴精度、可见区间、
+   * 蜡烛全变）就是硬闪一下 —— 用户说的「切换币种 k 线会有闪动」。
+   */
+  const startedAt = performance.now()
+  reloading = true
+  fading.value = true
   try {
     reachedStart = false
     userPanned = false
-    // 选了开始时间：从那刻画到结束；测试模式没选开始时间：往前铺 DEFAULT_BARS 根
+    // 以选中那一刻为中心：左右各 CENTER_BARS 根（再多拉点缓冲）
     let range: {from: number; to: number} | undefined
-    if (ranged.value) range = {from: fromMs.value, to: endMs()}
-    else if (testMode.value)
+    if (centered.value) {
+      const half = (CENTER_BARS + CENTER_MARGIN) * tfMs()
+      range = {from: fromMs.value - half, to: fromMs.value + half}
+    } else if (testMode.value) {
       range = {from: untilMs.value - tfMs() * DEFAULT_BARS, to: untilMs.value}
+    }
     const d = await fetchCandles(symbol, props.timeframe, barsToLoad(), range)
+    // 半路又切了一次（连点几个币）→ 这次的结果作废，让最后那次画
+    if (seq !== loadSeq) return
     // 测试模式：接口只保证 ts ≤ to，那根**还没收盘**的得自己剔掉
     const bars =
       testMode.value && lastClosedMs.value > 0
@@ -677,13 +940,21 @@ async function load() {
         : (d.candles ?? [])
     draw(bars, d.sr ?? null)
   } catch (e) {
-    emit('error', (e as Error).message)
+    if (seq === loadSeq) emit('error', (e as Error).message)
+  } finally {
+    if (seq === loadSeq) {
+      reloading = false
+      // 先把新数据画进 canvas，再等淡出够时长（太快的请求也能看出「换过了」）
+      const wait = Math.max(0, FADE_MIN_MS - (performance.now() - startedAt))
+      setTimeout(() => {
+        if (seq === loadSeq) fading.value = false
+      }, wait)
+    }
   }
 }
 
 /**
  * 往前补一段更早的历史（拖到左边缘时自动调）。
- *
  * 一次补多少根看周期（`HISTORY_BARS`）；补完把视图钉在原地，不会跳。
  */
 async function loadOlder(): Promise<void> {
@@ -717,6 +988,91 @@ async function loadOlder(): Promise<void> {
   } finally {
     loadingOlder = false
   }
+}
+
+/**
+ * 实时推送来的那一根，并进数据 —— 让 K 线「动」起来。
+ *
+ * 时间戳跟最后一根相同 → **就地替换**（同一根还在长）；更大 → append。
+ *
+ * ⚠️ 只动尾部那三条序列 + 右侧参考价，**绝不碰视图**（不 fitContent、不重设可见区间）——
+ * 用户正看哪一段、拖到哪儿都不会被拽走。
+ */
+function applyTail(tail: Candle[]): void {
+  if (!refs || !tail.length || !candles.length) return
+  // 整段重画中：图里还是旧币的数据，这一根先不收（load 完会拿到最新的）
+  if (reloading) return
+  let changed = false
+  for (const c of tail) {
+    const last = candles[candles.length - 1]
+    if (!last) break
+    if (c.timestamp === last.timestamp) {
+      if (c.close !== last.close || c.high !== last.high) changed = true
+      candles[candles.length - 1] = c
+    } else if (c.timestamp > last.timestamp) {
+      candles.push(c)
+      changed = true
+    }
+  }
+  if (!changed) return
+
+  // 尾部重算：EMA / 量均线都要跟着最后一根走
+  emaValues = ema(
+    candles.map(x => x.close),
+    42
+  )
+  volMa = sma(
+    candles.map(x => x.volume),
+    20
+  )
+
+  const i = candles.length - 1
+  const c = candles[i]
+  const t = Math.floor(c.timestamp / 1000)
+  candleIndex.set(t, i)
+  refs.candle.update({
+    time: t,
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close
+  })
+  refs.volume.update({
+    time: t,
+    value: c.volume,
+    color: c.close >= c.open ? 'rgba(38,166,154,0.45)' : 'rgba(239,83,80,0.45)'
+  })
+  if (Number.isFinite(emaValues[i])) {
+    refs.ema42.update({time: t, value: emaValues[i]})
+  }
+
+  // 信息栏 / 右侧参考价：只在用户没在看别的那一根时才跟着走
+  if (!hovering) {
+    overlay.refPrice = c.close
+    renderLabels()
+    showInfoAt(i)
+  }
+  // 画上的选中框、结束线位置跟着数据长度走
+  drawSelection()
+}
+
+/** 订上实时推送（测试/回看是历史视图，不订） */
+function startStream(): void {
+  stopStream?.()
+  stopStream = null
+  const symbol = props.symbol.trim()
+  if (!symbol || testMode.value) return
+  stopStream = klineStream(symbol, props.timeframe, c => applyTail([c]))
+}
+
+/** 切到后台就断掉（别让手机在后台白收推送），回来立刻重订 */
+function onLiveVisible(): void {
+  if (document.hidden) {
+    stopStream?.()
+    stopStream = null
+    return
+  }
+  startStream()
 }
 
 /* ---------------- 坐标轴工具 ---------------- */
@@ -1025,12 +1381,92 @@ function onRangeUp(e: PointerEvent) {
   })
 }
 
+/**
+ * 已经画好的范围**还能改**：
+ *   · 抓左 / 右那道粗线 → 只动这一端（另一头钉住）
+ *   · 按住中间那段 → 整段平移
+ * 改完照旧 walk `select` 事件出去，跟刚拖出来时一模一样。
+ */
+const grabEdge = ref<'left' | 'right' | 'mid' | null>(null)
+/** 抓的起点（像素）和当时的两端下标 + 指针落在第几根 */
+let grabX = 0
+let grabAt = {i: 0, j: 0, at: 0}
+
+/** 当前范围的两端在数据里的下标（端点不在数据里就按时间找回来） */
+function rangeIndexes(): {i: number; j: number} | null {
+  const r = props.range
+  if (!r || !candles.length) return null
+  const find = (ms: number): number | null => {
+    const byMap = candleIndex.get(Math.floor(ms / 1000))
+    if (byMap !== undefined) return byMap
+    const x = msToX(ms)
+    return x === null ? null : xToIndex(x)
+  }
+  const i = find(r.from)
+  const j = find(r.to)
+  if (i === null || j === null) return null
+  return i <= j ? {i, j} : {i: j, j: i}
+}
+
+/** 把下标区间发出去（与图上拖出来时同一个事件） */
+function emitIdxRange(i: number, j: number): void {
+  const last = candles.length - 1
+  const a = Math.max(0, Math.min(i, j))
+  const b = Math.min(last, Math.max(i, j))
+  if (b <= a) return
+  emit('select', {
+    from: candles[a].timestamp,
+    to: candles[b].timestamp,
+    bars: b - a + 1
+  })
+}
+
+function onGrabDown(e: PointerEvent, edge: 'left' | 'right' | 'mid'): void {
+  const idx = rangeIndexes()
+  if (!idx) return
+  // 别让这一下传给下面那层（否则会变成「重新拖一段」）
+  e.preventDefault()
+  e.stopPropagation()
+  grabEdge.value = edge
+  grabX = localX(e)
+  grabAt = {i: idx.i, j: idx.j, at: xToIndex(grabX)}
+  try {
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  } catch {
+    /* 忽略 */
+  }
+}
+
+function onGrabMove(e: PointerEvent): void {
+  const edge = grabEdge.value
+  if (!edge) return
+  e.preventDefault()
+  const x = localX(e)
+  if (edge === 'left') {
+    // 不能越过右端（至少留一根）
+    emitIdxRange(Math.min(xToIndex(x), grabAt.j - 1), grabAt.j)
+    return
+  }
+  if (edge === 'right') {
+    emitIdxRange(grabAt.i, Math.max(xToIndex(x), grabAt.i + 1))
+    return
+  }
+  // 整段平移：按「根」挪，首尾一起动
+  const shift = xToIndex(x) - grabAt.at
+  emitIdxRange(grabAt.i + shift, grabAt.j + shift)
+}
+
+function onGrabUp(e: PointerEvent): void {
+  if (!grabEdge.value) return
+  e.preventDefault()
+  grabEdge.value = null
+}
+
 /** 同一层透明覆盖：范围模式拖一段，选线模式点一根 */
 function onLayerDown(e: PointerEvent) {
   if (picking.value) return onLineDown(e)
   onRangeDown(e)
 }
-
 function onLayerMove(e: PointerEvent) {
   if (picking.value) return onLineMove(e)
   onRangeMove(e)
@@ -1100,9 +1536,13 @@ function drawPoint() {
 
 /* ---------------- 生命周期 ---------------- */
 
-const title = computed(() => props.symbol)
-
 onMounted(load)
+// 实时推送：币种 / 周期 / 测试模式一变就重订（上游 WS → 后端 SSE → 这里）
+onMounted(() => {
+  startStream()
+  document.addEventListener('visibilitychange', onLiveVisible)
+})
+watch([() => props.symbol, () => props.timeframe, testMode], startStream)
 watch(() => props.symbol, load)
 watch(() => props.timeframe, load)
 watch(() => props.from, load)
@@ -1113,7 +1553,32 @@ watch([() => props.range, () => props.timeframe], drawSelection)
 watch(() => candles.length, drawSelection)
 watch(() => props.pointAt, drawPoint)
 
+/*
+ * 换币 / 换周期：**先把现在看的那段存下来**，再拉新的。
+ * 键只按币种，所以换周期只是把同一个币的「看多少根」刷新一下
+ * —— 拉完还是这个币的这段（用户：「切换周期也算 保留当前查看的多少根 k」）。
+ */
+watch([() => props.symbol, () => props.timeframe], () => {
+  saveChartWindow(props.symbol, liveRange)
+})
+
+/*
+ * 切走这一格（窄屏换成别的 tab）：也算「关闭 K 线图」，存一下。
+ * 桌面上图一直在（`active` 恒 true），走不到这里。
+ */
+watch(
+  () => props.active,
+  (on, was) => {
+    if (was !== false && on === false) saveChartWindow(props.symbol, liveRange)
+  }
+)
+
 onBeforeUnmount(() => {
+  // 关掉这一页也算「关闭 K 线图」：把当前那段存回去
+  saveChartWindow(props.symbol, liveRange)
+  stopStream?.()
+  stopStream = null
+  document.removeEventListener('visibilitychange', onLiveVisible)
   try {
     refs?.chart.remove()
   } catch {
@@ -1127,53 +1592,35 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="panel chart-panel">
+    <!--
+      顶部：#top 给外层塞「行情条」（分析页塞的是 TickerHead，币安那种排法）。
+      下面才是图上自己的那行：周期按钮 + 外层塞进来的按钮。
+    -->
+    <slot name="top" />
+
     <div class="chart-head">
-      <h2>
-        {{ title }} <span class="tag">{{ timeframe }}</span>
-      </h2>
-      <div class="seg">
-        <button
-          v-for="t in TFS"
-          :key="t.value"
-          type="button"
-          :class="{active: t.value === timeframe}"
-          @click="emit('update:timeframe', t.value)"
-        >
-          {{ t.label }}
-        </button>
+      <!--
+        左边这一格留给外层写标题；分析页现在标题都不写了 ——
+        币种在顶部行情条最左边，周期有按钮高亮着，再写一遍是重复。
+      -->
+      <slot name="head" />
+      <div class="chart-head-right">
+        <div class="seg">
+          <button
+            v-for="t in TFS"
+            :key="t.value"
+            type="button"
+            :class="{active: t.value === timeframe}"
+            @click="emit('update:timeframe', t.value)"
+          >
+            {{ t.label }}
+          </button>
+        </div>
+        <slot name="head-end" />
       </div>
     </div>
 
-    <div class="date-row">
-      <span class="dim">从</span>
-      <button
-        type="button"
-        class="time-pick"
-        :class="{set: fromMs > 0}"
-        title="点一下选时间（年月日时分）"
-        @click="openPicker"
-      >
-        {{ fromMs ? bjTime(fromMs) : '选一个时间' }}
-      </button>
-      <span
-        v-if="testMode"
-        class="until-tag"
-        :title="`只画已收盘的 K 线；设的测试点是 ${bjTime(untilMs)}`"
-      >
-        K 线到 {{ bjTime(lastClosedMs) }}
-      </span>
-      <button
-        v-if="from"
-        type="button"
-        class="ghost tiny"
-        title="清掉时间，看最新的 K 线"
-        @click="clearRange"
-      >
-        回到最新
-      </button>
-    </div>
-
-    <div ref="wrapEl" class="chart-wrap">
+    <div ref="wrapEl" class="chart-wrap" :class="{fading}">
       <div ref="chartEl" class="chart"></div>
       <div ref="levelHost" class="level-labels"></div>
       <div ref="infoEl" class="chart-info"></div>
@@ -1197,7 +1644,33 @@ onBeforeUnmount(() => {
             left: selBox.from + 'px',
             width: selBox.to - selBox.from + 'px'
           }"
-        />
+        >
+          <!-- 画好的这段还能改：两边粗线拖端点，中间按住整段挪 -->
+          <span
+            class="rb-edge left"
+            title="拖这里改起点"
+            @pointerdown="onGrabDown($event, 'left')"
+            @pointermove="onGrabMove"
+            @pointerup="onGrabUp"
+            @pointercancel="onGrabUp"
+          />
+          <span
+            class="rb-mid"
+            title="按住拖动整段"
+            @pointerdown="onGrabDown($event, 'mid')"
+            @pointermove="onGrabMove"
+            @pointerup="onGrabUp"
+            @pointercancel="onGrabUp"
+          />
+          <span
+            class="rb-edge right"
+            title="拖这里改终点"
+            @pointerdown="onGrabDown($event, 'right')"
+            @pointermove="onGrabMove"
+            @pointerup="onGrabUp"
+            @pointercancel="onGrabUp"
+          />
+        </div>
         <div
           v-if="dragFromX !== null && dragToX !== null"
           class="range-box live"
@@ -1236,46 +1709,98 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="chart-tools">
-      <button
-        type="button"
-        title="自动布局（线性坐标 + 适配全部）"
-        @click="autoLayout"
-      >
-        A
-      </button>
-      <button
-        type="button"
-        :class="{active: logScale}"
-        title="切换对数坐标"
-        @click="toggleLog"
-      >
-        L
-      </button>
+    <!--
+      图表下面**就这一行**：左边「看哪一刻」，中间指标开关，右边 A / L。
+      （原来「阳线 / 阴线」那两个图例项去掉了 —— 红绿一目了然，白占地方）
+    -->
+    <div class="chart-foot">
+      <div class="foot-left">
+        <button
+          type="button"
+          class="time-pick"
+          :class="{set: fromMs > 0}"
+          :title="
+            fromMs
+              ? `以 ${bjTime(fromMs)} 为中心，左右各 ${CENTER_BARS} 根；点一下改时间`
+              : `看某一刻：点一下选时间（那一刻摆在正中间，左右各 ${CENTER_BARS} 根）`
+          "
+          @click="openPicker"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="3" y="5" width="18" height="15.5" rx="2.5" />
+            <path d="M3 10h18M8 3.2v3.6M16 3.2v3.6" />
+          </svg>
+        </button>
+        <span v-if="fromMs" class="foot-time">{{ bjTime(fromMs) }}</span>
+        <span
+          v-if="testMode"
+          class="until-tag"
+          :title="`只画已收盘的 K 线；设的测试点是 ${bjTime(untilMs)}`"
+        >
+          K 线到 {{ bjTime(lastClosedMs) }}
+        </span>
+        <button
+          v-if="from"
+          type="button"
+          class="ghost tiny"
+          title="清掉时间，看最新的 K 线"
+          @click="clearRange"
+        >
+          回到最新
+        </button>
+      </div>
+
+      <!-- 指标开关（点一下显示 / 隐藏） -->
+      <div class="legend">
+        <span
+          v-for="l in LEGEND"
+          :key="l.key"
+          :data-toggle="l.key"
+          :class="{off: !VISIBLE[l.key]}"
+          :title="`点击显示 / 隐藏`"
+          @click="toggleLegend(l.key)"
+        >
+          <i class="dot" :class="l.dot" />{{ l.label }}
+        </span>
+      </div>
+
+      <div class="chart-tools">
+        <button
+          type="button"
+          title="自动布局（线性坐标 + 适配全部）"
+          @click="autoLayout"
+        >
+          A
+        </button>
+        <button
+          type="button"
+          :class="{active: logScale}"
+          title="切换对数坐标"
+          @click="toggleLog"
+        >
+          L
+        </button>
+      </div>
     </div>
 
-    <div class="legend">
-      <span><i class="dot up" />阳线</span>
-      <span><i class="dot down" />阴线</span>
-      <span
-        v-for="l in LEGEND"
-        :key="l.key"
-        :data-toggle="l.key"
-        :class="{off: !VISIBLE[l.key]}"
-        :title="`点击显示 / 隐藏`"
-        @click="toggleLegend(l.key)"
-      >
-        <i class="dot" :class="l.dot" />{{ l.label }}
-      </span>
-      <span class="dim">点一下切换显隐</span>
-    </div>
+    <!-- 底部：#bottom 给外层塞东西（分析页塞的是 1天/3天/…/1年 涨幅那一行） -->
+    <slot name="bottom" />
 
-    <!-- 选时间：弹窗里选年月日时分，选完就从那一刻开始画 -->
+    <!-- 选时间：弹窗里选年月日时分，选完就把那一刻摆到图的中间 -->
     <TimeModal
       v-model="pickerOpen"
       kind="point"
       title="选一个时间"
-      hint="从这一刻开始画 K 线，一直画到最新。"
+      :hint="`以这一刻为中心，左右各 ${CENTER_BARS} 根 K 线。`"
       :initial="pickerInitial"
       @confirm="onPickTime"
     />

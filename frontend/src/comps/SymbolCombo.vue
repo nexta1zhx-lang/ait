@@ -116,31 +116,40 @@ function onBlur(e: FocusEvent) {
 
 <template>
   <div ref="boxEl" class="combo">
-    <input
-      ref="inputEl"
-      :value="modelValue"
-      placeholder="输入币种搜索，如 BTC"
-      autocomplete="off"
-      spellcheck="false"
-      @input="onInput"
-      @focus="show"
-      @click="show"
-      @keydown="onKey"
-      @blur="onBlur"
-    />
-    <button
-      v-if="modelValue"
-      type="button"
-      class="combo-clear"
-      title="清空"
-      @mousedown.prevent="clear"
-      @click.prevent="clear"
-    >
-      ✕
-    </button>
-    <button type="button" title="展开全部合约" @click="open ? close() : show()">
-      ▾
-    </button>
+    <!-- 叉号和箭头都叠在输入框里侧，别另占宽度 -->
+    <div class="combo-box" :class="{clearable: !!modelValue}">
+      <input
+        ref="inputEl"
+        :value="modelValue"
+        placeholder="输入币种搜索，如 BTC"
+        autocomplete="off"
+        spellcheck="false"
+        @input="onInput"
+        @focus="show"
+        @click="show"
+        @keydown="onKey"
+        @blur="onBlur"
+      />
+      <button
+        v-if="modelValue"
+        type="button"
+        class="combo-clear"
+        title="清空"
+        @mousedown.prevent="clear"
+        @click.prevent="clear"
+      >
+        ✕
+      </button>
+      <button
+        type="button"
+        class="combo-caret"
+        title="展开全部合约"
+        @mousedown.prevent
+        @click="open ? close() : show()"
+      >
+        ▾
+      </button>
+    </div>
 
     <div v-if="open" class="combo-list">
       <div v-if="!items.length" class="combo-empty">无匹配合约</div>
