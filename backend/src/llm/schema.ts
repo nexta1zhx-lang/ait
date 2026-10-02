@@ -37,7 +37,7 @@ export const judgeSchema = z.object({
   /** 上面那个走势发生的概率（0~100 的整数） */
   probability: z.number().min(0).max(100).catch(50),
   /** go = 可做, wait = 等待, no_go = 不做 */
-  verdict: z.enum(['go', 'no_go', 'wait']).catch('wait'),
+  verdict: z.enum(['go', 'wait', 'no_go']).catch('wait'),
   /** 推荐怎么做：现在做什么、什么条件下动手、什么条件下不碰 */
   recommendation: z.string().catch('')
 })
