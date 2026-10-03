@@ -4,11 +4,11 @@ import * as LWC from 'lightweight-charts'
 import {fetchCandles, klineStream, type Candle, type LevelSR} from '../api'
 import {CHART_BARS} from '../analyze'
 import {
-  getChartWindow,
+  MIN_SAVED_BARS,
+  chartBars,
   keepChartZoom,
   rememberShown,
-  saveChartWindow,
-  type ChartWindow
+  saveChartBars
 } from '../settings'
 import TimeModal from './TimeModal.vue'
 import {
@@ -278,7 +278,24 @@ const FADE_MIN_MS = 140
  * 图上此刻的可见区间（跟 `settings` 里存的那份不同：这份是「正在看」，那份是「记住的」）。
  * 换币 / 切走 / 关页时拿它去存（用户：在关闭 K 线图或者切换 K 线图保存）。
  */
-let liveRange: ChartWindow | null = null
+let liveRange: {from: number; to: number} | null = null
+/**
+ * 「铺视图」的版本号：`showLastN()` 要隔一帧才真正设区间，
+ * 这一帧里可能又换币 / 换周期了 —— 旧的那次靠它自己作废（见 `showLastN`）。
+ */
+let applySeq = 0
+
+/**
+ * 用户**自己**缩出来的根数（要存进配置的就是它）。
+ *
+ * ⚠️ 不能直接拿「当前可见多少根」去存：程序重铺（换币、图从藏着变露出来）
+ * 中间会短暂报出一个**被卡住的**数字（实测要 200 根先报 129），
+ * 存下去就把全局那个数污染了 —— 以后每个币都只显示 129 根。
+ * 所以只认「手动手势之后」报上来的值：`userZoomed` 由 pointerdown / wheel 置位，
+ * 每次 `load()`（程序重画）开头清掉。
+ */
+let userBars = 0
+let userZoomed = false
 /** 上一次的图宽度：用来判断「刚从藏着变成露出来」（0 → 非 0） */
 let lastWidth = 0
 /** 已经拉到头了（交易所没有更早的了） */
@@ -463,8 +480,11 @@ function ensureChart(): boolean {
     positionLabels()
   })
 
-  // 只有用户自己动过（拖动 / 滚轮）才算「想看更早的」，避免加载后自己触发
-  const markPanned = () => (userPanned = true)
+  // 只有用户自己动过（拖动 / 滚轮 / 双指）才算「想看更早的」+ 算「他缩到了多少根」
+  const markPanned = () => {
+    userPanned = true
+    userZoomed = true
+  }
   chartEl.value.addEventListener('pointerdown', markPanned)
   chartEl.value.addEventListener('wheel', markPanned, {passive: true})
 
@@ -709,59 +729,76 @@ const RIGHT_GAP = 8
 /** 最少显示几根 —— 切币时数据短了也不会把图压成一条缝 */
 const MIN_SPAN = 10
 
-/** 时间轴上我们用到的那一个方法（不想为它把 LWC 的类型也引进来） */
+/** 时间轴上我们用到的那几个方法（不想为它把 LWC 的类型也引进来） */
 interface TimeScaleLike {
+  width(): number
+  applyOptions(o: {barSpacing: number}): void
   setVisibleLogicalRange(r: {from: number; to: number}): void
 }
 
-/** 右边缘贴齐最新一根，往左铺 `n` 根（配置里的「显示多少根 K 线」） */
+/**
+ * 右边缘贴齐最新一根，往左铺 `n` 根（配置里的「显示多少根 K 线」）。
+ *
+ * ⚠️⚠️ **必须先定「每根多宽」，而且中间得隔一帧**（跟下面「看某一刻」同一个坑）：
+ * LWC 的 `setVisibleLogicalRange` **只滚动、不缩放** —— 它拿**当前**的 barSpacing
+ * 去卡，要的跨度比一屏放得下的宽时就把左边缘吃掉（实测想要 200 根只给 **129 根**，
+ * 于是「显示多少根」从来没有真正生效过）；两次调用挤在同一帧里也不行，
+ * 那会儿 barSpacing 还是旧的。
+ *
+ * ⚠️ 所以不能只看右边缘对不对 —— 右边一直是对的（一直在滚），左边才是真相。
+ */
 function showLastN(ts: TimeScaleLike, len: number, n: number): void {
   if (len < 2) return
-  const span = Math.max(MIN_SPAN, Math.min(n, len - 1))
-  try {
-    ts.setVisibleLogicalRange({from: len - 1 - span, to: len - 1 + RIGHT_GAP})
-  } catch {
-    /* 图已经拆了（切页 / 换币），这一帧就算了 */
+  /*
+   * `span` **就是**「要显示多少根」：区间 `[len-span, len-1+RIGHT_GAP]` 里正好 span 根 K 线。
+   * ⚠️ 别写成 `len-1-span` —— 那样是 span+1 根，报上去的数字老比设定值大 1
+   * （实测设 47 显示 48，看着像「没记住」）。
+   */
+  const span = Math.max(MIN_SPAN, Math.min(n, len))
+  const w = ts.width()
+  const my = ++applySeq
+  const put = () => {
+    if (my !== applySeq) return // 中间又铺过一次（换币 / 换周期），这次作废
+    try {
+      ts.setVisibleLogicalRange({from: len - span, to: len - 1 + RIGHT_GAP})
+    } catch {
+      /* 图已经拆了（切页 / 换币），这一帧就算了 */
+    }
   }
-}
-
-/**
- * 沿用「当前记下的那段 K 线范围」（保持 K 线缩放样式打开时走这条）。
- *
- * 数据长度可能跟记的时候不一样（换币 / 换周期），所以两头都要夹：
- * `to` 不超最后一根，跨度至少 `MIN_SPAN` 根。
- */
-function applyWindow(ts: TimeScaleLike, len: number, w: ChartWindow): void {
-  if (len < 2) return
-  const max = len - 1 + RIGHT_GAP
-  const span = Math.max(MIN_SPAN, Math.min(Math.round(w.to - w.from), len - 1))
-  let to = Math.min(Math.round(w.to), max)
-  let from = to - span
-  if (from < 0) {
-    from = 0
-    to = Math.min(max, span)
-  }
-  try {
-    ts.setVisibleLogicalRange({from, to})
-  } catch {
-    /* 图已经拆了 */
+  if (w > 0) {
+    // 一屏要放下 span 根 + 右边那 RIGHT_GAP 格空档
+    ts.applyOptions({barSpacing: w / (span + RIGHT_GAP)})
+    requestAnimationFrame(put)
+  } else {
+    // 图还没露出来（宽度 0），算不出每根多宽 —— 先只定区间，
+    // 等变可见时订阅里那次 `applyView()` 会再走一遍
+    put()
   }
 }
 
 /**
  * 按当前配置把视图铺一次（居中那种情况不走这里，它是用户明确点的）。
  *
- * 「保持 K 线缩放样式」打开 + 这个币记过 → 沿用记的那段；否则右边缘贴齐最新一根，
- * 往左铺 `DEFAULT_BARS` 根。
+ * 「保持 K 线缩放样式」打开 → 铺**全局那个根数**（所有币种共用）；
+ * 没缩过 / 关掉 → 铺默认那一屏。
+ *
+ * ⚠️ 以前这里是「这个币记过就还原它自己那段」，一个币一个样；
+ * 用户 2026-10-03：「保持 k 线缩放的根数是所有币种都要」→ 改成只认 `chartBars`。
+ * 顺带好处：不存在「某个币套用了别的币的区间」这类错位了。
  */
 function applyView(): void {
   if (!refs || !candles.length) return
-  const rec = getChartWindow(props.symbol)
-  if (keepChartZoom.value && rec) {
-    applyWindow(refs.chart.timeScale(), candles.length, rec)
-  } else {
-    showLastN(refs.chart.timeScale(), candles.length, DEFAULT_BARS)
-  }
+  const saved = keepChartZoom.value && chartBars.value >= MIN_SAVED_BARS
+  showLastN(
+    refs.chart.timeScale(),
+    candles.length,
+    saved ? chartBars.value : DEFAULT_BARS
+  )
+}
+
+/** 当前用户自己缩出来的根数（拿它去存；程序重排不会动它） */
+function liveBars(): number {
+  return userBars
 }
 
 /**
@@ -779,7 +816,10 @@ function reportShown(): void {
   if (!r) return
   liveRange = {from: r.from, to: r.to}
   // 报给配置面板的「显示多少根」要扣掉右侧空档 —— 那 8 格没 K 线
-  rememberShown(r.to - r.from + 1 - RIGHT_GAP, `${props.symbol} · ${props.timeframe}`)
+  const n = r.to - r.from + 1 - RIGHT_GAP
+  rememberShown(n, `${props.symbol} · ${props.timeframe}`)
+  // 只有用户自己缩/拖过，这个数才作数（见 `userBars` 那段注释）
+  if (userZoomed) userBars = n
 }
 
 /**
@@ -903,7 +943,7 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
     }
     requestAnimationFrame(put)
   } else {
-    /* 这个币记过就用记的那段，没记过就铺最近 DEFAULT_BARS 根 */
+    /* 铺全局那个根数（没缩过就是默认那一屏） */
     applyView()
   }
 
@@ -926,6 +966,8 @@ async function load() {
   const startedAt = performance.now()
   reloading = true
   fading.value = true
+  // 接下来是程序重铺（不是用户缩的）—— 从现在起到这次画完，报上来的根数都不作数
+  userZoomed = false
   try {
     reachedStart = false
     userPanned = false
@@ -1561,22 +1603,22 @@ watch(() => candles.length, drawSelection)
 watch(() => props.pointAt, drawPoint)
 
 /*
- * 换币 / 换周期：**先把上一个币看的那段存下来**，再拉新的。
- * 键只按币种，所以换周期只是把同一个币的「看多少根」刷新一下
- * —— 拉完还是这个币的这段（用户：「切换周期也算 保留当前查看的多少根 k」）。
+ * 换币 / 换周期 / 切走这一格：都把「现在显示多少根」存一下。
  *
- * ⚠️⚠️ 必须存**旧**币种（`was`），不能直接读 `props.symbol`：
- * 回调跑起来的时候 `props.symbol` **已经是新币了**，而 `liveRange` 还是旧币那段
- * —— 于是旧币的可见区间被写到了新币名下。
- * 后果（用户反馈「切换币种，看不到 k 线，没有自动布局」）：
- * 新币一进来就套用旧币的区间，若旧币当时是放大到十几根，新币就只在**最右边露出十几根**，
- * 看着就是一张空图（而且新币永远拿不到默认那一屏）。
- * 存到旧币名下 → 新币没记录 → `applyView()` 走 `showLastN()`，自动铺好。
+ * ⚠️ 存的是**全局一个数**（`chartBars`，所有币种共用），跟币种无关 ——
+ * 所以这里不需要旧币种、也不需要 `liveRange` 的位置，只要那个**跨度**。
+ * 以前是「每个币各记一段 {from,to}」，而回调里读的 `props.symbol` 已经是新币了，
+ * 于是旧币的区间被写进新币名下（用户：「切换币种，看不到 k 线，没有自动布局」）。
  */
-watch([() => props.symbol, () => props.timeframe], (_now, was) => {
-  const prev = was?.[0]
-  saveChartWindow(prev ?? props.symbol, liveRange)
+watch([() => props.symbol, () => props.timeframe], () => {
+  saveChartBars(liveBars())
 })
+
+/*
+ * 配置面板里拨了那颗开关：**立刻重铺一次**（面板上写着「改完立刻生效」）。
+ * 打开 → 铺全局那个根数；关掉 → 回到默认那一屏。
+ */
+watch(keepChartZoom, () => applyView())
 
 /*
  * 切走这一格（窄屏换成别的 tab）：也算「关闭 K 线图」，存一下。
@@ -1585,13 +1627,13 @@ watch([() => props.symbol, () => props.timeframe], (_now, was) => {
 watch(
   () => props.active,
   (on, was) => {
-    if (was !== false && on === false) saveChartWindow(props.symbol, liveRange)
+    if (was !== false && on === false) saveChartBars(liveBars())
   }
 )
 
 onBeforeUnmount(() => {
   // 关掉这一页也算「关闭 K 线图」：把当前那段存回去
-  saveChartWindow(props.symbol, liveRange)
+  saveChartBars(liveBars())
   stopStream?.()
   stopStream = null
   document.removeEventListener('visibilitychange', onLiveVisible)
