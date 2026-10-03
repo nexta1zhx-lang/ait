@@ -15,22 +15,32 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # ---------------------------------------------------------------- JDK 21
-if [[ -z "${JAVA_HOME:-}" || ! -x "${JAVA_HOME}/bin/javac" ]]; then
+#
+# ⚠️ 不能「JAVA_HOME 已设就直接用」：机器上常常已经有个 17（Homebrew 装的），
+#    那样会跳过探测、编到一半报「无效的源发行版：21」。
+#    所以这里**按版本挑**，认的只有 javac 21，别的都往下找。
+pick_jdk() {
   for cand in \
-    "$(/usr/libexec/java_home -v 21 2>/dev/null || true)" \
     "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" \
-    "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"; do
-    if [[ -n "$cand" && -x "$cand/bin/javac" ]]; then
-      export JAVA_HOME="$cand"
-      break
+    "/usr/local/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" \
+    "$(/usr/libexec/java_home -v 21 2>/dev/null || true)" \
+    "${JAVA_HOME:-}"; do
+    [[ -n "$cand" && -x "$cand/bin/javac" ]] || continue
+    if "$cand/bin/javac" -version 2>&1 | grep -q ' 21\.'; then
+      echo "$cand"
+      return 0
     fi
   done
-fi
+  return 1
+}
 
-if [[ -z "${JAVA_HOME:-}" ]]; then
-  echo "✗ 找不到 JDK 21。先装：brew install openjdk@21" >&2
+if ! JDK_HOME="$(pick_jdk)"; then
+  echo "✗ 需要 JDK 21（Capacitor 8 硬性要求），没找到。装一个：" >&2
+  echo "    brew install openjdk@21" >&2
+  echo "  当前 JAVA_HOME=${JAVA_HOME:-未设置}" >&2
   exit 1
 fi
+export JAVA_HOME="$JDK_HOME"
 echo "JAVA_HOME=$JAVA_HOME"
 "$JAVA_HOME/bin/java" -version 2>&1 | head -1
 
