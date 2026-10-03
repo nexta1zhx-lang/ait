@@ -12,7 +12,15 @@
  */
 import {ref, watch} from 'vue'
 
-const KEY = 'ca-settings-v1'
+const KEY = 'ca-settings-v2'
+/**
+ * 旧键。里面的 `chartWindows` **全是错的**，不迁移：
+ * KlineChart 以前在「换币」那个 watcher 里读的是 `props.symbol`，
+ * 而回调跑起来时它已经是**新币**了 —— 于是**旧币**的可见区间被写到新币名下。
+ * 症状：切过去只在最右边露出十几根（看着像空图）、新币再也拿不到默认那一屏。
+ * 所以 v1 → v2 只把 `keepChartZoom` 这个开关搬过来，区间全部丢弃重记。
+ */
+const OLD_KEY = 'ca-settings-v1'
 
 /** 图上当前那段可见区间（按「第几根到第几根」记，跟具体时间 / 价格无关） */
 export interface ChartWindow {
@@ -28,7 +36,12 @@ interface Stored {
 function read(): Stored {
   try {
     const raw = localStorage.getItem(KEY)
-    return raw ? (JSON.parse(raw) as Stored) : {}
+    if (raw) return JSON.parse(raw) as Stored
+    // 第一次跑 v2：从 v1 只捡开关，区间不带过来
+    const old = localStorage.getItem(OLD_KEY)
+    if (!old) return {}
+    const prev = JSON.parse(old) as Stored
+    return {keepChartZoom: prev.keepChartZoom}
   } catch {
     // 无痕模式 / 被禁用，读取会抛，当没有配置
     return {}

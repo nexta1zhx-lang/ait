@@ -383,10 +383,12 @@ function ensureChart(): boolean {
       timeVisible: true,
       secondsVisible: false,
       /*
-       * 最新一根右边留几根空档。原来是 4 根（约 24px），
-       * 用户 2026-10-03：「右侧间距取消」→ 0，最后一根直接贴到价格轴。
+       * 最新一根右边留几根空档。
+       * 2026-10-03 先按「右侧间距取消」改成了 0，随后用户又要回
+       * 「右侧需要留出 8 根 K 线」→ 8（跟下面那个 `RIGHT_GAP` 是同一个值，
+       * 两处必须一致，否则程序设的区间跟默认视图不一样宽）。
        */
-      rightOffset: 0,
+      rightOffset: RIGHT_GAP,
       tickMarkFormatter: (time: number, type: number) =>
         formatTickMark(time, type)
     },
@@ -695,11 +697,15 @@ function centerIndexOf(data: Candle[]): number {
 /**
  * 右侧留几根空位。
  *
- * 原来是 4（配合 `timeScale.rightOffset: 4`），用户 2026-10-03：「右侧间距取消」→ 0。
- * ⚠️ 这个值跟 chart 选项里的 `rightOffset` **要一致**，不然程序设的区间跟默认视图不一样宽；
- * 也影响配置面板里「显示多少根」的数字（200 + 这个值）。
+ * 原本 4 → 用户 2026-10-03「右侧间距取消」→ 0 → 随后又要求
+ * 「k 线右侧需要留出 8 根 k 线」→ **8**（最后一根不贴着价格轴，看盘习惯问题）。
+ *
+ * ⚠️ 这个值跟 `createChart` 里的 `timeScale.rightOffset` **要一致**
+ * （现在两处都引用本变量），不然程序设的区间跟默认视图不一样宽。
+ * ⚠️ 它同时是「可见区间」的一部分：`to = len - 1 + RIGHT_GAP`，
+ * 所以 `reportShown()` 报给配置面板的根数要**减掉**它（那几根是空档、不是 K 线）。
  */
-const RIGHT_GAP = 0
+const RIGHT_GAP = 8
 /** 最少显示几根 —— 切币时数据短了也不会把图压成一条缝 */
 const MIN_SPAN = 10
 
@@ -772,7 +778,8 @@ function reportShown(): void {
   const r = ts.getVisibleLogicalRange()
   if (!r) return
   liveRange = {from: r.from, to: r.to}
-  rememberShown(r.to - r.from + 1, `${props.symbol} · ${props.timeframe}`)
+  // 报给配置面板的「显示多少根」要扣掉右侧空档 —— 那 8 格没 K 线
+  rememberShown(r.to - r.from + 1 - RIGHT_GAP, `${props.symbol} · ${props.timeframe}`)
 }
 
 /**
@@ -1554,12 +1561,21 @@ watch(() => candles.length, drawSelection)
 watch(() => props.pointAt, drawPoint)
 
 /*
- * 换币 / 换周期：**先把现在看的那段存下来**，再拉新的。
+ * 换币 / 换周期：**先把上一个币看的那段存下来**，再拉新的。
  * 键只按币种，所以换周期只是把同一个币的「看多少根」刷新一下
  * —— 拉完还是这个币的这段（用户：「切换周期也算 保留当前查看的多少根 k」）。
+ *
+ * ⚠️⚠️ 必须存**旧**币种（`was`），不能直接读 `props.symbol`：
+ * 回调跑起来的时候 `props.symbol` **已经是新币了**，而 `liveRange` 还是旧币那段
+ * —— 于是旧币的可见区间被写到了新币名下。
+ * 后果（用户反馈「切换币种，看不到 k 线，没有自动布局」）：
+ * 新币一进来就套用旧币的区间，若旧币当时是放大到十几根，新币就只在**最右边露出十几根**，
+ * 看着就是一张空图（而且新币永远拿不到默认那一屏）。
+ * 存到旧币名下 → 新币没记录 → `applyView()` 走 `showLastN()`，自动铺好。
  */
-watch([() => props.symbol, () => props.timeframe], () => {
-  saveChartWindow(props.symbol, liveRange)
+watch([() => props.symbol, () => props.timeframe], (_now, was) => {
+  const prev = was?.[0]
+  saveChartWindow(prev ?? props.symbol, liveRange)
 })
 
 /*
