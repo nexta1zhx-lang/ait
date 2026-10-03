@@ -14,7 +14,10 @@ bitcoooin.cn {
 	# APK / 安装包这类静态文件不走应用，Caddy 直接发文件。
 	# 目录由 compose 挂进来：宿主机 ./downloads → 容器 /srv/dl
 	# 链接形如 https://bitcoooin.cn/dl/xxx.apk
-	handle /dl/* {
+	# ⚠️ 必须是 handle_path（不是 handle）：handle_path 会把 `/dl` 前缀**剥掉**，
+	# 所以 /dl/xxx.apk → /srv/dl/xxx.apk。
+	# 用 handle 的话前缀不剥，会去找 /srv/dl/dl/xxx.apk —— 直接 404。
+	handle_path /dl/* {
 		root * /srv/dl
 		file_server
 	}
