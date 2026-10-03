@@ -35,8 +35,10 @@
 - **只有一个 Node 进程**：`backend/src/server.ts` 同时提供 API 和 `frontend/dist`
   静态文件。`NODE_ENV=production` 时它会跳过 Vite，只托管已构建产物，
   所以线上**不需要装 vite / tsx**（镜像里 `npm ci --omit=dev` 就够）。
-- **提示词在数据库里**（`ai_docs` 表）。表会由程序自动建，**数据不会自动来** ——
-  不迁的话开单分析直接抛错。
+- **提示词在代码里**（`backend/src/llm/prompts.ts` 的 `PREDICT_PROMPT` / `EXTRACT_PROMPT`）。
+  2026-10-04 从数据库搬过来的 —— 改提示词要改代码 + 重新部署（见下面「后续更新」）。
+  老表 `ai_docs` / `ai_doc_versions` 没删，程序不再读写它；想退回数据库那套，
+  正文按 id 捞：predict = 9、extract = 7。
 - 进程崩了由 Docker 自己拉起（`restart: unless-stopped`），**不需要 pm2**。
 
 ---
@@ -143,10 +145,10 @@ docker compose -f docker-compose.prod.yml logs -f caddy   # 等 certificate obta
 > 失败后自动降级 `http-01`（走 80）**把证书签成功了** —— 但外面照样连不上 443。
 > **证书 + 端口两样都要看。** 续期 Caddy 自动做，不用 cron。
 
-### 4. 迁移数据（**关键**：提示词 + 标签模板）
+### 4. 迁移数据（**关键**：标签模板 + 案例库）
 
 建表是自动的（`ensureSchema()` 幂等跑），但**表里是空的**。
-没有启用的 `predict` 提示词时，开单分析会直接抛错。
+⚠️ 提示词**不用迁**（在代码里）。要迁的是「有哪些标签可以挑」和案例库。
 
 ```bash
 # 本机导出
@@ -174,8 +176,9 @@ curl -s localhost:8787/api/health      # rules.sources 应有 1 份以上
   COPY failed for table "analyses" ... Key (rules_hash)=(068b12cebc8f) is not present in "rules_versions"
   ```
   补一次也能修（父表已有数据后）：加 `--table=ai_doc_versions --table=analyses` 再跑一遍。
-- 不想带历史数据的话，最少迁 `ai_docs` + `ai_doc_versions`（提示词），
-  想要标签池完整再带 `tag_templates`。案例库 `knowledge`、历史 `analyses` / `llm_usage` 可选。
+- 最少迁 `tag_templates`（标签模板，不然提示词里的标签池是空的）。
+  案例库 `knowledge`（顺带 `knowledge_tags`）、历史 `analyses` / `llm_usage` 可选。
+- `ai_docs` / `ai_doc_versions` 已经没用了，迁不迁都行。
 
 ### 5. 验收
 
@@ -191,7 +194,7 @@ curl -s -o /dev/null -w 'http  %{http_code}\n' http://bitcoooin.cn/api/health   
 浏览器打开 `https://bitcoooin.cn`，然后：
 
 1. `/` 页跑一次分析 —— 有结论、有标签概率、能过。
-2. `/prompts` 能看到提示词、能改、能看历史版本。
+2. `/api/health` 里 `rules.sources` 是 `["分析预测（代码内置）"]`、`systemChars` ≈ 3415。
 3. `/history` 能翻到记录。
 4. 顶部余额徽标点一下能刷新（说明出网到 DeepSeek 正常）。
 
@@ -215,8 +218,9 @@ bash release.sh            # 会问一句确认；加 -y 不问，加 --dry-run 
 先分清哪一类改动：
 
 - **要重新 build 镜像的**（走下面这套）：后端 / 前端源码、`Dockerfile`、
-  `docker-compose.prod.yml`、`Caddyfile`、`config/calibers.yaml`、`data/`
-- **不用更新**：提示词（`ai_docs` 表）—— 网页「AI 提示词」页改，即时生效
+  `docker-compose.prod.yml`、`Caddyfile`、`config/calibers.yaml`、`data/`、
+  **`backend/src/llm/prompts.ts`（提示词）**
+- **不用更新**：标签模板 / 案例库（数据库里，网页上改即时生效）
 - **在服务器上改的**：`.env`（Key / 密码 / 模型）—— 服务器上直接编辑后 `restart app`，
   **别**拿本机那份覆盖
 
@@ -235,15 +239,22 @@ scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.tgz \
 cd /opt/crypto-advisor
 tar tzf /tmp/ca.tgz >/dev/null \
   && sudo bash -c 'cd /opt/crypto-advisor && find . -mindepth 1 -maxdepth 1 \
-       ! -name .env -exec rm -rf {} +' \
+       ! -name .env ! -name downloads -exec rm -rf {} +' \
   && tar xzf /tmp/ca.tgz \
-  && sudo bash deploy.sh           # 末尾会自检 /api/health，并报数据库通不通
+  && sudo bash deploy.sh \
+  && sudo docker compose -f docker-compose.prod.yml up -d --force-recreate caddy
+# 最后那句别省：Caddyfile 是 bind mount 的单文件，内容改了 compose 看不出来，
+# up -d 不会重建容器，而 Caddy 只在启动时读一次配置 —— 不重建等于没改。
 ```
 
 > ⚠️ **为什么要先清一遍**：`tar xzf` 只覆盖同名文件、**不会删除**本机已经删掉的文件。
 > 残留的旧 `.ts` 会被 `tsc` 一起编译进镜像（如果它还 import 了已删模块，会直接构建失败）。
-> 只保留 `.env` 就行 —— 数据库在 Docker 命名卷 `ca-pgdata` 里，删目录不动数据；
+> 只能留 `.env` 和 `downloads` —— 数据库在 Docker 命名卷 `ca-pgdata` 里，删目录不动数据；
 > Caddy 证书也在卷里，不会重新申请。
+>
+> ⚠️ **`downloads` 必须留着**：它 bind mount 进了 caddy（`./downloads:/srv/dl`）。
+> 把目录整个删了再建，**目录 inode 就换了**，容器里那个挂载还指着被删的旧 inode ——
+> `/srv/dl` 变成空目录，线上 APK 直接 404（实测踩过）。留着目录让 tar 往里覆盖文件就行。
 
 > ⚠️ **`--exclude='.env'` 不能漏**。服务器上的 `.env` 里有随机化过的 `PGPASSWORD`，
 > 被本机那份覆盖的话应用会连不上数据库，日志里是「⚠️ 数据库不可用」。

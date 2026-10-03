@@ -151,11 +151,17 @@ if grep -qxF './.env' <<<"$listing"; then
   echo "✗ 包里含 .env，拒绝解包" >&2; exit 1
 fi
 
-echo "==> 清掉旧文件（保留 .env）"
+echo "==> 清掉旧文件（保留 .env / downloads）"
 before=$(find "$APP_DIR" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
 # tar 只覆盖、不删除：不清的话，本机删掉的 .ts 会残留并被 tsc 编进镜像
-find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env -exec rm -rf {} +
-echo "    清掉 $before 项"
+# ⚠️ 但这两项必须留着：
+#   · .env      服务器上管的密钥，本机那份会盖掉
+#   · downloads 它 bind mount 进了 caddy（./downloads:/srv/dl）。
+#     把目录整个删了再建 = **目录 inode 换了**，容器里那个挂载还指着被删的旧 inode，
+#     于是 /srv/dl 变成空目录 —— 线上 APK 直接 404（实测踩过）。
+#     留着目录、让 tar 往里覆盖文件，挂载才不断。
+find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env ! -name downloads -exec rm -rf {} +
+echo "    清掉 $before 项（保留 .env / downloads）"
 
 echo "==> 解包"
 # 不加 sudo：文件要归 ubuntu（root 所有会让下次更新解压失败）
@@ -171,6 +177,12 @@ echo "    ✓ server.ts / deploy.sh 都与本机 md5 相同"
 echo "==> 跑 deploy.sh（构建镜像 + 起容器 + 自检），2 核机器要等几分钟"
 cd "$APP_DIR"
 sudo bash deploy.sh
+
+echo "==> 重建 caddy（Caddyfile 改了靠这一步生效）"
+# Caddyfile 是 bind mount 的**单个文件**：内容变了 compose 看不出来，`up -d` 不会重建容器，
+# 而 Caddy 只在启动时读一次配置 —— 不重建的话改了等于没改。
+# 证书在命名卷 ca-caddy-data 里，重建不会重新申请。
+sudo docker compose -f docker-compose.prod.yml up -d --force-recreate caddy
 REMOTE
 
 # ---------------------------------------------------------------- 6. 公网验收
