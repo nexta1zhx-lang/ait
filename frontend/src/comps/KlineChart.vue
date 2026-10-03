@@ -10,6 +10,7 @@ import {
   rememberShown,
   saveChartBars
 } from '../settings'
+import {setLivePrice} from '../ticker'
 import TimeModal from './TimeModal.vue'
 import {
   bjInputToMs,
@@ -76,6 +77,8 @@ const emit = defineEmits<{
   (e: 'update:from', v: string): void
   (e: 'error', msg: string): void
   (e: 'loaded', candles: Candle[]): void
+  /** 图上的大周期压力 / 支撑（外层拿去做「价格位置」图用） */
+  (e: 'levels', sr: LevelSR | null): void
   /** 拖完松手：这一段就是我要的 */
   (e: 'select', v: {from: number; to: number; bars: number}): void
   (e: 'clear:select'): void
@@ -422,12 +425,13 @@ function ensureChart(): boolean {
   })
 
   const candle = chart.addSeries(LWC.CandlestickSeries, {
-    upColor: '#26a69a',
-    downColor: '#ef5350',
-    borderUpColor: '#26a69a',
-    borderDownColor: '#ef5350',
-    wickUpColor: '#26a69a',
-    wickDownColor: '#ef5350'
+    // 跟 `style.css` 的 `--ok` / `--bad`、`MiniKline.vue` 的 `UP` / `DOWN` 必须一致
+    upColor: '#5eba89',
+    downColor: '#e35561',
+    borderUpColor: '#5eba89',
+    borderDownColor: '#e35561',
+    wickUpColor: '#5eba89',
+    wickDownColor: '#e35561'
   })
 
   const volume = chart.addSeries(LWC.HistogramSeries, {
@@ -833,6 +837,8 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
   const view = keepView ? refs.chart.timeScale().getVisibleLogicalRange() : null
   candles = data
   overlay.sr = sr
+  // 报给外层：结论区那把「上沿 / 现价 / 下沿」的尺子要用它
+  emit('levels', sr)
 
   if (!data.length) {
     refs.candle.setData([])
@@ -882,7 +888,7 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
       time: t(c),
       value: c.volume,
       color:
-        c.close >= c.open ? 'rgba(38,166,154,0.45)' : 'rgba(239,83,80,0.45)'
+        c.close >= c.open ? 'rgba(94,186,137,0.45)' : 'rgba(227,85,97,0.45)'
     }))
   )
 
@@ -1089,7 +1095,7 @@ function applyTail(tail: Candle[]): void {
   refs.volume.update({
     time: t,
     value: c.volume,
-    color: c.close >= c.open ? 'rgba(38,166,154,0.45)' : 'rgba(239,83,80,0.45)'
+    color: c.close >= c.open ? 'rgba(94,186,137,0.45)' : 'rgba(227,85,97,0.45)'
   })
   if (Number.isFinite(emaValues[i])) {
     refs.ema42.update({time: t, value: emaValues[i]})
@@ -1101,6 +1107,8 @@ function applyTail(tail: Candle[]): void {
     renderLabels()
     showInfoAt(i)
   }
+  // 头部那条行情的「现价」也吃这一口（比 15 秒轮询快得多，价格才能闪得起来）
+  setLivePrice(props.symbol, c.close)
   // 画上的选中框、结束线位置跟着数据长度走
   drawSelection()
 }

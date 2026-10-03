@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import {computed, ref} from 'vue'
+import {computed, onBeforeUnmount, ref, watch} from 'vue'
 import type {Contract} from '../api'
 
 /**
  * 币种选择。
  * 点开默认展开**全部**合约（只显示币种，不带 /USDT）；
  * 打字则按前缀过滤；回车选中第一项，Esc 关闭。
+ *
+ * ★ 2026-10-03 多了一个 **`plain` 模式**（用户：「去掉搜索只显示币种」）：
+ * 窄屏不摆输入框了，就一行「币种 ▾」；点它展开列表，
+ * **搜索框挪进列表最上面** —— 528 个合约照样能搜到。
+ * 好处：顶部那一行不再被一个“像搜索框的框”占掉 150px。
  */
 
 const props = defineProps<{
@@ -13,6 +18,8 @@ const props = defineProps<{
   contracts: Contract[]
   /** 一次最多渲染多少项（防止几百上千条时卡顿） */
   max?: number
+  /** 只显示币种、不要输入框（窄屏用） */
+  plain?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -112,12 +119,49 @@ function onBlur(e: FocusEvent) {
   if (next && boxEl.value?.contains(next)) return
   close()
 }
+
+/*
+ * 点外面关掉。
+ *
+ * 原来只靠输入框的 `blur` —— 但 `plain` 模式里那颗是个普通按钮，
+ * 手指点它**不一定拿得到焦点**（尤其 iPhone），那样列表就永远关不掉。
+ * 所以再挂一个 document 层的 mousedown（捕获阶段）。
+ */
+function onDocDown(e: MouseEvent): void {
+  if (boxEl.value && !boxEl.value.contains(e.target as Node)) close()
+}
+
+watch(open, v => {
+  if (v) document.addEventListener('mousedown', onDocDown, true)
+  else document.removeEventListener('mousedown', onDocDown, true)
+})
+
+onBeforeUnmount(() =>
+  document.removeEventListener('mousedown', onDocDown, true)
+)
 </script>
 
 <template>
-  <div ref="boxEl" class="combo">
-    <!-- 叉号和箭头都叠在输入框里侧，别另占宽度 -->
-    <div class="combo-box" :class="{clearable: !!modelValue}">
+  <div ref="boxEl" class="combo" :class="{plain}">
+    <!--
+      窄屏：不摆输入框，就一行「币种 ▾」（用户：「去掉搜索只显示币种」）。
+      点它展开列表，搜索框在列表里。
+    -->
+    <button
+      v-if="plain"
+      type="button"
+      class="combo-plain"
+      :class="{open}"
+      title="切换币种"
+      @blur="onBlur"
+      @click="open ? close() : show()"
+    >
+      <span class="combo-plain-t">{{ modelValue || '选币种' }}</span>
+      <span class="combo-plain-caret">▾</span>
+    </button>
+
+    <!-- 宽屏：原来的输入框（叉号和箭头叠在里侧，别另占宽度） -->
+    <div v-else class="combo-box" :class="{clearable: !!modelValue}">
       <input
         ref="inputEl"
         :value="modelValue"
@@ -152,6 +196,16 @@ function onBlur(e: FocusEvent) {
     </div>
 
     <div v-if="open" class="combo-list">
+      <!-- 窄屏没有输入框了，所以搜索框搬到列表最上面 -->
+      <input
+        v-if="plain"
+        v-model="filter"
+        class="combo-search"
+        placeholder="搜币种，如 BTC"
+        autocomplete="off"
+        spellcheck="false"
+        @keydown="onKey"
+      />
       <div v-if="!items.length" class="combo-empty">无匹配合约</div>
       <div
         v-for="(c, i) in items"

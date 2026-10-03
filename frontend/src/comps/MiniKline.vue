@@ -20,8 +20,9 @@ const host = ref<HTMLCanvasElement | null>(null)
 let ro: ResizeObserver | null = null
 let raf = 0
 
-const UP = '#26a69a'
-const DOWN = '#ef5350'
+// 跟 `KlineChart.vue`、`style.css` 的 `--ok` / `--bad` 三处必须一致
+const UP = '#5eba89'
+const DOWN = '#e35561'
 const GRID = 'rgba(139, 148, 158, 0.22)'
 const TEXT = 'rgba(139, 148, 158, 0.95)'
 
@@ -135,7 +136,7 @@ function paint() {
       const c = data[i]
       const bh = Math.max(1, (c.volume / maxVol) * volH)
       ctx.fillStyle =
-        c.close >= c.open ? 'rgba(38,166,154,0.42)' : 'rgba(239,83,80,0.42)'
+        c.close >= c.open ? 'rgba(94,186,137,0.42)' : 'rgba(227,85,97,0.42)'
       ctx.fillRect(x(i) - bodyW / 2, vTop + volH - bh, bodyW, bh)
     }
   }

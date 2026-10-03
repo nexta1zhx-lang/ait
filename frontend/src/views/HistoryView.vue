@@ -857,7 +857,7 @@ body.fixed-viewport .list .pager {
   margin-left: 8px;
   font-size: 12px;
   font-weight: 400;
-  color: var(--blue, #58a6ff);
+  color: var(--blue);
 }
 
 .overlay {
@@ -981,6 +981,6 @@ body.fixed-viewport .list .pager {
 
 .ghost.tiny.danger,
 .ghost.danger {
-  color: var(--bad, #f85149);
+  color: var(--bad);
 }
 </style>

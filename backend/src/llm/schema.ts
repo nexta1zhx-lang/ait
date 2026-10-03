@@ -16,7 +16,7 @@ import {z} from 'zod'
  */
 export const judgeSchema = z.object({
   /**
-   * 形状标签 + **每个标签的概率**（最多 4 个）。
+   * 形状标签 + **每个标签的概率**（最多 `MAX_TAGS` 个，现在是 2）。
    *
    * 优先从【可用的标签】（= 标签模板 ∪ 知识库里已用过的标签）里挑，
    * 拼写要完全一致；池子里实在没有合适的才新造。
@@ -42,7 +42,13 @@ export const judgeSchema = z.object({
   recommendation: z.string().catch('')
 })
 
-/** 标签最多留几个（模型偶尔会多给，这里兜一道） */
-export const MAX_TAGS = 4
+/**
+ * 标签最多留几个（模型偶尔会多给，`client.ts` 里靠它兜一道）。
+ *
+ * ★ 2026-10-04：用户要求「标签最多 2 个」—— 原来是 4。
+ * 改这里就够了（契约、标签池提示、前端都引用它 / 跟着变），
+ * ⚠️ 但**数据库那份提示词里写着「最多 4 个」**，那份要单独改（它在库里，不跟着代码走）。
+ */
+export const MAX_TAGS = 2
 
 export type JudgeParsed = z.infer<typeof judgeSchema>

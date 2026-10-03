@@ -1,19 +1,67 @@
 /* ==================== 主题变量 ==================== */
+/*
+ * 2026-10-03 换主题（用户：「蓝色我看不舒服没有看的欲望…改用苹果风…主色调肯定要换…
+ * 背景色还可以再黑点…暖沙 / 圆角要 / k 线不改」）。
+ *
+ * 三件事：
+ *  ① 底色**比原来黑一档、去掉蓝味**（原来是 #0d1117 那种偏蓝的 GitHub 灰）
+ *  ② 主色从 Material 亮蓝 `#42a5f5` 换成**低饱和暖沙 `#d3b583`**
+ *     —— 亮蓝是给白底链接设计的，铺在近黑底上像一束蓝光
+ *  ③ 圆角统一往「苹果那档」走（见 `--r-*`）
+ *
+ * ⚠️ 数据色（涨 `--ok` / 跌 `--bad` / 警示 `--warn`）后来单独调过好几轮：
+ *    用户先让涨跌胶囊「深一点 / 鲜艳一点 / 白字」，又要求「和 k 线一样」，
+ *    最后**直接给了两个值**（「改为 37 73 538 ，891 332 381」= 0~1 小数的 RGB）。
+ *    现在整站涨跌色 = `#5eba89` / `#e35561`（`KlineChart` / `MiniKline` 里的写死色一起改了）。
+ */
 :root {
-  --bg: #0d1117;
-  --panel: #161b22;
-  --panel-2: #1c2230;
-  --border: #2a3441;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --ok: #26a69a;
-  --ok-soft: rgba(38, 166, 154, 0.14);
-  --bad: #ef5350;
-  --bad-soft: rgba(239, 83, 80, 0.14);
+  --bg: #08090b;
+  --panel: #121316;
+  --panel-2: #1a1c20;
+  --border: #26282e;
+  --text: #f0f1f3;
+  --muted: #8d9099;
+
+  /*
+   * 数据色：涨 / 跌 / 警示。
+   * 2026-10-03 换主题时没动，之后又调了很多轮，最后用户直接给了两个值：
+   * 「改为 37 73 538 ，891 332 381」—— 这是 **0~1 小数的 RGB（省了前面的 `0.`）**，
+   * 即 `0.37 / 0.73 / 0.538` 与 `0.891 / 0.332 / 0.381`，×255 得到下面两个色。
+   * ⚠️ **改这里不够**：蜡烛色在 `KlineChart.vue` / `MiniKline.vue` 里是写死的，
+   *    两边要一起改（K 线成交量柱的 `rgba(...)` 也是）。
+   */
+  --ok: #5eba89;
+  --ok-soft: rgba(94, 186, 137, 0.14);
+  --bad: #e35561;
+  --bad-soft: rgba(227, 85, 97, 0.14);
   --warn: #f0b429;
   --warn-soft: rgba(240, 180, 41, 0.14);
-  --blue: #42a5f5;
-  --blue-soft: rgba(66, 165, 245, 0.14);
+
+  /*
+   * 「分类」数据色：图表里既不是涨也不是跌、纯粹分类用的那一段（如 token 构成）。
+   * ⚠️ 这类地方**别再借 `--blue` 了** —— 它现在是主色（暖沙），会跟 `--warn`（琥珀）撞成一家。
+   */
+  --data-3: #e08aa8;
+
+  /*
+   * 主色：低饱和暖沙。语义名是 `--accent*`，
+   * ⚠️ 但 `--blue` / `--blue-soft` 这两个**历史名字**还保留着（全站 57 处在用），
+   *    它们只是 `--accent` 的别名 —— 以后换主色**只改这三行**，不用全文件搜索替换。
+   */
+  --accent: #d3b583;
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 45%, transparent);
+  /* 主色**上面的字**：暖沙是浅色，得压深墨色才看得清（原来写的 #06121f 太蓝，换成中性墨）*/
+  --accent-ink: #17140f;
+  --blue: var(--accent);
+  --blue-soft: var(--accent-soft);
+
+  /* 圆角三档：输入 / 面板 / 弹层（原来是 7/8/9/10/12/16 六种混着用）*/
+  --r-xs: 8px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 18px;
+
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /*
@@ -225,14 +273,14 @@ a {
   background: var(--panel-2);
   border: 1px solid var(--border);
   padding: 3px;
-  border-radius: 10px;
+  border-radius: var(--r-sm);
 }
 
 .nav a {
   color: var(--muted);
   text-decoration: none;
   padding: 6px 14px;
-  border-radius: 7px;
+  border-radius: var(--r-xs);
   font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
@@ -242,9 +290,15 @@ a {
   color: var(--text);
 }
 
+/*
+ * 顶栏导航的选中项。
+ * ⚠️ 原来是**实心主色块**（`background: var(--blue)` + 近黑字）——
+ *    那是全站最刺眼的几块之一（用户：「蓝色我看不舒服」）。
+ *    现在改成「淡底纹 + 主色字」，跟苹果那套「主色只当点缀」一致。
+ */
 .nav a.router-link-active {
-  background: var(--blue);
-  color: #06121f;
+  background: var(--blue-soft);
+  color: var(--blue);
 }
 
 /*
@@ -323,7 +377,7 @@ a {
 
 .badge.ok {
   color: var(--ok);
-  border-color: rgba(38, 166, 154, 0.4);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
 }
 
 .badge.bad {
@@ -340,7 +394,7 @@ a.badge:hover {
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   padding: 14px 16px;
 }
 
@@ -400,7 +454,7 @@ textarea {
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   padding: 8px 10px;
   font-size: 13px;
   width: 100%;
@@ -438,9 +492,9 @@ textarea {
 
 button {
   background: var(--blue);
-  color: #06121f;
+  color: var(--accent-ink);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   padding: 9px 20px;
   font-size: 14px;
   font-weight: 600;
@@ -487,7 +541,7 @@ button.danger {
 
 button.danger:hover {
   color: var(--bad);
-  border-color: rgba(239, 83, 80, 0.5);
+  border-color: color-mix(in srgb, var(--bad) 50%, transparent);
   filter: none;
 }
 
@@ -495,7 +549,7 @@ button.danger:hover {
 .seg {
   display: inline-flex;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--r-sm);
   overflow: hidden;
   background: var(--panel-2);
 }
@@ -533,16 +587,17 @@ button.danger:hover {
   }
 }
 
+/* 同上：选中那一格用淡底纹 + 主色字，不再是实心块 */
 .seg button.active {
-  background: var(--blue);
-  color: #06121f;
+  background: var(--blue-soft);
+  color: var(--blue);
 }
 
 /* ==================== 提示条 ==================== */
 .notice,
 .error,
 .loading {
-  border-radius: 10px;
+  border-radius: var(--r-md);
   padding: 11px 14px;
   font-size: 13px;
   line-height: 1.6;
@@ -557,7 +612,7 @@ button.danger:hover {
 
 .error {
   background: var(--bad-soft);
-  border: 1px solid rgba(239, 83, 80, 0.45);
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
   color: #ff9b98;
   white-space: pre-wrap;
 }
@@ -660,13 +715,17 @@ button.danger:hover {
 
    ⚠️ 2026-10-03 用户要求「取消左侧边框线」：
    那条 `border-left` 色条全删了，身份改由**整圈细描边 + 标题色 / 徽标色**带
-   —— 三块照样分得出来，但左边不再是三条竖着的彩线。 */
+   —— 三块照样分得出来，但左边不再是三条竖着的彩线。
+
+   ⚠️ 2026-10-04 用户又说「**不要背景框和背景**，纯文字太单调懒得看」：
+   底色 + 描边一起去掉，改成**小节标签 + 一条细线分隔**；
+   同时上面补三块图（概率条 / 形状条 / 价格位置尺），见下面的 `.prob` `.shape` `.lv`。 */
 .concl {
-  margin-top: 8px;
-  padding: 11px 13px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
+  margin-top: 6px;
+  padding: 10px 0 0;
+  border: 0;
+  background: none;
+  border-top: 1px solid var(--border);
 }
 
 /*
@@ -717,7 +776,7 @@ button.danger:hover {
 
 /* ① 推荐：最重要的一块（三行动作各自配色，标题绿） */
 .concl.rec {
-  border-color: rgba(38, 166, 154, 0.38);
+  border-color: color-mix(in srgb, var(--ok) 38%, transparent);
 }
 .concl.rec .concl-h {
   font-size: 14px;
@@ -792,14 +851,14 @@ button.danger:hover {
 
 /* ② 走势 */
 .concl.out {
-  border-color: rgba(66, 165, 245, 0.34);
+  border-color: var(--accent-line);
 }
 .concl.out .concl-h {
   color: var(--blue);
 }
 .concl.out .concl-pct {
   background: var(--blue);
-  color: #0d1117;
+  color: var(--accent-ink);
 }
 
 /* ③ 理由：默认收起（最轻的一块） */
@@ -843,7 +902,7 @@ button.danger:hover {
 
 .stat {
   background: var(--panel-2);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   padding: 7px 10px;
   min-width: 0;
 }
@@ -891,6 +950,227 @@ button.danger:hover {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 10px;
+}
+
+/* ==================== 结论区的图示 ====================
+   用户 2026-10-04：「不要背景框和背景，纯文字太单调懒得看，能否**图示预测**」。
+   于是：外面不再套卡片，里面用三块图说话 ——
+     ① `.prob`  走势概率：一条长条
+     ② `.shape` 形状：每个标签一条概率条
+     ③ `.lv`    价格位置：上沿 / 现价 / 下沿 一把尺子
+   文字（推荐 / 走势 / 理由）留着，但只用小节标签 + 细线分隔。 */
+
+/* 小节标签：淡、小、字距拉开一点，起分隔作用又不抢眼 */
+.sec-label {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+
+/* 结果区整块不要卡片底（用户：「不要背景框和背景」） */
+.result-card,
+.panel.flush {
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* ① 走势概率 */
+.prob {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.prob-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* 那个百分数：整块里最大的字 —— 一眼就是它 */
+.prob-num {
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -1px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.prob-num i {
+  font-size: 15px;
+  font-style: normal;
+  font-weight: 600;
+  margin-left: 1px;
+  color: var(--muted);
+}
+
+.prob-num.go {
+  color: var(--ok);
+}
+.prob-num.wait {
+  color: var(--warn);
+}
+.prob-num.no {
+  color: var(--bad);
+}
+
+.prob-cap {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.prob-top .pill {
+  margin-left: auto;
+}
+
+.prob-track {
+  display: block;
+  height: 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 16%, var(--panel));
+  overflow: hidden;
+}
+
+.prob-track > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--muted);
+  transition: width 0.5s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.prob-track > i.go {
+  background: var(--ok);
+}
+.prob-track > i.wait {
+  background: var(--warn);
+}
+.prob-track > i.no {
+  background: var(--bad);
+}
+
+/* ② ③ 两块图的共同外壳 */
+.viz {
+  margin-top: 14px;
+}
+
+.shape {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.shape-name {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shape-track {
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 14%, var(--panel));
+  overflow: hidden;
+}
+
+.shape-track > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--blue) 75%, transparent);
+  transition: width 0.5s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.shape-pct {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ③ 价格位置：左边一根竖尺，右边三行数 */
+.lv {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.lv-rail {
+  position: relative;
+  border-radius: 999px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--muted) 26%, transparent),
+    color-mix(in srgb, var(--muted) 8%, transparent)
+  );
+}
+
+.lv-dot {
+  position: absolute;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 0 3px var(--panel);
+  transition: top 0.5s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.lv-rows {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.lv-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.lv-row .k {
+  font-style: normal;
+  color: var(--muted);
+}
+
+.lv-row .v {
+  font-family: var(--mono);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.lv-row .d {
+  font-style: normal;
+  font-family: var(--mono);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 上沿偏红、下沿偏绿（跟“涨跌”无关，只是上下两头的区分） */
+.lv-row.hi .v {
+  color: var(--bad);
+}
+.lv-row.lo .v {
+  color: var(--ok);
+}
+.lv-row.now .v {
+  font-weight: 700;
 }
 
 /* ==================== 周期标识 ==================== */
@@ -1077,7 +1357,7 @@ button.danger:hover {
 }
 
 .table tbody tr:hover td {
-  background: rgba(66, 165, 245, 0.05);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .table .r {
@@ -1110,11 +1390,11 @@ button.danger:hover {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.mkt-bar .seg button {
-  padding: 4px 9px;
-  font-size: 12px;
+  /*
+   * ⚠️ 必须 `0 0 auto`：`.mkt` 是个高度受限的 flex 列，默认 `flex-shrink: 1` 会把
+   * 这一行**压扁**（实测窄屏只剩 4px，搜索框整个被 `overflow: hidden` 剪掉、看不见）。
+   */
+  flex: 0 0 auto;
 }
 
 .mkt-search {
@@ -1122,24 +1402,17 @@ button.danger:hover {
   min-width: 0;
   padding: 5px 9px;
   font-size: 12px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--text);
 }
 
-.mkt-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.mkt-meta > span:first-child {
-  flex: 1 1 auto;
-  min-width: 0;
-}
+/*
+ * ⚠️ `.mkt-meta`（共 N 个合约 / 刚刚更新 / 刷新）那一行 2026-10-03 已删：
+ * 统计挪到「合约行情」标题右侧，数据本来就是实时推的 + 5 分钟自动重拉，
+ * 那个「刷新」按钮和「x 秒前更新」都是多余的。
+ */
 
 /*
  * 列表的滚动结构（用户 2026-10-03：「吸顶效果不好，改为布局」）：
@@ -1165,6 +1438,93 @@ button.danger:hover {
   /* 表头底下那条线：在 `thead th` 上（`.table th` 自带） */
 }
 
+/*
+ * 表头上那组排序箭头（用户 2026-10-03：「…旁加图标可以切换排行」→
+ * 「成交量没法双向点击，图标换个分开的」→「图标宽高不对没有适应、没有居中太宽了、
+ * 点击切换没有生效」）。
+ *
+ * 所以：
+ *   · 两个方向是**两个分开的 `<button>`**（不是两个 `<svg>`）——
+ *     SVG 默认只在**画出来的那块**响应指针（`visiblePainted`），
+ *     三角形旁边包括内边距都是死区，手指稍偏就「点了没反应」。
+ *     包成 HTML 按钮后整个 16×10 都是热区。
+ *   · 三角形本身 **8×5**（1.6:1 的正常比例，压扁了才显得「太宽」），
+ *     在按钮里居中。
+ *   · 按钮高 10px × 2 = 20px，正好等于文字行高 —— 不会把表头顶高（33→35px）。
+ */
+.mkt-head th.sortable {
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mkt-head th.sortable .scell {
+  /*
+   * ⚠️ 必须包一层 flex：直接让箭头待在 `th` 的行盒里，
+   * 那个 20px 高的行内盒会把行盒顶起来 —— 实测表头 33px → **41px**。
+   */
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.mkt-head th.sortable .s-label {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.mkt-head th.sortable .sarr {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  /* ⚠️ 贴近文字：1px 就够（用户：「图标再近一点和文字」） */
+  margin-left: 1px;
+}
+
+.mkt-head th.sortable .sbtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * 20 宽是为了好点（三角形只有 9px）；
+   * 高只有 8px —— 两个叠起来 16px，比文字行（19px）矮，
+   * 所以既贴着文字、也不会把表头顶高（一直是 33px）。
+   */
+  width: 20px;
+  height: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mkt-head th.sortable .sbtn svg {
+  display: block;
+  /* 三角形本身 9x6：比原来大一点、看得清，上下只留 1px 缝 */
+  width: 9px;
+  height: 6px;
+  fill: currentColor;
+  opacity: 0.3;
+  transition: opacity 0.12s;
+}
+
+.mkt-head th.sortable.on {
+  color: var(--text);
+}
+
+/* 没排到的那一列：箭头淡着（只当「这里能点」的提示），排到的亮蓝色 */
+.mkt-head th.sortable .sbtn:hover svg {
+  opacity: 0.6;
+}
+
+.mkt-head th.sortable .sbtn.on svg,
+.mkt-head th.sortable .sbtn.on:hover svg {
+  opacity: 1;
+  color: var(--blue);
+}
+
 .mkt-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -1185,6 +1545,15 @@ button.danger:hover {
 
 .mkt-panel > h2 {
   flex: 0 0 auto;
+}
+
+/* 标题右侧的「共 N 个合约」（用户：把下面那行统计挪到这里） */
+.mkt-panel > h2 .mkt-count {
+  margin-left: auto;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .mkt-panel > .mkt {
@@ -1244,12 +1613,25 @@ button.danger:hover {
   box-shadow: inset 2px 0 0 var(--blue);
 }
 
-/* 24h 涨跌幅：一块小色底（用户：加上背景），涨绿跌红好扫 */
+/*
+ * 24h 涨跌幅：一块小色底（用户：加上背景），涨绿跌红好扫。
+ * 2026-10-03 一路迭代（以最后为准）：
+ *   ①「背景对比再深一点」→ ②「**不要描边，实体颜色**」→ ③「白字」
+ *   → ④「颜色深一点」→ ⑤「鲜艳一点」（关键：**调黑不调灰**，掺灰会发闷）
+ *   → ⑥「和 k 线一样」→ ⑦「亮一点」→ ⑧ 用户直接给色值 → ⑨「字改白色」
+ *   → ⑩「**感觉没和背景色适应，再调一下**」
+ *
+ * ⑩ 的做法：**把所在面板的底色掺进填充里**（`color-mix(… 85%, var(--panel))`）。
+ * 纯主色铺在近黑底上会「浮」起来，像贴上去的；掺 15% 面板色之后才坐回页面里，
+ * 白字对比度也顺带从 2.4 提到 3.2。圆角同时改回主题那一档（`--r-xs`）。
+ *
+ * ⚠️ 字是**白色**（用户明确要的）。白字在亮绿上偏弱，想更清楚只能把底压深。
+ */
 .mkt-table .chg {
   display: inline-block;
   min-width: 62px;
   padding: 2px 6px;
-  border-radius: 6px;
+  border-radius: var(--r-xs);
   background: var(--panel-2);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -1273,13 +1655,13 @@ button.danger:hover {
 }
 
 .mkt-table .chg.up {
-  background: var(--ok-soft);
-  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 85%, var(--panel));
+  color: #fff;
 }
 
 .mkt-table .chg.down {
-  background: var(--bad-soft);
-  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 85%, var(--panel));
+  color: #fff;
 }
 
 .mkt-table .num {
@@ -1406,7 +1788,7 @@ body.fixed-viewport .analyze {
 
 /* 「画范围」按钮：进了拖动模式就亮起来 */
 .follow-row .range-btn.on {
-  color: #06121f;
+  color: var(--accent-ink);
   background: var(--blue);
   border-color: var(--blue);
 }
@@ -1596,21 +1978,6 @@ body.fixed-viewport .split {
  */
 .scroll-body > * {
   flex: 0 0 auto;
-}
-
-/* 二级 tab 比一级小一号，视觉上分得出层级 */
-.sub-tabs {
-  align-self: flex-start;
-}
-
-.sub-tabs button {
-  padding: 4px 9px;
-  font-size: 11px;
-}
-
-/* 二级 tab 就 4 个短的，让它自己排一行 */
-.analyze .sub-tabs {
-  flex-wrap: wrap;
 }
 
 /* 右侧 K 线铺满整栏高度 */
@@ -2035,7 +2402,7 @@ body.fixed-viewport .split {
 .spin {
   width: 26px;
   height: 26px;
-  border: 3px solid rgba(66, 165, 245, 0.22);
+  border: 3px solid color-mix(in srgb, var(--accent) 22%, transparent);
   border-top-color: var(--blue);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -2122,7 +2489,7 @@ body.fixed-viewport .split {
 
 .chart-foot button.time-pick.set {
   color: var(--blue);
-  border-color: rgba(66, 165, 245, 0.5);
+  border-color: var(--accent-line);
   background: var(--blue-soft);
 }
 
@@ -2196,14 +2563,14 @@ body.fixed-viewport .split {
   position: absolute;
   top: 0;
   bottom: 0;
-  background: rgba(66, 165, 245, 0.14);
+  background: var(--accent-soft);
   border-left: 1px solid var(--blue);
   border-right: 1px solid var(--blue);
   pointer-events: none;
 }
 
 .range-box.live {
-  background: rgba(66, 165, 245, 0.22);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 /*
@@ -2509,10 +2876,11 @@ body.fixed-viewport .split {
   }
 }
 
+/* 图表工具条：同様只给淡底纹 */
 .chart-tools button.active {
-  background: var(--blue);
-  color: #06121f;
-  border-color: var(--blue);
+  background: var(--blue-soft);
+  color: var(--blue);
+  border-color: var(--accent-line);
 }
 
 /* ==================== K 线块顶部的行情条 ==================== */
@@ -2541,35 +2909,201 @@ body.fixed-viewport .split {
   width: 190px;
 }
 
+/*
+ * 中间那一块（现价 + 涨跌 + 24h 位置条）。
+ * 2026-10-03 升级（用户：「k 线上面的价格感觉光秃秃的」）—— 原来是
+ * 「一个彩色大数字 + 一行小字」，现在三件事：
+ *   ① 现价用**正文色的大字**（不再自己染色，颜色统一交给胶囊，免得一屏好几处绿/红）
+ *   ② 涨跌做成**实底胶囊**：三角箭头 + 涨跌额 + 涨跌幅（加粗）
+ *   ③ 下面补一条 **24h 位置条**，一眼看出现价在 24h 区间里靠上还是靠下
+ *      （低/高的具体数值仍在右边指标格里，这里只给位置，不重复报数）
+ */
 .tk-head .tk-mid {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   flex: 0 0 auto;
+}
+
+.tk-head .tk-price {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .tk-head .tk-last {
   font-family: var(--mono);
-  font-size: 21px;
+  font-size: 23px;
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1.05;
+  letter-spacing: -0.3px;
+  /* 基色：涨绿跌红（见下面 `--tk-base`） */
+  color: var(--tk-base);
   font-variant-numeric: tabular-nums;
 }
 
-.tk-head .tk-chg {
+/*
+ * 价格的基色 = 跟当前行情（24h 涨跌）走。
+ *
+ * ⚠️ 抽成 `--tk-base` 是为了给下面那个闪动动画用：
+ * 关键帧里要「从这一跳的颜色淡回**基色**」，而基色是变的（翻绿翻红 / “—”时的正文色），
+ * 写死任何一个颜色都会在另一种情况下淡错。自定义属性会被动画按元素现算，正好。
+ */
+.tk-head .tk-mid {
+  --tk-base: var(--text);
+}
+
+.tk-head .tk-mid.up {
+  --tk-base: var(--ok);
+}
+
+.tk-head .tk-mid.down {
+  --tk-base: var(--bad);
+}
+
+/*
+ * 价格跳一下（用户：「**价格颜色跟随实时行情闪动**」）。
+ *
+ * ★ 闪的**颜色**跟的是**这一跳**的方向，不是 24h 涨跌：
+ *   往上跳 → 闪绿；往下跳 → 闪红；然后 0.7s 淡回基色。
+ *   所以 24h 明明是绿的时候，往下跳那一下也会红一下 —— 跟交易所一个感觉。
+ *
+ * ⚠️ 用户 2026-10-03 明确说过「**闪动不要加阴影**」：
+ *    所以这里只改 `color` + 一点 `brightness`，不发光晕、不投影。
+ */
+.tk-head .tk-last.blip-up {
+  animation: tk-blip-up 0.7s ease-out;
+}
+
+.tk-head .tk-last.blip-down {
+  animation: tk-blip-down 0.7s ease-out;
+}
+
+/*
+ * ⚠️ 关键帧写成「**先稳住跳色、再淡回基色**」而不是两个颜色直接插值：
+ *    绿 ↔ 红 在 sRGB 里直接过渡，中间会经过一坨发灰的橄榄色（实测 rgb(117,169,130)），
+ *    看着脏。所以前 35%（约 0.25s）钉在跳色上，后 65% 再淡回去。
+ */
+@keyframes tk-blip-up {
+  0% {
+    color: var(--ok);
+    filter: brightness(1.8);
+  }
+  35% {
+    color: var(--ok);
+    filter: brightness(1.25);
+  }
+  100% {
+    color: var(--tk-base);
+    filter: brightness(1);
+  }
+}
+
+@keyframes tk-blip-down {
+  0% {
+    color: var(--bad);
+    filter: brightness(1.8);
+  }
+  35% {
+    color: var(--bad);
+    filter: brightness(1.25);
+  }
+  100% {
+    color: var(--tk-base);
+    filter: brightness(1);
+  }
+}
+
+/*
+ * 涨跌额 / 涨跌幅：用户 2026-10-03「**不要背景块**」——
+ * 所以就是一行彩色文字（那个实心胶囊撤了），箭头跟文字同色。
+ */
+.tk-head .tk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  color: var(--muted);
   font-family: var(--mono);
   font-size: 13px;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
-.tk-head .tk-last.up,
-.tk-head .tk-chg.up {
+.tk-head .tk-mid.up .tk-chip {
   color: var(--ok);
 }
 
-.tk-head .tk-last.down,
-.tk-head .tk-chg.down {
+.tk-head .tk-mid.down .tk-chip {
   color: var(--bad);
+}
+
+.tk-head .tk-chip b {
+  font-weight: 700;
+}
+
+.tk-head .tk-arrow {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 5px;
+  fill: currentColor;
+}
+
+.tk-head .tk-range {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+}
+
+.tk-head .tk-range-label {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.tk-head .tk-range-track {
+  position: relative;
+  width: 150px;
+  height: 4px;
+  border-radius: 999px;
+  /* 也是一块实体色：不再用「面板底 + 一圈描边」 */
+  background: color-mix(in srgb, var(--muted) 16%, var(--panel));
+}
+
+.tk-head .tk-range-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  /* 行情一动，进度条**滑过去**而不是“啪”一下跳（用户：「柱状条也要动」） */
+  transition: width 0.6s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.tk-head .tk-mid.up .tk-range-fill {
+  background: color-mix(in srgb, var(--ok) 65%, transparent);
+}
+
+.tk-head .tk-mid.down .tk-range-fill {
+  background: color-mix(in srgb, var(--bad) 65%, transparent);
+}
+
+/* 现价那颗小圆点：外面套一圈面板色，压在条上更清楚 */
+.tk-head .tk-range-dot {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  background: var(--text);
+  transform: translateY(-50%);
+  box-shadow: 0 0 0 2px var(--panel);
+  /* 跟进度条一起滑 */
+  transition: left 0.6s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
 .tk-head .tk-stats {
@@ -2766,7 +3300,7 @@ body.fixed-viewport .split {
 
 .combo-item:hover,
 .combo-item.hot {
-  background: rgba(66, 165, 245, 0.16);
+  background: var(--accent-soft);
 }
 
 .combo-empty {
@@ -2774,6 +3308,62 @@ body.fixed-viewport .split {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+/*
+ * 窄屏那版「只显示币种」（`plain` 模式）。
+ *
+ * 用户 2026-10-03：「**去掉搜索只显示币种**」—— 窄屏不再摆那个像搜索框的框
+ * （为了显示一个币名占 150px 不值），就是一行「BTC ▾」，点开才出列表；
+ * **搜索框搬到列表里面**，528 个合约照样搜得到。
+ */
+.combo-plain {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px 4px 2px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.combo-plain:active {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.combo-plain-t {
+  letter-spacing: 0.2px;
+}
+
+/* 箭头：展开后翻过来，能看出「点过了」 */
+.combo-plain-caret {
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+
+.combo-plain.open .combo-plain-caret {
+  transform: rotate(180deg);
+}
+
+/* 列表从币种那儿往下弹，**要比触发按钮宽得多**，否则一列窄条没法点 */
+.combo.plain .combo-list {
+  right: auto;
+  width: 62vw;
+  min-width: 210px;
+  max-width: 320px;
+}
+
+/* 列表里那个搜索框（搜 528 个合约用） */
+.combo-search {
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 7px 9px;
+  font-size: 13px;
 }
 
 /* ==================== 知识库 ==================== */
@@ -2962,7 +3552,7 @@ body.fixed-viewport .split {
 }
 
 .archived-link {
-  color: var(--blue, #58a6ff);
+  color: var(--blue);
   text-decoration: underline;
 }
 
@@ -3005,14 +3595,14 @@ body.fixed-viewport .split {
 }
 
 .chip:hover {
-  border-color: var(--blue, #58a6ff);
-  color: var(--fg, #e6edf3);
+  border-color: var(--blue);
+  color: var(--fg, #f0f1f3);
 }
 
 .chip.on {
-  border-color: var(--blue, #58a6ff);
-  background: rgba(88, 166, 255, 0.14);
-  color: var(--fg, #e6edf3);
+  border-color: var(--blue);
+  background: var(--blue-soft);
+  color: var(--fg, #f0f1f3);
 }
 
 .chip i {
@@ -3027,49 +3617,8 @@ body.fixed-viewport .split {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--blue, #58a6ff);
+  color: var(--blue);
   font-size: 12px;
-}
-
-/* ── 各周期行情（把 K 线切成小段读出来的文字） ── */
-.blocks {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.block {
-  border: 1px solid var(--line, #2a2f3a);
-  border-radius: 8px;
-  background: var(--panel2, rgba(255, 255, 255, 0.02));
-  overflow: hidden;
-}
-
-.block > summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  cursor: pointer;
-  font-size: 12px;
-  flex-wrap: wrap;
-}
-
-.block[open] > summary {
-  border-bottom: 1px solid var(--line, #2a2f3a);
-}
-
-.block-text {
-  margin: 0;
-  padding: 10px;
-  max-height: 340px;
-  overflow: auto;
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: 11px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--fg2, #b8c0cc);
 }
 
 /* ── 模型余额（顶栏那颗，是个按钮：点一下刷新） ── */
@@ -3111,9 +3660,10 @@ button.badge:disabled {
 }
 
 .balance.ok {
-  background: rgba(38, 166, 154, 0.18);
-  color: #46d3cb;
-  border-color: rgba(70, 211, 203, 0.45);
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  /* 字色 / 描边都从 `--ok` 推 —— 以后换涨色只改 `:root`，不用回来改这里 */
+  color: color-mix(in srgb, var(--ok) 78%, #fff);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
 .balance.warn {
@@ -3222,8 +3772,9 @@ button.badge.balance:hover:not(:disabled) {
     grid-auto-flow: column;
     grid-auto-columns: 1fr;
     border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 16px;
-    background: rgba(22, 27, 34, 0.72);
+    border-radius: var(--r-lg);
+    /* 跟新底色对一下（原来是偏蓝的 #161b22 半透）*/
+    background: rgba(18, 19, 22, 0.72);
     backdrop-filter: blur(14px) saturate(1.3);
     -webkit-backdrop-filter: blur(14px) saturate(1.3);
     overflow: hidden;
@@ -3315,47 +3866,69 @@ button.badge.balance:hover:not(:disabled) {
     border-radius: 8px;
   }
   .seg button.active {
-    background: rgba(66, 165, 245, 0.18);
+    background: var(--accent-soft);
     color: var(--blue);
   }
 
   /*
-   * 一级 tab（合约行情 / K 线 / 实时分析 / 历史分析）：做成**悬浮层**——
-   * 圆角 + 半透明 + 一层很淡的投影，浮在刚才那张面上，不再是“通栏色带”。
-   * 所以也不会再出现“圆角处露出深色底”那种黑边。
+   * 一级 tab（合约行情 / K 线 / 实时分析 / 历史分析）
+   * 用户 2026-10-03：「**移动端顶部 tab 简化，不要背景，底部用短一点的线表示，靠左**」。
+   *
+   * 所以把之前那套「外壳」全拆了（色带 → 悬浮玻璃层 → 现在**什么都没有**）：
+   * 一排纯文字的 tab 靠左排；选中态不再用色块，改成**底下一小段横线**。
+   * 这样顶部最干净，视线也不会被一条色带抢走。
    */
   .tab-row {
     margin: 0;
-    gap: 0;
-    padding: 2px 0 4px;
+    padding: 4px 0 2px;
   }
   .tab-row .seg {
-    width: 100%;
+    width: auto;
     flex-wrap: nowrap;
-    padding: 4px;
-    background: rgba(255, 255, 255, 0.06);
-    border-radius: 12px;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    justify-content: flex-start;
+    padding: 0;
+    background: none;
+    border-radius: 0;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
   .tab-row .seg button {
     position: relative;
-    flex: 1 1 0;
-    padding: 8px 6px;
+    /* 靠左：按自己的文字宽度排，不拉伸、不分摊整行 */
+    flex: 0 0 auto;
+    /* 下面那点内边距是给下划线留的位置 */
+    padding: 6px 2px 9px;
     border: 0;
-    font-size: 12.5px;
+    border-radius: 0;
+    font-size: 13px;
     font-weight: 600;
-    text-align: center;
+    text-align: left;
     background: transparent;
     color: var(--muted);
   }
-  .tab-row .seg button.active {
-    background: var(--blue);
-    color: #06121f;
+  .tab-row .seg button + button {
+    margin-left: 18px;
   }
-  /* 悬浮层跟内容之间留一小口气（两面同色，看上去其实是一条头发缝） */
+  /* 这一块原来是实心亮蓝（全屏最刺眼的一处）→ 淡底纹 → 现在什么都不铺 */
+  .tab-row .seg button.active {
+    background: none;
+    color: var(--blue);
+  }
+  /* 选中：底部一小段横线（比文字窄、居中），比色块轻得多 */
+  .tab-row .seg button.active::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    width: 18px;
+    height: 2px;
+    border-radius: 999px;
+    background: var(--blue);
+    transform: translateX(-50%);
+  }
+  /* 已经没有悬浮层了，不需要再往内容下面“钻” */
   .tab-row + * {
-    margin-top: -6px;
+    margin-top: 0;
   }
   /* 内容区的面板把上沿拉平，别在悬浮层下面冒出圆角 */
   .split .scroll-body > .panel {
@@ -3489,10 +4062,32 @@ button.badge.balance:hover:not(:disabled) {
     border-radius: 0;
   }
   .split.m-market .mkt-panel > h2,
-  .split.m-market .mkt-bar,
-  .split.m-market .mkt-meta {
+  .split.m-market .mkt-bar {
     padding-left: 14px;
     padding-right: 14px;
+  }
+  /*
+   * 手机端往下翻就把搜索框收起来（用户：「移动端下滑搜索框自动收起」）——
+   * 一只手翻榜单时那一行白占地方；往上滑回来、或者滑回顶部就自动露出来。
+   *
+   * 收的方式用 `max-height` 而不是 `display:none`：这样有过渡、不会“跳”一下。
+   * ⚠️ `.mkt` 自己有 `gap: 8px`，收起来时得一起归零，不然还剩一条 8px 的缝。
+   * 桌面端不写这段（宽屏上那一行不贵，鼠标滚轮也不需要这个）。
+   */
+  .mkt-bar {
+    max-height: 56px;
+    overflow: hidden;
+    transition:
+      max-height 0.2s ease,
+      opacity 0.2s ease;
+  }
+  .mkt.compact {
+    gap: 0;
+  }
+  .mkt.compact .mkt-bar {
+    max-height: 0;
+    opacity: 0;
+    pointer-events: none;
   }
   .split.m-market .mkt-table th:first-child,
   .split.m-market .mkt-table td:first-child {
@@ -3583,6 +4178,27 @@ button.badge.balance:hover:not(:disabled) {
     display: inline-flex;
     align-items: center;
   }
+  /*
+   * 「分析」在窄屏就是**一颗闪电图标**（用户：「分析改为闪电图标」）。
+   * 做成实心主色方块 + 墨色闪电（跟全站 CTA 那套一致），
+   * 尺寸（30×28）跟旁边的 ＋ / ✓ / 配置 对齐，一排看着是一路的。
+   * 文案（分析 / 分析中… / 按这段行情判断）走 `title` + `aria-label`。
+   */
+  .tk-head .tk-run {
+    width: 30px;
+    height: 28px;
+    padding: 0;
+    justify-content: center;
+    background: var(--blue);
+    border-color: transparent;
+    color: var(--accent-ink);
+    font-size: 12px;
+  }
+  .tk-head .tk-run svg {
+    width: 15px;
+    height: 15px;
+    fill: currentColor;
+  }
   .tk-head .tk-only-mobile {
     padding: 5px 9px;
     font-size: 12px;
@@ -3607,7 +4223,7 @@ button.badge.balance:hover:not(:disabled) {
   }
   .tk-plus.on {
     color: var(--bad);
-    border-color: rgba(239, 83, 80, 0.5);
+    border-color: color-mix(in srgb, var(--bad) 50%, transparent);
   }
   /*
    * 确认提炼：一颗钩，绿一点，跟旁边那颗红叉分得清。
@@ -3615,7 +4231,7 @@ button.badge.balance:hover:not(:disabled) {
    */
   .tk-head .tk-add {
     color: var(--ok);
-    border-color: rgba(38, 166, 154, 0.45);
+    border-color: color-mix(in srgb, var(--ok) 45%, transparent);
   }
   .chart-head .head-run {
     display: none;
@@ -3640,8 +4256,20 @@ button.badge.balance:hover:not(:disabled) {
   .tk-head .tk-left .combo {
     width: 150px;
   }
+  /* 「只显示币种」那一版不占固定宽度，按币名长短自己算（山寨币名字长一点也放得下） */
+  .tk-head .tk-left .combo.plain {
+    width: auto;
+  }
   .tk-head .tk-last {
-    font-size: 19px;
+    font-size: 20px;
+  }
+  /* 窄屏：位置条铺满整行，别缩在左边一小截 */
+  .tk-head .tk-range {
+    width: 100%;
+  }
+  .tk-head .tk-range-track {
+    flex: 1 1 auto;
+    width: auto;
   }
   .tk-head .tk-stats {
     flex: 1 0 100%;
@@ -3724,7 +4352,7 @@ button.badge.balance:hover:not(:disabled) {
   padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
   background: var(--panel);
   border-top: 1px solid var(--border);
-  border-radius: 16px 16px 0 0;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
   box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.5);
   animation: sheet-up 0.18s ease;
 }
@@ -3793,6 +4421,51 @@ button.badge.balance:hover:not(:disabled) {
   text-align: center;
 }
 
+/*
+ * 「行情过滤」那一行的输入：数字框 + 单位 M + 一排常用档位。
+ * 档位是给手机准备的 —— 点一下就行，不用弹键盘。
+ */
+.mvol {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mvol input {
+  width: 74px;
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: var(--mono);
+  text-align: right;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.mvol input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
+.mvol > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mvol-presets {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.mvol-presets button.on {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--blue);
+}
+
 .sheet-foot {
   margin: 10px 0 0;
   font-size: 11px;
@@ -3826,8 +4499,8 @@ button.badge.balance:hover:not(:disabled) {
 }
 
 .switch.on {
-  background: rgba(66, 165, 245, 0.22);
-  border-color: rgba(66, 165, 245, 0.55);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent-line);
 }
 
 .switch.on span {

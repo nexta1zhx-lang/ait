@@ -8,9 +8,9 @@
  *
  * 数据来自「../ticker」（15 秒刷一次），拿不到就显示「—」，不挡页面。
  */
-import {computed} from 'vue'
+import {computed, onBeforeUnmount, ref, watch} from 'vue'
 import {fixed, fmt} from '../format'
-import {nowTick, ticker} from '../ticker'
+import {freshLivePrice, nowTick, ticker} from '../ticker'
 
 /** 涨了绿、跌了红 —— 跟图上蜡烛一套 */
 const tone = computed(() => {
@@ -19,14 +19,87 @@ const tone = computed(() => {
   return Number(v) >= 0 ? 'up' : 'down'
 })
 
-const lastText = computed(() => fmt(ticker.value?.last))
+/**
+ * 现价。
+ *
+ * ★ 优先用 **K 线 WS 推来的实时价**（秒级），拿不到才退回 15 秒那份轮询 ——
+ * 用户 2026-10-03：「价格颜色跟随当前行情变化闪动」，15 秒才动一次是闪不起来的。
+ * 两边都是「现价」同一个东西，不存在对不上的问题。
+ */
+const last = computed(() => freshLivePrice.value ?? ticker.value?.last ?? null)
 
-const changeText = computed(() => {
+const lastText = computed(() => fmt(last.value))
+
+/**
+ * 价格跳一下。
+ *
+ * **闪的颜色跟的是这一跳的方向**（往上跳闪绿、往下跳闪红），不是 24h 涨跌 ——
+ * 所以 24h 明明是绿的，往下跳那一下也会红一下，跟交易所一个感觉。
+ * CSS 那边靠 `--tk-base`（基色）实现「从跳的色淡回基色」。
+ *
+ * ⚠️ 不加阴影（用户 2026-10-03：「闪动不要加阴影」）—— 只改颜色 + 一点亮度。
+ *
+ * ⚠️ 连着两次同一个方向时，光把 class 设成同一个值**不会重新播动画**，
+ * 所以先清空、下一帧再设，强制它从头播。
+ */
+const blip = ref<'' | 'up' | 'down'>('')
+let prevPrice = 0
+let blipTimer: ReturnType<typeof setTimeout> | null = null
+
+function fire(dir: 'up' | 'down'): void {
+  blip.value = ''
+  requestAnimationFrame(() => (blip.value = dir))
+  if (blipTimer) clearTimeout(blipTimer)
+  blipTimer = setTimeout(() => (blip.value = ''), 800)
+}
+
+watch(last, v => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return
+  if (prevPrice && n !== prevPrice) fire(n > prevPrice ? 'up' : 'down')
+  prevPrice = n
+})
+
+onBeforeUnmount(() => {
+  if (blipTimer) clearTimeout(blipTimer)
+})
+
+/**
+ * 涨跌额与涨跌幅**分开**（原来是拼成一串「739.7  +0.86%」）：
+ * 拆开才能各自排版 —— 额度淡一点、百分比加粗，读数更有层次。
+ * 正数显式带 `+`（以前不带，跟下面那颗百分比对不齐，看着像缺了一块）。
+ */
+const changeAbs = computed(() => {
+  const v = ticker.value?.change24h
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
+  const n = Number(v)
+  return `${n >= 0 ? '+' : ''}${fmt(n)}`
+})
+
+const changePct = computed(() => {
+  const v = ticker.value?.change24hPct
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
+  const n = Number(v)
+  return `${n >= 0 ? '+' : ''}${fixed(n, 2)}%`
+})
+
+/**
+ * 现价落在 24h 区间（最低 ~ 最高）里的位置，0~100。
+ * 拿不到、或高低相等 → null（那一小条整个不画，不画一条假的）。
+ */
+const rangePos = computed<number | null>(() => {
   const d = ticker.value
-  if (!d || d.change24h === null || d.change24hPct === null) return '—'
-  const abs = fmt(d.change24h)
-  const p = `${Number(d.change24hPct) >= 0 ? '+' : ''}${fixed(d.change24hPct, 2)}%`
-  return `${abs}  ${p}`
+  const hi = Number(d?.high24h)
+  const lo = Number(d?.low24h)
+  // 用「现价」（含实时价）—— 这样那条位置条也跟着行情实时走
+  const px = Number(last.value)
+  if (![hi, lo, px].every(n => Number.isFinite(n)) || hi <= lo) return null
+  return Math.min(100, Math.max(0, ((px - lo) / (hi - lo)) * 100))
+})
+
+const rangeTitle = computed(() => {
+  const d = ticker.value
+  return `24h 低 ${fmt(d?.low24h)} · 高 ${fmt(d?.high24h)}`
 })
 
 /** 成交量 / 成交额 / 持仓量：中文量级，别糊一长串数字 */
@@ -94,9 +167,27 @@ const rows = computed(() => {
       <span class="tk-actions"><slot name="actions" /></span>
     </div>
 
-    <div class="tk-mid">
-      <span class="tk-last" :class="tone">{{ lastText }}</span>
-      <span class="tk-chg" :class="tone">{{ changeText }}</span>
+    <div class="tk-mid" :class="tone">
+      <div class="tk-price">
+        <!-- 价格：跟行情染色 + 每跳一下闪一下（背景块已按用户要求去掉） -->
+        <span class="tk-last" :class="[tone, blip && 'blip-' + blip]">
+          {{ lastText }}
+        </span>
+        <span class="tk-chip">
+          <svg class="tk-arrow" viewBox="0 0 10 6" aria-hidden="true">
+            <path :d="tone === 'down' ? 'M0 0h10L5 6z' : 'M5 0l5 6H0z'" />
+          </svg>
+          <span class="tk-delta">{{ changeAbs }}</span>
+          <b>{{ changePct }}</b>
+        </span>
+      </div>
+      <div v-if="rangePos !== null" class="tk-range" :title="rangeTitle">
+        <span class="tk-range-label">24h</span>
+        <span class="tk-range-track">
+          <i class="tk-range-fill" :style="{width: rangePos + '%'}" />
+          <em class="tk-range-dot" :style="{left: rangePos + '%'}" />
+        </span>
+      </div>
     </div>
 
     <div class="tk-stats">

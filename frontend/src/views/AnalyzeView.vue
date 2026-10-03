@@ -11,11 +11,10 @@ import StepsPanel from '../comps/StepsPanel.vue'
 import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import TickerChanges from '../comps/TickerChanges.vue'
-import {tagsOf, type Heat, collectStream} from '../api'
+import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
 import {
   CHART_TAB,
   LEFT_TABS,
-  LIVE_TABS,
   MOBILE_MAX,
   chartFrom,
   chartRange,
@@ -31,7 +30,6 @@ import {
   historyPages,
   historyTotal,
   leftTab,
-  liveTab,
   loadHistory,
   loading,
   pickSymbol,
@@ -125,6 +123,13 @@ const tabs = computed(() => {
 
 /* ---------------- 窄屏：左右滑动切换一级 tab ---------------- */
 
+/**
+ * 「共 N 个合约」——行情表报上来的数，显示在「合约行情」标题右边
+ * （用户 2026-10-03：把下面那行统计挪到标题右侧、顺手删掉「刷新 / 刚刚更新」那行）。
+ * 跟着**筛选后的名单**走：搜索 / 换榜单，这个数也跟着变。
+ */
+const marketCount = ref(0)
+
 /** 滑多远才算「切一下」（px）—— 太小会跟「点一下」抢，太大手腕划不动 */
 const SWIPE_MIN = 52
 /** 横向位移得是纵向的这么多倍 —— 斜着划多半是想上下滚内容 */
@@ -132,8 +137,13 @@ const SWIPE_DOMINANCE = 1.3
 
 const swipeRef = ref<HTMLElement | null>(null)
 
-let swipe: {x: number; y: number; dx: number; dy: number; fired: boolean} | null =
-  null
+let swipe: {
+  x: number
+  y: number
+  dx: number
+  dy: number
+  fired: boolean
+} | null = null
 
 /**
  * 这个元素（往上到 `.col` 为止）自己要不要吃横向手势？要就别抢：
@@ -147,7 +157,9 @@ function ownsHorizontal(el: EventTarget | null): boolean {
   for (let n = el as HTMLElement | null; n && n !== host; n = n.parentElement) {
     if (!(n instanceof HTMLElement)) break
     if (
-      n.matches('input, textarea, select, [contenteditable="true"], .chart-wrap')
+      n.matches(
+        'input, textarea, select, [contenteditable="true"], .chart-wrap'
+      )
     )
       return true
     const ox = getComputedStyle(n).overflowX
@@ -276,6 +288,23 @@ function onPickMarket(base: string): void {
   if (isMobile.value) leftTab.value = 'chart'
 }
 
+/**
+ * 点「分析」（桌面 `#head-end` 和手机上币种旁那颗共用这一个）。
+ *
+ * 用户 2026-10-03：「点击分析自动跳转实时分析界面」——
+ * 默认停在「合约行情 / K 线」那一格，点完分析还杵在榜单前面，看不见结论，
+ * 得自己再点一下「实时分析」。所以点下去先把左侧切过去。
+ *
+ * ⚠️ **「测试」那一格不能切**：`testMode` 是从 `leftTab` 推出来的，
+ * 切走会让它变 false、`testAt` 跟着变 null —— 测试跑会被当成实时跑**存进库里**
+ * （踩过一次，`analyze.ts` 的 `run()` 里也留着同样的告警）。
+ */
+function onRun(): void {
+  if (leftTab.value !== 'live' && leftTab.value !== 'test')
+    leftTab.value = 'live'
+  run()
+}
+
 /* ---------------- 手机端「＋ 添加案例」---------------- */
 /*
  * 窄屏不再有「添加案例」那一格（那套表单要在图上看过程、还要填备注，手机上来不及）：
@@ -399,6 +428,62 @@ const verdictInfo = computed(
 /** 推荐做法拆成「现在 / 动手 / 别碰」几行（老记录没前缀就一段） */
 const recParts = computed(() => splitRec(judge.value?.recommendation))
 
+/*
+ * 价格位置图（用户 2026-10-04：「纯文字太单调懒得看，能否图示预测」）。
+ *
+ * 图上的 4H 压力/支撑 由 `KlineChart` 报上来（`@levels`），拿不到就退回 24h 高低 ——
+ * 总之要画出一道「上沿 / 现价 / 下沿」的尺子，让人一眼看出现价卡在哪。
+ */
+const sr = ref<LevelSR | null>(null)
+
+const levelBox = computed<{
+  hi: number
+  lo: number
+  hiK: string
+  loK: string
+} | null>(() => {
+  const r = result.value
+  const p = r?.price
+  if (!r || !p) return null
+  /*
+   * ⚠️ **测试跑不能用车上的压力 / 支撑**：那是拿「现在」的 K 线算出来的，
+   * 而这里的价格是**那一刻**的 —— 两把尺子对不上。
+   * 实测踩过：测试点现价 83,302，图上 4H 却给 84,708 ~ 84,928，现价被甩在盒子外面。
+   * 那一刻的 24h 高低是**随快照一起取回来的**，跟价格同一个时点，只有它靠得住。
+   */
+  if (!r.testMode) {
+    const hi = sr.value?.resistance
+    const lo = sr.value?.support
+    if (hi && lo && hi > lo) return {hi, lo, hiK: '压力', loK: '支撑'}
+  }
+  const h = r.heat?.high24h
+  const l = r.heat?.low24h
+  if (h && l && h > l) return {hi: h, lo: l, hiK: '24h高', loK: '24h低'}
+  return null
+})
+
+/** 三行：上沿 / 现价 / 下沿，带上离现价多远（%） */
+const levels = computed(() => {
+  const b = levelBox.value
+  const p = result.value?.price
+  if (!b || !p) return []
+  const off = (v: number) =>
+    `${v >= p ? '+' : ''}${(((v - p) / p) * 100).toFixed(2)}%`
+  return [
+    {k: b.hiK, v: fmt(b.hi), d: off(b.hi), tone: 'hi'},
+    {k: '现价', v: fmt(p), d: '—', tone: 'now'},
+    {k: b.loK, v: fmt(b.lo), d: off(b.lo), tone: 'lo'}
+  ]
+})
+
+/** 现价在「上沿 → 下沿」这条尺子上的位置（0% = 贴上沿，100% = 贴下沿） */
+const lvPos = computed<number | null>(() => {
+  const b = levelBox.value
+  const p = result.value?.price
+  if (!b || !p) return null
+  return Math.min(100, Math.max(0, ((b.hi - p) / (b.hi - b.lo)) * 100))
+})
+
 const heatRows = computed(() => {
   const h: Heat | undefined = result.value?.heat
   if (!h) return []
@@ -485,13 +570,6 @@ const heatRows = computed(() => {
       >
         <div class="tab-row">
           <SegTabs v-model="leftTab" :options="tabs" />
-          <RouterLink
-            v-if="leftTab === 'live' && result?.analysisId"
-            class="archived-link"
-            :to="`/history?id=${result.analysisId}`"
-          >
-            已存档 #{{ result.analysisId }} → 去复盘
-          </RouterLink>
         </div>
 
         <!--
@@ -502,14 +580,22 @@ const heatRows = computed(() => {
         -->
         <div v-show="leftTab === 'market'" class="scroll-body">
           <section class="panel mkt-panel">
+            <!--
+              标题右侧那个「共 N 个合约」是 MarketPanel `count` 事件报上来的 ——
+              统计跟着**筛选后的名单**走（搜索 / 榜单变了它也跟着变）。
+              左边原来那句「点一行切币种」提示已按用户要求去掉。
+            -->
             <h2>
               合约行情
-              <span class="tag">点一行切币种</span>
+              <span v-if="marketCount" class="mkt-count">
+                共 {{ marketCount }} 个合约
+              </span>
             </h2>
             <MarketPanel
               :symbol="symbol"
               :active="leftTab === 'market'"
               @pick="onPickMarket"
+              @count="marketCount = $event"
             />
           </section>
         </div>
@@ -606,33 +692,68 @@ const heatRows = computed(() => {
             />
 
             <template v-if="result">
-              <SegTabs
-                v-model="liveTab"
-                :options="LIVE_TABS"
-                class="sub-tabs"
-              />
-
-              <!-- tab 1：AI 结论 -->
-              <section v-if="liveTab === 'verdict'" class="panel">
-                <div class="grade-row">
-                  <div class="grade" :class="verdictInfo[1]">
-                    {{ probText }}
-                  </div>
-                  <div class="grade-title">
+              <!--
+                ★ 2026-10-03 精简（用户要求）：
+                · 去掉「已存档 #N → 去复盘」那个链接
+                · 去掉二级 tab 栏（原来「结论 / 市场与周期」两格）→ 结论和热度直接铺下来
+                · 去掉「各周期行情」（发给 AI 的原文）那一大块
+                · 去掉下面那 6 项统计（当前价 / 24h 涨跌 / 资金费率 / 拉了多少行情 /
+                  提示词版本 / 可用标签）—— 价格上面行情条里就有，其余与判断无关
+                · **市场热度保留**（唯一要看的是它）
+              -->
+              <section class="panel flush result-card">
+                <!-- ① 走势概率：一条长条，比一个数字好看也好比 -->
+                <div class="prob">
+                  <div class="prob-top">
+                    <span class="prob-num" :class="verdictInfo[1]">
+                      {{ judge?.probability ?? '—' }}<i>%</i>
+                    </span>
+                    <span class="prob-cap">走势概率</span>
                     <span class="pill" :class="verdictInfo[1]">{{
                       verdictInfo[0]
                     }}</span>
                   </div>
-                </div>
-
-                <!-- 形状标签 + 每个标签的概率 -->
-                <div v-if="tags.length" class="tf-strip">
-                  <span v-for="t in tags" :key="t.name" class="tag">
-                    {{ t.name }}
-                    <i v-if="t.probability">{{ t.probability }}%</i>
+                  <span class="prob-track">
+                    <i
+                      :class="verdictInfo[1]"
+                      :style="{width: (judge?.probability ?? 0) + '%'}"
+                    />
                   </span>
                 </div>
 
+                <!-- ② 形状：每个标签一条概率条（比 chips 直观） -->
+                <div v-if="tags.length" class="viz">
+                  <div class="sec-label">形状 · 有多像</div>
+                  <div v-for="t in tags" :key="t.name" class="shape">
+                    <span class="shape-name">{{ t.name }}</span>
+                    <span class="shape-track">
+                      <i :style="{width: t.probability + '%'}" />
+                    </span>
+                    <span class="shape-pct">{{ t.probability }}%</span>
+                  </div>
+                </div>
+
+                <!-- ③ 价格位置：上沿 / 现价 / 下沿 一把尺子 -->
+                <div v-if="levels.length" class="viz">
+                  <div class="sec-label">价格位置</div>
+                  <div class="lv">
+                    <span class="lv-rail">
+                      <b class="lv-dot" :style="{top: (lvPos ?? 0) + '%'}" />
+                    </span>
+                    <span class="lv-rows">
+                      <span
+                        v-for="r in levels"
+                        :key="r.k"
+                        class="lv-row"
+                        :class="r.tone"
+                      >
+                        <em class="k">{{ r.k }}</em>
+                        <b class="v">{{ r.v }}</b>
+                        <i class="d">{{ r.d }}</i>
+                      </span>
+                    </span>
+                  </div>
+                </div>
                 <!-- ① 推荐：最该照做的（绿，字最大）—— AI 按「现在/开单/别碰」三行给 -->
                 <section v-if="recParts.length" class="concl rec">
                   <span class="concl-h">推荐</span>
@@ -669,94 +790,18 @@ const heatRows = computed(() => {
                   </summary>
                   <p v-html="richText(judge.reason)" />
                 </details>
+              </section>
 
-                <div class="stats">
-                  <div class="stat">
-                    <span class="k">当前价</span>
-                    <span class="v">{{ fmt(result.price) }}</span>
-                  </div>
-                  <div class="stat">
-                    <span class="k">24h 涨跌</span>
-                    <span
-                      class="v"
-                      :class="
-                        result.change24hPct == null
-                          ? ''
-                          : result.change24hPct >= 0
-                            ? 'ok'
-                            : 'bad'
-                      "
-                    >
-                      {{ signedPct(result.change24hPct) }}
-                    </span>
-                  </div>
-                  <div class="stat">
-                    <span class="k">资金费率</span>
-                    <span class="v">
-                      {{
-                        result.fundingRate == null
-                          ? '—'
-                          : (Number(result.fundingRate) * 100).toFixed(4) + '%'
-                      }}
-                    </span>
-                  </div>
-                  <div class="stat">
-                    <span class="k">拉了多少行情</span>
-                    <span class="v">
-                      {{ result.blocks.length }} 个周期 · 主周期
-                      {{ result.primary }}
-                    </span>
-                  </div>
-                  <div class="stat">
-                    <span class="k">提示词版本</span>
-                    <span class="v">{{ result.meta.rules.hash }}</span>
-                  </div>
-                  <div class="stat">
-                    <span class="k">可用标签</span>
-                    <span class="v">{{ result.meta.tagCount }} 个</span>
+              <!-- 市场热度：**用户明确要保留的一块**（二级 tab 和「各周期行情」都去掉了） -->
+              <section class="panel flush">
+                <h2>市场热度 <span class="tag">交易所数据</span></h2>
+                <div class="heat-grid">
+                  <div v-for="r in heatRows" :key="r.k" class="heat-row">
+                    <span class="k">{{ r.k }}</span>
+                    <span class="v" :class="r.cls">{{ r.v }}</span>
                   </div>
                 </div>
               </section>
-
-              <!-- tab 2（最后一个）：市场与周期 -->
-              <template v-else>
-                <section class="panel">
-                  <h2>市场热度 <span class="tag">交易所数据</span></h2>
-                  <div class="heat-grid">
-                    <div v-for="r in heatRows" :key="r.k" class="heat-row">
-                      <span class="k">{{ r.k }}</span>
-                      <span class="v" :class="r.cls">{{ r.v }}</span>
-                    </div>
-                  </div>
-                </section>
-
-                <section class="panel">
-                  <h2>
-                    各周期行情
-                    <span class="tag">发给 AI 的就是这些文字</span>
-                  </h2>
-                  <div class="blocks">
-                    <details
-                      v-for="b in result.blocks"
-                      :key="b.timeframe"
-                      class="block"
-                      :open="b.primary"
-                    >
-                      <summary>
-                        <b>{{ b.timeframe }}</b>
-                        <span v-if="b.primary" class="tag">主周期</span>
-                        <span class="dim">
-                          {{
-                            b.days === null ? '图上那段' : `最近 ${b.days} 天`
-                          }}
-                          · {{ b.bars }} 根 · {{ b.from }} → {{ b.to }}
-                        </span>
-                      </summary>
-                      <pre class="block-text">{{ b.text }}</pre>
-                    </details>
-                  </div>
-                </section>
-              </template>
             </template>
           </div>
         </template>
@@ -882,6 +927,7 @@ const heatRows = computed(() => {
           @update:pick-point="setPointPicking"
           @select="onPickRange"
           @point="onPickPoint"
+          @levels="sr = $event"
           @clear:select="clearChartRange"
           @error="onChartError"
         >
@@ -889,19 +935,33 @@ const heatRows = computed(() => {
           <template #top>
             <TickerHead>
               <template #symbol>
+                <!--
+                  窄屏：**只显示币种**（用户 2026-10-03：「去掉搜索只显示币种」）——
+                  不摆输入框了，就是「BTC ▾」，点开列表里才有搜索框。
+                -->
                 <SymbolCombo
                   v-model="symbol"
                   :contracts="contracts"
+                  :plain="isMobile"
                   @pick="pickSymbol"
-                  @submit="run"
+                  @submit="onRun"
                 />
                 <!--
                   窄屏：「分析」就**贴在币种旁边**（用户 2026-10-03：「ai 分析改为分析
-                  靠在币种旁边」）。放 `#symbol` 里而不是 `#actions` —— 后者整组带
-                  `margin-left: auto`，会被推到最右边。桌面端不露（看下面那颗）。
+                  靠在币种旁边」），后来又要「**分析改为闪电图标**」。
+                  所以窄屏这颗就是一颗闪电，文案走 title / aria-label（`runLabel`）。
+                  放 `#symbol` 里而不是 `#actions` —— 后者整组带 `margin-left: auto`，会被推到最右边。
                 -->
-                <button class="btn-run tk-run" :disabled="loading" @click="run">
-                  {{ runLabel }}
+                <button
+                  class="btn-run tk-run"
+                  :disabled="loading"
+                  :title="runLabel"
+                  :aria-label="runLabel"
+                  @click="onRun"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                  </svg>
                 </button>
               </template>
               <!-- 最右侧那组：＋ / 添加案例 / 配置 -->
@@ -954,7 +1014,7 @@ const heatRows = computed(() => {
           </template>
           <!-- 右边：跑分析（桌面端在这儿，手机端在上面币种旁） -->
           <template #head-end>
-            <button class="btn-run head-run" :disabled="loading" @click="run">
+            <button class="btn-run head-run" :disabled="loading" @click="onRun">
               {{ runLabel }}
             </button>
           </template>

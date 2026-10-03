@@ -13,7 +13,7 @@
  *
  * 跟着 localStorage 走。
  */
-import {ref, watch} from 'vue'
+import {computed, ref, watch} from 'vue'
 
 const KEY = 'ca-settings-v2'
 /**
@@ -30,6 +30,8 @@ interface Stored {
   keepChartZoom?: boolean
   /** 所有币种共用的显示根数 */
   chartBars?: number
+  /** 行情过滤：24h 成交额低于这个数（**百万 USDT**）的合约不显示。0 = 不过滤 */
+  marketMinVolM?: number
 }
 
 function read(): Stored {
@@ -38,7 +40,11 @@ function read(): Stored {
     if (raw) {
       const v = JSON.parse(raw) as Stored
       // 只取认得的字段 —— 旧的 `chartWindows` 别跟着写回去
-      return {keepChartZoom: v.keepChartZoom, chartBars: v.chartBars}
+      return {
+        keepChartZoom: v.keepChartZoom,
+        chartBars: v.chartBars,
+        marketMinVolM: v.marketMinVolM
+      }
     }
     // 第一次跑：从 v1 只捡开关
     const old = localStorage.getItem(OLD_KEY)
@@ -71,6 +77,18 @@ export const keepChartZoom = ref(saved.keepChartZoom !== false)
 export const MIN_SAVED_BARS = 5
 export const chartBars = ref(saved.chartBars ?? 0)
 
+/**
+ * 「行情过滤」：24h 成交额**低于**这个数（单位：**百万 USDT**）的合约，
+ * 合约行情列表里就不显示。`0` = 不过滤（默认）。
+ *
+ * 用户 2026-10-03：「行情过滤 可以配置 24h 成交多少 m，大于这个数合约行情才显示」。
+ * ⚠️ 只影响**行情列表**（和它标题右边的总数），不影响 K 线 / 分析取数。
+ */
+export const marketMinVolM = ref(Math.max(0, saved.marketMinVolM ?? 0))
+
+/** 阈值换算成 USDT 原值（列表那边直接比） */
+export const marketMinVolUsd = computed(() => marketMinVolM.value * 1e6)
+
 /** 图上现在显示多少根（实时，来自图上报的可见区间；只给配置面板看） */
 export const shownBars = ref(0)
 /** 这是哪个币 · 哪个周期（`BTC · 1h`） */
@@ -96,14 +114,15 @@ export function saveChartBars(n: number | null | undefined): void {
 }
 
 watch(
-  [keepChartZoom, chartBars],
+  [keepChartZoom, chartBars, marketMinVolM],
   () => {
     try {
       localStorage.setItem(
         KEY,
         JSON.stringify({
           keepChartZoom: keepChartZoom.value,
-          chartBars: chartBars.value
+          chartBars: chartBars.value,
+          marketMinVolM: marketMinVolM.value
         })
       )
     } catch {

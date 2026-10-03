@@ -31,17 +31,23 @@ const props = withDefaults(
 
 const emit = defineEmits<{(e: 'pick', key: string): void}>()
 
-/** 配色：够 9 块用，跟页面主色系一致 */
+/**
+ * 配色：够 9 块用。
+ *
+ * 2026-10-03 换主题时一起来的：原来头两块是 `#58a6ff` / `#79c0ff`（GitHub 亮蓝），
+ * 跟新的暖沙主色格格不入 —— 换成**暖色打头 + 整体降饱和**的一组，
+ * 蓝色只留一个雾蓝（`#8fb8d6`）当分类色，不再是刺眼的高饱和亮蓝。
+ */
 const COLORS = [
-  '#58a6ff',
+  '#d3b583',
   '#39c5bb',
-  '#d29922',
-  '#f778ba',
-  '#a371f7',
-  '#7ee787',
-  '#ffa657',
-  '#79c0ff',
-  '#ff7b72'
+  '#e0a33e',
+  '#e08aa8',
+  '#a98fd6',
+  '#7ec46b',
+  '#e08a5a',
+  '#8fb8d6',
+  '#e07a72'
 ]
 
 const R = 52
@@ -236,8 +242,8 @@ const pickable = (key: string) => key !== '__other__'
 }
 
 .pie-legend li.on {
-  background: rgba(88, 166, 255, 0.14);
-  color: var(--fg, #e6edf3);
+  background: var(--blue-soft);
+  color: var(--fg, #f0f1f3);
 }
 
 .pie-legend li.dim {

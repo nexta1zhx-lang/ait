@@ -4,7 +4,6 @@ import AnalyzeView from './views/AnalyzeView.vue'
 import HistoryView from './views/HistoryView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
 import UsageView from './views/UsageView.vue'
-import PromptsView from './views/PromptsView.vue'
 
 export const routes = [
   {
@@ -26,17 +25,17 @@ export const routes = [
     meta: {title: '历史知识库', nav: '历史知识库'}
   },
   {
-    path: '/prompts',
-    name: 'prompts',
-    component: PromptsView,
-    meta: {title: 'AI 提示词', nav: 'AI 提示词'}
-  },
-  {
     path: '/usage',
     name: 'usage',
     component: UsageView,
     meta: {title: '用量与花费', nav: '用量'}
   },
+  /*
+   * 「AI 提示词」页 2026-10-04 已删（用户：「没什么用，都要和代码绑定」）——
+   * 提示词现在是 `backend/src/llm/prompts.ts` 里的常量。
+   * 老书签 / 老链接进 /prompts 会被下面这条捕到，直接回首页，不留白屏。
+   */
+  {path: '/prompts', redirect: '/'},
   {path: '/:pathMatch(.*)*', redirect: '/'}
 ]
 

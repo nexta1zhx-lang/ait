@@ -85,87 +85,11 @@ export interface RulesInfo {
   warnings: string[]
 }
 
-/* ---------------- AI 提示词文档（存数据库） ---------------- */
-
-/**
- * role = 开单分析的角色设定；rule = 规则正文；
- * extract = 知识库提炼（收录案例时用的那份）
+/*
+ * 2026-10-04：原来这里的「AI 提示词文档」一整节（列表 / 增删改 / 版本 / 预览）全删了。
+ * 用户说「AI 提示词界面没什么用，都要和代码绑定，直接去掉相关逻辑，写死代码」——
+ * 提示词现在是 `backend/src/llm/prompts.ts` 里的常量，前端不再碰它。
  */
-export type DocKind = 'role' | 'rule' | 'extract' | 'predict'
-
-export interface AiDoc {
-  id: number
-  kind: DocKind
-  name: string
-  content: string
-  enabled: boolean
-  sort: number
-  updatedAt: string
-}
-
-export interface AiDocVersion {
-  id: number
-  docId: number
-  name: string
-  kind: DocKind
-  chars: number
-  savedAt: string
-}
-
-/** 拼 prompt 的概览 —— 页面顶部那条「这次会发什么」 */
-export interface AiAssembly {
-  enabled: boolean
-  origin: 'db' | 'documents'
-  sources: string[]
-  hash: string
-  /** 分析预测那份的字数（就这一份） */
-  predictChars: number
-  /** 知识库提炼那份（跟分析不是一条链路，单独报） */
-  extractChars: number
-  extractSources: string[]
-  extractHash: string
-  updatedAt: string | null
-  warnings: string[]
-}
-
-export const fetchAiDocs = () =>
-  get<{docs: AiDoc[]; assembly: AiAssembly}>('/api/ai-docs')
-
-export const createAiDoc = (input: {
-  kind: DocKind
-  name: string
-  content?: string
-}) => post<{doc: AiDoc}>('/api/ai-docs', input)
-
-export const updateAiDoc = (
-  id: number,
-  patch: {
-    kind?: DocKind
-    name?: string
-    content?: string
-    enabled?: boolean
-    sort?: number
-  }
-) => put<{doc: AiDoc}>(`/api/ai-docs/${id}`, patch)
-
-export const deleteAiDoc = (id: number) => del<{ok: true}>(`/api/ai-docs/${id}`)
-
-export const fetchAiVersions = (id: number) =>
-  get<{versions: AiDocVersion[]}>(`/api/ai-docs/${id}/versions`)
-
-export const fetchAiVersion = (versionId: number) =>
-  get<{version: AiDocVersion & {content: string}}>(
-    `/api/ai-versions/${versionId}`
-  )
-
-export const restoreAiVersion = (versionId: number) =>
-  post<{doc: AiDoc}>(`/api/ai-versions/${versionId}/restore`, {})
-
-/** 看这次真正发出去的 system prompt（`kind='extract'` 看知识库提炼那份） */
-export const fetchAiPreview = (kind?: 'extract') =>
-  get<{system: string; enabled: boolean; sources: string[]; hash: string}>(
-    kind ? `/api/ai-preview?kind=${kind}` : '/api/ai-preview'
-  )
 
 export interface UsageHeadline {
   todayCalls: number
@@ -418,13 +342,22 @@ export function tickerStream(
 }
 
 /**
- * 币种图标（后端代理那套开源图标集，顺带缓存）。
+ * 币种图标（后端代理几套公开图标集 + 按顺序兜底，顺带缓存）。
  *
  * 走我们自己的域名：图标源在国内不一定连得上，自己的域名一定连得上。
  * 拿不到会 404，组件那边退回首字母的圆形占位。
+ *
+ * ⚠️ `?v=2` 是**刻意加的缓存破解**：后端 2026-10-03 换过图标源
+ * （老的 spothq 那套只覆盖 16%，新币基本全缺），而旧的 404 响应在浏览器里
+ * 缓存了 **一天**（`max-age=86400`）。不加这个参数，已经打开过页面的用户
+ * 这一天里看到的还是首字母占位。换源/改图标逻辑时**把这个数字 +1**。
  */
+export const ICON_VERSION = 2
+
 export const iconUrl = (base: string): string =>
-  apiUrl(`/api/icon/${encodeURIComponent(base.trim().toLowerCase())}`)
+  apiUrl(
+    `/api/icon/${encodeURIComponent(base.trim().toLowerCase())}?v=${ICON_VERSION}`
+  )
 
 /* ---------------- 分析 ---------------- */
 
@@ -487,7 +420,7 @@ export interface JudgeTag {
  * 同时给每个形状标签一个概率。
  */
 export interface Judge {
-  /** 形状标签，按概率从高到低（最多 4 个；池子里没有的会新造） */
+  /** 形状标签，按概率从高到低（最多 2 个；池子里没有的会新造） */
   tags: JudgeTag[]
   /** 为什么这么看，要落到具体数据上 */
   reason: string

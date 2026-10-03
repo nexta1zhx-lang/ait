@@ -4,7 +4,8 @@
  *
  * 一屏把全市场看一遍：
  *   · 币种（带图标）/ 最新价 / 24h 涨跌 / 24h 成交额
- *   · 顶部三档榜单（成交额 / 涨幅 / 跌幅）+ 搜索框筛币种
+ *   · 表头点一下就能按涨跌幅 / 成交额排（▲ 升序、▼ 降序，各是一个按钮）
+ *   · 上面只有搜索框（榜单按钮「成交额 / 涨幅 / 跌幅」已按用户要求去掉）
  *   · 点一行 = 切币种（把下方行情、K 线、历史全换过去）
  *
  * 数据怎么来（**实时推送**，不再自己轮询）：
@@ -18,7 +19,6 @@
  * 全塞进 DOM 里每秒重绘一次会让滑动发涩 —— 搜索/排序仍然吃全量数据。
  */
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
-import SegTabs from './SegTabs.vue'
 import {
   fetchMarkets,
   iconUrl,
@@ -27,6 +27,7 @@ import {
   type TickerPatch
 } from '../api'
 import {decimalsFor, fmt} from '../format'
+import {marketMinVolUsd} from '../settings'
 
 const props = defineProps<{
   /** 当前选中的币种（高亮那一行） */
@@ -42,7 +43,11 @@ const props = defineProps<{
   intervalMs?: number
 }>()
 
-const emit = defineEmits<{(e: 'pick', base: string): void}>()
+const emit = defineEmits<{
+  (e: 'pick', base: string): void
+  /** 名单里有几个币（标题右侧那个「共 N 个合约」在父组件里显示） */
+  (e: 'count', n: number): void
+}>()
 
 const MAX_ROWS = 120
 /** 好久没收到 SSE 就认为推送断了，改用 REST 顶一会儿 */
@@ -50,13 +55,40 @@ const STALE_MS = 15_000
 /** 全表重拉（检新上市 / 下架的币） */
 const RESYNC_MS = 5 * 60_000
 
-const BOARDS = [
-  {value: 'volume', label: '成交额'},
-  {value: 'up', label: '涨幅'},
-  {value: 'down', label: '跌幅'}
-]
+/**
+ * 排序状态：**按哪一列**（`sortKey`）+ **哪个方向**（`sortDir`）。
+ *
+ * 用户 2026-10-03：「涨跌幅和成交额旁加图标可以切换排行」，
+ * 又提「成交量没法双向点击，图标换个分开的」——
+ * 所以表头上那颗上下箭头是**两个分开的点击目标**：点 ▲ 升序、点 ▼ 降序。
+ * 点标题文字本身 = 切到这一列，方向用最顺的那个（两列都是「从大到小」）。
+ *
+ * ⚠️ 2026-10-03 又一轮：「成交 / 涨幅 / 跌涨都去掉，**每次都是全量**」——
+ * 上面那排榜单按钮删了，涨跌幅那一列也**不再筛掉涨/跌**（以前降序只留涨的、
+ * 升序只留跌的），现在就是一个普通排序：两个方向都是**全量**。
+ */
+type SortKey = 'volume' | 'change'
+const sortKey = ref<SortKey>('volume')
+const sortDir = ref<'asc' | 'desc'>('desc')
 
-const board = ref<'volume' | 'up' | 'down'>('volume')
+function setSort(key: SortKey, dir: 'asc' | 'desc'): void {
+  sortKey.value = key
+  sortDir.value = dir
+}
+
+/**
+ * 点标题文字：不是这一列 → 切过来（从大到小）；
+ * 就是这一列 → **换个方向**。
+ *
+ * ⚠️ 以前「已经在排这一列了就直接 return」—— 默认就是成交额降序，
+ * 于是点「成交额」这三个字一点反应都没有（用户：「点击切换没有生效」）。
+ * 现在是「点一下换个方向」，任何一点都能看到东西在变。
+ */
+function sortBy(key: SortKey): void {
+  if (sortKey.value !== key) return setSort(key, 'desc')
+  sortDir.value = sortDir.value === 'desc' ? 'asc' : 'desc'
+}
+
 const keyword = ref('')
 
 /**
@@ -68,16 +100,11 @@ const keyword = ref('')
 const byPair = new Map<string, MarketRow>()
 /** 增量版本号（`byPair` 里的对象是非响应式的，靠它触发重算） */
 const version = ref(0)
-const updatedAt = ref(0)
 const loading = ref(false)
 const error = ref('')
 
 /** 没有图标的币（退回首字母圆形占位） */
 const failed = ref<string[]>([])
-
-/** 「更新于 x 秒前」要自己跳秒，不然看着像卡住了 */
-const nowTick = ref(Date.now())
-let clock: ReturnType<typeof setInterval> | null = null
 
 /* ---------------- 表头对齐表身 ---------------- */
 
@@ -97,6 +124,26 @@ function measureScrollbar(): void {
   if (!el) return
   const w = Math.max(0, el.offsetWidth - el.clientWidth)
   if (w !== sbw.value) sbw.value = w
+}
+
+/**
+ * 手机端下滑时把搜索框收起来（用户：「移动端下滑搜索框自动收起」）。
+ *
+ * 只看**方向**：往下滑过几像素就收，往上滑、或者滑回顶部就放 ——
+ * 不看绝对位置（“滚到 200px 以下就藏”那种，往上滑时还得先滑到底才肯出来，很难用）。
+ * 加个 6px 的容差：手指停住时的抖动不该让它来回抽。
+ *
+ * 样式只在窄屏生效（见 `style.css` 的 `@media (max-width: 900px)`），
+ * 所以这里的 `compact` 在桌面端不会造成任何变化。
+ */
+const compact = ref(false)
+let lastTop = 0
+
+function onListScroll(e: Event): void {
+  const y = (e.target as HTMLElement).scrollTop
+  if (y <= 8 || y < lastTop - 6) compact.value = false
+  else if (y > lastTop + 6) compact.value = true
+  lastTop = y
 }
 
 let unsubscribe: (() => void) | null = null
@@ -143,7 +190,6 @@ function applyBatch(updates: TickerPatch[]): void {
   }
   if (!hit) return
   lastEventAt = Date.now()
-  updatedAt.value = lastEventAt
   version.value++
 }
 
@@ -219,7 +265,6 @@ let bodyRO: ResizeObserver | null = null
 
 onMounted(() => {
   sync()
-  clock = setInterval(() => (nowTick.value = Date.now()), 1000)
   document.addEventListener('visibilitychange', sync)
   if (bodyEl.value && typeof ResizeObserver !== 'undefined') {
     bodyRO = new ResizeObserver(() => measureScrollbar())
@@ -233,7 +278,6 @@ onBeforeUnmount(() => {
   stop()
   bodyRO?.disconnect()
   bodyRO = null
-  if (clock) clearInterval(clock)
   document.removeEventListener('visibilitychange', sync)
 })
 
@@ -258,29 +302,34 @@ function letterColor(base: string): string {
 const shown = computed<MarketRow[]>(() => {
   void version.value // 增量改的是 Map 里的对象（非响应式），靠这个版本号触发重算
   const q = keyword.value.trim().toUpperCase()
-  const list = [...byPair.values()]
+  /*
+   * 配置里的「行情过滤」：24h 成交额低于阀值的合约直接不列（搜也不给）。
+   * 阈值是「百万 USDT」× 1e6；`0` = 不过滤。没成交额（null）的当 0，照样会被滤掉。
+   */
+  const floor = marketMinVolUsd.value
+  let list = [...byPair.values()]
+  if (floor > 0) list = list.filter(r => (r.quoteVolume24h ?? 0) >= floor)
   if (q) {
     // 搜索时不切榜单：按成交额排，找币最顺
     return list
       .filter(r => r.base.includes(q))
       .sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
   }
-  if (board.value === 'up') {
-    return list
-      .filter(r => (r.change24hPct ?? 0) > 0)
-      .sort((a, b) => (b.change24hPct ?? 0) - (a.change24hPct ?? 0))
-  }
-  if (board.value === 'down') {
-    return list
-      .filter(r => (r.change24hPct ?? 0) < 0)
-      .sort((a, b) => (a.change24hPct ?? 0) - (b.change24hPct ?? 0))
-  }
-  // 成交额榜：实时值在变，每次都重排（几百行，一秒一次没压力）
-  return list.sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
+  const desc = sortDir.value === 'desc'
+  // 两列都是**全量排序**（不再按涨/跌筛掉一半）：涨跌幅升序就是「跌得最狠的在前」
+  const field = (r: MarketRow) =>
+    (sortKey.value === 'volume' ? r.quoteVolume24h : r.change24hPct) ?? 0
+  return list.sort((a, b) => {
+    const d = field(b) - field(a)
+    return desc ? d : -d
+  })
 })
 
 const total = computed(() => shown.value.length)
 const visible = computed(() => shown.value.slice(0, MAX_ROWS))
+
+/* 总数要报给父组件（它拿去做标题右侧的「共 N 个合约」） */
+watch(total, n => emit('count', n), {immediate: true})
 
 // 行数变了（滚动条可能出现 / 消失）、尺寸变了，都要重新量一下滚动条宽度
 watch(visible, () => void nextTick(measureScrollbar))
@@ -306,32 +355,17 @@ function pctText(v: number | null): string {
 
 const toneOf = (v: number | null): string =>
   v === null ? 'dim' : v >= 0 ? 'up' : 'down'
-
-const agoText = computed(() => {
-  if (!updatedAt.value) return ''
-  const s = Math.max(0, Math.round((nowTick.value - updatedAt.value) / 1000))
-  return s <= 1 ? '刚刚更新' : `${s} 秒前更新`
-})
 </script>
 
 <template>
-  <div class="mkt">
-    <!-- 榜单 + 搜索 -->
+  <div class="mkt" :class="{compact}">
+    <!-- 搜索：榜单按钮（成交额 / 涨幅 / 跌幅）已按用户要求删掉，排序全在表头上 -->
     <div class="mkt-bar">
-      <SegTabs v-model="board" :options="BOARDS" />
       <input
         v-model="keyword"
         class="mkt-search"
         placeholder="搜币种，如 BTC"
       />
-    </div>
-
-    <div class="mkt-meta">
-      <span>共 {{ total }} 个合约</span>
-      <span class="dim">{{ agoText }}</span>
-      <button class="ghost tiny" :disabled="loading" @click="loadSnapshot">
-        刷新
-      </button>
     </div>
 
     <div v-if="error" class="error">{{ error }}</div>
@@ -356,14 +390,76 @@ const agoText = computed(() => {
             <tr>
               <th>币种</th>
               <th class="r">最新价</th>
-              <th class="r">涨跌幅</th>
-              <th class="r">成交额</th>
+              <!--
+                表头直接当排序钮：点标题那几个字 = 切到这一列，点 ▲ / ▼ = 要哪个方向。
+                ⚠️ 箭头必须包成 `<button>` 再挂 @click，**不能直接挂 `<svg>`** ——
+                SVG 默认只在自己**画出来的那块** 响应指针，三角形旁边一圈是死的，
+                手指稍偏一点就「点了没反应」（用户：「点击切换没有生效」）。
+              -->
+              <th class="r sortable" :class="{on: sortKey === 'change'}">
+                <span class="scell">
+                  <span class="s-label" @click="sortBy('change')">涨跌幅</span>
+                  <span class="sarr">
+                    <button
+                      type="button"
+                      class="sbtn"
+                      :class="{on: sortKey === 'change' && sortDir === 'asc'}"
+                      aria-label="涨跌幅升序（跌得最狠在前）"
+                      @click="setSort('change', 'asc')"
+                    >
+                      <svg viewBox="0 0 10 6" aria-hidden="true">
+                        <path d="M5 .4 9.6 5.6H.4z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="sbtn"
+                      :class="{on: sortKey === 'change' && sortDir === 'desc'}"
+                      aria-label="涨跌幅降序（涨得最多在前）"
+                      @click="setSort('change', 'desc')"
+                    >
+                      <svg viewBox="0 0 10 6" aria-hidden="true">
+                        <path d="M5 5.6.4.4h9.2z" />
+                      </svg>
+                    </button>
+                  </span>
+                </span>
+              </th>
+              <th class="r sortable" :class="{on: sortKey === 'volume'}">
+                <span class="scell">
+                  <span class="s-label" @click="sortBy('volume')">成交额</span>
+                  <span class="sarr">
+                    <button
+                      type="button"
+                      class="sbtn"
+                      :class="{on: sortKey === 'volume' && sortDir === 'asc'}"
+                      aria-label="成交额升序（从小到大）"
+                      @click="setSort('volume', 'asc')"
+                    >
+                      <svg viewBox="0 0 10 6" aria-hidden="true">
+                        <path d="M5 .4 9.6 5.6H.4z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="sbtn"
+                      :class="{on: sortKey === 'volume' && sortDir === 'desc'}"
+                      aria-label="成交额降序（从大到小）"
+                      @click="setSort('volume', 'desc')"
+                    >
+                      <svg viewBox="0 0 10 6" aria-hidden="true">
+                        <path d="M5 5.6.4.4h9.2z" />
+                      </svg>
+                    </button>
+                  </span>
+                </span>
+              </th>
             </tr>
           </thead>
         </table>
       </div>
 
-      <div ref="bodyEl" class="mkt-body">
+      <div ref="bodyEl" class="mkt-body" @scroll="onListScroll">
         <table class="table fixed">
           <colgroup>
             <col style="width: 30%" />

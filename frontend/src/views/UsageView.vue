@@ -177,7 +177,7 @@ const composition = computed(() => {
       w: miss / all,
       color: 'var(--warn)'
     },
-    {key: 'out', label: '输出', n: out, w: out / all, color: 'var(--blue)'}
+    {key: 'out', label: '输出', n: out, w: out / all, color: 'var(--data-3)'}
   ]
 })
 

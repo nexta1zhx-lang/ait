@@ -87,36 +87,9 @@ export const notices = computed(() => {
     )
   }
   if (!c.rules?.sources?.length) {
-    out.push('数据库里没有启用的「分析预测」提示词，分析会直接报错。')
+    out.push('没读到内置的分析预测提示词 —— 这是代码问题，不是配置问题。')
   }
   return out
-})
-
-export const rulesBadge = computed(() => {
-  const r = config.value?.rules
-  const sources = r?.sources ?? []
-  if (!sources.length) {
-    return {
-      text: '⚠️ 没有分析预测提示词',
-      cls: 'bad',
-      title: '数据库里还没有启用的「分析预测」提示词 —— 去「AI 提示词」页写一份'
-    }
-  }
-  const chars = ((r?.systemChars || 0) + (r?.bodyChars || 0)) / 1000
-  return {
-    text: `分析预测 ${sources.length} 份 · ${chars.toFixed(1)}K · ${r?.hash ?? ''}`,
-    cls: 'ok',
-    title: `${sources.join('\n')}\n\n在「AI 提示词」页维护`
-  }
-})
-
-export const kbBadge = computed(() => {
-  const total = config.value?.knowledge?.total ?? 0
-  return {
-    text: `知识库 ${total} 条`,
-    cls: total > 0 ? 'ok' : '',
-    title: '我录过的行情案例'
-  }
 })
 
 /** 可切换的模型列表（拿不到接口列表时用内置的） */

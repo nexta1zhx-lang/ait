@@ -9,18 +9,6 @@ import {
   loadContracts
 } from './contracts'
 import {fullSystem, loadExtractRules, loadRules} from './rules'
-import {buildSystemPrompt} from './llm/prompt'
-import {buildExtractPrompt} from './llm/extract'
-import {
-  createDoc,
-  deleteDoc,
-  getVersion,
-  listDocs,
-  listVersions,
-  restoreVersion,
-  updateDoc,
-  type DocKind
-} from './db/prompts'
 import {
   checkDb,
   closePool,
@@ -233,9 +221,6 @@ function readJsonBody(
 
 const str = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d)
 
-/** 提示词文档类型（认不出的返回 null，由调用方决定默认值） */
-const asDocKind = (v: unknown): DocKind | null =>
-  v === 'role' || v === 'rule' || v === 'extract' ? v : null
 const num = (v: unknown): number | undefined => {
   const n = Number(v)
   return Number.isFinite(n) ? n : undefined
@@ -873,16 +858,38 @@ async function handleTickerStream(
 }
 
 /**
- * 币种图标（代理上面那套开源图标集）。
+ * 币种图标（代理几套公开图标集 + 按顺序兜底）。
  *
  * 为什么不让浏览器直连图标站：图标源在国内不一定连得上，但**我们的域名一定连得上**
- * （跟 K 线 WS 中转一个道理）；顺带在内存里缓存起来，一张 32px PNG 不到 1KB，
- * 整个市场几百个币也就几百 KB，且浏览器那边 `max-age` 七天。
- * 找不到就 404，前端退回首字母的圆形占位。
+ * （跟 K 线 WS 中转一个道理）；顺带在内存里缓存起来，几百个币也就几百 KB，
+ * 浏览器那边 `max-age` 七天。找不到就 404，前端退回首字母的圆形占位。
+ *
+ * ★ 2026-10-03 换过一次源。用户问「图标怎么不全」——实测把 528 个合约跑了一遍：
+ *
+ *   | 源 | 命中 |
+ *   |---|---|
+ *   | `spothq/cryptocurrency-icons`（原来只用这个） | **86 / 528（16%）** |
+ *   | `assets.coincap.io` | 245 / 528（46%） |
+ *   | `static.okx.com` | **352 / 528（67%）** |
+ *   | 三家合起来 | 406 / 528（77%） |
+ *
+ * spothq 那套是 2018 年前后停更的老图标集，**新币几乎一个都没有**
+ * （HYPE / SUI / WLD / PUMP / ENA / TAO / PEPE 全缺）—— 这就是「图标不全」的原因。
+ * 现在按 **okx → coincap → spothq** 的顺序试，谁先答应用谁。
+ * 剩下那 122 个（新上币、中文名的（牛来 / 龙虾 / 币安人生）、以及 BTCDOM 这种指数）
+ * 三家都没有，继续走首字母占位。
  */
-const ICON_CDN =
-  'https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/32/color'
-const iconCache = new Map<string, Buffer>()
+const ICON_SOURCES: ((k: string) => string)[] = [
+  // OKX 的公开 CDN：按纯 ticker 取，对币安那批合约覆盖最好
+  k => `https://static.okx.com/cdn/oksupport/asset/currency/icon/${k}.png`,
+  // CoinCap：@2x 那张，体积小（~2KB）
+  k => `https://assets.coincap.io/assets/icons/${k}@2x.png`,
+  // 老的那套（留着当兜底：老币它反而更全，比如一堆 2017 年的币）
+  k =>
+    `https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/32/color/${k}.png`
+]
+
+const iconCache = new Map<string, {buf: Buffer; type: string} | null>()
 
 /**
  * 没有这个币的图标：回 404 但**带缓存头**。
@@ -895,6 +902,37 @@ function sendNoIcon(res: http.ServerResponse): void {
   res.end()
 }
 
+/** 逐个源试一遍，拿到就返回；全都拿不到返回 null */
+async function fetchIcon(
+  keys: string[]
+): Promise<{buf: Buffer; type: string} | null> {
+  for (const src of ICON_SOURCES) {
+    for (const k of keys) {
+      try {
+        const r = await fetch(src(k), {
+          signal: AbortSignal.timeout(4000)
+        })
+        if (!r.ok) continue
+        /*
+         * ⚠️ 必须校验类型：这几个源对「不存在的币」有时也回 **200**，
+         * 但正文是一小段 HTML 或 JSON（实测 LIT / MARSCOIN / US 就是这样，
+         * 浏览器那边 `<img>` 解码失败 → 变成裂图）。不是 `image/*` 就当没找到，
+         * 继续试下一个源 —— 千万别把 `content-type` 兜底成 image/png 蒙过去。
+         */
+        const ct = (r.headers.get('content-type') ?? '').split(';')[0].trim()
+        if (!ct.startsWith('image/')) continue
+        const buf = Buffer.from(await r.arrayBuffer())
+        if (!buf.length) continue
+        return {buf, type: ct}
+      } catch {
+        // 这个源不通/超时 → 换下一个（别把整条链路卡死）
+        continue
+      }
+    }
+  }
+  return null
+}
+
 async function handleIcon(
   sym: string,
   res: http.ServerResponse
@@ -904,32 +942,29 @@ async function handleIcon(
     sendJson(res, 400, {error: '币种不合法'})
     return
   }
-  let buf = iconCache.get(key)
-  if (!buf) {
-    try {
-      const r = await fetch(`${ICON_CDN}/${key}.png`)
-      if (!r.ok) {
-        sendNoIcon(res)
-        return
-      }
-      buf = Buffer.from(await r.arrayBuffer())
-      if (!buf.length) {
-        sendNoIcon(res)
-        return
-      }
-      iconCache.set(key, buf)
-    } catch (e) {
-      sendJson(res, 502, {error: (e as Error).message})
-      return
-    }
+  let hit = iconCache.get(key)
+  if (hit === undefined) {
+    /*
+     * 候选键：先用原样，再去掉开头的数字。
+     * `1000PEPE` / `1000SHIB` 这种，图标站多数只认 `pepe` / `shib`。
+     */
+    const stripped = key.replace(/^\d+/, '')
+    const keys = stripped && stripped !== key ? [key, stripped] : [key]
+    hit = await fetchIcon(keys)
+    // 找不到也记一笔（null），别每次开页面都为同一个币把三个源都问一遍
+    iconCache.set(key, hit)
+  }
+  if (!hit) {
+    sendNoIcon(res)
+    return
   }
   res.writeHead(200, {
-    'Content-Type': 'image/png',
-    'Content-Length': buf.length,
+    'Content-Type': hit.type,
+    'Content-Length': hit.buf.length,
     'Cache-Control': 'public, max-age=604800',
     ...CORS
   })
-  res.end(buf)
+  res.end(hit.buf)
 }
 
 /**
@@ -977,165 +1012,6 @@ async function handleAnalyzeStream(
   } finally {
     res.end()
   }
-}
-
-/* ------------------------------------------------------------------ */
-/* AI 提示词文档（分析预测 / 知识库提炼，全部存数据库）                   */
-/* ------------------------------------------------------------------ */
-
-/** 列表 + 「这次真正会发出去什么」的概览 */
-async function handleListAiDocs(res: http.ServerResponse): Promise<void> {
-  try {
-    const [docs, bundle, extract] = await Promise.all([
-      listDocs(),
-      loadRules(),
-      loadExtractRules()
-    ])
-    sendJson(res, 200, {
-      docs,
-      assembly: {
-        // 分析预测只读 kind=predict 那一份（不再分角色/规则两段）
-        enabled: bundle.bodyEnabled,
-        origin: bundle.origin,
-        sources: bundle.sources,
-        hash: bundle.hash,
-        predictChars: bundle.system.length,
-        // 知识库提炼那份走的是另一条链路（kind=extract），一起报出来
-        extractChars: extract.system.length,
-        extractSources: extract.sources,
-        extractHash: extract.hash,
-        updatedAt: bundle.updatedAt,
-        warnings: bundle.warnings
-      }
-    })
-  } catch (e) {
-    sendJson(res, 503, {error: dbHelpMessage(e)})
-  }
-}
-
-async function handleCreateAiDoc(
-  req: http.IncomingMessage,
-  res: http.ServerResponse
-): Promise<void> {
-  const body = await readJsonBody(req).catch(() => null)
-  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
-  const kind = asDocKind(body.kind) ?? 'rule'
-  const name = str(body.name).trim()
-  if (!name) return sendJson(res, 400, {error: '请给这份文档起个名字'})
-  try {
-    const doc = await createDoc({
-      kind,
-      name,
-      content: typeof body.content === 'string' ? body.content : ''
-    })
-    sendJson(res, 200, {doc})
-  } catch (e) {
-    sendJson(res, 503, {error: dbHelpMessage(e)})
-  }
-}
-
-async function handleUpdateAiDoc(
-  id: number,
-  req: http.IncomingMessage,
-  res: http.ServerResponse
-): Promise<void> {
-  const body = await readJsonBody(req).catch(() => null)
-  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
-  const patch: Parameters<typeof updateDoc>[1] = {}
-  if (typeof body.name === 'string') patch.name = body.name
-  if (typeof body.content === 'string') patch.content = body.content
-  if (typeof body.enabled === 'boolean') patch.enabled = body.enabled
-  const kind = asDocKind(body.kind)
-  if (kind) patch.kind = kind
-  if (body.sort !== undefined) patch.sort = Number(body.sort) || 0
-  try {
-    const doc = await updateDoc(id, patch)
-    if (!doc) return sendJson(res, 404, {error: '文档不存在'})
-    sendJson(res, 200, {doc})
-  } catch (e) {
-    sendJson(res, 503, {error: dbHelpMessage(e)})
-  }
-}
-
-async function handleDeleteAiDoc(
-  id: number,
-  res: http.ServerResponse
-): Promise<void> {
-  try {
-    const ok = await deleteDoc(id)
-    sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '文档不存在'})
-  } catch (e) {
-    sendJson(res, 503, {error: dbHelpMessage(e)})
-  }
-}
-
-async function handleListAiVersions(
-  docId: number,
-  res: http.ServerResponse
-): Promise<void> {
-  try {
-    sendJson(res, 200, {versions: await listVersions(docId)})
-  } catch (e) {
-    sendJson(res, 503, {error: dbHelpMessage(e)})
-  }
-}
-
-async function handleGetAiVersion(
-  versionId: number,
-  res: http.ServerResponse
-): Promise<void> {
-  try {
-    const v = await getVersion(versionId)
-    if (!v) return sendJson(res, 404, {error: '版本不存在'})
-    sendJson(res, 200, {version: v})
-  } catch (e) {
-    sendJson(res, 503, {error: dbHelpMessage(e)})
-  }
-}
-
-async function handleRestoreAiVersion(
-  versionId: number,
-  res: http.ServerResponse
-): Promise<void> {
-  try {
-    const doc = await restoreVersion(versionId)
-    if (!doc) return sendJson(res, 404, {error: '版本不存在'})
-    sendJson(res, 200, {doc})
-  } catch (e) {
-    sendJson(res, 503, {error: dbHelpMessage(e)})
-  }
-}
-
-/**
- * 看看这次真正发出去的 system prompt 长什么样。
- *
- * `?kind=extract` 看知识库提炼那份（它不是通过 buildSystemPrompt 拼的，
- * 而是正文 + 标签规则）。
- */
-async function handleAiPreview(
-  url: URL,
-  res: http.ServerResponse
-): Promise<void> {
-  if (url.searchParams.get('kind') === 'extract') {
-    const [extract, templates] = await Promise.all([
-      loadExtractRules(),
-      loadTagTemplates()
-    ])
-    sendJson(res, 200, {
-      system: buildExtractPrompt(extract.system, templates),
-      enabled: extract.enabled,
-      sources: extract.sources,
-      hash: extract.hash
-    })
-    return
-  }
-  const bundle = await loadRules()
-  sendJson(res, 200, {
-    system: buildSystemPrompt(bundle.system),
-    enabled: bundle.bodyEnabled,
-    sources: bundle.sources,
-    hash: bundle.hash
-  })
 }
 
 /* ------------------------------------------------------------------ */
@@ -1686,45 +1562,6 @@ async function route(
     const row = await getAnalysis(id).catch(() => null)
     if (!row) return sendJson(res, 404, {error: '记录不存在'})
     return sendJson(res, 200, {analysis: row})
-  }
-
-  /* ---- AI 提示词文档（角色 / 规则，全部存数据库） ---- */
-  if (p === '/api/ai-docs') {
-    if (method === 'GET') return handleListAiDocs(res)
-    if (method === 'POST') return handleCreateAiDoc(req, res)
-    return sendJson(res, 405, {error: 'Method Not Allowed'})
-  }
-  if (p === '/api/ai-preview') {
-    if (method !== 'GET')
-      return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleAiPreview(url, res)
-  }
-  if (p.startsWith('/api/ai-docs/')) {
-    const mv = p.match(/^\/api\/ai-docs\/(\d+)\/versions$/)
-    if (mv) {
-      if (method !== 'GET')
-        return sendJson(res, 405, {error: 'Method Not Allowed'})
-      return handleListAiVersions(Number(mv[1]), res)
-    }
-    const m = p.match(/^\/api\/ai-docs\/(\d+)$/)
-    if (!m) return sendJson(res, 404, {error: 'Not Found'})
-    const id = Number(m[1])
-    if (method === 'PUT') return handleUpdateAiDoc(id, req, res)
-    if (method === 'DELETE') return handleDeleteAiDoc(id, res)
-    return sendJson(res, 405, {error: 'Method Not Allowed'})
-  }
-  if (p.startsWith('/api/ai-versions/')) {
-    const mr = p.match(/^\/api\/ai-versions\/(\d+)\/restore$/)
-    if (mr) {
-      if (method !== 'POST')
-        return sendJson(res, 405, {error: 'Method Not Allowed'})
-      return handleRestoreAiVersion(Number(mr[1]), res)
-    }
-    const m = p.match(/^\/api\/ai-versions\/(\d+)$/)
-    if (!m) return sendJson(res, 404, {error: 'Not Found'})
-    if (method !== 'GET')
-      return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleGetAiVersion(Number(m[1]), res)
   }
 
   /* ---- 知识库 ---- */

@@ -154,12 +154,10 @@ export const leftTab = ref<LeftTab>('market')
  */
 export const CHART_TAB = {value: 'chart' as const, label: 'K 线'}
 
-/** 实时分析内部的二级 tab（大简化后只剩两个） */
-export const LIVE_TABS = [
-  {value: 'verdict' as const, label: 'AI 结论'},
-  {value: 'market' as const, label: '市场与周期'}
-]
-export const liveTab = ref<'verdict' | 'market'>('verdict')
+/*
+ * 2026-10-03：二级 tab（AI 结论 / 市场与周期）已按用户要求整块去掉 ——
+ * 结论和「市场热度」现在直铺下来，不再切。所以 `LIVE_TABS` / `liveTab` 两个导出都删了。
+ */
 
 /** 分析过程：跑的时候展开，出结论后收成一行，点一下还能展开 */
 export const showSteps = ref(true)
@@ -355,7 +353,6 @@ export function run(): void {
   // ⚠️ 这里**不能**动 leftTab：测试已经是左侧一级 tab 了（2026-10-03），
   // 一点「判断」就切回实时的话，testMode 立刻变 false、testAt 变 null ——
   // 测试跑会被当成实时跑存档（踩过：#100 就是这么来的）。
-  liveTab.value = 'verdict'
   showSteps.value = true
   loading.value = true
 
