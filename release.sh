@@ -65,10 +65,14 @@ rm -f "$LOCAL_TAR"
 # --no-xattrs：别把 macOS 的 xattr 写进包 —— 否则 Linux 的 GNU tar 会刷一屏
 #   “Ignoring unknown extended header keyword”（实测 0 警告 vs 一百多行）
 # ⚠️ --exclude='.env' 绝不能漏：服务器那份 .env 里有随机化过的 PGPASSWORD 和你的 Key
+# ./android 是 Capacitor 的原生工程（含 Gradle 构建产物，几十 MB），服务器只跑
+#   后端 + 前端 dist，完全用不到它 —— 排掉能让包小一大截。
+# ./downloads 反而**要**传：APK 放在那儿，Caddy 按 /dl/* 发出去。
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$LOCAL_TAR" \
   --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='.env.local' \
   --exclude='backend/dist' --exclude='frontend/dist' --exclude='logs' \
   --exclude='.DS_Store' --exclude='._*' --exclude='backup*.dump' \
+  --exclude='./android' \
   -C . .
 
 if tar tzf "$LOCAL_TAR" | grep -qx '\./\.env'; then

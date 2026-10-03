@@ -56,6 +56,18 @@ echo "→ 编译 APK"
 APK="$(pwd)/android/app/build/outputs/apk/debug/app-debug.apk"
 echo
 echo "✓ 完成：$APK"
-ls -lh "$APK"
+
+# 同时丢进 downloads/ —— 那是分发给别人下载的目录：
+#   · 本机：python3 -m http.server（见 MOBILE.md）
+#   · 线上：compose 把它挂给 Caddy，链接 https://bitcoooin.cn/dl/<文件名>
+# 版本号从 package.json 读，文件名带版本，不会新旧混淆。
+VER="$(node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0)"
+DEST="$(pwd)/downloads"
+mkdir -p "$DEST"
+cp "$APK" "$DEST/entry-advisor-$VER.apk"
+echo "✓ 已放入下载目录：downloads/entry-advisor-$VER.apk"
+ls -lh "$DEST"
 echo
 echo "装到手机（需要 adb）：adb install -r \"$APK\""
+echo "本机下载：cd downloads && python3 -m http.server 8899 --bind 0.0.0.0"
+echo "线上下载：https://bitcoooin.cn/dl/entry-advisor-$VER.apk（跑 bash release.sh 之后）"

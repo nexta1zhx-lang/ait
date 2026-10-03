@@ -10,10 +10,24 @@
 bitcoooin.cn {
 	encode gzip zstd
 
-	# 分析 / 提炼走 SSE（text/event-stream）。
-	# flush_interval -1 = 每个事件立刻写出去，否则「分析过程」会憋到跑完才显示。
-	reverse_proxy app:8787 {
-		flush_interval -1
+	# ---------------------------------------------------------------- 下载
+	# APK / 安装包这类静态文件不走应用，Caddy 直接发文件。
+	# 目录由 compose 挂进来：宿主机 ./downloads → 容器 /srv/dl
+	# 链接形如 https://bitcoooin.cn/dl/xxx.apk
+	handle /dl/* {
+		root * /srv/dl
+		file_server
+	}
+
+	# ---------------------------------------------------------------- 其余全部给应用
+	# ⚠️ handle 之间是**互斥**的（按路径长度挑最匹配的那条），
+	# 所以这条兜底的必须是一个**不带头部**的 handle，不能再直接写 reverse_proxy。
+	handle {
+		# 分析 / 提炼走 SSE（text/event-stream）。
+		# flush_interval -1 = 每个事件立刻写出去，否则「分析过程」会憋到跑完才显示。
+		reverse_proxy app:8787 {
+			flush_interval -1
+		}
 	}
 
 	# 访问日志走 stdout，用 docker compose logs caddy 看

@@ -10,6 +10,13 @@ frontend/dist/
 .env.local
 .env.*.local
 
+# 下载分发目录里的大文件（目录本身要留着，Caddy 会挂它）
+downloads/*.apk
+
+# Capacitor 原生工程的本地产物（原生工程源码仍然提交，见 MOBILE.md）
+android/app/src/main/assets/public/
+android/.gradle/
+
 # 运行产物
 logs/
 *.log

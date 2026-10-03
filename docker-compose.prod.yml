@@ -82,6 +82,8 @@ services:
       - '443:443/udp' # HTTP/3
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 下载目录（APK 等）—— 对应 Caddyfile 里的 /dl/* 路由
+      - ./downloads:/srv/dl:ro
       - ca-caddy-data:/data
       - ca-caddy-config:/config
     # 让 Caddy 能反代到宿主机上的服务（如 Netdata 装在宿主机时）

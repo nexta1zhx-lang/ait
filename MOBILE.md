@@ -148,7 +148,51 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 
 ---
 
-## 七、还没做（要正式发布再补）
+## 七、分发与下载链接
+
+### 线上：挂在域名下
+
+APK 放 `downloads/`，Caddy 按 **`/dl/*`** 直接发文件（目录由
+`docker-compose.prod.yml` 挂进 caddy 容器：`./downloads → /srv/dl`）：
+
+```
+https://bitcoooin.cn/dl/entry-advisor-0.1.0.apk
+```
+
+发一次：
+
+```bash
+bash release.sh          # 会连 downloads/ 一起打上去，并重建 caddy 容器
+```
+
+`build-apk.sh` 每次都会把新 APK 自动放进 `downloads/entry-advisor-<版本>.apk`，
+版本号读的是 `package.json` 的 `version`。
+
+### 本机：同一个 WiFi 下最快
+
+```bash
+cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
+# 手机浏览器打开 http://<本机局域网IP>:8899/entry-advisor-0.1.0.apk
+```
+
+### ⚠️ 传不上去时先看这里
+
+本机代理开 **TUN / 全局模式** 时会劫持所有出站 TCP，症状：
+
+- `ssh` 报 `Connection closed by <ip> port 22`
+- `dig bitcoooin.cn` 返回 **198.18.x.x**（RFC 2544 假 IP 段，代理的 fake-IP）
+- `nc -z <任意IP> <任意端口>` **全部"成功"**（结果是伪造的，别信）
+
+**关掉代理的 TUN（或给 `57.181.38.200` 加一条直连规则）再跑 `release.sh`。**
+
+### 安装提示
+
+这是 **debug 签名**的包，手机首次安装要在系统里允许「未知来源」。要长期分发 / 上架，
+得先做正式签名（见第三节）。
+
+---
+
+## 八、还没做（要正式发布再补）
 
 1. **后端鉴权** ⚠️ 最重要
    后端接口现在**完全开放**（CORS `*`、无任何 token）。网页没人管，但 App 一旦发出去，

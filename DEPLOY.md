@@ -252,6 +252,27 @@ tar tzf /tmp/ca.tgz >/dev/null \
 
 ---
 
+## 静态下载（`/dl/`）
+
+`downloads/` 里的文件由 Caddy 直接发出去（**不走应用**），链接形如：
+
+```
+https://bitcoooin.cn/dl/entry-advisor-0.1.0.apk
+```
+
+- `Caddyfile`：`handle /dl/* { root * /srv/dl; file_server }`
+- `docker-compose.prod.yml`：给 caddy 挂了 `./downloads:/srv/dl:ro`
+
+换文件时一起传上去：
+
+```bash
+bash build-apk.sh        # 顺带把新 APK 放进 downloads/
+bash release.sh -y       # 打包上传 + 重建 caddy 容器
+```
+
+⚠️ 第一次加这个挂载**必须重建 caddy**（`release.sh` 走的就是
+`up -d --build`，会按新配置重建），否则容器里没有 `/srv/dl`。
+
 ## 常用命令
 
 ```bash
