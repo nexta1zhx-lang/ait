@@ -66,6 +66,14 @@ DEST="$(pwd)/downloads"
 mkdir -p "$DEST"
 cp "$APK" "$DEST/entry-advisor-$VER.apk"
 echo "✓ 已放入下载目录：downloads/entry-advisor-$VER.apk"
+
+# 别忘了在 releases.json 里补一条 —— 网页 /download 页就是读它拿到「介绍 + 更新说明」的，
+# 没登记的话那一版会被列成「未登记」（能下，但说不清是什么）。
+if [[ -f "$DEST/releases.json" ]] && ! grep -q "\"version\": \"$VER\"" "$DEST/releases.json"; then
+  echo
+  echo "⚠️  downloads/releases.json 里还没有 v$VER 这条 —— /download 页会把它列成「未登记」。"
+  echo "    补一条（title / date / notes）再跑 release.sh。"
+fi
 ls -lh "$DEST"
 echo
 echo "装到手机（需要 adb）：adb install -r \"$APK\""

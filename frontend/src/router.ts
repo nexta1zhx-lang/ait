@@ -4,6 +4,7 @@ import AnalyzeView from './views/AnalyzeView.vue'
 import HistoryView from './views/HistoryView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
 import UsageView from './views/UsageView.vue'
+import DownloadView from './views/DownloadView.vue'
 
 export const routes = [
   {
@@ -29,6 +30,12 @@ export const routes = [
     name: 'usage',
     component: UsageView,
     meta: {title: '用量与花费', nav: '用量'}
+  },
+  {
+    path: '/download',
+    name: 'download',
+    component: DownloadView,
+    meta: {title: '下载 App', nav: '下载'}
   },
   /*
    * 「AI 提示词」页 2026-10-04 已删（用户：「没什么用，都要和代码绑定」）——

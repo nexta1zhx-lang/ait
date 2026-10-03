@@ -2,6 +2,7 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import {createHash} from 'node:crypto'
 import {loadConfig, ROOT_DIR} from './config'
 import {
   CONTRACTS_MAX_AGE_MS,
@@ -80,6 +81,7 @@ const MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.png': 'image/png',
+  '.apk': 'application/vnd.android.package-archive',
   '.woff2': 'font/woff2'
 }
 
@@ -187,6 +189,187 @@ function serveStatic(res: http.ServerResponse, urlPath: string): void {
   <a href="/api/health">/api/health</a> · <a href="/api/config">/api/config</a> ·
   <a href="/api/account">/api/account</a></p>
 </main></body></html>`)
+}
+
+/* ------------------------------------------------------------------ */
+/* 下载分发（/download 页 + /dl/*）                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 下载目录 —— APK 就放这儿。
+ *
+ * · 线上：Caddy 挂了 `./downloads:/srv/dl:ro`，`/dl/*` 由 **Caddy 直接发**，
+ *   请求压根到不了本进程（见 `Caddyfile` / `docker-compose.prod.yml`）；
+ * · 本地：没人帮忙代发，所以下面 `serveDownload()` 自己发一份 ——
+ *   这样 `npm run web` 打开 `/download` 页，点了按钮真能下下来。
+ *
+ * `releases.json` 是手写的清单（介绍 / 更新说明），跟文件同级放。
+ * 磁盘上有、清单里没写的 APK 也会列出来（标成「未登记」），不让谁隐身。
+ */
+const DOWNLOAD_DIR = path.join(ROOT_DIR, 'downloads')
+const RELEASES_FILE = path.join(DOWNLOAD_DIR, 'releases.json')
+
+interface ReleaseMeta {
+  version?: string
+  file?: string
+  date?: string
+  title?: string
+  notes?: string[]
+  /** 显式标「不是推荐版本」；一般不用写 —— 版本号最大的自动算推荐 */
+  deprecated?: boolean
+}
+
+interface ReleasesDoc {
+  app?: {
+    name?: string
+    packageId?: string
+    desc?: string
+    require?: string
+    sizeHint?: string
+    install?: string[]
+  }
+  releases?: ReleaseMeta[]
+}
+
+/** `entry-advisor-0.1.0.apk` → `0.1.0` */
+function versionFromFile(file: string): string {
+  const m = file.match(/(\d+(?:\.\d+)*)(?=\.apk$)/i)
+  return m ? m[1] : file.replace(/\.apk$/i, '')
+}
+
+/** 版本号比较（数字段逐个比，`0.10.0` 要大于 `0.9.0`） */
+function cmpVersion(a: string, b: string): number {
+  const pa = a.split('.').map(n => Number(n) || 0)
+  const pb = b.split('.').map(n => Number(n) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d) return d
+  }
+  return 0
+}
+
+/**
+ * APK 的 md5 —— 页面上显示出来方便核对下载有没有坏。
+ * 4MB 的包没必要每次请求都重算，按「路径 + 大小 + mtime」缓存，文件一变自动失效。
+ */
+const md5Cache = new Map<string, {key: string; hex: string}>()
+
+function fileMd5(file: string): string {
+  const st = fs.statSync(file)
+  const key = `${st.size}:${st.mtimeMs}`
+  const hit = md5Cache.get(file)
+  if (hit?.key === key) return hit.hex
+  const hex = createHash('md5').update(fs.readFileSync(file)).digest('hex')
+  md5Cache.set(file, {key, hex})
+  return hex
+}
+
+/** 北京时间 YYYY-MM-DD */
+function bjDate(ms: number): string {
+  return new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
+}
+
+/** 列清单：`releases.json` 的介绍 + 磁盘上真实的文件信息（大小 / md5 / 时间） */
+function listDownloads() {
+  let doc: ReleasesDoc = {}
+  try {
+    doc = JSON.parse(fs.readFileSync(RELEASES_FILE, 'utf8')) as ReleasesDoc
+  } catch {
+    /* 没清单就只按文件列 */
+  }
+
+  let onDisk: string[] = []
+  try {
+    onDisk = fs
+      .readdirSync(DOWNLOAD_DIR)
+      .filter(f => f.toLowerCase().endsWith('.apk'))
+  } catch {
+    /* 目录还不存在（没打过包） */
+  }
+
+  const metas: ReleaseMeta[] = [...(doc.releases ?? [])]
+  for (const f of onDisk) {
+    if (!metas.some(m => m.file === f)) metas.push({file: f})
+  }
+
+  const releases = metas
+    .filter((m): m is ReleaseMeta & {file: string} => Boolean(m.file))
+    .map(m => {
+      const file = path.join(DOWNLOAD_DIR, m.file)
+      let size = 0
+      let mtime = 0
+      let md5: string | null = null
+      try {
+        const st = fs.statSync(file)
+        size = st.size
+        mtime = Math.round(st.mtimeMs)
+        md5 = fileMd5(file)
+      } catch {
+        /* 清单里写了、文件不在（本地没打包时很常见）*/
+      }
+      return {
+        version: m.version ?? versionFromFile(m.file),
+        file: m.file,
+        url: `/dl/${encodeURIComponent(m.file)}`,
+        title: m.title ?? '',
+        date: m.date ?? (mtime ? bjDate(mtime) : ''),
+        notes: m.notes ?? [],
+        /** 清单里登记过 / 还是磁盘上捡到的 */
+        listed: Boolean(m.title || m.notes?.length || m.date),
+        size,
+        mtime,
+        md5,
+        deprecated: Boolean(m.deprecated),
+        latest: false
+      }
+    })
+    .filter(r => r.size > 0)
+    .sort((a, b) => cmpVersion(b.version, a.version))
+
+  if (releases.length && !releases[0].deprecated) releases[0].latest = true
+
+  // ⚠️ 只回清单，**不回 `DOWNLOAD_DIR` 这个绝对路径** ——
+  //    接口是公开的，没必要把容器里的目录结构说出去。
+  return {
+    app: doc.app ?? {},
+    releases
+  }
+}
+
+/** 本地把 `downloads/` 发出去（线上这一步是 Caddy 干的） */
+function serveDownload(res: http.ServerResponse, urlPath: string): void {
+  const rel = decodeURIComponent(urlPath.replace(/^\/dl\/?/, '')).replace(
+    /^\/+/,
+    ''
+  )
+  const safe = path.normalize(rel)
+  const file = path.join(DOWNLOAD_DIR, safe)
+
+  if (
+    !safe ||
+    safe.startsWith('..') ||
+    !file.startsWith(DOWNLOAD_DIR) ||
+    !fs.existsSync(file) ||
+    !fs.statSync(file).isFile()
+  ) {
+    res.writeHead(404, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store'
+    })
+    res.end('没有这个文件')
+    return
+  }
+
+  const base = path.basename(file)
+  res.writeHead(200, {
+    'Content-Type':
+      MIME[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
+    'Content-Length': fs.statSync(file).size,
+    // 手机上点了直接存下来，别在浏览器里打开
+    'Content-Disposition': `attachment; filename="${base}"`,
+    'Cache-Control': 'no-cache'
+  })
+  fs.createReadStream(file).pipe(res)
 }
 
 function readJsonBody(
@@ -1280,6 +1463,11 @@ async function route(
   const method = req.method ?? 'GET'
 
   if (!p.startsWith('/api/')) {
+    // 下载分发：线上是 Caddy 发（请求到不了这儿），本地自己发一份
+    if (p === '/dl' || p.startsWith('/dl/')) {
+      serveDownload(res, p)
+      return
+    }
     // 开发模式下前端交给 Vite 中间件（改完立刻生效，不需要 build）
     if (viteDev?.handle(req, res)) return
     serveStatic(res, p)
@@ -1619,6 +1807,11 @@ async function route(
     }
     if (method === 'PATCH') return handleUpdateCase(id, req, res)
     return handleGetCase(id, res)
+  }
+
+  // 「下载」页的数据：磁盘上的 APK + `downloads/releases.json` 里的介绍
+  if (p === '/api/downloads') {
+    return sendJson(res, 200, listDownloads())
   }
 
   sendJson(res, 404, {error: 'Not Found'})

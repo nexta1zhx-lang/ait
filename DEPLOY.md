@@ -263,7 +263,29 @@ tar tzf /tmp/ca.tgz >/dev/null \
 
 ---
 
-## 静态下载（`/dl/`）
+## 静态下载（`/dl/`）与「下载」页
+
+### `/download` 页
+
+站内有一个独立路由 **`https://bitcoooin.cn/download`**，列出所有历史安装包 +
+介绍 + 更新说明。顶栏/底栏那颗「下载」就是它。
+
+数据来自后端 **`/api/downloads`**，它做两件事：
+
+1. 扫 `downloads/` 目录里真实的 `*.apk`（大小 / 时间 / **md5** 都现算，md5 按
+   「大小 + mtime」缓存）；
+2. 把同级手写的 **`downloads/releases.json`** 合进来 —— 那里面写「这一版叫什么、
+   改了啥、什么时候发的」。
+
+所以**加一版新包只要两步**：`bash build-apk.sh`（
+
+自动把 APK 放进 `downloads/`）→ 在 `downloads/releases.json` 里补一条 →
+`bash release.sh -y`。页面不用改代码。没登记的 APK 也会列出来，标「未登记」。
+
+> `releases.json` 里的 `app` 段是整页的介绍文案（名称 / 包名 / 说明 / 安装步骤）；
+> `releases[]` 每条对应一个版本（`version` / `file` / `date` / `title` / `notes`）。
+
+### `/dl/*` 文件分发
 
 `downloads/` 里的文件由 Caddy 直接发出去（**不走应用**），链接形如：
 
@@ -271,15 +293,24 @@ tar tzf /tmp/ca.tgz >/dev/null \
 https://bitcoooin.cn/dl/entry-advisor-0.1.0.apk
 ```
 
-- `Caddyfile`：`handle /dl/* { root * /srv/dl; file_server }`
-- `docker-compose.prod.yml`：给 caddy 挂了 `./downloads:/srv/dl:ro`
+- `Caddyfile`：`handle_path /dl/* { root * /srv/dl; file_server }`
+- `docker-compose.prod.yml`：给 **caddy** 挂了 `./downloads:/srv/dl:ro`
+- `docker-compose.prod.yml`：给 **app** 也挂了同一个目录 `./downloads:/app/downloads:ro`
+  —— `/api/downloads` 要读里面的真实文件（大小 / md5）才能列出清单。
+  ⚠️ **两边必须指向同一个宿主机目录**，否则页面上列的和实际能下的对不上。
+  ⚠️ `downloads/` **不 COPY 进镜像**（`.dockerignore` 排掉了）——
+  换 APK 只传文件，不用重新构建镜像层。
 
 换文件时一起传上去：
 
 ```bash
-bash build-apk.sh        # 顺带把新 APK 放进 downloads/
+bash build-apk.sh        # 顺带把新 APK 放进 downloads/（并在 releases.json 里补一条）
 bash release.sh -y       # 打包上传 + 重建 caddy 容器
 ```
+
+> 💭 本地 `npm run web` 也能下：线上 `/dl/*` 是 Caddy 发的，本地没有 Caddy，
+> 后端 `serveDownload()` 会自己发一份（`backend/src/server.ts`）。效果一样，
+> 所以 `/download` 页在本机就能完整验收。
 
 ⚠️ 第一次加这个挂载**必须重建 caddy**（`release.sh` 走的就是
 `up -d --build`，会按新配置重建），否则容器里没有 `/srv/dl`。

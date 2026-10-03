@@ -16,4 +16,8 @@ frontend/dist
 logs
 *.log
 
+# 下载目录（APK 有 4MB+，不往构建上下文里塞）——
+# 它是 bind mount 进容器给 /api/downloads 读的，不是 COPY 进镜像的。
+downloads
+
 .DS_Store

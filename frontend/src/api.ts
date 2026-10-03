@@ -1060,3 +1060,46 @@ export const fetchAnalysis = (id: number) =>
 
 export const deleteAnalysis = (id: number) =>
   del<{ok: boolean}>(`/api/analyses/${id}`)
+
+/* ---------------- 下载 ---------------- */
+
+export interface DownloadApp {
+  name?: string
+  packageId?: string
+  desc?: string
+  require?: string
+  sizeHint?: string
+  install?: string[]
+}
+
+export interface DownloadRelease {
+  version: string
+  file: string
+  /** `/dl/xxx.apk` —— 线上由 Caddy 发，本地由后端发 */
+  url: string
+  title: string
+  date: string
+  notes: string[]
+  /** 清单里登记过介绍 / 只是磁盘上捡到的 */
+  listed: boolean
+  /** 字节数 */
+  size: number
+  mtime: number
+  md5: string | null
+  deprecated: boolean
+  /** 版本号最大的那个（且没被标 deprecated） */
+  latest: boolean
+}
+
+export interface DownloadsResult {
+  app: DownloadApp
+  releases: DownloadRelease[]
+}
+
+export const fetchDownloads = () => get<DownloadsResult>('/api/downloads')
+
+/**
+ * 下载链接 —— 原生壳里页面跑在 `https://localhost`，相对路径 `/dl/x.apk`
+ * 会打到 WebView 自己身上，所以必须补上 `API_BASE`。
+ */
+export const downloadUrl = (url: string): string => apiUrl(url)

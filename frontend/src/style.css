@@ -3531,6 +3531,236 @@ body.fixed-viewport .split {
   font-size: 12px;
 }
 
+/* ==================== 下载页（/download） ==================== */
+/*
+ * 用户 2026-10-04：「单独搞一个界面放所有历史下载链接和介绍，单独路由」。
+ *
+ * 布局：头上一张卡（是什么 + 一个显眼的「下载最新版」按钮），中间「怎么装」，
+ * 下面一列历史版本（每个 = 版本号 + 日期 + 更新说明 + 大小 + md5 + 下载）。
+ * 数据全部来自 `/api/downloads`，页面不写死任何版本号。
+ */
+.dl-hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.dl-hero-main {
+  flex: 1 1 260px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dl-app {
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.dl-meta {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-desc {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+
+/* 主按钮：主色底 + 深墨字（暖沙是浅色，用白字会糊） */
+.dl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 11px 20px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 13.5px;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: filter 0.15s, transform 0.1s;
+}
+.dl-btn:hover {
+  filter: brightness(1.08);
+}
+.dl-btn:active {
+  transform: scale(0.98);
+}
+.dl-btn svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 安装步骤 */
+.dl-steps {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 12.5px;
+  line-height: 1.85;
+  color: var(--text);
+}
+.dl-steps li {
+  margin: 6px 0;
+  opacity: 0.86;
+}
+.dl-steps li::marker {
+  color: var(--accent);
+}
+
+/* 历史版本 */
+.dl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.dl-item {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  padding: 11px 14px 12px;
+}
+/* 当前推荐的那一版：左边一条主色，一眼看出来该下哪个 */
+.dl-item.latest {
+  border-left-color: var(--accent);
+}
+.dl-item.dead {
+  opacity: 0.55;
+}
+
+.dl-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dl-ver {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  font-weight: 650;
+}
+
+.dl-title {
+  font-size: 12.5px;
+  color: var(--text);
+  opacity: 0.85;
+}
+
+.dl-spacer {
+  flex: 1 1 0;
+}
+
+.dl-date {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-notes {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.85;
+  color: var(--muted);
+}
+.dl-notes li {
+  margin: 3px 0;
+}
+.dl-notes li::marker {
+  color: var(--border);
+}
+
+.dl-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 11px;
+}
+
+.dl-md5 {
+  font-family: var(--mono);
+  cursor: help;
+}
+
+.dl-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 13px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+.dl-mini:hover {
+  background: var(--accent-soft);
+}
+.dl-mini svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dl-note {
+  margin: 14px 0 0;
+  font-size: 11.5px;
+  line-height: 1.8;
+}
+.dl-note code,
+.dl-item code,
+.empty code {
+  background: var(--panel);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/*
+ * 独立落地页（`/download`）—— 不挂站内导航。
+ *
+ * 用户 2026-10-04：「下载界面是独立的，不和其他界面一起，tab 不要」。
+ * 所以这一页既不在顶栏、也不在窄屏底栏留位置：顶栏 / 底栏整块不显示。
+ *
+ * ⚠️ 不写 `!important`：`body.bare .tabbar` 的特异性 (0,2,1) 已经高过窄屏
+ *    那两条 `.tabbar` / `.topbar`（(0,1,0)），跟书写顺序无关。
+ * ⚠️ `#app { padding-bottom }` 是 ID 选择器，必须也带 `#app` 才压得住，
+ *    不然底栏没了、下面还空着一条。
+ */
+body.bare .topbar,
+body.bare .tabbar {
+  display: none;
+}
+
+body.bare #app,
+body.bare.fixed-viewport #app {
+  padding-bottom: 0;
+}
+
 /* ==================== 窄屏 ==================== */
 @media (max-width: 1040px) {
   .analyze {
@@ -4506,4 +4736,31 @@ button.badge.balance:hover:not(:disabled) {
 .switch.on span {
   transform: translateX(20px);
   background: var(--blue);
+}
+
+/* ==================================================================
+ * 窄屏：下载页（放在最后 = 覆盖上面的基础样式，见「窄屏」那段开头的说明）
+ * ================================================================== */
+@media (max-width: 900px) {
+  /* 手机上主按钮独占一行、铺满，拇指好点 */
+  .dl-btn {
+    width: 100%;
+    justify-content: center;
+  }
+  .dl-hero {
+    gap: 12px;
+  }
+  /* 窄屏把「版本号 + 标签 + 标题」放一行，日期单独退到第二行 —— 
+     全挤一行会折得七零八落，「日期靠右对齐」在窄屏也看不出是右对齐 */
+  .dl-head .dl-spacer {
+    display: none;
+  }
+  .dl-title {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .dl-date {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
 }
