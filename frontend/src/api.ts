@@ -1,9 +1,32 @@
 /** 所有后端接口的类型与调用 */
 
+import {isNativeShell} from './platform'
+
 /* ---------------- 通用 ---------------- */
 
+/**
+ * 接口基址。
+ *
+ * · Web（线上 / 本地开发）：留空 → 继续走相对路径 `/api/...`，同源，由后端
+ *   或 Vite 代理转发，行为跟以前**完全一样**；
+ * · 原生壳（Android / iOS app）：页面跑在 `https://localhost` / `capacitor://localhost`
+ *   下，**没有同源后端**，相对路径会打到 WebView 自己身上（全部 404），
+ *   所以这里必须指向线上服务器。
+ *
+ * 打包时可以用 `VITE_API_BASE` 覆盖（想指到测试服就传这个）。
+ */
+export const API_BASE =
+  import.meta.env.VITE_API_BASE ??
+  (isNativeShell() ? 'https://bitcoooin.cn' : '')
+
+/** 把 `/api/xxx` 拼成能用的地址（Web 上原样返回，所以 Web 侧零影响） */
+export const apiUrl = (path: string): string => `${API_BASE}${path}`
+
+/** 开一条 SSE。**必须走绝对地址**，否则原生壳里连不上 */
+const openSse = (path: string): EventSource => new EventSource(apiUrl(path))
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init)
+  const res = await fetch(apiUrl(url), init)
   let data: unknown = null
   try {
     data = await res.json()
@@ -315,7 +338,7 @@ export function klineStream(
   onCandle: (c: Candle) => void
 ): () => void {
   const qs = new URLSearchParams({symbol, timeframe})
-  const es = new EventSource(`/api/kline/stream?${qs}`)
+  const es = openSse(`/api/kline/stream?${qs}`)
   es.addEventListener('kline', e => {
     try {
       const d = JSON.parse((e as MessageEvent).data) as {candle?: Candle}
@@ -380,7 +403,7 @@ export interface TickerPatch {
 export function tickerStream(
   onBatch: (updates: TickerPatch[]) => void
 ): () => void {
-  const es = new EventSource('/api/tickers/stream')
+  const es = openSse('/api/tickers/stream')
   es.addEventListener('ticker', e => {
     try {
       const d = JSON.parse((e as MessageEvent).data) as {
@@ -401,7 +424,7 @@ export function tickerStream(
  * 拿不到会 404，组件那边退回首字母的圆形占位。
  */
 export const iconUrl = (base: string): string =>
-  `/api/icon/${encodeURIComponent(base.trim().toLowerCase())}`
+  apiUrl(`/api/icon/${encodeURIComponent(base.trim().toLowerCase())}`)
 
 /* ---------------- 分析 ---------------- */
 
@@ -570,7 +593,7 @@ export function analyzeStream(
   if (opts.timeframe) q.set('timeframe', opts.timeframe)
   if (opts.at) q.set('at', String(opts.at))
   const url = '/api/analyze/stream?' + q.toString()
-  const es = new EventSource(url)
+  const es = openSse(url)
   let finished = false
 
   const stop = () => {
@@ -804,7 +827,7 @@ export function collectStream(
   }
   if (params.exact) qs.set('exact', '1')
 
-  const es = new EventSource('/api/knowledge/stream?' + qs.toString())
+  const es = openSse('/api/knowledge/stream?' + qs.toString())
   let finished = false
 
   const stop = () => {

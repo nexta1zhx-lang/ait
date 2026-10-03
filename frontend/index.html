@@ -2,8 +2,27 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>用量与花费 · 开单分析</title>
+    <!--
+      viewport-fit=cover 是**必须的**：打包成 App 后 WebView 铺满整屏，
+      不写这一条，`env(safe-area-inset-*)` 会**恒为 0**，
+      现有的底部导航安全区（style.css 的 --tabbar-h 那段）就白做了。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d1117" />
+    <meta name="color-scheme" content="dark" />
+    <!-- 「添加到主屏幕」后全屏运行（PWA / iOS 独立模式） -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="开单分析" />
+    <!-- 首屏标题：原来这里是「用量与花费」，明显是复制残留，路由会覆盖但会闪一下 -->
+    <title>开单分析</title>
   </head>
   <body>
     <div id="app"></div>

@@ -1,0 +1,15 @@
+{
+  "appId": "cn.bitcoooin.advisor",
+  "appName": "开单分析",
+  "webDir": "frontend/dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "ios": {
+    "contentInset": "never"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#161b22"
+  }
+}

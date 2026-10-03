@@ -1,4 +1,5 @@
-import {createRouter, createWebHistory} from 'vue-router'
+import {createRouter, createWebHashHistory, createWebHistory} from 'vue-router'
+import {isNativeShell} from './platform'
 import AnalyzeView from './views/AnalyzeView.vue'
 import HistoryView from './views/HistoryView.vue'
 import KnowledgeView from './views/KnowledgeView.vue'
@@ -40,7 +41,12 @@ export const routes = [
 ]
 
 export const router = createRouter({
-  history: createWebHistory(),
+  /*
+   * 原生壳（App）里没有后端做 SPA 回退，`history` 模式下刷新或直达
+   * 子路径会 404 白屏 → 换成 `hash`（地址变成 `#/history`，功能一样）。
+   * Web 上继续用 `history`，线上地址 `/history?id=106` 一点都不能变。
+   */
+  history: isNativeShell() ? createWebHashHistory() : createWebHistory(),
   routes
 })
 

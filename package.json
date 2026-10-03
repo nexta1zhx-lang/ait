@@ -35,7 +35,14 @@
     "peak": "tsx backend/src/scripts/peak.ts",
     "clean": "npm run clean:backend && npm run clean:frontend",
     "clean:backend": "rm -rf backend/dist",
-    "clean:frontend": "rm -rf frontend/dist"
+    "clean:frontend": "rm -rf frontend/dist",
+    "app:sync": "npm run ui:build && cap sync",
+    "app:add:android": "cap add android",
+    "app:add:ios": "cap add ios",
+    "app:android": "npm run app:sync && cap open android",
+    "app:ios": "npm run app:sync && cap open ios",
+    "app:run:android": "npm run app:sync && cap run android",
+    "app:run:ios": "npm run app:sync && cap run ios"
   },
   "dependencies": {
     "ccxt": "^4.4.0",
@@ -51,6 +58,12 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor/ios": "^8.5.2",
+    "@capacitor/status-bar": "^8.0.3",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.23.1",
     "@vitejs/plugin-vue": "^5.2.4",
