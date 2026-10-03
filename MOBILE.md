@@ -11,12 +11,12 @@
 
 ## 一、当前状态
 
-| | 状态 |
-| --- | --- |
-| 前端改造（安全区 / API 基址 / hash 路由） | ✅ 已完成 |
-| Capacitor 接入（`capacitor.config.json` + 依赖） | ✅ 已完成 |
-| **Android 工程 + APK** | ✅ **已跑通**（`android/`，产物 4.1 MB） |
-| iOS 工程 | ⚠️ 未生成 —— 本机缺完整 Xcode 与 CocoaPods，见第四节 |
+|                                                  | 状态                                                 |
+| ------------------------------------------------ | ---------------------------------------------------- |
+| 前端改造（安全区 / API 基址 / hash 路由）        | ✅ 已完成                                            |
+| Capacitor 接入（`capacitor.config.json` + 依赖） | ✅ 已完成                                            |
+| **Android 工程 + APK**                           | ✅ **已跑通**（`android/`，产物 4.1 MB）             |
+| iOS 工程                                         | ⚠️ 未生成 —— 本机缺完整 Xcode 与 CocoaPods，见第四节 |
 
 ---
 
@@ -25,14 +25,14 @@
 打包后页面不再跑在 `bitcoooin.cn`，而是跑在 WebView 的本地 scheme 下
 （Android `https://localhost`、iOS `capacitor://localhost`）。这一个前提牵出三处改动：
 
-| 文件 | 改了什么 | 不改会怎样 |
-| --- | --- | --- |
-| `frontend/src/platform.ts` | **新增**：判断「网页」还是「原生壳」 | — |
-| `frontend/src/api.ts` | 新增 `API_BASE` / `apiUrl()`；`req()`、4 处 `EventSource`、`iconUrl()` 都走它 | `/api/...` 是相对路径，**全部打到 WebView 自己身上 → 全站 404** |
-| `frontend/src/router.ts` | 原生壳里用 `createWebHashHistory()` | 本地没有后端做 SPA 回退，刷新/直达子路径 **404 白屏** |
-| `frontend/index.html` | viewport 加 `viewport-fit=cover` + theme-color + apple meta | 不写 `viewport-fit=cover`，`env(safe-area-inset-*)` **恒为 0**，现有底部导航安全区直接失效 |
-| `frontend/src/style.css` | 抽 `--safe-top` 变量，`#app` 的**三处** padding 全部带上 | 全屏后第一行被**刘海**压住。⚠️ 只改基础那一处**没用**：`body.fixed-viewport #app` 和窄屏 `@media` 两条特异性/位置在后面，会把它整个盖掉 —— 实测手机上顶部只剩 10px |
-| `capacitor.config.json` | `StatusBar.overlaysWebView=false` + 深色状态栏 | Android 的 `env(safe-area-inset-top)` **恒为 0**，光靠 CSS 兜不住（CSS 那套留作 overlay 模式的兜底） |
+| 文件                       | 改了什么                                                                      | 不改会怎样                                                                                                                                                         |
+| -------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `frontend/src/platform.ts` | **新增**：判断「网页」还是「原生壳」                                          | —                                                                                                                                                                  |
+| `frontend/src/api.ts`      | 新增 `API_BASE` / `apiUrl()`；`req()`、4 处 `EventSource`、`iconUrl()` 都走它 | `/api/...` 是相对路径，**全部打到 WebView 自己身上 → 全站 404**                                                                                                    |
+| `frontend/src/router.ts`   | 原生壳里用 `createWebHashHistory()`                                           | 本地没有后端做 SPA 回退，刷新/直达子路径 **404 白屏**                                                                                                              |
+| `frontend/index.html`      | viewport 加 `viewport-fit=cover` + theme-color + apple meta                   | 不写 `viewport-fit=cover`，`env(safe-area-inset-*)` **恒为 0**，现有底部导航安全区直接失效                                                                         |
+| `frontend/src/style.css`   | 抽 `--safe-top` 变量，`#app` 的**三处** padding 全部带上                      | 全屏后第一行被**刘海**压住。⚠️ 只改基础那一处**没用**：`body.fixed-viewport #app` 和窄屏 `@media` 两条特异性/位置在后面，会把它整个盖掉 —— 实测手机上顶部只剩 10px |
+| `capacitor.config.json`    | `StatusBar.overlaysWebView=false` + 深色状态栏                                | Android 的 `env(safe-area-inset-top)` **恒为 0**，光靠 CSS 兜不住（CSS 那套留作 overlay 模式的兜底）                                                               |
 
 **在网页上这些改动全是空操作**（`isNativeShell()` 恒为 `false`、`env()` 恒为 `0`），
 线上行为跟以前一模一样。
@@ -137,14 +137,14 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 
 ## 六、常用命令
 
-| 命令 | 干什么 |
-| --- | --- |
-| `bash build-apk.sh` | 一键出 Android APK |
-| `npm run app:sync` | 打前端 → 同步进**所有**已添加的原生工程 |
-| `npm run app:android` | sync 后用 Android Studio 打开 |
-| `npm run app:ios` | sync 后用 Xcode 打开（需先装环境） |
-| `npm run app:run:android` | sync 后直接跑到已连接的设备/模拟器 |
-| `npm run app:add:ios` | 生成 iOS 工程（只需一次） |
+| 命令                      | 干什么                                  |
+| ------------------------- | --------------------------------------- |
+| `bash build-apk.sh`       | 一键出 Android APK                      |
+| `npm run app:sync`        | 打前端 → 同步进**所有**已添加的原生工程 |
+| `npm run app:android`     | sync 后用 Android Studio 打开           |
+| `npm run app:ios`         | sync 后用 Xcode 打开（需先装环境）      |
+| `npm run app:run:android` | sync 后直接跑到已连接的设备/模拟器      |
+| `npm run app:add:ios`     | 生成 iOS 工程（只需一次）               |
 
 ---
 
