@@ -123,6 +123,86 @@ const tabs = computed(() => {
   return [...market, CHART_TAB, ...rest]
 })
 
+/* ---------------- 窄屏：左右滑动切换一级 tab ---------------- */
+
+/** 滑多远才算「切一下」（px）—— 太小会跟「点一下」抢，太大手腕划不动 */
+const SWIPE_MIN = 52
+/** 横向位移得是纵向的这么多倍 —— 斜着划多半是想上下滚内容 */
+const SWIPE_DOMINANCE = 1.3
+
+const swipeRef = ref<HTMLElement | null>(null)
+
+let swipe: {x: number; y: number; dx: number; dy: number; fired: boolean} | null =
+  null
+
+/**
+ * 这个元素（往上到 `.col` 为止）自己要不要吃横向手势？要就别抢：
+ * - 输入框：手指横划是在选文字
+ * - 自己能横向滚的（`overflow-x: auto` 且真滚得动）：那是滚动，不是切 tab
+ * - K 线画布：横划是拖动图表（它在右边那栏，正常走不到这儿，顺手挡住）
+ * - 图表那两个 tab 行（周期 / 榜单）都是 `flex: 1 1 0`，窄屏不会横向滚，所以不受影响
+ */
+function ownsHorizontal(el: EventTarget | null): boolean {
+  const host = swipeRef.value
+  for (let n = el as HTMLElement | null; n && n !== host; n = n.parentElement) {
+    if (!(n instanceof HTMLElement)) break
+    if (
+      n.matches('input, textarea, select, [contenteditable="true"], .chart-wrap')
+    )
+      return true
+    const ox = getComputedStyle(n).overflowX
+    if ((ox === 'auto' || ox === 'scroll') && n.scrollWidth > n.clientWidth + 4)
+      return true
+  }
+  return false
+}
+
+function onSwipeStart(e: TouchEvent): void {
+  swipe = null
+  if (!isMobile.value || e.touches.length !== 1) return
+  const t = e.touches[0]
+  if (ownsHorizontal(e.target)) return
+  swipe = {x: t.clientX, y: t.clientY, dx: 0, dy: 0, fired: false}
+}
+
+function onSwipeMove(e: TouchEvent): void {
+  if (!swipe || e.touches.length !== 1) return
+  const t = e.touches[0]
+  swipe.dx = t.clientX - swipe.x
+  swipe.dy = t.clientY - swipe.y
+  /*
+   * 一旦够远就「认定」是切 tab（`fired`），之后手指再飘也不会取消 ——
+   * 不然划到一半往上一提就当没发生过，手感很飘。
+   */
+  if (
+    !swipe.fired &&
+    Math.abs(swipe.dx) >= SWIPE_MIN &&
+    Math.abs(swipe.dx) >= Math.abs(swipe.dy) * SWIPE_DOMINANCE
+  ) {
+    swipe.fired = true
+  }
+}
+
+/**
+ * 抬手（或者手势被系统打断）才真切 ——
+ * 划到一半就切的话，内容在手指底下换掉，人会以为划错了。
+ */
+function onSwipeEnd(): void {
+  const s = swipe
+  swipe = null
+  if (!s?.fired) return
+  // 往左划 = 看右边那一格（跟翻页同一个方向）
+  stepTab(s.dx < 0 ? 1 : -1)
+}
+
+/** 按 tab 行的顺序挪一格；已经在头 / 尾就不动 */
+function stepTab(delta: number): void {
+  const list = tabs.value
+  const i = list.findIndex(t => t.value === leftTab.value)
+  const next = list[i + delta]
+  if (i >= 0 && next) leftTab.value = next.value
+}
+
 /* ---------- 历史列表：能放几行就放几行，列表自己不出滚动条 ---------- */
 const histBox = ref<HTMLElement | null>(null)
 let histRO: ResizeObserver | null = null
@@ -395,7 +475,14 @@ const heatRows = computed(() => {
         ⚠️ 这一栏**必须常驻**：切到手机上那格「K 线」时，tab 行就在这里面，
         整栏藏了就没地方切回去了。所以只把内容清空（见下面的分支）。
       -->
-      <div class="col">
+      <div
+        ref="swipeRef"
+        class="col"
+        @touchstart.passive="onSwipeStart"
+        @touchmove.passive="onSwipeMove"
+        @touchend.passive="onSwipeEnd"
+        @touchcancel.passive="onSwipeEnd"
+      >
         <div class="tab-row">
           <SegTabs v-model="leftTab" :options="tabs" />
           <RouterLink
