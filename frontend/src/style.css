@@ -15,6 +15,16 @@
   --blue: #42a5f5;
   --blue-soft: rgba(66, 165, 245, 0.14);
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /*
+   * 刘海 / 状态栏那一截的高度 —— 只有**打包成 App**（WebView 铺满整屏）时才有值，
+   * 网页上恒为 0（前提是 index.html 写了 `viewport-fit=cover`）。
+   *
+   * ⚠️ 为什么非要抽成变量：`#app` 的 padding 一共**三处**会互相覆盖
+   * （基础样式 / `body.fixed-viewport` / 窄屏 @media），
+   * 只改基础那处会被后面两个盖掉（实测顶部只剩 10px），所以都得带上。
+   */
+  --safe-top: env(safe-area-inset-top, 0px);
 }
 
 * {
@@ -133,7 +143,7 @@ summary,
    *    全局有 `box-sizing: border-box`（见本文件顶部），padding 算在 `100vh` 里面，
    *    不会把内容顶出屏幕。
    */
-  padding: calc(12px + env(safe-area-inset-top)) 16px 32px;
+  padding: calc(12px + var(--safe-top)) 16px 32px;
 }
 
 /* ------------------------------------------------------------------
@@ -149,7 +159,11 @@ body.fixed-viewport #app {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px 14px;
+  /*
+   * 这条特异性比上面的 `#app` 高（`body.xxx #app`），**会把它整个盖掉** ——
+   * 顶部安全区必须在这里再带一次，否则开单分析页（手机主要用的就是它）顶上还是被刘海压。
+   */
+  padding: calc(10px + var(--safe-top)) 14px;
   overflow: hidden;
 }
 
@@ -2939,7 +2953,8 @@ body.fixed-viewport .split {
 
 @media (max-width: 640px) {
   #app {
-    padding: 12px 12px 32px;
+    /* 同理：窄屏这条排在基础样式后面，不带 --safe-top 就把顶部安全区盖没了 */
+    padding: calc(12px + var(--safe-top)) 12px 32px;
   }
   .field-row {
     grid-template-columns: 1fr;

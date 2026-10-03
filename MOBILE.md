@@ -31,7 +31,8 @@
 | `frontend/src/api.ts` | 新增 `API_BASE` / `apiUrl()`；`req()`、4 处 `EventSource`、`iconUrl()` 都走它 | `/api/...` 是相对路径，**全部打到 WebView 自己身上 → 全站 404** |
 | `frontend/src/router.ts` | 原生壳里用 `createWebHashHistory()` | 本地没有后端做 SPA 回退，刷新/直达子路径 **404 白屏** |
 | `frontend/index.html` | viewport 加 `viewport-fit=cover` + theme-color + apple meta | 不写 `viewport-fit=cover`，`env(safe-area-inset-*)` **恒为 0**，现有底部导航安全区直接失效 |
-| `frontend/src/style.css` | `#app` 顶部补 `env(safe-area-inset-top)` | 全屏后第一行内容被**刘海**压住 |
+| `frontend/src/style.css` | 抽 `--safe-top` 变量，`#app` 的**三处** padding 全部带上 | 全屏后第一行被**刘海**压住。⚠️ 只改基础那一处**没用**：`body.fixed-viewport #app` 和窄屏 `@media` 两条特异性/位置在后面，会把它整个盖掉 —— 实测手机上顶部只剩 10px |
+| `capacitor.config.json` | `StatusBar.overlaysWebView=false` + 深色状态栏 | Android 的 `env(safe-area-inset-top)` **恒为 0**，光靠 CSS 兜不住（CSS 那套留作 overlay 模式的兜底） |
 
 **在网页上这些改动全是空操作**（`isNativeShell()` 恒为 `false`、`env()` 恒为 `0`），
 线上行为跟以前一模一样。
