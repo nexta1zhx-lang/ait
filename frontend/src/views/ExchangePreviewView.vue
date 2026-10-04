@@ -1,85 +1,66 @@
 <script setup lang="ts">
 /**
- * 「交易所账户」新版界面的**预览页**（模拟数据，不连任何接口）。
+ * 「交易所资产」新版界面的预览页（**只有模拟数据**，不连任何接口）。
  *
- * 用户 2026-10-05：「交易所行情账户界面大优化，根据返回的数据格式先模拟一套数据
- * 看看效果」—— 真数据要绑 Key + 打交易所，样式来回调的时候太慢，
- * 所以这里用 `exchangeMock.ts` 那套假数据把新界面直接摆出来。
+ * 用户 2026-10-05：「先设计移动端界面」「根据返回的数据格式先模拟一套数据看看效果」。
+ * 所以这一页只干一件事：把 `ExchangeAccountBoard` 摆出来，数据全来自
+ * `comps/exchangeMock.ts`。
  *
- * 免登录：路径写在 `App.vue` 的 `isPublicPage` 里（只有假数据，没有真凭据）。
- * 定稿之后：把真数据那条路（`ExchangeAccountPanel.vue`）也换成
- * `ExchangeAccountBoard`，这个页和 mock 就可以删了。
+ * 免登录：路径写在 `App.vue` 的 `isPublicPage` 里（页面里只有假数据，没有凭据）。
+ * 定稿之后：把真数据那条路（analyze 的「交易所账户」tab）也换成这个 board，
+ * 然后这个页连同 mock 一起删。
  */
 import {computed, ref} from 'vue'
 import ExchangeAccountBoard from '../comps/ExchangeAccountBoard.vue'
-import {MOCK_CONTRACT, MOCK_EMPTY, MOCK_SPOT} from '../comps/exchangeMock'
-import type {ExchangeAccountResult} from '../api'
-
-/** 三套「账户」= 三种典型数据形状 */
-const accounts: {id: number; label: string; data: ExchangeAccountResult}[] = [
-  {id: 1, label: '币安 · 主号（合约）', data: MOCK_CONTRACT},
-  {id: 2, label: 'OKX 现货', data: MOCK_SPOT},
-  {id: 3, label: '币安 · 小号（空）', data: MOCK_EMPTY}
-]
+import {
+  MOCK_ACCOUNTS,
+  MOCK_INCOME,
+  MOCK_OPEN_ORDERS,
+  MOCK_TRADES
+} from '../comps/exchangeMock'
 
 const picked = ref(1)
-/** 状态预览：正常 / 查询中 / 查询失败 */
-const state = ref<'ok' | 'loading' | 'error'>('ok')
-const orderSymbol = ref('')
-
-const data = computed<ExchangeAccountResult | null>(() => {
-  if (state.value !== 'ok') return null
-  return accounts.find(a => a.id === picked.value)?.data ?? null
-})
-const loading = computed(() => state.value === 'loading')
-const error = computed(() =>
-  state.value === 'error' ? '币安接口返回：Invalid API-key, IP, or permissions for action.' : ''
-)
-
-/** 预览宽度：默认按手机上那一栏（≈ 手机上全宽 / PC 左栏） */
+const symbol = ref('')
+/** 手机宽度 / 宽栏，两种排版对比着看 */
 const wide = ref(false)
+
+const data = computed(
+  () => MOCK_ACCOUNTS.find(a => a.value === picked.value)?.data ?? null
+)
+/** 慢接口那几块：空账户就当作没有 */
+const hasTrades = computed(() => (data.value?.futures.positions.length ?? 0) > 0)
 </script>
 
 <template>
   <div class="pv">
     <section class="panel head">
-      <h1>交易所账户界面 · 预览</h1>
+      <h1>交易所资产 · 移动端界面预览</h1>
       <p class="hint">
-        这一页吃的是本地模拟数据（结构照 /api/exchange/account 的返回，见
-        comps/exchangeMock.ts），用来先看新版排版 —— 真数据那条路还没换过来。
-        右上角可以切「正常 / 查询中 / 查询失败」三种状态和宽窄两档宽度。
+        数据是<b>本地模拟</b>的，结构照 <code>fapi/v2/account</code> +
+        <code>sapi/v1/asset/wallet/balance</code> 拟（见 comps/exchangeMock.ts）。
+        只统计 <b>USDT 合约 + C2C 钱包</b>，不含现货。
       </p>
-
       <div class="ctl">
-        <select v-model.number="picked" :disabled="state !== 'ok'">
-          <option v-for="a in accounts" :key="a.id" :value="a.id">{{ a.label }}</option>
+        <select v-model.number="picked">
+          <option v-for="a in MOCK_ACCOUNTS" :key="a.value" :value="a.value">
+            {{ a.label }}
+          </option>
         </select>
-        <button
-          v-for="s in [
-            {v: 'ok', l: '正常'},
-            {v: 'loading', l: '查询中'},
-            {v: 'error', l: '查询失败'}
-          ]"
-          :key="s.v"
-          class="ghost tiny"
-          :class="{on: state === s.v}"
-          @click="state = s.v as 'ok' | 'loading' | 'error'"
-        >
-          {{ s.l }}
-        </button>
         <span class="spacer" />
         <button class="ghost tiny" :class="{on: wide}" @click="wide = !wide">
-          {{ wide ? '窄栏' : '宽栏' }}
+          {{ wide ? '手机宽度' : '宽栏' }}
         </button>
       </div>
     </section>
 
     <div class="stage" :class="{wide}">
       <ExchangeAccountBoard
-        v-model:symbol="orderSymbol"
+        v-model:symbol="symbol"
         :data="data"
-        :loading="loading"
-        :error="error"
+        :open-orders="hasTrades ? MOCK_OPEN_ORDERS : []"
+        :trades="hasTrades ? MOCK_TRADES : []"
+        :income="hasTrades ? MOCK_INCOME : []"
+        @refresh="() => {}"
         @search="() => {}"
       />
     </div>
@@ -102,6 +83,12 @@ const wide = ref(false)
 .head .hint {
   margin: 0 0 10px;
 }
+.head code {
+  background: var(--panel-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11.5px;
+}
 .ctl {
   display: flex;
   align-items: center;
@@ -109,9 +96,9 @@ const wide = ref(false)
   flex-wrap: wrap;
 }
 .ctl select {
-  padding: 6px 8px;
+  padding: 7px 9px;
   font-size: 13px;
-  min-width: 160px;
+  min-width: 180px;
 }
 .spacer {
   flex: 1 1 auto;
@@ -120,9 +107,9 @@ const wide = ref(false)
   color: var(--blue, #d3b583);
   border-color: var(--blue, #d3b583);
 }
-/* 窄栏 = 手机上那一栏的宽度（PC 上开单分析左栏 ≈ 430px） */
+/* 默认按手机宽度摆（约等于 PC 上开单分析左栏） */
 .stage {
-  max-width: 430px;
+  max-width: 420px;
 }
 .stage.wide {
   max-width: 100%;
