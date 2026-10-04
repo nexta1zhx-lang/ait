@@ -17,7 +17,7 @@
  *    （`router.ts` 里把 `/history?tab=kb` 转成 `/me?p=kb`）。
  *    「管理」里的二级 tab 用 `?t=` 记，`/me?p=admin&t=server` 分享出去能直接落在服务器那半。
  */
-import {computed, onMounted, ref, watch} from 'vue'
+import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import SegTabs from '../comps/SegTabs.vue'
 import HistoryView from './HistoryView.vue'
@@ -151,6 +151,30 @@ const {onTouchStart, onTouchMove, onTouchEnd} = useSwipeTabs<Pane>({
   set: v => setPane(v)
 })
 
+/**
+ * 切一级 tab 时内容「滑入」——跟「开单分析」那排一级 tab 同一套。
+ *
+ * 用户 2026-10-05：「我的里面 tab 也加上切换动画丝滑一点」。
+ * 方向跟着 tab 顺序：**往后翻 = 从右滑入**（跟翻页 / 滑动同一个方向）。
+ *
+ * ⚠️ 只挂 260ms 的临时类：动画播完就摘。理由跟 `AnalyzeView` 那份一样：
+ *   ① 不摘的话同一个方向连划两次，class 值不变，动画不会重播；
+ *   ② `transform` 长期存在会变成 `fixed` 后代的「包含块」。
+ */
+const paneAnim = ref<'' | 'l' | 'r'>('')
+let paneAnimTimer: number | null = null
+watch(pane, (nv, ov) => {
+  const i = panes.value.findIndex(p => p.value === nv)
+  const j = panes.value.findIndex(p => p.value === ov)
+  if (i < 0 || j < 0 || i === j) return
+  paneAnim.value = i > j ? 'l' : 'r'
+  if (paneAnimTimer) window.clearTimeout(paneAnimTimer)
+  paneAnimTimer = window.setTimeout(() => (paneAnim.value = ''), 260)
+})
+onBeforeUnmount(() => {
+  if (paneAnimTimer) window.clearTimeout(paneAnimTimer)
+})
+
 /*
  * ⚠️ 「历史」那一半里面还有自己的固定布局（`body.fixed-viewport .pane-kb` 那套），
  * 所以这个 class 一直得有。
@@ -195,7 +219,7 @@ onMounted(() => document.body.classList.add('fixed-viewport'))
       用量 / 服务器是另外两页。
       用 v-if 而不是 v-show：切走就卸载，服务器监测那边的轮询和图表会自己停掉。
     -->
-    <div class="me-pane">
+    <div class="me-pane" :class="paneAnim ? 'pane-' + paneAnim : ''">
       <HistoryView v-if="pane === 'records' || pane === 'kb'" :pane="pane" />
       <LlmConfigView v-else-if="pane === 'llm'" />
       <ProfileView v-else-if="pane === 'profile'" />
@@ -311,6 +335,38 @@ onMounted(() => document.body.classList.add('fixed-viewport'))
     border-radius: 999px;
     background: var(--blue);
     transform: translateX(-50%);
+  }
+
+  /*
+   * 切一级 tab 滑入 —— 跟「开单分析」那排（`style.css` 的 `.split.pane-l …`）一致。
+   * `pane-l` = 往后翻（从右滑入）、`pane-r` = 往前翻（从左滑入）。
+   * ⚠️ 类只挂 260ms（见 `paneAnim`）—— 动画完就摘，`transform` 不会长期存在。
+   */
+  .me-pane.pane-l {
+    animation: me-pane-in-right 0.24s ease both;
+  }
+  .me-pane.pane-r {
+    animation: me-pane-in-left 0.24s ease both;
+  }
+  @keyframes me-pane-in-right {
+    from {
+      opacity: 0.35;
+      transform: translateX(18px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes me-pane-in-left {
+    from {
+      opacity: 0.35;
+      transform: translateX(-18px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 }
 </style>
