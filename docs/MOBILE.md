@@ -140,14 +140,14 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 
 ## 六、常用命令
 
-| 命令                      | 干什么                                  |
-| ------------------------- | --------------------------------------- |
-| `bash scripts/build-apk.sh`       | 一键出 Android APK                      |
-| `npm run app:sync`        | 打前端 → 同步进**所有**已添加的原生工程 |
-| `npm run app:android`     | sync 后用 Android Studio 打开           |
-| `npm run app:ios`         | sync 后用 Xcode 打开（需先装环境）      |
-| `npm run app:run:android` | sync 后直接跑到已连接的设备/模拟器      |
-| `npm run app:add:ios`     | 生成 iOS 工程（只需一次）               |
+| 命令                       | 干什么                                                  |
+| -------------------------- | ------------------------------------------------------- |
+| `npm run apk`              | 一键出 Android APK（= `bash scripts/build-apk.sh`）      |
+| `npm run app:sync`         | 打前端 → 同步进**所有**已添加的原生工程                 |
+| `npm run app:android`      | sync 后用 Android Studio 打开                           |
+| `npm run app:ios`          | sync 后用 Xcode 打开（需先装环境）                      |
+| `npm run app:run:android`  | sync 后直接跑到已连接的设备/模拟器                      |
+| `npm run app:add:ios`      | 生成 iOS 工程（只需一次）                               |
 
 ---
 
@@ -211,6 +211,9 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
    - 免责声明要显著（「不是投资建议」），并作为审核说明材料
 
 3. **原生体验打磨**
-   - Android 物理返回键（`@capacitor/app` 的 `backButton`）—— 现在按下会直接退出 App
+   - ~~Android 物理返回键~~ ✅ **已做**（`frontend/src/back-button.ts`）：
+     能后退就路由后退，已经在落地页（`/contracts`）再按才真退出。
+     按仓库约定**不 `import` `@capacitor/*`**（那些是 `devDependencies`，生产镜像不装），
+     而是从 `window.Capacitor.Plugins.App` 取插件；**Web 上是空操作**。
    - SSE 直播流在 App 切后台 / 锁屏后会被系统挂起，回前台要重连
    - 应用图标、启动图、状态栏配色（`@capacitor/status-bar`）

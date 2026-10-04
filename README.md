@@ -71,9 +71,12 @@ npm run dev -- BTC/USDT -t 4h -d 30     # 换周期 / 换天数
 完整步骤与运维看 [`docs/DEPLOY.md`](./docs/DEPLOY.md)，日常就一件事：
 
 ```bash
-bash scripts/release.sh            # 本机跑：提交检查 → 类型检查 → 打包 → 上传 → 远端部署 → 验收
-bash scripts/release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服务器
+npm run release            # = bash scripts/release.sh：提交检查 → 类型检查 → 打包 → 上传 → 远端部署 → 验收
+npm run release:dry        # 只看打包结果和要执行的命令，不碰服务器
 ```
+
+> `package.json` 里给 `scripts/` 下那三个壳脚本各配了别名：`release` / `release:dry` /
+> `deploy`（在服务器上跑）/ `apk`（打安卓包）。直接 `bash scripts/release.sh` 也一样。
 
 它内部用 tar + scp 搬运（不要用 rsync：macOS 自带的是 openrsync，和服务器 rsync 3.x
 不保证兼容），并自动排除 `.env` / `android` / `*.apk`，清掉服务器上的旧文件后再解包

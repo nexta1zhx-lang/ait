@@ -4,12 +4,20 @@ import AnalyzeView from './views/AnalyzeView.vue'
 import ContractsView from './views/ContractsView.vue'
 import DownloadView from './views/DownloadView.vue'
 
+/**
+ * 落地页：打开 App / 网站先看到的那个。
+ *
+ * `/` 重定向到这里；**Android 物理返回键也是「已经在落地页」时才真退出 App**
+ * （见 `back-button.ts`）—— 所以这个常量要能对外引用，别在各处硬写字符串。
+ */
+export const LANDING_PATH = '/contracts'
+
 export const routes = [
   /*
    * `/` **不再是开单分析**（用户 2026-10-04：默认落在「合约」）——
    * 打开 App / 网站先看到的是一片市场列表。开单分析挪到 `/analyze`。
    */
-  {path: '/', redirect: '/contracts'},
+  {path: '/', redirect: LANDING_PATH},
   {
     path: '/contracts',
     name: 'contracts',
