@@ -12,7 +12,7 @@
 | 维度 | 接口 | 拿到什么 |
 |---|---|---|
 | USDT 合约（USDⓈ-M） | `GET /fapi/v2/account` | `totalWalletBalance` / `totalUnrealizedProfit` / `totalMarginBalance` / `availableBalance` + `assets[]` + **`positions[]`** |
-| C2C 钱包 | `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true` | `walletName` / `balance` / `assetBalances[]` —— ⚠️ **实测：C2C 对应的是 `walletName="Funding"`（资金账户）**，接口里**没有**叫 "C2C" 的钱包，按名字找 "C2C" 会静默拿不到数据 |
+| C2C 钱包 | `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true` | `walletName` / `balance` / `assetBalances[]` —— ⚠️ 两个坑（2026-10-05 真丢过钱）：**① 钱包名各账号不一样**（官方文档写 `"C2C"`，实测本账号是 `"Funding"`）⇒ 两个都得认；**② `assetBalances[]` 里没有 `balance` 字段**，金额在 `free`/`locked`/`freeze`/`withdrawing` 里（钱包层级那个 `balance` 是 **BTC 估值**） |
 | 挂单 | `GET /fapi/v1/openOrders`（**不需要交易对**） | |
 | 成交 | WS `ORDER_TRADE_UPDATE`，REST `userTrades` 兜底 | |
 | 已实现盈亏 | WS 同事件里的 `rp`，REST `fapi/v1/income` 兜底 | |
@@ -59,7 +59,7 @@ exchange_snapshots 里的一行（举例）
   available   9672.43            可用
   positions   [ {BTCUSDT,long,…}, {ETHUSDT,short,…} ]   ← 完整持仓，jsonb
   assets      [ {USDT, wallet, available, unrealized} ]
-  c2c_total   2140.00            C2C（Funding）折 USDT
+  c2c_total   2140.00            C2C / Funding 折 USDT
   c2c_detail  [ {USDT,…}, {BTC,…} ]
   source      ws | poll | manual  这条是谁写的
   err         采集时那一侧失败了就记这儿
@@ -222,7 +222,7 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 | `POST /fapi/v1/listenKey`（ccxt 的 `fapiPrivatePostListenKey`） | ✅ 通，拿到 64 位 listenKey |
 | **自己连裸 WS** `wss://fstream.binance.com/ws/<listenKey>` | ✅ **429ms 连上，15 秒稳定不断** |
 | `/fapi/v2/account` | ✅ 字段全中；⚠️ `positions` 返回**全部 920 个槽位**（绝大多数 `positionAmt=0`）⇒ 必须过滤 |
-| `/sapi/v1/asset/wallet/balance` | ✅ 通；⚠️ **C2C 钱包的 `walletName` 实际叫 `Funding`**（返回的 10 个钱包里没有 "C2C"） |
+| `/sapi/v1/asset/wallet/balance` | ✅ 通；⚠️ **钱包名各账号不一样**：文档写 `"C2C"`、实测本账号是 `"Funding"` ⇒ 必须两个都认；⚠️ **`assetBalances[]` 里没有 `balance`**（钱在 `free`/`locked`/`freeze`/`withdrawing`）—— 读错字段会**静默算成 0** |
 
 ⇒ **实时层自己写**：listenKey 搭 ccxt 的隐式方法（`fapiPrivatePostListenKey` / `PutListenKey` /
 `DeleteListenKey` ✓ 已验证），WS 用 `ws` 包直连 `wss://fstream.binance.com/ws/<listenKey>`。
@@ -289,7 +289,7 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 | **M0** ✅ | 用真 key 跑 30 秒临时脚本，确认 ccxt 的币安 ws 用户数据流能出事件、字段够用 | 一句话结论：走 WS 还是退回轮询 |
 | **M1** ✅ | `schema.ts` 两张表 + `data/exchange-overview.ts`（REST 取数）+ `overview`/`refresh` 接口 | 真实数字能出来（界面先不动） |
 | **M2** ✅ | `exchange-stream.ts`（WS 常驻 + 重连复用 listenKey + 重连补成交）+ 5 分钟采样兼对账 + SSE `/api/exchange/stream` | 数字开始秒跳 |
-| M3 | 成交/盈亏**读**接口 + 前端接真数据（`交易所账户` tab 换掉 mock） | 去掉 mock |
+| **M3** ✅ | 成交/盈亏**读**接口 + 前端接真数据（`交易所账户` tab 换成 `ExchangeAccountLivePanel`，SSE 接上） | 去掉 mock（界面已用真数据） |
 | M4 | 资产曲线（快照序列 → 图）—— **用户定：这轮先不做**，但快照从现在就开始攒 | 后补 |
 | M5 | 删 mock / 预览页 / 老 `/api/exchange/account` | 收尾 |
 
