@@ -69,21 +69,32 @@ curl -s -o /dev/null -w 'deepseek %{http_code}\n' https://api.deepseek.com/user/
 # 本机
 cd /Users/nexta1/Documents/预测
 tar czf /tmp/ca.tgz --exclude='node_modules' --exclude='.git' --exclude='.env' \
-  --exclude='backend/dist' --exclude='frontend/dist' --exclude='logs' -C . .
+  --exclude='backend/dist' --exclude='frontend/dist' --exclude='logs' \
+  --exclude='./android' --exclude='./downloads/*.apk' -C . .
 
 scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.tgz \
   ubuntu@57.181.38.200:/tmp/
 
-# 服务器
+# 服务器（⚠️ 必须先 chown 成 ubuntu：`sudo mkdir` 建出来是 root 所有，
+#   而 release.sh 是**非 sudo** 解包 —— 文件得归 ubuntu，不 chown 后面会解压失败）
 ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200 \
-  'sudo mkdir -p /opt/crypto-advisor && cd /opt/crypto-advisor && tar xzf /tmp/ca.tgz'
+  'sudo mkdir -p /opt/crypto-advisor && sudo chown ubuntu:ubuntu /opt/crypto-advisor \
+   && cd /opt/crypto-advisor && tar xzf /tmp/ca.tgz'
 ```
 
-包只有 250K 左右。
+包 5MB 左右（大头是自托管字体 `frontend/public/fonts/`）。
+
+> 💡 **APK 不在这条 tar 里**（一个就 9MB，而且服务器上已经有的不必重传）。
+> 首次部署想让 `/dl/*` 有东西可下，把 `downloads/*.apk` 单独 `scp` 到
+> `/opt/crypto-advisor/downloads/`；之后就交给 `bash release.sh`（它会按需补传）。
+
+> 💡 只是**更新**的话，不用做这一步 —— 直接 `bash release.sh` 一条命令。
+> 这一步只在**全新机器 / APP_DIR 还不存在**时做（`release.sh` 检测到目录不在会提示你回来）。
 
 > ⚠️ **一定排除 `.env`**。服务器上的 `.env` 是「在服务器上管」的：里面有随机化过的
-> `PGPASSWORD` 和你的 API Key。用本机的 `.env` 覆盖它，会让**应用连不上数据库**
-> （密码与 db 容器里那个对不上）。首次部署时 `.env` 不存在，`deploy.sh` 会交互式问你 Key。
+> `PGPASSWORD`。用本机的 `.env` 覆盖它，会让**应用连不上数据库**（密码与 db 容器里
+> 那个对不上）。首次部署时 `.env` 不存在，`deploy.sh` 会从 `.env.example` 生成一份，
+> 并把 `PGPASSWORD` 换成随机值。
 
 ### 2. 一键部署
 
@@ -153,49 +164,13 @@ docker compose -f docker-compose.prod.yml logs -f caddy   # 等 certificate obta
 > 失败后自动降级 `http-01`（走 80）**把证书签成功了** —— 但外面照样连不上 443。
 > **证书 + 端口两样都要看。** 续期 Caddy 自动做，不用 cron。
 
-### 4. 迁移数据（**关键**：标签模板 + 案例库）
+### 4. 同步数据库（本地 → 服务器，**整份覆盖**）
 
-建表是自动的（`ensureSchema()` 幂等跑），但**表里是空的**。
-⚠️ 提示词**不用迁**（在代码里）。要迁的是「有哪些标签可以挑」和案例库。
-
-```bash
-# 本机导出
-cd /Users/nexta1/Documents/预测
-docker exec ca-postgres pg_dump -U ca -d crypto_advisor -Fc > /tmp/ca.dump
-
-# 传上去
-scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.dump \
-  ubuntu@57.181.38.200:/tmp/
-
-# 服务器：导入（先停 app，避免写冲突）
-cd /opt/crypto-advisor
-sudo docker cp /tmp/ca.dump ca-postgres:/tmp/ca.dump
-sudo docker compose -f docker-compose.prod.yml stop app
-sudo docker compose -f docker-compose.prod.yml exec -T db \
-  pg_restore -U ca -d crypto_advisor --no-owner --data-only --disable-triggers /tmp/ca.dump
-sudo docker compose -f docker-compose.prod.yml start app
-curl -s localhost:8787/api/health      # rules.sources 应有 1 份以上
-```
-
-- **一定加 `--disable-triggers`**（需要超级用户，`ca` 就是）。不加的话 `pg_restore` 的
-  数据段顺序**不等于**表依赖顺序，会出现：
-  ```
-  COPY failed for table "ai_doc_versions" ... Key (doc_id)=(1) is not present in table "ai_docs"
-  COPY failed for table "analyses" ... Key (rules_hash)=(068b12cebc8f) is not present in "rules_versions"
-  ```
-  补一次也能修（父表已有数据后）：加 `--table=ai_doc_versions --table=analyses` 再跑一遍。
-- 最少迁 `tag_templates`（标签模板，不然提示词里的标签池是空的）。
-  案例库 `knowledge`（顺带 `knowledge_tags`）、历史 `analyses` / `llm_usage` 可选。
-- `ai_docs` / `ai_doc_versions` 已经没用了，迁不迁都行。
-
-> ☝️ 上面这条 `--data-only` 是给**全新空库首次导入**用的。库里已经有数据时重跑，
-> 会在主键上撞重复（`duplicate key value violates unique constraint`）——
-> 那种情况看下面「4b」。
-
-### 4b. 重新同步数据库（本地 → 服务器，**整份覆盖**）
-
-「本地那份才是准的，整份推上去」的走法。**管理员账号就在这份 dump 的 `users` 表里**，
-所以代码里不需要任何初始密码 —— 登录用的就是你本机那个密码。
+建表是自动的（`ensureSchema()` 幂等跑），但**表里是空的** ——
+账号、标签模板、案例库、历史都要靠这一步从本机搬过去。
+⚠️ **提示词不用管**（2026-10-04 起在代码里，见 `backend/src/llm/prompts.ts`）。
+**管理员账号就在 dump 的 `users` 表里**，所以代码里不需要任何初始密码 ——
+登录用的就是你本机那个密码。
 
 > ⚠️ 这是**覆盖式**：服务器上现有数据（线上跑出来的预测历史、知识库、用量）
 > 会被本地这份**完全替换**，不可撤销。第 ③ 步开头会先把服务器现值备份一份，能回滚。
@@ -260,64 +235,45 @@ curl -s -o /dev/null -w 'http  %{http_code}\n' http://bitcoooin.cn/api/health   
 
 ## 后续更新
 
-**更新 = 本机重新打包 → 上传 → 服务器上重跑 `deploy.sh`**（**不用 `git pull`**：
-本机工作区有未提交的改动，tar 才能原样带过去）。**在本机跑一条命令就行：**
+**更新 = 本机提交 → 打包 → 上传 → 服务器上重跑 `deploy.sh`**。
+在本机跑一条命令就行（**不用 `git pull`**：tar 把工作区直接搬过去）：
 
 ```bash
 cd /Users/nexta1/Documents/预测
 bash release.sh            # 会问一句确认；加 -y 不问，加 --dry-run 只看不发
 ```
 
-它按顺序做：`tsc` 类型检查 → 打包（自动排除 `.env`，并断言包里确实没有它）→
-检查 SSH（本机代理劫持时给出提示）→ `scp` 上传 → 远端「校验包 → 清空旧文件
-（保留 `.env`）→ 解包 → md5 与本机核对 → `sudo bash deploy.sh`」→
+`release.sh` 按顺序做：**先要求工作区已提交**（有未提交改动直接停，加 `--no-check` 可跳过）
+→ `tsc` 类型检查 → 打包（排除 `.env` / `android` / `*.apk`，并断言包里确实没有 `.env`）
+→ 检查 SSH（本机代理劫持时给出提示）→ `scp` 上传主包 → **按需补传 APK**
+（服务器上已有同名同大小的不传）→ 远端「校验包 → 清空旧文件（保留 `.env` / `downloads`）
+→ 解包 → md5 与本机核对 → `sudo bash deploy.sh` → 重建 caddy」→
 最后 `curl https://bitcoooin.cn/api/health` 验收。**任一步失败就停住**，不会留下半个部署。
 
 先分清哪一类改动：
 
-- **要重新 build 镜像的**（走下面这套）：后端 / 前端源码、`Dockerfile`、
+- **要重新 build 镜像的**（走上面这套）：后端 / 前端源码、`Dockerfile`、
   `docker-compose.prod.yml`、`Caddyfile`、`config/calibers.yaml`、`data/`、
   **`backend/src/llm/prompts.ts`（提示词）**
-- **不用更新**：标签模板 / 案例库（数据库里，网页上改即时生效）
-- **在服务器上改的**：`.env`（Key / 密码 / 模型）—— 服务器上直接编辑后 `restart app`，
-  **别**拿本机那份覆盖
+- **不用更新**：账号 / 标签模板 / 案例库（都在数据库里，网页上改即时生效）
+- **在服务器上改的**：`.env`（只剩 `PGPASSWORD` / 汇率这些）—— 服务器上直接编辑后
+  `restart app`，**别**拿本机那份覆盖
 
-### 手动等价步骤（`release.sh` 做的就是这些）
+### ⚠️ 三条不能忘（`release.sh` 已经帮你挡住了）
 
-```bash
-# 本机：打包（250K 左右）并上传
-cd /Users/nexta1/Documents/预测
-tar czf /tmp/ca.tgz --exclude='node_modules' --exclude='.git' --exclude='.env' \
-  --exclude='backend/dist' --exclude='frontend/dist' --exclude='logs' -C . .
-scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.tgz \
-  ubuntu@57.181.38.200:/tmp/
+- **`--exclude='.env'` 不能漏**：服务器 `.env` 里有随机化过的 `PGPASSWORD`，被本机那份
+  覆盖就再也连不上数据库（日志里是「⚠️ 数据库不可用」）。真碰上了：
+  `sudo docker inspect ca-postgres` 查环境变量里的真实密码，改回 `.env`。
+- **`downloads` 目录必须留着**：它 bind mount 进了 caddy（`./downloads:/srv/dl`）。
+  把目录整个删了再建，**目录 inode 就换了**，容器里那个挂载还指着被删的旧 inode ——
+  `/srv/dl` 变成空目录，线上 APK 直接 404（实测踩过）。留着目录、让 tar 往里覆盖文件即可。
+- **`Caddyfile` 改了要重建 caddy 容器**：它是 bind mount 的**单个文件**，内容变了
+  compose 看不出来，`up -d` 不会重建，而 Caddy 只在启动时读一次配置 —— 不重建等于没改。
+  （证书在命名卷 `ca-caddy-data` 里，重建不会重新申请。）
 
-# 服务器（⚠️ 串成一条 && 链：包没传好就停在第一步，不会删了旧代码却没得解压）
-# tar xzf 也不加 sudo —— 用 ubuntu 解压文件才归 ubuntu，root 所有会让下次更新失败
-cd /opt/crypto-advisor
-tar tzf /tmp/ca.tgz >/dev/null \
-  && sudo bash -c 'cd /opt/crypto-advisor && find . -mindepth 1 -maxdepth 1 \
-       ! -name .env ! -name downloads -exec rm -rf {} +' \
-  && tar xzf /tmp/ca.tgz \
-  && sudo bash deploy.sh \
-  && sudo docker compose -f docker-compose.prod.yml up -d --force-recreate caddy
-# 最后那句别省：Caddyfile 是 bind mount 的单文件，内容改了 compose 看不出来，
-# up -d 不会重建容器，而 Caddy 只在启动时读一次配置 —— 不重建等于没改。
-```
-
-> ⚠️ **为什么要先清一遍**：`tar xzf` 只覆盖同名文件、**不会删除**本机已经删掉的文件。
-> 残留的旧 `.ts` 会被 `tsc` 一起编译进镜像（如果它还 import 了已删模块，会直接构建失败）。
-> 只能留 `.env` 和 `downloads` —— 数据库在 Docker 命名卷 `ca-pgdata` 里，删目录不动数据；
-> Caddy 证书也在卷里，不会重新申请。
->
-> ⚠️ **`downloads` 必须留着**：它 bind mount 进了 caddy（`./downloads:/srv/dl`）。
-> 把目录整个删了再建，**目录 inode 就换了**，容器里那个挂载还指着被删的旧 inode ——
-> `/srv/dl` 变成空目录，线上 APK 直接 404（实测踩过）。留着目录让 tar 往里覆盖文件就行。
-
-> ⚠️ **`--exclude='.env'` 不能漏**。服务器上的 `.env` 里有随机化过的 `PGPASSWORD`，
-> 被本机那份覆盖的话应用会连不上数据库，日志里是「⚠️ 数据库不可用」。
-> 真碰上了：`sudo docker inspect ca-postgres` 查环境变量里的真实密码，
-> 改回 `.env`；或 `down -v` 重建库后重迁数据。
+> 💡 为什么要「先清一遍旧文件」：`tar xzf` 只覆盖同名文件、**不会删除**本机已经删掉的
+> 文件；残留的旧 `.ts` 会被 `tsc` 一起编进镜像（还 import 已删模块的话直接构建失败）。
+> 数据库在命名卷 `ca-pgdata` 里，删目录不动数据。
 
 ---
 

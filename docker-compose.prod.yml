@@ -1,6 +1,6 @@
 # 生产部署：app + db 一站起。
 #
-#   cp .env.example .env        # 改掉 PGPASSWORD（见 DEPLOY.md）
+#   cp .env.example .env        # 改掉 PGPASSWORD（见 docs/DEPLOY.md）
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
 # 与根目录的 docker-compose.yml 的区别：那份只起 db，给本地开发用；

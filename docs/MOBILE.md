@@ -15,7 +15,7 @@
 | ------------------------------------------------ | ---------------------------------------------------- |
 | 前端改造（安全区 / API 基址 / hash 路由）        | ✅ 已完成                                            |
 | Capacitor 接入（`capacitor.config.json` + 依赖） | ✅ 已完成                                            |
-| **Android 工程 + APK**                           | ✅ **已跑通**（`android/`，产物 4.1 MB）             |
+| **Android 工程 + APK**                           | ✅ **已跑通**（`android/`，产物约 9 MB）             |
 | iOS 工程                                         | ⚠️ 未生成 —— 本机缺完整 Xcode 与 CocoaPods，见第四节 |
 
 ---
@@ -130,8 +130,10 @@ npm run app:ios
 VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 ```
 
-> 本地联调时后端要监听 `0.0.0.0` 且手机与电脑同一局域网；
-> 后端已开 `Access-Control-Allow-Origin: *`，跨域不用另外配。
+> 本地联调时后端要监听 `0.0.0.0` 且手机与电脑同一局域网。
+> ⚠️ 后端的 CORS 是**白名单**（`backend/src/server.ts` 的 `CORS_ORIGIN_RE`），
+> 只放行 `bitcoooin.cn` + `https://localhost`（Android 壳）+ `capacitor://localhost`（iOS 壳）
+> + 本机开发端口。**指到别的地址要记得把那个来源加进去**，否则请求会被浏览器拦掉。
 
 ---
 
@@ -156,7 +158,7 @@ APK 放 `downloads/`，Caddy 按 **`/dl/*`** 直接发文件（目录由
 `docker-compose.prod.yml` 挂进 caddy 容器：`./downloads → /srv/dl`）：
 
 ```
-https://bitcoooin.cn/dl/entry-advisor-0.1.0.apk
+https://bitcoooin.cn/dl/entry-advisor-<版本>.apk
 ```
 
 发一次：
@@ -172,7 +174,7 @@ bash release.sh          # 会连 downloads/ 一起打上去，并重建 caddy �
 
 ```bash
 cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
-# 手机浏览器打开 http://<本机局域网IP>:8899/entry-advisor-0.1.0.apk
+# 手机浏览器打开 http://<本机局域网IP>:8899/entry-advisor-<版本>.apk
 ```
 
 ### ⚠️ 传不上去时先看这里
@@ -192,12 +194,15 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 
 ---
 
-## 八、还没做（要正式发布再补）
+## 八、鉴权与还没做的
 
-1. **后端鉴权** ⚠️ 最重要
-   后端接口现在**完全开放**（CORS `*`、无任何 token）。网页没人管，但 App 一旦发出去，
-   等于把「分析 / 知识库 / 用量」全部接口公开给所有人，**任何人可以刷爆你的 DeepSeek 余额**。
-   发布前至少加一层固定 token，规范做法是登录 + JWT。
+1. ~~后端鉴权~~ ✅ **已完成**（2026-10-04）：用户名 + 密码（scrypt）登录、30 天会话、
+   多端登录与设备管理、管理员两步验证（TOTP）。业务接口全部要登录，
+   只有行情 / K 线 / 币种 / 图标 / 下载清单是公开的。
+   - 请求要带 `Authorization: Bearer <token>`（`api.ts` 的 `req()` 自动加）；
+     SSE（EventSource）发不了请求头，所以走 `?token=`。
+   - ⚠️ **开了两步验证的账号，旧版 App 登不进去**（旧包拿到的是 `{needTotp}` 而不是 token）
+     —— 要开 TOTP 就先重新打一版 APK。
 
 2. **上架合规**
    - App Store 4.2 条款：纯网页壳会被判「Minimum Functionality」拒掉，需要足够的原生能力

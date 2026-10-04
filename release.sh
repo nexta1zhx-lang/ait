@@ -188,13 +188,13 @@ set -euo pipefail
 APP_DIR="$1"; TAR="$2"; WANT_TS="$3"; WANT_DEPLOY="$4"; APK_STAGE="$5"
 
 echo "==> 前置检查"
-[[ -d "$APP_DIR" ]] || { echo "✗ $APP_DIR 不存在 —— 首次部署请按 DEPLOY.md 手动走一遍" >&2; exit 1; }
+[[ -d "$APP_DIR" ]] || { echo "✗ $APP_DIR 不存在 —— 首次部署请按 docs/DEPLOY.md 手动走一遍" >&2; exit 1; }
 # 服务器上的 .env 是 root:600（deploy.sh 建的），所以只能用 sudo 读
 # ⚠️ 大模型配置（LLM_API_KEY）2026-10-04 起已经不放 .env 了 ——
 #    Key 按用户存在数据库，网页「我的 → 模型配置」里填。
 #    所以这里只检查 .env 存在（数据库账号密码还在里面）。
 if ! sudo -n sh -c "test -s '$APP_DIR/.env'"; then
-  echo "✗ $APP_DIR/.env 不存在 —— 首次部署请按 DEPLOY.md「首次部署」手动走一遍" >&2
+  echo "✗ $APP_DIR/.env 不存在 —— 首次部署请按 docs/DEPLOY.md「首次部署」手动走一遍" >&2
   exit 1
 fi
 echo "    ✓ 目录与 .env 都正常"

@@ -83,7 +83,7 @@ echo
 echo "✓ 完成：$APK"
 
 # 同时丢进 downloads/ —— 那是分发给别人下载的目录：
-#   · 本机：python3 -m http.server（见 MOBILE.md）
+#   · 本机：python3 -m http.server（见 docs/MOBILE.md）
 #   · 线上：compose 把它挂给 Caddy，链接 https://bitcoooin.cn/dl/<文件名>
 # 版本号从 package.json 读，文件名带版本，不会新旧混淆。
 VER="$(node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0)"

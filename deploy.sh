@@ -141,9 +141,6 @@ if [[ -s /tmp/ca-health.json ]]; then
     printf '      docker compose -f docker-compose.prod.yml logs --tail=80 app\n'
   else
     ok '应用已就绪（数据库正常）'
-    if grep -q '"sources":\[\]' /tmp/ca-health.json; then
-      warn '数据库里还没有提示词 —— 开单分析会报错，见 DEPLOY.md「首次部署」第 4 步（迁移 ai_docs）'
-    fi
   fi
 else
   warn '本地健康检查没通过，看日志：'

@@ -19,7 +19,7 @@
   现在代码只负责**取数**和**把 K 线读成文字**，怎么读、怎么判断全交给 AI。
 - AI 输出**只有 6 个字段**：标签（带概率）、理由、走势、走势概率、结论、推荐。
 - 没有止损止盈、没有仓位、没有 checklist、没有护栏校验 —— 那些都删了。
-- **提示词只有一份**（数据库 `ai_docs` 里，kind=`predict`），网页上随时改，改完立刻生效。
+- **提示词写在代码里**（`backend/src/llm/prompts.ts`），改完要**重新部署**。
 - 知识库**不注入** prompt，只借它一份**标签池**。
 
 ---
@@ -68,7 +68,7 @@ npm run dev -- BTC/USDT -t 4h -d 30     # 换周期 / 换天数
 
 **已上线：<https://bitcoooin.cn>** —— AWS Lightsail（东京）+ Docker Compose + Caddy 自动 HTTPS。
 
-完整步骤与运维看 [`DEPLOY.md`](./DEPLOY.md)，日常就一件事：
+完整步骤与运维看 [`docs/DEPLOY.md`](./docs/DEPLOY.md)，日常就一件事：
 
 ```bash
 bash release.sh            # 本机跑：类型检查 → 打包 → 上传 → 远端部署 → 公网验收
@@ -76,7 +76,8 @@ bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服
 ```
 
 它内部用 tar + scp 搬运（不要用 rsync：macOS 自带的是 openrsync，和服务器 rsync 3.x
-不保证兼容），并自动排除 `.env`、清掉服务器上的旧文件后再解包 —— 细节看 `DEPLOY.md`。
+不保证兼容），并自动排除 `.env` / `android` / `*.apk`，清掉服务器上的旧文件后再解包
+—— 细节看 `docs/DEPLOY.md`。
 
 两个最容易忘的：**Lightsail 防火墙要放行 80 / 443**；
 **打包必须 `--exclude='.env'`**（服务器那份里有随机化过的 `PGPASSWORD`，被覆盖就连不上库）。
@@ -90,19 +91,27 @@ bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服
 
 | 路由         | 干什么                                                                 |
 | ------------ | ---------------------------------------------------------------------- |
-| `/`          | **开单分析**。币种 + 模式 → 让 AI 判断；右边是 K 线图                  |
-| `/history`   | **预测历史**。左三张饼图（结论 / 标签 / 币种），右记录列表；点饼图即筛 |
-| `/knowledge` | **历史知识库**。攒案例、维护标签模板                                   |
-| `/prompts`   | **AI 提示词**。分析预测 + 知识库提炼两份，能编辑、启停、回滚           |
+| `/contracts` | **合约行情**（默认页）。全市场榜单，点一行就去开单分析                  |
+| `/analyze`   | **开单分析**。行情条 + K 线，左栏一级 tab 见下                         |
+| `/history`   | **预测历史**（`?tab=kb` 切知识库）。左三张饼图，右记录列表；点饼图即筛 |
 | `/usage`     | **用量**。每次调用花了多少钱                                           |
+| `/me`        | **我的**：预测历史 / 知识库 / 模型配置 / 用量 / 管理 / 个人信息        |
+| `/download`  | **下载**。列全部历史安装包（独立页，不进导航）                         |
+| 其余          | 302 到上面几个                                                         |
+
+开单分析左栏一级 tab：**合约行情 / K 线 / 实时分析 / 测试 / 历史分析 / 添加案例**
+（窄屏会去掉「测试」和「添加案例」，把它们并进 K 线头部的「＋」）。
+
+登录后才有业务数据（行情 / K 线 / 币种 / 图标 / 下载清单无需登录）。
+账号由管理员在「我的 → 管理」创建 —— **不开放注册**。
 
 ### `/` 上怎么取数
 
 - **主周期 = 图上那个周期**（5分 / 15分 / 1时 / 4时 / 日线）—— 页面上切周期，AI 看的就是它
   （不切的话两边会不一致）。
-- 主周期看的就是**图上初次加载的那一段**：`CHART_BARS = 300` 根。
-  页面上**不给用户填天数**，提示栏只做只读展示（1h × 300 根 ≈ 12.5 天）。
-  换算出来的天数发给后端，后端再换回根数。
+- 主周期看的就是**图上那一段**：`CHART_BARS`（`frontend/src/analyze.ts`，基准 200 根），
+  实际根数**跟屏幕宽度走**（`KlineChart.vue`），换出来的天数发给后端。
+  页面上**不给用户填天数**。
 - 其余周期**跟着主周期走**，取多少天由 `config/calibers.yaml` 决定：
 
   ```yaml
@@ -148,9 +157,7 @@ bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服
 {
   "tags": [
     {"name": "放量突破", "probability": 62},
-    {"name": "底部抬升", "probability": 55},
-    {"name": "上沿受阻", "probability": 40},
-    {"name": "假突破", "probability": 25}
+    {"name": "上沿受阻", "probability": 40}
   ],
   "reason": "15m 第 5 段从 84,045 拉到 86,622，均量 1,833……",
   "outlook": "先小幅回踩 15m 第 5 段冲高后的密集区不破，再往上试 86,888 那道被反复顶到的上沿",
@@ -160,7 +167,7 @@ bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服
 }
 ```
 
-- `tags` 是**形状**标签 + 概率（最多 4 个，按概率高低排），不是档位。
+- `tags` 是**形状**标签 + 概率（最多 2 个，按概率高低排），不是档位。
 - `outlook` 是**预测**，要写**具体价位**：先说看哪个价位、守住还是破了、然后看哪个价位。
   点位必须**带来源**（第几段的高/低点、哪道被反复碰的压力/支撑）——
   允许写点位，但不许凭空抬一个目标价、也不许说成「一定到得了」。
@@ -176,25 +183,25 @@ bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服
 **这份骨架写死在代码里**（`backend/src/llm/prompt.ts` 的 `OUTPUT_CONTRACT`），
 但**它只管格式**：字段名、类型、取值范围、必须输出 JSON。
 **判定标准一条都不在里面**（怎么读行情、怎么预测、`verdict` 三档怎么分、点位怎么写）
-—— 那些全在下面那份提示词里，网页上随时改。
-它是程序接口，不放在网页上编辑。`npm run selftest` 会断言骨架里的字段名和 `zod` schema 对得上。
+—— 那些全在 `PREDICT_PROMPT` 里。它是程序接口，**不在网页上编辑**。
+`npm run selftest` 会断言骨架里的字段名和 `zod` schema 对得上。
 
 ---
 
 ## 提示词
 
-只有一份，存数据库表 `ai_docs`：
+**写在代码里**，两份常量（`backend/src/llm/prompts.ts`）：
 
-| kind            | 干什么                                                             | 谁在用            |
-| --------------- | ------------------------------------------------------------------ | ----------------- |
-| `predict`       | **分析预测**：怎么读行情、怎么预测、怎么给概率、**结论三档怎么判** | 每次分析（`/`）   |
-| `extract`       | **知识库提炼**：收录案例时怎么把这段行情写成一条案例               | `/knowledge` 收录 |
-| `role` / `rule` | 旧版留下的，**不再参与分析**                                       | 无                |
+| 常量             | 干什么                                                             | 谁在用               |
+| ---------------- | ------------------------------------------------------------------ | -------------------- |
+| `PREDICT_PROMPT` | **分析预测**：怎么读行情、怎么预测、怎么给概率、**结论三档怎么判** | 每次分析（`/analyze`） |
+| `EXTRACT_PROMPT` | **知识库提炼**：收录案例时怎么把这段行情写成一条案例               | 知识库「收录」       |
 
-- 在 `/prompts` 编辑，**改完立刻生效**（下次分析读新的），每次保存留一版历史，能回滚。
-- 正文里没写兜底文案 —— 库里没有启用的 `predict` 就直接报错，不会静默用默认值。
-- 标签池 = **标签模板**（`/knowledge` 维护）∪ **知识库里用过的标签**。
-  标签名字要保持一致，不然池子会膨胀。
+- **改提示词 = 改这个文件 + 重新部署**（`bash release.sh`）。网页上没有编辑入口
+  （原 `/prompts` 页已撤）。
+- 每次分析会把「正文 + 输出契约」一起算 hash 存进 `analyses`，能对出当时用的是哪版。
+- 标签池 = **标签模板**（知识库页维护）∪ **知识库里用过的标签**。
+  名字要保持一致，不然池子会膨胀；模板外的自造词会在存库前被丢掉。
 
 ---
 
@@ -242,13 +249,11 @@ backend/src/
   scripts/               selftest / history / cost / learn / swing …
 
 frontend/src/
-  views/AnalyzeView.vue  开单分析
-  views/PromptsView.vue  提示词
-  comps/KlineChart.vue   lightweight-charts
-  api.ts / analyze.ts    接口与全局状态
+  views/AnalyzeView.vue  开单分析 · MeView.vue 我的 · ContractsView.vue 合约行情
+  comps/KlineChart.vue   主图（lightweight-charts）；MiniKline/PieChart/CostTrend 是 echarts
+  api.ts / analyze.ts    接口与全局状态 · session.ts 登录态 · candles.ts 预取
 
 config/calibers.yaml     取数表（也能改这里）
-rules/                   早期手写提示词，现在是参考稿（真正生效的在数据库）
 data/contracts.json      合约表缓存
 
 docker-compose.yml       PostgreSQL 16（本地开发，只起 db）
@@ -256,8 +261,10 @@ docker-compose.prod.yml  生产：app + db + caddy（线上用这份）
 Dockerfile               多阶段构建，运行阶段只带生产依赖
 Caddyfile                域名与反代（Caddy 跑在 compose 里）
 deploy.sh                服务器上一键部署（加 swap / 装 Docker / 起服务 / 自检）
-release.sh               本机一键发布（打包 → 上传 → 触发 deploy.sh → 公网验收）
-DEPLOY.md                部署与运维文档
+release.sh               本机一键发布（提交检查 → 打包 → 上传 → 触发 deploy.sh → 验收）
+build-apk.sh             打 Android APK 并放进 downloads/
+docs/DEPLOY.md           部署与运维文档
+docs/MOBILE.md           打包成 App（Capacitor）
 ```
 
 ---
