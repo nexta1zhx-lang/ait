@@ -2082,13 +2082,15 @@ button.danger {
   align-items: center;
   justify-content: center;
   /*
-   * 尺寸（用户 2026-10-04：「格子空间再大一点，有点间距和方块」—— 66×21 → 72×23；
-   *      2026-10-05：「方块也高一点有点挤了」→ 高 23 → **28**）：
-   * 宽 72 的余量按最长数字算 —— 12px Inter + tnum 实测 7 位 `+13.27%` = 54.2px、
-   * 8 位 `+123.45%`（理论上限）= 61.9px，两边各留 5px 以上，再长也不贴边。
-   * 高 28 = 窄屏那个币种图标的高度（`.ico` 28px）⇒ 一列扫下来方块和图标齐平。
-   * ⚠️ 手机上这一格字号是 **13px**（不是桌面的 12px），23px 高的方块只剩 5px 余量
-   *    —— 用户说的「有点挤」就是这个，所以统一加到 28。
+   * 尺寸：**72×28**。历史：66×21 → 72×23「格子空间再大一点」→ 72×28
+   *      「方块也高一点有点挤了」→ 试过 72×32（「内间距加大一点」），
+   *      **当天用户又让还原** ⇒ 28 就是定稿，别再往上加。
+   *
+   * 宽度余量（12px Inter+tnum 实测）：7 位最长的 `+13.27%` = 54.2px、
+   * 8 位（理论上限）`+123.45%` = 61.9px ⇒ 72px 里两侧各留 5px 以上。
+   * ⚠️⚠️ **72 就是宽度上限**：窄屏那格 88px 减去两侧 8px 内边距 ⇒ 内容盒正好 72px
+   *    （实测方块左右各 8px，完全贴合）。再宽就会被格子的 `overflow: hidden`
+   *    裁掉左边一截 —— 想更宽得先加宽 `.c-chg`（那会挤窄币种列）。
    */
   width: 72px;
   height: 28px;
@@ -2143,6 +2145,31 @@ button.danger {
 .mkt-table .chg.down {
   background: var(--bad-fill);
   color: #fff;
+}
+
+/*
+ * 最新价那一列 **居中**（用户 2026-10-05：「最新价水平居中」）。
+ *
+ * ⚠️ **表头 + 表身一起改**：只改数字的话，“最新价”三个字还贴在右边、数字在中间，
+ *    一眼就看得出不齐（手机是 `<th class="r">` 右对齐）。
+ *
+ * ⚠️ 用 `:nth-child(2)` 定位“第 2 列”（表头表身两个 `<table>` 的列顺序都是
+ *    币种 / 最新价 / 涨跌）—— 改动比给模板加 class 小，但**列顺序变了这里要跟着改**。
+ * ⚠️ 特指度要压过 `.table .r { text-align: right }`（0,2,0）：这两条分别是
+ *    （0,3,1）和（0,3,2），够用。
+ * ⚠️ 涨跌幅那列**不动**：它的方块是钉死的 72px 宽，居中/右对齐都看不出来（
+ *    格子里本来就是方块贴右、左边空着）。
+ *
+ * ⚠️ 还要 **上下居中**（`vertical-align: middle`，用户 2026-10-05：「价格上下居中」）：
+ *    `.table td` 全局是 `vertical-align: top`，而币种格是两行（比价格高一大截），
+ *    top 对齐时价格就吊在行顶上 —— 居中之后它跟币名、涨跌方块在同一条水平线上。
+ *    ⚠️ 只动价格这一格：币种格要顶对齐（图标 + 两行文字），
+ *    而涨跌方块自己 28px 高、几乎占满行高，居不居中差不到 2px。
+ */
+.mkt-table .mkt-head th:nth-child(2),
+.mkt-table .mkt-body tr > td:nth-child(2) {
+  text-align: center;
+  vertical-align: middle;
 }
 
 .mkt-table .num {
@@ -5023,6 +5050,14 @@ button.badge:disabled {
   .split.m-market .mkt-table td:first-child {
     padding-left: 14px;
   }
+  /*
+   * ⚠️ 这条 `padding-right: 14px` 其实**被压掉了**（实测真实是 8px）：
+   *    紧跟其后的 `.split.m-market .mkt-table .table th/td { padding: 11px 8px }`
+   *    特指度（0,4,1）跟它**打平**、且在文件更后面 ⇒ 后者赢。
+   *    **别去「修」它**：真改成 14px 后涨跌那格的内容盒只剩 66px，
+   *    而方块是钉死的 72px ⇒ 左边会被 `overflow: hidden` 裁掉 6px。
+   *    要修就得连 `.c-chg` 一起加宽（会挤窄币种列）。
+   */
   .split.m-market .mkt-table th:last-child,
   .split.m-market .mkt-table td:last-child {
     padding-right: 14px;
