@@ -55,13 +55,30 @@ async function main(): Promise<void> {
     sandbox: row.sandbox
   })
 
-  /* ---------------- ① 建 listenKey ---------------- */
+  /* ---------------- ② listenKey ---------------- */
   const r = await ex.fapiPrivatePostListenKey()
   const listenKey = String(r?.listenKey ?? '')
   console.log(`[1] listenKey 长度 ${listenKey.length}（值不打印）`)
   if (!listenKey) {
     console.log('    ❌ 没拿到 listenKey，后面没法验')
     return
+  }
+
+  /* ---------------- ①b 断档能不能补：币安有没有「历史权益」接口 ---------------- */
+  console.log('\n[1b] 历史权益快照接口（决定「服务挂了那段时间能不能补」）')
+  for (const type of ['FUTURES', 'SPOT']) {
+    try {
+      const snap: any = await ex.sapiGetAccountSnapshot({type, limit: 3})
+      const code = snap?.code
+      const list = snap?.snapshotVos ?? []
+      console.log(
+        `    ${type}: ${code ? `code=${code} msg=${snap?.msg}` : `✅ 有 ${list.length} 条`}` +
+          (list[0] ? `（最早一条 ${new Date(Number(list[list.length - 1]?.updateTime ?? 0)).toISOString().slice(0, 10)}）` : '')
+      )
+      if (list[0]) console.log(`      一条的字段: ${Object.keys(list[0]).join(', ')}`)
+    } catch (e) {
+      console.log(`    ${type}: ❌ ${(e as Error).message.slice(0, 160)}`)
+    }
   }
 
   /* ---------------- ② 连裸 WS ---------------- */

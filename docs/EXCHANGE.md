@@ -81,6 +81,31 @@ exchange_snapshots 里的一行（举例）
 ⚠️ 和「成交」的区别：快照是**状态**（可以丢采样点、可以覆盖），
 成交是**事件账本**（一行都不能丢，而且交易所只帮存 3 个月）。
 
+### ⚠️ 断档与恢复（后端挂了怎么办）
+
+**先说结论：权益的细粒度历史「补不回来」，所以设计目标是「少断 + 断了看得出来」。**
+
+| 挂什么 | 影响 | 能不能补 |
+|---|---|---|
+| **进程崩 / 容器重启** | 采样停 + WS 断 | ✅ **自动拉起**：prod compose 里 app 等服务全是 `restart: unless-stopped`（已核实）⇒ 断档 ≈ 秒级；**重启时立刻补一条锚点快照** |
+| **WS 断线**（进程还活着） | 成交 / 已实现盈亏事件丢 | ✅ **能补**：重连后 REST 增量拉（`userTrades` / `income`，**3 个月内还在**） |
+| **服务长时间停**（部署 / 机器重启 / OOM 反复） | 快照整段空白 | ⚠️ 分钟级**补不回**（币安没有分钟级历史权益接口）<br>✅ **天粒度能补**：实测 `/sapi/v1/accountSnapshot?type=FUTURES` **可用**（每日一个点，回溯 30 天） |
+
+据此加四条设计：
+
+1. **锚点快照**：绑定 key、进程启动、优雅关闭（SIGTERM）各写一条，
+   `source = bind | boot | shutdown` —— 曲线**两端都有锚点**，不会出现"开头/结尾没有点"。
+2. **断档要看得见**：曲线**不插值**，两点之间画直线；空档 > 2× 采样间隔就画成**断点/虚线**，
+   **绝不假装那段时间有数据**。
+3. **启动补数据**：启动时若发现最后一条快照早于 N 小时（比如 2 小时）⇒
+   用 `/sapi/v1/accountSnapshot?type=FUTURES` 回补天粒度点（`source='snapshotApi'`，
+   界面上可以和实测点区分）。
+4. **写库失败**：内存里兜一批、退避重试（DB 短暂抖动别丢）。
+
+**明确不做 HA**：多副本会重复订阅同一个 key 的 WS（要领导者选举/分布式锁），
+代价大于收益 —— 这工具单实例够（见「容量」）。所以真正的长时间停机，
+那段细粒度数据**永久缺失**，只能靠上面 1+3 把影响缩到最小。
+
 ---
 
 ## 4. 表结构（加在 `backend/src/db/schema.ts` 的 `SCHEMA_SQL` 里，幂等）
@@ -102,7 +127,8 @@ CREATE TABLE IF NOT EXISTS exchange_snapshots (
   c2c_total   NUMERIC(24,8),
   c2c_detail  JSONB,
   -- 这一条是谁写的 / 有没有失败
-  source      TEXT        NOT NULL DEFAULT 'poll',  -- poll | ws | manual
+  -- poll | ws | manual | bind | boot | shutdown | snapshotApi
+  source      TEXT        NOT NULL DEFAULT 'poll',
   err         TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -277,3 +303,9 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 1. ~~资产曲线这轮做吗~~ → **用户定：后面做**（快照从现在开始攒就行）
 2. **快照保留 30 天**行不行？（一套 13 MB，300 套 4 GB）
 3. 界面 tab 文案：现在叫「**交易所账户**」，内容已经是资产 + 仓位 ⇒ 改叫「**交易所资产**」？
+4. ⚠️ **“从注册到结束”与“删了就删了”冲突**：现在定的是 `CASCADE`，
+   删 key = **曲线一起消失**（变成“从注册到删号”）。要想删号后还能看历史，
+   得改成 `SET NULL` + 存一份 `key_label` 文本（仓库先例：`llm_usage.llm_key_id`）。
+   建议：快照（曲线）**跟删**；若成交账本要长期留，就单独给它 `SET NULL`。
+5. 补数据用到的 `/sapi/v1/accountSnapshot?type=FUTURES` 是 **00:00 UTC（北京 08:00）**
+   的日点，粒度很粗 —— 只用来“把长期断档的天点补上”，不当主数据。
