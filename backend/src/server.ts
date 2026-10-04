@@ -102,6 +102,11 @@ import {EXCHANGE_CATALOG, fetchExchangeAccount} from './data/exchange-account'
 import {fetchExchangeOverview} from './data/exchange-overview'
 import {latestSnapshot, saveSnapshot} from './db/exchange-store'
 import {
+  startExchangeStreams,
+  startSnapshotSampler,
+  stopExchangeStreams
+} from './exchange-stream'
+import {
   backfillUsageKeys,
   createLlmKey,
   deleteLlmKey,
@@ -3315,6 +3320,14 @@ async function main(): Promise<void> {
   try {
     await ensureSchema()
     /*
+     * 交易所资产的实时层（M2，方案 docs/EXCHANGE.md）：
+     * 给每套合约账户写一条「启动锚点」快照并起用户数据流（listenKey + 裸 WS），
+     * 再起 5 分钟采样（兼作 REST 对账；C2C 钱包没有 WS 事件，只能靠它）。
+     * ⚠️ 不 await：联网慢不拖启动，内部失败只告警。
+     */
+    startExchangeStreams()
+    startSnapshotSampler()
+    /*
      * 检查有没有管理员账号（2026-10-04 起不开放注册，账号由管理员创建）。
      * ⚠️ **不建号、不内置密码** —— 管理员账号（用户名 + 密码哈希）
      * 随**本地数据库同步**一起上来。
@@ -3510,7 +3523,17 @@ async function main(): Promise<void> {
 /** 退出时把 Vite 与数据库连接池关干净，别留孤儿进程 */
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
-    void Promise.resolve(viteDev?.close())
+    /*
+     * 退出前：给交易所那边写一条「关闭锚点」快照 + 删 listenKey 断流。
+     * ⚠️ 给 5 秒上限 —— docker stop 默认 10 秒后就 SIGKILL，别卡在联网上
+     *    （写锚点要每条 key 打一次 REST，约 2s/条）。
+     */
+    void Promise.race([
+      stopExchangeStreams(),
+      new Promise(r => setTimeout(r, 5000))
+    ])
+      .catch(() => undefined)
+      .then(() => Promise.resolve(viteDev?.close()))
       .catch(() => undefined)
       .then(() => closePool())
       .catch(() => undefined)

@@ -116,8 +116,61 @@ export async function saveSnapshot(
   return true
 }
 
-/** 读最新一条（接口「秒开」靠它；不打交易所） */
-export async function latestSnapshot(
+/** 一笔成交（从 WS 的 ORDER_TRADE_UPDATE 里拆出来的） */
+export interface FillInput {
+  orderId: string
+  /** 币安事件里的 `t`，去重靠它 */
+  tradeId: string
+  symbol: string
+  side: string
+  price: number
+  amount: number
+  fee: number
+  feeCcy: string
+  /** 这一笔的已实现盈亏（事件里的 `rp`） */
+  realized: number
+  ts: Date
+  raw: unknown
+}
+
+/**
+ * 成交写账本 —— **幂等**（靠 `unique(key_id, trade_id)`）。
+ * 返回 true = 这一笔是新的（第一次写）。
+ * ⚠️ 重连后重放旧事件时全靠这个唯一键挡住，别改成普通 INSERT。
+ */
+export async function upsertFill(
+  userId: number,
+  keyId: number,
+  f: FillInput
+): Promise<boolean> {
+  const rows = await query<{id: string}>(
+    `INSERT INTO exchange_fills
+       (user_id, key_id, order_id, trade_id, symbol, side, price, amount,
+        cost, fee, fee_ccy, realized, ts, raw)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+     ON CONFLICT (key_id, trade_id) DO NOTHING
+     RETURNING id`,
+    [
+      userId,
+      keyId,
+      f.orderId,
+      f.tradeId,
+      f.symbol,
+      f.side,
+      f.price,
+      f.amount,
+      r8(f.price * f.amount),
+      f.fee,
+      f.feeCcy || null,
+      f.realized,
+      f.ts,
+      JSON.stringify(f.raw ?? {})
+    ]
+  )
+  return rows.length > 0
+}
+
+/** 读最新一条（接口「秒开」靠它；不打交易所） */export async function latestSnapshot(
   userId: number,
   keyId: number
 ): Promise<LatestSnapshot | null> {
