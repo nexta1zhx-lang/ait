@@ -54,7 +54,7 @@ const STABLES = new Set([
 ])
 
 /** 认得出的交易所实例 */
-function createExchange(c: ExchangeCredentials): any {
+export function createExchange(c: ExchangeCredentials): any {
   const Ctor = CCXT[c.exchange]
   if (!Ctor)
     throw new Error(`不支持的交易所「${c.exchange}」（ccxt 里没有这个 id）`)

@@ -12,7 +12,7 @@
 | 维度 | 接口 | 拿到什么 |
 |---|---|---|
 | USDT 合约（USDⓈ-M） | `GET /fapi/v2/account` | `totalWalletBalance` / `totalUnrealizedProfit` / `totalMarginBalance` / `availableBalance` + `assets[]` + **`positions[]`** |
-| C2C 钱包 | `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true` | `walletName` / `balance` / `assetBalances[]` |
+| C2C 钱包 | `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true` | `walletName` / `balance` / `assetBalances[]` —— ⚠️ **实测：C2C 对应的是 `walletName="Funding"`（资金账户）**，接口里**没有**叫 "C2C" 的钱包，按名字找 "C2C" 会静默拿不到数据 |
 | 挂单 | `GET /fapi/v1/openOrders`（**不需要交易对**） | |
 | 成交 | WS `ORDER_TRADE_UPDATE`，REST `userTrades` 兜底 | |
 | 已实现盈亏 | WS 同事件里的 `rp`，REST `fapi/v1/income` 兜底 | |
@@ -45,8 +45,45 @@
 
 ---
 
-## 3. 表结构（加在 `backend/src/db/schema.ts` 的 `SCHEMA_SQL` 里，幂等）
+## 3. 「快照」到底是什么
 
+**一条快照 = 某一瞬间这个账户的「资产体检报告」**，不是流水、不是增量，就是一整份当前状态：
+
+```
+exchange_snapshots 里的一行（举例）
+  key_id      4                  哪套 key
+  taken_at    2026-10-05 18:42   这一瞬间
+  wallet      30228.74           合约钱包余额（totalWalletBalance，不含浮盈）
+  unrealized  886.60             未实现盈亏
+  margin      31115.34           保证金余额（= 钱包 + 浮盈）← 净资产里的合约那半
+  available   9672.43            可用
+  positions   [ {BTCUSDT,long,…}, {ETHUSDT,short,…} ]   ← 完整持仓，jsonb
+  assets      [ {USDT, wallet, available, unrealized} ]
+  c2c_total   2140.00            C2C（Funding）折 USDT
+  c2c_detail  [ {USDT,…}, {BTC,…} ]
+  source      ws | poll | manual  这条是谁写的
+  err         采集时那一侧失败了就记这儿
+```
+
+**什么时候写一条**：
+- WS 收到 `ACCOUNT_UPDATE`（余额/仓位变了）—— 同一秒多次变化**合并成一条**
+- 每 5 分钟定时采样一条（`source='poll'`）← 就算 WS 一直没动静也有心跳
+- 用户点 ⟳（`source='manual'`）
+
+**为什么要它**：
+1. 前端「秒开」= 直接读**最新那一条**（毫秒级），不等交易所
+2. 攒下来的序列就是**资产曲线**（曲线后做，但数据得从现在开始攒）
+3. 排查问题时能回放「3 小时前账上是什么样」
+
+**量和保留**：一套 key 每天 288 条（5 分钟一条），每条约 1.5 KB（大头是 `positions` jsonb）
+⇒ **约 13 MB / 30 天 / 套**。快照保留 30 天（滚动删）；**成交永久**（账本不能丢）。
+
+⚠️ 和「成交」的区别：快照是**状态**（可以丢采样点、可以覆盖），
+成交是**事件账本**（一行都不能丢，而且交易所只帮存 3 个月）。
+
+---
+
+## 4. 表结构（加在 `backend/src/db/schema.ts` 的 `SCHEMA_SQL` 里，幂等）
 ```sql
 -- ── 资产快照（每次采一条；前端读「最新那条」= 秒开）
 CREATE TABLE IF NOT EXISTS exchange_snapshots (
@@ -107,18 +144,22 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 
 ---
 
-## 4. 实时层（WebSocket 用户数据流）
+## 5. 实时层（WebSocket 用户数据流）
 
-技术前提**已核实**（`ccxt@4.5.84` **社区版就带**，ccxt.pro 已并入）：
+> ### ⚠️ M0 已实测（2026-10-05，用仓库里那套币安合约 key 真跑的）—— 结论**推翻了最初设想**
 
-- `watchOrders()` / `watchBalance()` / `watchPositions()` 都是函数 ✓
-- 它们内部就是 `POST /fapi/v1/listenKey` → `wss://fstream.binance.com/ws/<key>`，
-  **listenKey 30 分钟续期、断线重连都由 ccxt 管** ⇒ 不用自己写裸 WS
-- ⚠️ 隐式 REST 方法挂在**实例**上：`ex.fapiPrivateGetAccount`、
-  `ex.sapiGetAssetWalletBalance`（C2C）、`ex.fapiPrivateGetIncome` ✓
-  （别用 `ccxt.binance.prototype` 探测，那里是 undefined）
-- ⚠️ **`has.watchOrders` 对 binance 是 `undefined`**（没声明"支持"）⇒
-  **M0 必须先用真 key 实测**；不成就退回 5 分钟轮询增量（架构不变，只换数据源）
+| 验的东西 | 结果 |
+|---|---|
+| ccxt 的 `watchOrders()` | ❌ **抛 `binance watchOrders() is not supported yet`** —— 社区版的 `watch*` 只是基类占位，真实现要付费的 ccxt.pro ⇒ **不能靠它** |
+| `POST /fapi/v1/listenKey`（ccxt 的 `fapiPrivatePostListenKey`） | ✅ 通，拿到 64 位 listenKey |
+| **自己连裸 WS** `wss://fstream.binance.com/ws/<listenKey>` | ✅ **429ms 连上，15 秒稳定不断** |
+| `/fapi/v2/account` | ✅ 字段全中；⚠️ `positions` 返回**全部 920 个槽位**（绝大多数 `positionAmt=0`）⇒ 必须过滤 |
+| `/sapi/v1/asset/wallet/balance` | ✅ 通；⚠️ **C2C 钱包的 `walletName` 实际叫 `Funding`**（返回的 10 个钱包里没有 "C2C"） |
+
+⇒ **实时层自己写**：listenKey 搭 ccxt 的隐式方法（`fapiPrivatePostListenKey` / `PutListenKey` /
+`DeleteListenKey` ✓ 已验证），WS 用 `ws` 包直连 `wss://fstream.binance.com/ws/<listenKey>`。
+**自己管三件事**：30 分钟续期（`PUT`）、指数退避重连、重连后 REST 对账。
+⚠️ `ws` 现在只是 ccxt 带进来的**传递依赖**，要显式写进 `package.json`。
 
 ### 事件 → 动作
 
@@ -181,12 +222,42 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 | M1 | `schema.ts` 两张表 + `data/exchange-overview.ts`（REST 取数）+ `overview`/`refresh` 接口 | 真实数字能出来（界面先不动） |
 | M2 | `exchange-stream.ts`（WS 常驻 + 重连 + 15 分钟对账）+ SSE 接口 | 数字开始秒跳 |
 | M3 | 成交/盈亏落库 + 读库接口 + 前端接真数据 | 去掉 mock |
-| M4 | 资产曲线（快照序列 → 图） | 可选 |
+| M4 | 资产曲线（快照序列 → 图）—— **用户定：这轮先不做**，但快照从现在就开始攒 | 后补 |
 | M5 | 删 mock / 预览页 / 老 `/api/exchange/account` | 收尾 |
 
 ---
 
-## 8. 风险与对策
+## 9. 容量 / 理论用户数
+
+**单套 key 的消耗**（按现在定的节奏算）：
+
+| 项 | 量 |
+|---|---|
+| WS 常驻连接 | **1 条**（每套 key 一条） |
+| REST | C2C 轮询 1/5min + 对账 2/15min + listenKey 续期 1/30min ≈ **0.37 请求/分钟/套** |
+| 权重（保守估） | ≈ **3.3 权重/分钟/套**（fapi 预算 2400/分钟/IP） |
+| 磁盘 | **≈ 13 MB / 30 天 / 套**（快照为主；成交那点量可忽略） |
+
+**各自的天花板**：
+
+| 资源 | 撑到多少套才吃紧 |
+|---|---|
+| WS 连接（Node 侧） | 几百条无压力（1 条约 50KB 内存）⚠️ 但**启动时连握手要错开**（币安限 300 次/5 分钟/IP）⇒ 限速 **1 条/秒** |
+| REST 额度 | 2400 / 3.3 ≈ **700 套**（保守算 500） |
+| **磁盘** ← 真正的瓶颈 | 100 套 = 1.3 GB、300 套 = 4 GB、1000 套 = 13 GB（机器盘通常 20~40 GB） |
+
+⇒ **单实例（现在这套部署）舒适区 ≈ 100~300 套 key**，
+≈ **50~150 个用户**（假设每人 2 套）。到 300 套时磁盘 4 GB、REST 只用掉 1/3 额度，都还宽松。
+
+**超过 300 套再优化**：① 快照降采样（7 天内 5 分钟、更早按小时）② C2C 轮询 5 → 15 分钟
+③ 分片（一条流固定挂某个副本）。
+
+⚠️ 以上全部基于**单实例**：多副本会重复订阅同一个 key（同一账户多条连接会互相干扰）
+⇒ 到时候要么加分布式锁、要么把这条流指定给主副本。
+
+---
+
+## 10. 风险与对策
 
 | 风险 | 对策 |
 |---|---|
@@ -201,8 +272,8 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 
 ---
 
-## 9. 待定（等你拍板）
+## 11. 待定（等你拍板）
 
-1. **资产曲线**这轮做吗？（M4 可选，快照已经是现成的）
-2. **快照保留 30 天**行不行？
+1. ~~资产曲线这轮做吗~~ → **用户定：后面做**（快照从现在开始攒就行）
+2. **快照保留 30 天**行不行？（一套 13 MB，300 套 4 GB）
 3. 界面 tab 文案：现在叫「**交易所账户**」，内容已经是资产 + 仓位 ⇒ 改叫「**交易所资产**」？
