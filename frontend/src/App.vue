@@ -84,12 +84,7 @@ const route = useRoute()
  * 下载页是**公开落地页**（别人拿到链接就能下载 App），不能卡在登录后面。
  * 它只调 `/api/downloads`（公开接口），不需要 token。
  */
-const isPublicPage = computed(
-  () =>
-    route.path === '/download' ||
-    // 账户界面预览页：只有本地 mock 数据，不需要登录
-    route.path === '/preview/account'
-)
+const isPublicPage = computed(() => route.path === '/download')
 
 watch(
   () => [route.path, user.value?.id ?? 0] as const,

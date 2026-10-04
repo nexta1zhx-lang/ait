@@ -20,10 +20,8 @@ import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import MarketPanel from '../comps/MarketPanel.vue'
 /*
- * ⚠️ 2026-10-05：这里原来是 `ExchangeAccountPanel`（拉真数据的老版）。
- * 用户要「先把新界面接进真实页面、数字先造假」→ 换成喂 mock 的临时容器。
- * 后端 `/api/exchange/overview` 做好后换回真容器，详见
- * `comps/ExchangeAccountMockPanel.vue` 顶部说明。
+ * 交易所账户：真数据容器（M3，2026-10-05）—— 先读库里的快照渲染、
+ * 旧了后台刷、并订阅 SSE 实时更新。详见 `comps/ExchangeAccountLivePanel.vue`。
  */
 import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
@@ -1015,9 +1013,9 @@ const heatRows = computed(() => {
           </div>
         </template>
 
-        <!-- ② 交易所资产：净资产（合约 + C2C）/ 仓位统计 / 持仓·挂单·盈亏·成交
+        <!-- ② 交易所资产：净资产（合约 + C2C）/ 走势曲线 / 仓位统计 / 持仓·挂单·盈亏·成交
              （用户 2026-10-05：「只统计 USDT 合约 + C2C，不算现货」）
-             ⚠️ 现阶段里面是**模拟数据**（还没接 `/api/exchange/overview`）。 -->
+             数据是真快照：先渲染库里那份、旧了后台刷、有变动走 SSE 推过来。 -->
         <div v-else-if="leftTab === 'exchange'" class="scroll-body">
           <ExchangeAccountLivePanel />
         </div>

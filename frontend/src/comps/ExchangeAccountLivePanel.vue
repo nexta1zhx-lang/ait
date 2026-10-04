@@ -10,19 +10,21 @@
  *   ③ 下面两个 tab 各取所需：**成交/盈亏读后端账本**（WS 实时落 + 断线后 RESF 补，
  *      **不需要交易对**），**挂单打交易所**（秒级变化的东西，不进快照）
  *
- * ⚠️ 跟老容器（`ExchangeAccountPanel.vue`）的区别：老的把 5 个交易所调用塞进
- *    一个请求、每次都要现拉；这个首屏只读库，慢的东西拆开按需查。
+ * ⚠️ 分层（跟已经删掉的老面板不同）：老的把 5 个交易所调用塞进一个请求、
+ *    每次都要现拉；这个首屏只读库，慢的东西（挂单）拆开按需查。
  */
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
 import ExchangeAccountBoard from './ExchangeAccountBoard.vue'
 import {
   exchangeStream,
+  fetchExchangeCurve,
   fetchExchangeFills,
   fetchExchangeKeys,
   fetchExchangeOpenOrders,
   fetchExchangeOverview,
   isAuthError,
   refreshExchangeOverview,
+  type CurvePoint,
   type ExchangeIncomeRow,
   type ExchangeKey,
   type ExchangeOpenOrder,
@@ -56,6 +58,13 @@ const ordersErr = ref('')
 const loadingOrders = ref(false)
 
 const fills = ref<ExchangeTrade[]>([])
+
+/** 净资产曲线（M4）：默认看 1 天 */
+const curve = ref<CurvePoint[]>([])
+const curveRange = ref('1d')
+const curveBucketSec = ref(300)
+/** 上次取曲线的时间 —— SSE 事件来得勤，靠它节流（别每个快照都拉一遍） */
+let curveAt = 0
 
 /** 已实现盈亏 = 账本里带 realized 的那些（一笔成交一条） */
 const income = computed<ExchangeIncomeRow[]>(() =>
@@ -92,6 +101,8 @@ async function doRefresh(id: number | undefined = picked.value): Promise<void> {
   refreshing.value = true
   try {
     applySnapshot(await refreshExchangeOverview(id))
+    // 用户主动刷新 = 想看到最新状态，曲线也顺手重拉
+    void loadCurve(id)
   } catch (e) {
     if (isAuthError(e)) return
     err.value = `刷新失败：${msg(e)}`
@@ -139,6 +150,21 @@ async function loadOrders(id: number | undefined): Promise<void> {
   }
 }
 
+/**
+ * 取净资产曲线。
+ * ⚠️ 失败**不吵**（不往 `err` 里写）：主数字已经在了，曲线属于锦上添花。
+ */
+async function loadCurve(id: number | undefined = picked.value): Promise<void> {
+  try {
+    const r = await fetchExchangeCurve(id, curveRange.value)
+    curve.value = r.points ?? []
+    curveBucketSec.value = r.bucketSec ?? 300
+    curveAt = Date.now()
+  } catch (e) {
+    if (!isAuthError(e)) curve.value = []
+  }
+}
+
 /* ---------------- SSE ---------------- */
 
 let stopStream: (() => void) | null = null
@@ -148,6 +174,8 @@ function startStream(id: number | undefined): void {
   stopStream = exchangeStream(id, {
     snapshot: r => {
       applySnapshot(r)
+      // SSE 来了新快照：最多每分钟把曲线也重拉一次（不节流的话事件多时太吵）
+      if (Date.now() - curveAt > 60_000) void loadCurve(id)
     },
     fill: t => {
       // 同一笔可能「实时事件」和「REST 回补」都给到 → 按 tradeId 去重
@@ -168,9 +196,13 @@ function startStream(id: number | undefined): void {
     reconnect: () => {
       void loadSnapshot(id)
       void loadFills(id)
+      void loadCurve(id)
     }
   })
 }
+
+/* 换跨度（1d / 7d / 30d）只重拉曲线，不动快照 */
+watch(curveRange, () => void loadCurve())
 
 /* ---------------- 换账户 ---------------- */
 
@@ -184,6 +216,7 @@ watch(picked, id => {
   void loadSnapshot(id)
   void loadFills(id)
   void loadOrders(id)
+  void loadCurve(id)
   startStream(id)
 })
 
@@ -229,6 +262,10 @@ onUnmounted(() => {
       :income="income"
       :loading-orders="loadingOrders"
       :refreshing="refreshing"
+      :curve="curve"
+      :curve-range="curveRange"
+      :curve-bucket-sec="curveBucketSec"
+      @update:curve-range="curveRange = $event"
       @refresh="doRefresh()"
     />
 

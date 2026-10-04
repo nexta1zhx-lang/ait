@@ -23,9 +23,8 @@
  * 一次调用打 3 个请求（account / positionRisk / sapi wallet），**共用一个 exchange 实例**
  * —— 不要每块各 createExchange 一遍，那样每次都要 loadMarkets（一两秒）。
  *
- * TODO(M3)：`exchange-account.ts` 里 `fetchExchangeBalance` 那段「稳定币 1:1 + 一次
- * fetchTickers 找 X/USDT」的估值逻辑跟下面 `valueInUsdt` 是同一套；等老面板删掉
- * （M5）之后两处合并成一个 helper。
+ * ★ M5（2026-10-05）：老接口 `/api/exchange/account` 连同它那套「余额估值」已经删了，
+ *   现在**全仓库只有下面 `valueInUsdt` 一套估值逻辑**（稳定币 1:1 + 找 X/USDT 报价）。
  */
 import {
   STABLES,
@@ -113,7 +112,7 @@ function r8(x: number): number {
 /**
  * 批量折 USDT：稳定币按 1 算，其余在**已加载的市场**里找 `X/USDT[:USDT]`，
  * 用**一次** `fetchTickers()` 把价格批量取回来；查不到就给 `null`
- * （宁可少算，不能给错数 —— 跟 `fetchExchangeBalance` 一个原则）。
+ * （宁可少算，不能给错数 —— 这是这个模块的原则）。
  */
 async function valueInUsdt(
   ex: any,

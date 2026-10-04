@@ -14,13 +14,14 @@
  *   ④ 二级 tab：持仓 / 挂单 / 盈亏 / 成交 / 资产明细
  *   ⑤ tab 内容（卡片行）
  *
- * ⚠️ **组件是纯展示的**：数据全走 props（自己不发请求）⇒ 预览页可以直接喂 mock
- *    （`exchangeMock.ts`），真数据那条路由外层传。
+ * ⚠️ **组件是纯展示的**：数据全走 props（自己不发请求）⇒ 真数据由
+ *    `ExchangeAccountLivePanel.vue` 传进来。
  * ⚠️ 顶部的「几分钟前」是**架构的一部分**：先渲染上一份快照、后台再刷新，
  *    所以界面上必须让用户看到「这份数据有多旧」，而不是空等一个 loading。
  */
-import {computed, ref} from 'vue'
+import {computed, defineAsyncComponent, ref} from 'vue'
 import {
+  type CurvePoint,
   type ExchangeIncomeRow,
   type ExchangeOpenOrder,
   type ExchangeOverview,
@@ -28,6 +29,16 @@ import {
 } from '../api'
 import {bjTime, fixed, fmt} from '../format'
 import SegTabs from './SegTabs.vue'
+
+/**
+ * 曲线用 echarts（~580KB），**单独一个 chunk 异步载**：
+ * `/analyze` 是主包里的静态路由，直接 import 会让 echarts 进主包，
+ * 连只看「合约」页的人都得替它付费。而这块面板本身是 `v-else-if` 挂的，
+ * 所以只有真的点开「交易所账户」时才会去下载。
+ */
+const ExchangeCurveChart = defineAsyncComponent(
+  () => import('./ExchangeCurveChart.vue')
+)
 
 const props = defineProps<{
   data: ExchangeOverview | null
@@ -47,11 +58,18 @@ const props = defineProps<{
   accounts?: {id: number; name: string}[]
   /** 当前选中的账户 id（配合 `update:modelValue`） */
   modelValue?: number | null
+  /** 净资产曲线（“快照序列 → 图”，可能还没攒够点） */
+  curve?: CurvePoint[]
+  /** 当前跨度：1d / 7d / 30d（受控） */
+  curveRange?: string
+  /** 后端用的桶宽（秒）—— 算「断档」要靠它 */
+  curveBucketSec?: number
 }>()
 
 const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'update:modelValue', id: number): void
+  (e: 'update:curveRange', range: string): void
 }>()
 
 /** 下拉选中的值从 DOM 出来是字符串，这里转回数字再往上抛 */
@@ -215,6 +233,15 @@ function sideText(side: string): string {
 function posText(side: string): string {
   return side.toLowerCase() === 'short' ? '空' : '多'
 }
+
+/* ---------------- ⑥ 净资产曲线（M4） ---------------- */
+
+/** 可选跨度（跟后端 `/api/exchange/history` 的 range 对齐） */
+const RANGES = [
+  {value: '1d', label: '1 天'},
+  {value: '7d', label: '7 天'},
+  {value: '30d', label: '30 天'}
+]
 </script>
 
 <template>
@@ -293,6 +320,30 @@ function posText(side: string): string {
         </div>
 
         <p v-if="data.account.sandbox" class="hint">模拟盘（sandbox）</p>
+      </section>
+
+      <!-- ⑥ 净资产曲线（M4）：折线=close，带子=桶内 high/low，断档=虚线 -->
+      <section class="panel">
+        <div class="pn-h">
+          <h2>净资产走势</h2>
+          <span class="spacer" />
+          <div class="chips">
+            <button
+              v-for="r in RANGES"
+              :key="r.value"
+              class="chip"
+              :class="{on: (curveRange ?? '1d') === r.value}"
+              @click="emit('update:curveRange', r.value)"
+            >
+              {{ r.label }}
+            </button>
+          </div>
+        </div>
+
+        <ExchangeCurveChart
+          :points="curve ?? []"
+          :bucket-sec="curveBucketSec ?? 300"
+        />
       </section>
 
       <!-- ③ 仓位统计 -->
@@ -858,5 +909,25 @@ function posText(side: string): string {
 .rf.busy {
   animation: spin 0.8s linear infinite;
   cursor: default;
+}
+
+/* ---------------- ⑥ 净资产曲线 ---------------- */
+
+.chips {
+  display: flex;
+  gap: 5px;
+}
+.chip {
+  padding: 2px 9px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-radius: 999px;
+}
+.chip.on {
+  color: var(--text, #e6e9ef);
+  background: color-mix(in srgb, var(--blue, #4c8dff) 22%, transparent);
+  border-color: color-mix(in srgb, var(--blue, #4c8dff) 55%, transparent);
 }
 </style>

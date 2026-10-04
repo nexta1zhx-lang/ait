@@ -109,107 +109,10 @@ function marketOptionsFor(c: ExchangeCredentials): Record<string, unknown> {
     : {defaultType: 'swap', defaultSubType: 'linear'}
 }
 
-export interface BalanceRow {
-  currency: string
-  free: number
-  used: number
-  total: number
-  /** 折成 USDT 的估值；查不到价时是 null */
-  usdt: number | null
-}
-
-export interface BalanceResult {
-  rows: BalanceRow[]
-  /** 所有能估值的资产折 USDT 的合计 */
-  totalUsdt: number
-  /** 有没有资产因为查不到价没能估值 */
-  partial: boolean
-  updatedAt: string
-}
-
 /** 数字兜底（ccxt 有的字段可能是 undefined / NaN） */
 function n(v: unknown): number {
   const x = Number(v)
   return Number.isFinite(x) ? x : 0
-}
-
-/**
- * 查余额，并尽量折成 USDT。
- *
- * 折价策略：稳定币按 1 算；其它的在**已加载的市场**里找 `X/USDT[:USDT]`，
- * 拿一次 `fetchTickers()` 把价格批量取回来。查不到就不估值（`usdt: null`），
- * 而不是瞎猜 —— 宁可少算，不能给错数。
- */
-export async function fetchExchangeBalance(
-  c: ExchangeCredentials
-): Promise<BalanceResult> {
-  const ex = createExchange(c)
-  await ex.loadMarkets()
-  const raw = await ex.fetchBalance()
-
-  const total = (raw?.total ?? {}) as Record<string, unknown>
-  const free = (raw?.free ?? {}) as Record<string, unknown>
-  const used = (raw?.used ?? {}) as Record<string, unknown>
-
-  const rows: BalanceRow[] = []
-  for (const [currency, v] of Object.entries(total)) {
-    const t = n(v)
-    if (t <= 0) continue
-    rows.push({
-      currency,
-      total: t,
-      free: n(free[currency]),
-      used: n(used[currency]),
-      usdt: null
-    })
-  }
-  rows.sort((a, b) => b.total - a.total)
-
-  // ---- 估值：只在需要时打一次 fetchTickers ----
-  let tickers: Record<string, any> = {}
-  try {
-    tickers = (await ex.fetchTickers()) ?? {}
-  } catch {
-    tickers = {}
-  }
-
-  const keys: string[] = Object.keys(ex.markets ?? {})
-  /** 给某个币找它的 /USDT 交易对（现货 `X/USDT` 或合约 `X/USDT:USDT`） */
-  const findUsdtSymbol = (cur: string): string | null => {
-    const wanted = [`${cur}/USDT:USDT`, `${cur}/USDT`]
-    for (const w of wanted) if (ex.markets?.[w] && tickers[w]) return w
-    // 退一步：随便找个以 X/ 开头、以 USDT 结尾的
-    return (
-      keys.find(
-        k => k.startsWith(`${cur}/`) && /USDT(:USDT)?$/.test(k) && tickers[k]
-      ) ?? null
-    )
-  }
-
-  let totalUsdt = 0
-  let partial = false
-  for (const r of rows) {
-    if (STABLES.has(r.currency)) {
-      r.usdt = r.total
-      totalUsdt += r.total
-      continue
-    }
-    const sym = findUsdtSymbol(r.currency)
-    const price = sym ? n(tickers[sym]?.last ?? tickers[sym]?.close) : 0
-    if (price > 0) {
-      r.usdt = r.total * price
-      totalUsdt += r.usdt
-    } else {
-      partial = true
-    }
-  }
-
-  return {
-    rows,
-    totalUsdt,
-    partial,
-    updatedAt: new Date().toISOString()
-  }
 }
 
 export interface OrderRow {
@@ -224,19 +127,6 @@ export interface OrderRow {
   status: string
   fee: number
   feeCurrency: string
-}
-
-export interface OrdersResult {
-  /** `orders` = 真·委托单；`trades` = 成交记录（有的交易所不给无 symbol 的委托单，退回成交记录） */
-  kind: 'orders' | 'trades'
-  rows: OrderRow[]
-  /**
-   * 交易所**不给「不带交易对」的订单**（币安就是这样），而且从余额也推不出交易对
-   * → 前端要引导用户输一个交易对再查。
-   */
-  needSymbol: boolean
-  /** 这次实际查了哪些交易对（自动推出来的，显示用） */
-  tried: string[]
 }
 
 function mapOrder(o: any): OrderRow {
@@ -280,103 +170,8 @@ export function humanize(e: unknown): string {
   return m
 }
 
-/** 查一个交易对的订单；没有委托单就退回成交记录 */
-async function ordersForSymbol(
-  ex: any,
-  symbol: string,
-  cap: number
-): Promise<{kind: 'orders' | 'trades'; rows: OrderRow[]}> {
-  try {
-    const rows = await ex.fetchOrders(symbol, undefined, cap)
-    return {kind: 'orders', rows: (rows ?? []).map(mapOrder)}
-  } catch {
-    const trades = await ex.fetchMyTrades(symbol, undefined, cap)
-    return {kind: 'trades', rows: (trades ?? []).map(mapOrder)}
-  }
-}
-
-/**
- * 订单历史。
- *
- * ⚠️ 币安这类交易所**不给「不带交易对」的订单**（`fetchOrders`/`fetchMyTrades`
- *    都要求 symbol）。所以顺序是：
- *      1. 有指定的 symbol → 直接查它
- *      2. 试全量（okx / bybit 这类支持）
- *      3. 支持不了 → 拿**余额里持有的币**推几个交易对逐个查，合并按时间倒序
- *      4. 连余额都没有 → 回 `needSymbol: true`，让前端引导用户输一个
- */
-export async function fetchExchangeOrders(
-  c: ExchangeCredentials,
-  opts: {limit?: number; symbol?: string; symbols?: string[]} = {}
-): Promise<OrdersResult> {
-  const ex = createExchange(c)
-  await ex.loadMarkets()
-  const cap = Math.max(1, Math.min(200, opts.limit ?? 50))
-  const symbol = (opts.symbol ?? '').trim()
-
-  if (symbol) {
-    const r = await ordersForSymbol(ex, symbol, cap)
-    return {...r, needSymbol: false, tried: [symbol]}
-  }
-
-  // 全量试一下（部分交易所有这种接口）
-  try {
-    const rows = await ex.fetchOrders(undefined, undefined, cap)
-    return {kind: 'orders', rows: (rows ?? []).map(mapOrder), needSymbol: false, tried: []}
-  } catch (e1) {
-    if (!requiresSymbol(e1)) {
-      try {
-        const trades = await ex.fetchMyTrades(undefined, undefined, cap)
-        return {
-          kind: 'trades',
-          rows: (trades ?? []).map(mapOrder),
-          needSymbol: false,
-          tried: []
-        }
-      } catch (e2) {
-        if (!requiresSymbol(e2)) throw new Error(humanize(e2))
-      }
-    }
-  }
-
-  // 用余额推出来的交易对逐个查
-  const tried: string[] = []
-  const merged: OrderRow[] = []
-  for (const s of opts.symbols ?? []) {
-    try {
-      const r = await ordersForSymbol(ex, s, cap)
-      tried.push(s)
-      merged.push(...r.rows)
-    } catch {
-      /* 这个交易对没有 / 不支持，跳过 */
-    }
-  }
-  if (tried.length) {
-    merged.sort((a, b) => (b.datetime ?? '').localeCompare(a.datetime ?? ''))
-    return {kind: 'orders', rows: merged.slice(0, cap), needSymbol: false, tried}
-  }
-  return {kind: 'orders', rows: [], needSymbol: true, tried: []}
-}
-
-/** 从余额里推几个「可能查得到订单」的交易对（按估值从高到低，最多 6 个） */
-function deriveSymbols(
-  c: ExchangeCredentials,
-  balance: BalanceResult | null
-): string[] {
-  if (!balance) return []
-  const swap = c.marketType !== 'spot'
-  const out: string[] = []
-  for (const r of balance.rows) {
-    const cur = r.currency.toUpperCase()
-    if (STABLES.has(cur)) continue // 稳定币本身不是交易对的 base
-    out.push(swap ? `${cur}/USDT:USDT` : `${cur}/USDT`)
-    if (out.length >= 6) break
-  }
-  return out
-}
-
 /* ------------------------------------------------------------------ */
-/* 持仓 / 当前挂单 / 已实现盈亏                                        */
+/* 持仓 / 当前挂单                                                    */
 /* ------------------------------------------------------------------ */
 
 export interface PositionRow {
@@ -422,26 +217,6 @@ export function mapPosition(p: any): PositionRow {
 }
 
 /**
- * 当前持仓（ccxt 统一 `fetchPositions()` → 币安 `/fapi/v2/positionRisk`）。
- * 只留有仓位的（仓量为 0 的一律丢掉）。
- */
-export async function fetchExchangePositions(
-  c: ExchangeCredentials
-): Promise<PositionRow[]> {
-  const ex = createExchange(c)
-  if (typeof ex.fetchPositions !== 'function') return []
-  await ex.loadMarkets()
-  const rows: any[] = (await ex.fetchPositions()) ?? []
-  return rows
-    .map((p: any) => mapPosition(p))
-    .filter((p: PositionRow) => p.contracts !== 0 || p.notional !== 0)
-    .sort(
-      (a: PositionRow, b: PositionRow) =>
-        Math.abs(b.notional) - Math.abs(a.notional)
-    )
-}
-
-/**
  * 当前挂单（ccxt 统一 `fetchOpenOrders()` → 币安 `/fapi/v1/openOrders`）。
  * ⚠️ 币安合约的挂单接口**不需要交易对** —— 这块比历史订单好拿得多。
  */
@@ -459,92 +234,3 @@ export async function fetchOpenOrders(
   )
   return list
 }
-
-export interface RealizedPnlRow {
-  symbol: string
-  income: number
-  time: string | null
-}
-
-/**
- * 已实现盈亏（`/fapi/v1/income?incomeType=REALIZED_PNL`）。
- * 币安专属（USDⓈ-M 合约钱包）；别的交易所没有这个方法 → 返回 null，前端不显示这一块。
- */
-export async function fetchRealizedPnl(
-  c: ExchangeCredentials,
-  limit = 30
-): Promise<RealizedPnlRow[] | null> {
-  const ex = createExchange(c)
-  if (typeof ex.fapiPrivateGetIncome !== 'function') return null
-  const cap = Math.max(1, Math.min(1000, limit))
-  const rows = await ex.fapiPrivateGetIncome({
-    incomeType: 'REALIZED_PNL',
-    limit: cap
-  })
-  return (rows ?? []).map((r: any) => ({
-    symbol: String(r?.symbol ?? ''),
-    income: n(r?.income),
-    time: Number.isFinite(Number(r?.time))
-      ? new Date(Number(r.time)).toISOString()
-      : null
-  }))
-}
-
-/** 「这一套账户」查余额 + 持仓 + 挂单 + 订单：每一项各自失败都不影响其它 */
-export async function fetchExchangeAccount(
-  c: ExchangeCredentials,
-  opts: {orderLimit?: number; symbol?: string} = {}
-): Promise<{
-  balance: BalanceResult | null
-  positions: PositionRow[] | null
-  openOrders: OrderRow[] | null
-  orders: OrdersResult | null
-  income: RealizedPnlRow[] | null
-  balanceError: string | null
-  positionsError: string | null
-  openOrdersError: string | null
-  ordersError: string | null
-  incomeError: string | null
-}> {
-  const orderLimit = opts.orderLimit ?? 50
-  // 现货账户没有「持仓」这一说，也拿不到合约收益流水
-  const isSwap = c.marketType !== 'spot'
-
-  const [bal, pos, open, income] = await Promise.allSettled([
-    fetchExchangeBalance(c),
-    isSwap ? fetchExchangePositions(c) : Promise.resolve([] as PositionRow[]),
-    fetchOpenOrders(c, orderLimit),
-    isSwap
-      ? fetchRealizedPnl(c, Math.max(30, orderLimit * 20))
-      : Promise.resolve(null)
-  ])
-
-  const balance = bal.status === 'fulfilled' ? bal.value : null
-
-  // 订单历史仍要交易对（币安 allOrders 必填）—— 用余额推出来的币兜底
-  let orders: OrdersResult | null = null
-  let ordersError: string | null = null
-  try {
-    orders = await fetchExchangeOrders(c, {
-      limit: orderLimit,
-      symbol: opts.symbol,
-      symbols: deriveSymbols(c, balance)
-    })
-  } catch (e) {
-    ordersError = humanize(e)
-  }
-
-  return {
-    balance,
-    positions: pos.status === 'fulfilled' ? pos.value : null,
-    openOrders: open.status === 'fulfilled' ? open.value : null,
-    orders,
-    income: income.status === 'fulfilled' ? income.value : null,
-    balanceError: bal.status === 'rejected' ? humanize(bal.reason) : null,
-    positionsError: pos.status === 'rejected' ? humanize(pos.reason) : null,
-    openOrdersError: open.status === 'rejected' ? humanize(open.reason) : null,
-    ordersError,
-    incomeError: income.status === 'rejected' ? humanize(income.reason) : null
-  }
-}
-

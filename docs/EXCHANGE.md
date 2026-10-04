@@ -255,12 +255,12 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 |---|---|---|---|
 | GET | `/api/exchange/overview?id=` | 库（最新快照） | **秒开**，返回 `takenAt` / `age` / `stale` |
 | POST | `/api/exchange/refresh?id=` | REST | 立刻拉一次 + 落库（手动 ⟳ 用） |
-| GET | `/api/exchange/history?id=&hours=` | 库 | 快照序列（画资产曲线） |
+| GET | `/api/exchange/history?id=&range=1d\|7d\|30d` | 库 | 快照序列（画资产曲线；桶宽随跨度自动变 5m/30m/2h） |
 | GET | `/api/exchange/orders?id=` | 内存（15s）| 当前挂单 |
 | GET | `/api/exchange/fills?id=&symbol=&limit=` | 库 | 成交明细（**不再需要交易对**） |
 | GET | `/api/exchange/pnl?id=&by=day\|symbol` | 库 | 盈亏汇总（`GROUP BY`） |
 | GET | `/api/exchange/stream?id=` | **SSE** | 推快照/成交变化（照抄 `/api/tickers/stream`） |
-| — | ~~`/api/exchange/account`~~ | — | 新界面稳定后下线 |
+| — | ~~`/api/exchange/account`~~ | — | ✅ M5 已下线（连同它那套 `fetchExchangeBalance` / `fetchExchangeOrders` / `fetchRealizedPnl`） |
 
 ---
 
@@ -277,8 +277,8 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 4. 挂单 / 成交 / 盈亏三个 tab **懒加载**（进 tab 才拉）
 5. 局部失败只提示那一块，不阻塞整页
 
-> 换成真数据后：`ExchangeAccountMockPanel` → 真容器，
-> 然后删掉 mock、`/preview/account` 预览页。
+> M3/M5（已完成）：换成 `ExchangeAccountLivePanel` 真容器，
+> mock / 预览页 / 老面板 / 老接口已经全删。
 
 ---
 
@@ -290,8 +290,8 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 | **M1** ✅ | `schema.ts` 两张表 + `data/exchange-overview.ts`（REST 取数）+ `overview`/`refresh` 接口 | 真实数字能出来（界面先不动） |
 | **M2** ✅ | `exchange-stream.ts`（WS 常驻 + 重连复用 listenKey + 重连补成交）+ 5 分钟采样兼对账 + SSE `/api/exchange/stream` | 数字开始秒跳 |
 | **M3** ✅ | 成交/盈亏**读**接口 + 前端接真数据（`交易所账户` tab 换成 `ExchangeAccountLivePanel`，SSE 接上） | 去掉 mock（界面已用真数据） |
-| M4 | 资产曲线（快照序列 → 图）—— **用户定：这轮先不做**，但快照从现在就开始攒 | 后补 |
-| M5 | 删 mock / 预览页 / 老 `/api/exchange/account` | 收尾 |
+| M4 ✅ | 资产曲线：`GET /api/exchange/history?id=&range=1d\|7d\|30d` + `ExchangeCurveChart.vue`（echarts：close 折线 + high/low 区间带、断档不插值） | 2026-10-05 完成 |
+| M5 ✅ | 删 mock / 预览页 / 老面板 / 老 `/api/exchange/account`（连同它那套余额估值、全量订单、已实现盈亏函数） | 收尾（2026-10-05 完成） |
 
 ### M2 实测记录（2026-10-05，本地跑通）
 
@@ -363,7 +363,7 @@ SSE 用真 token 验过：`open` → `snapshot`（底稿，带真实 `ageSec`）
 
 | 问题 | 结论 |
 |---|---|
-| 资产曲线 | **后面做**（分级保留的采样从现在就开始攒） |
+| 资产曲线 | ✅ **已做**（M4，2026-10-05）：快照序列 → `/api/exchange/history` → echarts 折线+区间带 |
 | 快照保留 | 5m 留 7 天 / 1h 留 90 天 / **1d 永久** |
 | 聚合算法 | **不取平均，留 high/low（振幅）** + close |
 | 删 key | **数据一起删**（`CASCADE`），“从注册到结束”= 绑定 → 删 key |

@@ -100,12 +100,11 @@ import {
 } from './db/exchange-keys'
 import {
   EXCHANGE_CATALOG,
-  fetchExchangeAccount,
   fetchOpenOrders,
   humanize
 } from './data/exchange-account'
 import {fetchExchangeOverview} from './data/exchange-overview'
-import {latestSnapshot, listFills, saveSnapshot} from './db/exchange-store'
+import {latestSnapshot, listCurve, listFills, saveSnapshot} from './db/exchange-store'
 import {
   startExchangeStreams,
   startSnapshotSampler,
@@ -2910,59 +2909,6 @@ async function route(
   }
 
   /*
-   * 「开单分析 → 交易所账户」：查那一套账户的余额 / 持仓 / 挂单 / 订单历史（**只读**）。
-   *
-   * 每一项各自失败只让那一块空着（`fetchExchangeAccount` 会带一组 `*Error` 字段），
-   * 不要把整页打挂 —— 没权限 / 该交易所不支持某个接口都是常事。
-   */
-  if (p === '/api/exchange/account' && method === 'GET') {
-    const idRaw = num(url.searchParams.get('id'))
-    const limit = Math.min(
-      200,
-      Math.max(1, num(url.searchParams.get('limit')) ?? 50)
-    )
-    const symbol = (url.searchParams.get('symbol') ?? '').trim() || undefined
-    const key = idRaw
-      ? await getExchangeKey(me.id, idRaw)
-      : await getDefaultExchangeKey(me.id)
-    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
-    const account = publicExchangeKey(key)
-    /* 没填 Key 就不用去连交易所了，直接把「空 + 原因」给前端 */
-    if (!key.apiKey || !key.secret) {
-      return sendJson(res, 200, {
-        account,
-        balance: null,
-        positions: null,
-        openOrders: null,
-        orders: null,
-        income: null,
-        balanceError:
-          '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）',
-        positionsError: null,
-        openOrdersError: null,
-        ordersError: null,
-        incomeError: null
-      })
-    }
-    try {
-      const r = await fetchExchangeAccount(
-        {
-          exchange: key.exchange,
-          apiKey: key.apiKey,
-          secret: key.secret,
-          password: key.password,
-          marketType: key.marketType,
-          sandbox: key.sandbox
-        },
-        {orderLimit: limit, symbol}
-      )
-      return sendJson(res, 200, {account, ...r})
-    } catch (e) {
-      return fail(res, 'exchange/account', e)
-    }
-  }
-
-  /*
    * 交易所资产（2026-10-05，方案见 docs/EXCHANGE.md）——
    *   GET  /api/exchange/overview?id=   读库里**最新一条快照**（毫秒级，不打交易所）
    *   POST /api/exchange/refresh?id=    现在去拉一次 + 落库（用户点 ⟳ 用）
@@ -3128,6 +3074,37 @@ async function route(
       })
     } catch (e) {
       return sendJson(res, 200, {openOrders: null, error: humanize(e)})
+    }
+  }
+
+  /*
+   * 净资产曲线（M4）—— 读快照序列，不连交易所。
+   *
+   * `range` 决定**时间跨度**和**桶宽**（跨度越长桶越宽，返回的点数始终 ≤ 400）：
+   *   1d → 5 分钟一桶（原样，最多 288 点）
+   *   7d → 30 分钟一桶（≤ 336）
+   *   30d → 2 小时一桶（≤ 360）
+   * 桶内取 close / max / min（**不取平均**，见 docs），前端用 close 画折线 +
+   * high/low 画区间带。
+   */
+  if (p === '/api/exchange/history' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    const range = (url.searchParams.get('range') ?? '1d').trim()
+    const shape: Record<string, {hours: number; bucket: number}> = {
+      '1d': {hours: 24, bucket: 300},
+      '7d': {hours: 24 * 7, bucket: 1800},
+      '30d': {hours: 24 * 30, bucket: 7200}
+    }
+    const {hours, bucket} = shape[range] ?? shape['1d']
+    try {
+      const points = await listCurve(me.id, key.id, hours, bucket)
+      return sendJson(res, 200, {points, range: shape[range] ? range : '1d', bucketSec: bucket})
+    } catch (e) {
+      return fail(res, 'exchange/history', e)
     }
   }
 

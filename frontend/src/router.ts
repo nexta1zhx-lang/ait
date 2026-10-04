@@ -78,17 +78,6 @@ export const routes = [
    * 老书签 / 老链接进 /prompts 会被下面那条捕到，直接回落地页，不留白屏。
    */
   {path: '/prompts', redirect: '/contracts'},
-  /*
-   * 「交易所账户」新版界面的预览页（2026-10-05）—— **只吃本地 mock 数据**，
-   * 不连任何接口、不碰任何凭据，所以放它免登录（见 App.vue 的 isPublicPage）。
-   * 定稿之后这条路由连同 `ExchangePreviewView` / `exchangeMock.ts` 一起删。
-   */
-  {
-    path: '/preview/account',
-    name: 'preview-account',
-    component: () => import('./views/ExchangePreviewView.vue'),
-    meta: {title: '账户预览'}
-  },
   {path: '/:pathMatch(.*)*', redirect: '/contracts'}
 ]
 

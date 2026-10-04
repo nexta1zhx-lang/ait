@@ -609,79 +609,38 @@ export interface ExchangeKeyInput {
   sandbox?: boolean
 }
 
-export interface ExchangeBalanceRow {
-  currency: string
-  free: number
-  used: number
-  total: number
-  /** 折 USDT 的估值；查不到价时是 null */
-  usdt: number | null
+/** 曲线上的一个点（一个时间桶） */
+export interface CurvePoint {
+  /** 桶起点（ISO） */
+  t: string
+  /** 桶内**最后一条**的净值（折线画它） */
+  close: number
+  /** 桶内最大（区间带上沿） */
+  high: number
+  /** 桶内最小（区间带下沿） */
+  low: number
 }
 
-export interface ExchangeOrderRow {
-  id: string
-  datetime: string | null
-  symbol: string
-  side: string
-  type: string
-  price: number
-  amount: number
-  cost: number
-  status: string
-  fee: number
-  feeCurrency: string
-}
+/**
+ * 净资产曲线（M4）。
+ *
+ * `range` = `1d` / `7d` / `30d` —— 跨度越长后端桶越宽，返回点数始终 ≤ 400。
+ * ⚠️ 桶内**不取平均**（见 docs）：平均会把「中间爆过一次仓」这种真实的尖峰抹平。
+ */
+export const fetchExchangeCurve = (id?: number, range = '1d') =>
+  get<{points: CurvePoint[]; range: string; bucketSec: number}>(
+    `/api/exchange/history?range=${encodeURIComponent(range)}` +
+      (id ? `&id=${id}` : '')
+  )
 
-/** 当前持仓（合约） */
-export interface ExchangePositionRow {
-  symbol: string
-  /** long / short */
-  side: string
-  contracts: number
-  notional: number
-  entryPrice: number
-  markPrice: number
-  liquidationPrice: number | null
-  leverage: number
-  unrealizedPnl: number
-  percentage: number | null
-}
-
-/** 已实现盈亏（币安合约专属） */
+/**
+ * 已实现盈亏那种「一条一条」的形状（新版「盈亏」tab 用）。
+ * ⚠️ 数据来自**成交账本的 `realized`**，不是交易所的 income 接口（M3 起）。
+ */
 export interface ExchangeIncomeRow {
   symbol: string
   income: number
   time: string | null
-}
-
-export interface ExchangeAccountResult {
-  account: ExchangeKey
-  balance: {
-    rows: ExchangeBalanceRow[]
-    totalUsdt: number
-    partial: boolean
-    updatedAt: string
-  } | null
-  /** 当前持仓（现货账户恒为空数组） */
-  positions: ExchangePositionRow[] | null
-  /** 当前挂单（不需要交易对） */
-  openOrders: ExchangeOrderRow[] | null
-  /** 历史订单 / 成交（币安这类要交易对） */
-  orders: {
-    kind: 'orders' | 'trades'
-    rows: ExchangeOrderRow[]
-    /** 交易所不给无交易对的订单，需要用户指定一个（币安） */
-    needSymbol: boolean
-    /** 这次实际查了哪些交易对 */
-    tried: string[]
-  } | null
-  /** 已实现盈亏（非币安为 null） */
-  income: ExchangeIncomeRow[] | null
-  balanceError: string | null
-  positionsError: string | null
-  openOrdersError: string | null
-  ordersError: string | null
-  incomeError: string | null
 }
 
 export const fetchExchangeKeys = () =>
@@ -701,20 +660,6 @@ export const deleteExchangeKey = (id: number) =>
 
 export const setDefaultExchangeKey = (id: number) =>
   post<{ok: boolean}>(`/api/exchange-keys/${id}/default`, {})
-
-/**
- * 查某套账户的余额 + 订单历史（不传 id 用默认那套）。
- * `symbol`：指定查哪个交易对的订单（币安这类必须给）。
- */
-export const fetchExchangeAccount = (
-  id?: number,
-  limit = 50,
-  symbol?: string
-) =>
-  get<ExchangeAccountResult>(
-    `/api/exchange/account?${id ? `id=${id}&` : ''}limit=${limit}` +
-      (symbol ? `&symbol=${encodeURIComponent(symbol)}` : '')
-  )
 
 /* ---------------- 交易所资产（新版：只算 USDT 合约 + C2C，2026-10-05） ---------------- */
 
@@ -740,7 +685,7 @@ export interface FuturesAsset {
 /**
  * 一个仓位。
  * ⚠️ `amount` 就是 ccxt 的 `contracts`（仓量绝对值）—— 故意不叫 contracts，
- *    免得跟下面 `ExchangePositionRow` 那套老接口混起来。
+ *    故意不叫 contracts，它就是快照里的字段（老接口那套 `ExchangePositionRow` 已删）。
  */
 export interface FuturesPosition {
   symbol: string
