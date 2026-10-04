@@ -4,7 +4,9 @@
  * 来源：Google Fonts，SIL Open Font License 1.1（可自由分发 / 商用）
  *   Noto Sans SC    wght 400~700   中文
  *   Inter           wght 400~700   英文 / 数字（拉丁）
- *   Inconsolata    wght 400~700   等宽数字（--mono） * 字体文件：frontend/public/fonts/<名字>/chunk-*.woff2（按 CSS 里出现的顺序编号）
+ *   Inconsolata    wght 400~700   等宽数字（--mono 的**上一版**，现已没有任何规则引用它；留着只为一行换回）
+ *
+ * 字体文件：frontend/public/fonts/<名字>/chunk-*.woff2（按 CSS 里出现的顺序编号）
  *
  * 为什么自托管（用户 2026-10-04「移动端的字体和我调试的不太一样」）：
  * 苹果用苹方、安卓用 Noto Sans CJK / MiSans / HarmonyOS Sans，等宽那边 Mac 是
