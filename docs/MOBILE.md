@@ -230,3 +230,38 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
      ⚠️ `targetSdkVersion = 36` → Android 15+ **强制 edge-to-edge**，状态栏底色不再由
      主题决定，而是透出 WebView 内容（靠页面顶部的安全区内边距垫）。
      · 启动图底色 = App 主背景 → 冷启动不再白闪。
+
+---
+
+## 九、软更新（改前端不用再打包 APK）
+
+用户 2026-10-04：「代码每次都要打包吗，能软更新吗」→ 已改成**远程加载**。
+
+`capacitor.config.json` 的 `server.url` 指向线上：
+
+```json
+"server": {"url": "https://bitcoooin.cn", "androidScheme": "https"}
+```
+
+**效果**：App 的 WebView 每次启动直接加载 `https://bitcoooin.cn` 的最新前端，
+所以改前端 → 只跑 `bash scripts/release.sh` 部署 Web 就行，**再也不用重新出包 / 重装**。
+
+**代价（已知并接受）**：
+
+- **必须联网**才能打开 App（本来就是「瘦客户端」，所有数据都在服务器）。
+  服务器不可达时是 Capacitor 的错误页，**没有内置离线兜底**
+  （内置的 `frontend/dist` 照旧随 `cap sync` 打进包，但 `server.url` 模式下用不到）。
+- App ≈ 套壳网页 —— 自用 / APK / 内部分发没问题；**上架 App Store 会被 4.2
+  「Minimum Functionality」判**（这条本来就在「还没做的」里）。
+- 想用真机联调本地改动时，`server.url` 会一直拉线上 —— 临时把这一行删掉再
+  `npx cap sync` 即可（改回来同理）。
+
+**⚠️ 只改这一行不会立刻生效**：要**重新出一次包**（`npm run apk`）并重装，
+之后才开始「改前端不用打包」。原生 / 依赖 / `capacitor.config.json` 的改动，
+仍然要重新出包。
+
+**兼容性**：`server.url` 下页面源就是 `bitcoooin.cn`，所以
+`api.ts` 的 `API_BASE`（原生壳里写死 `https://bitcoooin.cn`）变成**同源**、CORS 用不上；
+`platform.ts` 的 `isNativeShell()` 仍靠注入的 `window.Capacitor` 判为 true，
+路由照旧 **hash** 模式（地址形如 `https://bitcoooin.cn/#/analyze`）；
+原生插件（状态栏 / 返回键 / 前后台）照常工作。

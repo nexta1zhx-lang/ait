@@ -3,6 +3,7 @@
   "appName": "Ait",
   "webDir": "frontend/dist",
   "server": {
+    "url": "https://bitcoooin.cn",
     "androidScheme": "https"
   },
   "ios": {
