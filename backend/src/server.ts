@@ -104,7 +104,13 @@ import {
   humanize
 } from './data/exchange-account'
 import {fetchExchangeOverview} from './data/exchange-overview'
-import {latestSnapshot, listCurve, listFills, saveSnapshot} from './db/exchange-store'
+import {
+  firstSnapshotHours,
+  latestSnapshot,
+  listCurve,
+  listFills,
+  saveSnapshot
+} from './db/exchange-store'
 import {
   startExchangeStreams,
   startSnapshotSampler,
@@ -3080,10 +3086,9 @@ async function route(
   /*
    * 净资产曲线（M4）—— 读快照序列，不连交易所。
    *
-   * `range` 决定**时间跨度**和**桶宽**（跨度越长桶越宽，返回的点数始终 ≤ 400）：
-   *   1d → 5 分钟一桶（原样，最多 288 点）
-   *   7d → 30 分钟一桶（≤ 336）
-   *   30d → 2 小时一桶（≤ 360）
+   * `range` = `1d` / `7d` / `30d` / `180d` / `1y` / `all`。
+   * ⚠️ 桶宽**不写死**：按实际跨度算（span / 360，取 5 分钟的整数倍）——
+   *    这样加跨度不用改代码，返回点数也始终 ≤ ~360。
    * 桶内取 close / max / min（**不取平均**，见 docs），前端用 close 画折线 +
    * high/low 画区间带。
    */
@@ -3093,16 +3098,29 @@ async function route(
       ? await getExchangeKey(me.id, idRaw)
       : await getDefaultExchangeKey(me.id)
     if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
-    const range = (url.searchParams.get('range') ?? '1d').trim()
-    const shape: Record<string, {hours: number; bucket: number}> = {
-      '1d': {hours: 24, bucket: 300},
-      '7d': {hours: 24 * 7, bucket: 1800},
-      '30d': {hours: 24 * 30, bucket: 7200}
+    /** 跨度 → 小时数；`all` = 0（不设下界） */
+    const SPANS: Record<string, number> = {
+      '1d': 24,
+      '7d': 168,
+      '30d': 720,
+      '180d': 4320,
+      '1y': 8760,
+      all: 0
     }
-    const {hours, bucket} = shape[range] ?? shape['1d']
+    const asked = (url.searchParams.get('range') ?? '1d').trim().toLowerCase()
+    const range = Object.prototype.hasOwnProperty.call(SPANS, asked)
+      ? asked
+      : '1d'
+    const hours = SPANS[range] || null
     try {
+      // 真实跨度：`all` 时看库里最早那条，其余按 range 算
+      const spanHours = hours ?? (await firstSnapshotHours(me.id, key.id))
+      const bucket = Math.max(
+        300,
+        Math.ceil(((spanHours * 3600) / 360) / 300) * 300
+      )
       const points = await listCurve(me.id, key.id, hours, bucket)
-      return sendJson(res, 200, {points, range: shape[range] ? range : '1d', bucketSec: bucket})
+      return sendJson(res, 200, {points, range, bucketSec: bucket})
     } catch (e) {
       return fail(res, 'exchange/history', e)
     }

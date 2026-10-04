@@ -155,6 +155,8 @@ function liqGap(p: {
 
 type Tab = 'pos' | 'ord' | 'inc' | 'trades' | 'bags'
 const tab = ref<Tab>('pos')
+/** 净资产走势默认**折叠**（用户要求）；点标题旁边那个小图标展开 */
+const curveOpen = ref(false)
 function withCount(label: string, n: number): string {
   return n > 0 ? `${label} ${n}` : label
 }
@@ -236,11 +238,17 @@ function posText(side: string): string {
 
 /* ---------------- ⑥ 净资产曲线（M4） ---------------- */
 
-/** 可选跨度（跟后端 `/api/exchange/history` 的 range 对齐） */
+/**
+ * 可选跨度（**英文标签**，值跟后端 `/api/exchange/history` 的 range 对齐）。
+ * `all` = 全部历史。
+ */
 const RANGES = [
-  {value: '1d', label: '1 天'},
-  {value: '7d', label: '7 天'},
-  {value: '30d', label: '30 天'}
+  {value: '1d', label: '1D'},
+  {value: '7d', label: '7D'},
+  {value: '30d', label: '30D'},
+  {value: '180d', label: '180D'},
+  {value: '1y', label: '1Y'},
+  {value: 'all', label: 'ALL'}
 ]
 </script>
 
@@ -302,6 +310,65 @@ const RANGES = [
           </li>
         </ul>
 
+        <!--
+          ⑥ 净资产走势（M4）—— **默认折叠**在这个位置（钱包余额 / 未实现盈亏的上方）；
+          折叠时这一行正好当作下面四格的小标题，展开才拉图。
+          切换开关就是右边那个**小图标**（不占地方，也不给整行做 tab 背景）。
+          ⚠️ 用 `v-if` 而不是 `v-show`：折叠时**根本不下载** echarts 那个 chunk，
+          也不存在「容器 0 宽高时 init」那个坑（见 `ExchangeCurveChart.vue` 注释）。
+        -->
+        <div class="fold">
+          <button
+            class="fold-h"
+            type="button"
+            :aria-expanded="curveOpen"
+            @click="curveOpen = !curveOpen"
+          >
+            <span class="fold-t">净资产走势</span>
+            <span class="spacer" />
+            <svg
+              class="chev"
+              :class="{open: curveOpen}"
+              viewBox="0 0 16 16"
+              width="15"
+              height="15"
+              aria-hidden="true"
+            >
+              <path
+                d="M5 6.5l3 3 3-3"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+
+          <template v-if="curveOpen">
+            <ExchangeCurveChart
+              :points="curve ?? []"
+              :bucket-sec="curveBucketSec ?? 300"
+            />
+            <!--
+              跨度切换在**底部**（用户要求），纯文字、不给 tab 底色。
+              ⚠️ 类名别叫 `.chip` —— 全局有 `.chip`（标签筛选那种胶囊，`.chip.on` 还带
+              `--blue-soft` 底色），撞上了会把这里又变成带底色的胶囊。
+            -->
+            <div class="rngs">
+              <button
+                v-for="r in RANGES"
+                :key="r.value"
+                class="rng"
+                :class="{on: (curveRange ?? '1d') === r.value}"
+                @click="emit('update:curveRange', r.value)"
+              >
+                {{ r.label }}
+              </button>
+            </div>
+          </template>
+        </div>
+
         <!-- ② 合约明细：手机上排 2×2，别挤成一行小字 -->
         <div v-if="fx" class="grid4">
           <div>
@@ -320,30 +387,6 @@ const RANGES = [
         </div>
 
         <p v-if="data.account.sandbox" class="hint">模拟盘（sandbox）</p>
-      </section>
-
-      <!-- ⑥ 净资产曲线（M4）：折线=close，带子=桶内 high/low，断档=虚线 -->
-      <section class="panel">
-        <div class="pn-h">
-          <h2>净资产走势</h2>
-          <span class="spacer" />
-          <div class="chips">
-            <button
-              v-for="r in RANGES"
-              :key="r.value"
-              class="chip"
-              :class="{on: (curveRange ?? '1d') === r.value}"
-              @click="emit('update:curveRange', r.value)"
-            >
-              {{ r.label }}
-            </button>
-          </div>
-        </div>
-
-        <ExchangeCurveChart
-          :points="curve ?? []"
-          :bucket-sec="curveBucketSec ?? 300"
-        />
       </section>
 
       <!-- ③ 仓位统计 -->
@@ -911,23 +954,62 @@ const RANGES = [
   cursor: default;
 }
 
-/* ---------------- ⑥ 净资产曲线 ---------------- */
+/* ---------------- ⑥ 净资产走势（折叠） ---------------- */
 
-.chips {
+/*
+ * 折叠块在 hero 卡里、四格上方。**不画自己的上边框** —— 下面 `.grid4`
+ * 自带一条 `border-top`，折叠时那条线就当这一行的下划线，正好把四格隔开。
+ */
+.fold {
+  margin-top: 10px;
+}
+.fold-h {
   display: flex;
-  gap: 5px;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
 }
-.chip {
-  padding: 2px 9px;
-  font-size: 11.5px;
+.fold-t {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.chev {
+  flex: 0 0 auto;
   color: var(--muted);
-  background: transparent;
-  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
-  border-radius: 999px;
+  transition: transform 0.15s;
 }
-.chip.on {
-  color: var(--text, #e6e9ef);
-  background: color-mix(in srgb, var(--blue, #4c8dff) 22%, transparent);
-  border-color: color-mix(in srgb, var(--blue, #4c8dff) 55%, transparent);
+.chev.open {
+  transform: rotate(180deg);
+}
+
+/*
+ * 跨度切换：6 档铺满一行，**纯文字**（用户：不要 tab 背景），选中的只换字色。
+ * ⚠️ 类名避开全局的 `.chip`（那是标签筛选的胶囊，见 style.css 4434）。
+ */
+.rngs {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+  margin-top: 2px;
+}
+.rng {
+  flex: 1 1 auto;
+  padding: 3px 0;
+  font-size: 11.5px;
+  text-align: center;
+  color: var(--muted);
+  background: none;
+  border: 0;
+}
+.rng.on {
+  color: var(--accent, #d3b583);
+  font-weight: 600;
+  background: none;
 }
 </style>

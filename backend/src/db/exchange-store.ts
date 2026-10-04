@@ -238,8 +238,9 @@ export interface CurvePoint {
 /**
  * 净资产序列（画曲线用）。
  *
- * ⚠️ 只读 `kind='5m'` 的原始行 —— 归档任务（5m→1h→1d）还没做，等做了之后
- *    长时间跨度的查询应该改读聚合档（否则 30 天要扫 8640 行）。
+ * `hours = null` ⇒ **不设下界**（看全部历史）。
+ * ⚠️ 只读 `kind='5m'` 的原始行 —— 归档任务（5m→1h→1d）还没做，
+ *    长跨度（180 天 / 一年 / 全部）会扫很多行；等归档做了应该改读聚合档。
  * ⚠️ 桶内**取 close / max / min，绝不取平均**：平均会把「中间爆过一次仓」这种
  *    真实的尖峰抹平（见 docs 的「聚合不取平均」）。
  * ⚠️ 净值口径 = `margin + c2c_total`，跟列表页那个「净资产」必须一致。
@@ -247,7 +248,7 @@ export interface CurvePoint {
 export async function listCurve(
   userId: number,
   keyId: number,
-  hours: number,
+  hours: number | null,
   bucketSec: number
 ): Promise<CurvePoint[]> {
   const rows = await query<Record<string, unknown>>(
@@ -258,10 +259,15 @@ export async function listCurve(
                        ORDER BY taken_at DESC))[1] AS close
        FROM exchange_snapshots
       WHERE user_id = $1 AND key_id = $2 AND kind = '5m'
-        AND taken_at >= now() - make_interval(hours => $3::int)
+        AND ($3::int IS NULL OR taken_at >= now() - make_interval(hours => $3::int))
       GROUP BY 1
       ORDER BY 1`,
-    [userId, keyId, Math.max(1, Math.round(hours)), Math.max(60, Math.round(bucketSec))]
+    [
+      userId,
+      keyId,
+      hours === null ? null : Math.max(1, Math.round(hours)),
+      Math.max(60, Math.round(bucketSec))
+    ]
   )
   return rows.map(r => ({
     t: new Date(String(r.t)).toISOString(),
@@ -269,6 +275,21 @@ export async function listCurve(
     high: num(r.high),
     low: num(r.low)
   }))
+}
+
+/** 库里最早那条快照距现在多少小时（算桶宽用；没有快照时回 24） */
+export async function firstSnapshotHours(
+  userId: number,
+  keyId: number
+): Promise<number> {
+  const row = await queryOne<{h: string | null}>(
+    `SELECT extract(epoch FROM now() - min(taken_at)) / 3600 AS h
+       FROM exchange_snapshots
+      WHERE user_id = $1 AND key_id = $2 AND kind = '5m'`,
+    [userId, keyId]
+  )
+  const h = num(row?.h)
+  return h > 0 ? h : 24
 }
 
 /** 读最新一条（接口「秒开」靠它；不打交易所） */

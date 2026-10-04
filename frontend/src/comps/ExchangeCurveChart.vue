@@ -11,6 +11,8 @@
  *
  * ⚠️ y 轴用 `scale: true`（**不强制从 0 起**）：账户只有几美元时从 0 画，
  *    曲线会贴着顶成一条直线，什么走势都看不出来。
+ * ⚠️ 颜色用**主题主色**（`C.accent` = `--accent` 暖沙），不是 `C.blue`
+ *    —— 那个是历史名字，实际是亮蓝，跟现在的主题不是一套。
  */
 import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
 import {C, darkTooltip, echarts, type ECharts} from '../chart-theme'
@@ -197,7 +199,7 @@ function render(): void {
           data: s.xs.map((x, i) => [x, s.band[i]]),
           symbol: 'none',
           lineStyle: {opacity: 0},
-          areaStyle: {color: C.blue, opacity: 0.16},
+          areaStyle: {color: C.accent, opacity: 0.16},
           silent: true,
           z: 1,
           tooltip: {show: false}
@@ -210,7 +212,7 @@ function render(): void {
           smooth: false,
           // ⚠️ 必须 false：插进去的 null 就是要把折线断开（不插值）
           connectNulls: false,
-          lineStyle: {color: C.blue, width: 1.6},
+          lineStyle: {color: C.accent, width: 1.6},
           z: 3
         }
       ]
@@ -238,23 +240,37 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="curve-wrap">
+    <!--
+      ⚠️ 容器**始终可见**（藏着时宽高是 0，echarts 会拿 100×100 兜底且不自己纠正）；
+      空数据提示用**浮层盖上去**，不另外撑一块高度（跟 `CostTrend.vue` 一个写法）。
+    -->
     <div ref="el" class="curve" />
-    <p v-if="!shape" class="dim">
+    <p v-if="!shape" class="curve-none">
       还不够画曲线 —— 快照每 5 分钟攒一个点，过一会儿就有。
     </p>
   </div>
 </template>
 
 <style scoped>
+.curve-wrap {
+  position: relative;
+  min-width: 0;
+}
 .curve {
   width: 100%;
   height: 148px;
 }
-.dim {
+.curve-none {
+  position: absolute;
+  inset: 0;
   margin: 0;
-  padding: 22px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
   text-align: center;
-  font-size: 12px;
   color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 </style>
