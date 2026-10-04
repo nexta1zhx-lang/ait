@@ -57,7 +57,13 @@ const acct = computed(() => props.data?.account ?? null)
 const fx = computed(() => props.data?.futures ?? null)
 const c2c = computed(() => props.data?.c2c ?? null)
 const stats = computed(
-  () => props.data?.stats ?? {longCount: 0, shortCount: 0, notional: 0, unrealized: 0}
+  () =>
+    props.data?.stats ?? {
+      longCount: 0,
+      shortCount: 0,
+      notional: 0,
+      unrealized: 0
+    }
 )
 const positions = computed(() => props.data?.futures?.positions ?? [])
 
@@ -93,19 +99,28 @@ const stale = computed(() => {
 /* ---------------- ③ 多空分布 ---------------- */
 
 const longNotional = computed(() =>
-  positions.value.filter(p => p.side !== 'short').reduce((s, p) => s + p.notional, 0)
+  positions.value
+    .filter(p => p.side !== 'short')
+    .reduce((s, p) => s + p.notional, 0)
 )
 const shortNotional = computed(() =>
-  positions.value.filter(p => p.side === 'short').reduce((s, p) => s + p.notional, 0)
+  positions.value
+    .filter(p => p.side === 'short')
+    .reduce((s, p) => s + p.notional, 0)
 )
 const lsTotal = computed(() => longNotional.value + shortNotional.value)
 /** 只有一个方向时（比如全是多仓），条子别画成 0% —— 那一段独占整条 */
 const longPct = computed(() =>
-  lsTotal.value > 0 ? Math.max((longNotional.value / lsTotal.value) * 100, 2) : 0
+  lsTotal.value > 0
+    ? Math.max((longNotional.value / lsTotal.value) * 100, 2)
+    : 0
 )
 
 /** 强平价距标记价还有多远（%）：<5% 变黄提醒 */
-function liqGap(p: {markPrice: number; liquidationPrice: number | null}): number | null {
+function liqGap(p: {
+  markPrice: number
+  liquidationPrice: number | null
+}): number | null {
   const liq = p.liquidationPrice
   if (!liq || !p.markPrice) return null
   return Math.abs(((liq - p.markPrice) / p.markPrice) * 100)
@@ -120,7 +135,10 @@ function withCount(label: string, n: number): string {
 }
 const tabs = computed(() => [
   {value: 'pos' as Tab, label: withCount('持仓', positions.value.length)},
-  {value: 'ord' as Tab, label: withCount('挂单', props.openOrders?.length ?? 0)},
+  {
+    value: 'ord' as Tab,
+    label: withCount('挂单', props.openOrders?.length ?? 0)
+  },
   {value: 'inc' as Tab, label: withCount('盈亏', props.income?.length ?? 0)},
   {value: 'trades' as Tab, label: '成交'},
   {value: 'bags' as Tab, label: '资产'}
@@ -140,7 +158,10 @@ const orderGroups = computed(() => {
 /** 已实现盈亏：按币种汇总（逐笔看着累） */
 const incomeRows = computed(() => props.income ?? [])
 const incomeTotal = computed(() =>
-  incomeRows.value.reduce((s, r) => s + (Number.isFinite(r.income) ? r.income : 0), 0)
+  incomeRows.value.reduce(
+    (s, r) => s + (Number.isFinite(r.income) ? r.income : 0),
+    0
+  )
 )
 const incomeGroups = computed(() => {
   const m = new Map<string, {symbol: string; sum: number; count: number}>()
@@ -159,7 +180,10 @@ const incomeGroups = computed(() => {
 function money(v: number): string {
   return (
     '$' +
-    v.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+    v.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    })
   )
 }
 function signedMoney(v: number): string {
@@ -198,7 +222,11 @@ function posText(side: string): string {
           <span class="age" :class="{stale}" :title="bjTime(data.takenAt)">
             {{ ageText }}
           </span>
-          <button class="ghost tiny rf" title="立即刷新" @click="emit('refresh')">
+          <button
+            class="ghost tiny rf"
+            title="立即刷新"
+            @click="emit('refresh')"
+          >
             ⟳
           </button>
         </div>
@@ -249,8 +277,8 @@ function posText(side: string): string {
         <div class="pn-h">
           <h2>仓位统计</h2>
           <span class="dim tiny">
-            {{ stats.longCount + stats.shortCount }} 个持仓 ·
-            多 {{ stats.longCount }} / 空 {{ stats.shortCount }}
+            {{ stats.longCount + stats.shortCount }} 个持仓 · 多
+            {{ stats.longCount }} / 空 {{ stats.shortCount }}
           </span>
         </div>
         <div class="grid4">
@@ -259,13 +287,17 @@ function posText(side: string): string {
           </div>
           <div>
             <span class="k">未实现盈亏</span>
-            <b :class="tone(stats.unrealized)">{{ signedMoney(stats.unrealized) }}</b>
+            <b :class="tone(stats.unrealized)">{{
+              signedMoney(stats.unrealized)
+            }}</b>
           </div>
           <div>
-            <span class="k">多头</span><b class="up">{{ money(longNotional) }}</b>
+            <span class="k">多头</span
+            ><b class="up">{{ money(longNotional) }}</b>
           </div>
           <div>
-            <span class="k">空头</span><b class="down">{{ money(shortNotional) }}</b>
+            <span class="k">空头</span
+            ><b class="down">{{ money(shortNotional) }}</b>
           </div>
         </div>
         <div v-if="lsTotal > 0" class="ls-bar">
@@ -291,21 +323,32 @@ function posText(side: string): string {
               <span class="pnl" :class="tone(p.unrealizedPnl)">
                 {{ signedMoney(p.unrealizedPnl) }}
                 <em v-if="p.percentage !== null">
-                  {{ p.percentage >= 0 ? '+' : '−' }}{{ fixed(Math.abs(p.percentage), 2) }}%
+                  {{ p.percentage >= 0 ? '+' : '−'
+                  }}{{ fixed(Math.abs(p.percentage), 2) }}%
                 </em>
               </span>
             </div>
             <div class="kv">
-              <div><span class="k">数量</span><b>{{ qty(p.amount) }}</b></div>
-              <div><span class="k">开仓价</span><b>{{ fmt(p.entryPrice) }}</b></div>
-              <div><span class="k">标记价</span><b>{{ fmt(p.markPrice) }}</b></div>
+              <div>
+                <span class="k">数量</span><b>{{ qty(p.amount) }}</b>
+              </div>
+              <div>
+                <span class="k">开仓价</span><b>{{ fmt(p.entryPrice) }}</b>
+              </div>
+              <div>
+                <span class="k">标记价</span><b>{{ fmt(p.markPrice) }}</b>
+              </div>
               <div v-if="p.liquidationPrice">
-                <span class="k">强平价</span><b class="warn">{{ fmt(p.liquidationPrice) }}</b>
+                <span class="k">强平价</span
+                ><b class="warn">{{ fmt(p.liquidationPrice) }}</b>
               </div>
             </div>
             <div class="p-f">
               <span>名义 {{ money(p.notional) }}</span>
-              <span v-if="liqGap(p) !== null" :class="liqGap(p)! < 5 ? 'warn' : 'dim'">
+              <span
+                v-if="liqGap(p) !== null"
+                :class="liqGap(p)! < 5 ? 'warn' : 'dim'"
+              >
                 距强平 {{ liqGap(p)!.toFixed(1) }}%
               </span>
             </div>
@@ -316,7 +359,9 @@ function posText(side: string): string {
 
       <!-- 挂单 -->
       <section v-show="tab === 'ord'" class="panel">
-        <div v-if="loadingOrders" class="dim load"><span class="spin" />正在查询挂单…</div>
+        <div v-if="loadingOrders" class="dim load">
+          <span class="spin" />正在查询挂单…
+        </div>
         <div v-else-if="orderGroups.length" class="grps">
           <div v-for="g in orderGroups" :key="g.symbol" class="grp">
             <div class="grp-h">
@@ -355,7 +400,9 @@ function posText(side: string): string {
               <span class="sym">{{ g.symbol }}</span>
               <span class="dim tiny">{{ g.count }} 笔</span>
               <span class="spacer" />
-              <span class="pnl" :class="tone(g.sum)">{{ signedMoney(g.sum) }}</span>
+              <span class="pnl" :class="tone(g.sum)">{{
+                signedMoney(g.sum)
+              }}</span>
             </li>
           </ul>
           <p class="sub-h dim tiny">最近明细</p>
@@ -363,7 +410,9 @@ function posText(side: string): string {
             <li v-for="(r, i) in incomeRows.slice(0, 10)" :key="i">
               <span class="sym">{{ r.symbol }}</span>
               <span class="spacer" />
-              <span class="pnl" :class="tone(r.income)">{{ signedMoney(r.income) }}</span>
+              <span class="pnl" :class="tone(r.income)">{{
+                signedMoney(r.income)
+              }}</span>
               <span class="dim tiny">{{ r.time ? bjTime(r.time) : '' }}</span>
             </li>
           </ul>
@@ -384,10 +433,14 @@ function posText(side: string): string {
             type="text"
             spellcheck="false"
             placeholder="交易对，如 BTCUSDT"
-            @input="emit('update:symbol', ($event.target as HTMLInputElement).value)"
+            @input="
+              emit('update:symbol', ($event.target as HTMLInputElement).value)
+            "
             @keyup.enter="emit('search', symbol ?? '')"
           />
-          <button class="ghost tiny" @click="emit('search', symbol ?? '')">查</button>
+          <button class="ghost tiny" @click="emit('search', symbol ?? '')">
+            查
+          </button>
         </div>
         <ul v-if="trades?.length" class="rows trades">
           <li v-for="t in trades" :key="t.id">
@@ -402,7 +455,9 @@ function posText(side: string): string {
             <div class="t-sub dim tiny">
               <span>量 {{ qty(t.amount) }}</span>
               <span>额 {{ fmt(t.cost) }}</span>
-              <span v-if="t.fee">费 {{ fmt(t.fee, 4) }} {{ t.feeCurrency }}</span>
+              <span v-if="t.fee"
+                >费 {{ fmt(t.fee, 4) }} {{ t.feeCurrency }}</span
+              >
               <span class="spacer" />
               <span>{{ t.datetime ? bjTime(t.datetime) : '' }}</span>
             </div>
@@ -436,7 +491,9 @@ function posText(side: string): string {
             <span class="sym">{{ a.asset }}</span>
             <span class="spacer" />
             <span class="num">{{ qty(a.balance) }}</span>
-            <span class="dim num">{{ a.usdt === null ? '—' : money(a.usdt) }}</span>
+            <span class="dim num">{{
+              a.usdt === null ? '—' : money(a.usdt)
+            }}</span>
           </li>
         </ul>
         <p v-else class="dim">这个账户没有 C2C 钱包</p>

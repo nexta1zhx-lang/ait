@@ -19,7 +19,13 @@ import {
 import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import MarketPanel from '../comps/MarketPanel.vue'
-import ExchangeAccountPanel from '../comps/ExchangeAccountPanel.vue'
+/*
+ * ⚠️ 2026-10-05：这里原来是 `ExchangeAccountPanel`（拉真数据的老版）。
+ * 用户要「先把新界面接进真实页面、数字先造假」→ 换成喂 mock 的临时容器。
+ * 后端 `/api/exchange/overview` 做好后换回真容器，详见
+ * `comps/ExchangeAccountMockPanel.vue` 顶部说明。
+ */
+import ExchangeAccountMockPanel from '../comps/ExchangeAccountMockPanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
 import SettingsSheet from '../comps/SettingsSheet.vue'
 import SegTabs from '../comps/SegTabs.vue'
@@ -1009,11 +1015,11 @@ const heatRows = computed(() => {
           </div>
         </template>
 
-        <!-- ② 交易所账户：余额 + 订单历史
-             （用户 2026-10-04：「实时分析 tab 后加入交易所账户信息，显示账户余额和订单历史」）
-             账户在「我的 → 个人信息 → 交易所」里绑；这里用 v-if 挂，切走就卸载。 -->
+        <!-- ② 交易所资产：净资产（合约 + C2C）/ 仓位统计 / 持仓·挂单·盈亏·成交
+             （用户 2026-10-05：「只统计 USDT 合约 + C2C，不算现货」）
+             ⚠️ 现阶段里面是**模拟数据**（还没接 `/api/exchange/overview`）。 -->
         <div v-else-if="leftTab === 'exchange'" class="scroll-body">
-          <ExchangeAccountPanel />
+          <ExchangeAccountMockPanel />
         </div>
 
         <!-- ② 历史分析：只在切到这个 tab 时显示 -->

@@ -28,7 +28,9 @@ const data = computed(
   () => MOCK_ACCOUNTS.find(a => a.value === picked.value)?.data ?? null
 )
 /** 慢接口那几块：空账户就当作没有 */
-const hasTrades = computed(() => (data.value?.futures.positions.length ?? 0) > 0)
+const hasTrades = computed(
+  () => (data.value?.futures.positions.length ?? 0) > 0
+)
 </script>
 
 <template>
@@ -37,8 +39,8 @@ const hasTrades = computed(() => (data.value?.futures.positions.length ?? 0) > 0
       <h1>交易所资产 · 移动端界面预览</h1>
       <p class="hint">
         数据是<b>本地模拟</b>的，结构照 <code>fapi/v2/account</code> +
-        <code>sapi/v1/asset/wallet/balance</code> 拟（见 comps/exchangeMock.ts）。
-        只统计 <b>USDT 合约 + C2C 钱包</b>，不含现货。
+        <code>sapi/v1/asset/wallet/balance</code> 拟（见
+        comps/exchangeMock.ts）。 只统计 <b>USDT 合约 + C2C 钱包</b>，不含现货。
       </p>
       <div class="ctl">
         <select v-model.number="picked">

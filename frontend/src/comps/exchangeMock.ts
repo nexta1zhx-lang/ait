@@ -46,7 +46,12 @@ export interface FuturesPosition {
 export interface ExchangeOverview {
   apiKeyId: number
   /** 这套 Key 的展示信息（脱敏后，前端要显示「币安 · 主号」） */
-  account: {exchange: string; name: string; sandbox: boolean; marketType: string}
+  account: {
+    exchange: string
+    name: string
+    sandbox: boolean
+    marketType: string
+  }
   /** 快照时间（ISO）—— 前端拿它算「几分钟前」，**先渲染这一份再后台刷新** */
   takenAt: string
 
@@ -113,7 +118,8 @@ function pos(
     liquidationPrice,
     leverage,
     unrealizedPnl,
-    percentage: margin > 0 ? Math.round((unrealizedPnl / margin) * 10000) / 100 : null
+    percentage:
+      margin > 0 ? Math.round((unrealizedPnl / margin) * 10000) / 100 : null
   }
 }
 
@@ -122,7 +128,8 @@ function statsOf(ps: FuturesPosition[]): ExchangeOverview['stats'] {
     longCount: ps.filter(p => p.side !== 'short').length,
     shortCount: ps.filter(p => p.side === 'short').length,
     notional: Math.round(ps.reduce((s, p) => s + p.notional, 0) * 100) / 100,
-    unrealized: Math.round(ps.reduce((s, p) => s + p.unrealizedPnl, 0) * 100) / 100
+    unrealized:
+      Math.round(ps.reduce((s, p) => s + p.unrealizedPnl, 0) * 100) / 100
   }
 }
 
@@ -134,7 +141,12 @@ const POSITIONS: FuturesPosition[] = [
 /** 合约 + C2C 都有的「正常账户」 */
 export const MOCK_FULL: ExchangeOverview = {
   apiKeyId: 1,
-  account: {exchange: 'binance', name: '币安 · 主号', sandbox: false, marketType: 'swap'},
+  account: {
+    exchange: 'binance',
+    name: '币安 · 主号',
+    sandbox: false,
+    marketType: 'swap'
+  },
   takenAt: '2026-10-05T10:42:07.000Z',
   futures: {
     wallet: 30228.74,
@@ -143,7 +155,9 @@ export const MOCK_FULL: ExchangeOverview = {
     available: 9672.43,
     used: 21442.91,
     // ⚠️ U 本位合约账户正常情况下 `assets` 就一行 USDT（多资产保证金模式才会多）
-    assets: [{asset: 'USDT', wallet: 30228.74, available: 9672.43, unrealized: 886.6}],
+    assets: [
+      {asset: 'USDT', wallet: 30228.74, available: 9672.43, unrealized: 886.6}
+    ],
     positions: POSITIONS
   },
   c2c: {
@@ -161,7 +175,12 @@ export const MOCK_FULL: ExchangeOverview = {
 /** 没开仓、只有钱包余额（也在用 C2C 收付款的那种） */
 export const MOCK_FLAT: ExchangeOverview = {
   apiKeyId: 2,
-  account: {exchange: 'binance', name: '币安 · 小号', sandbox: false, marketType: 'swap'},
+  account: {
+    exchange: 'binance',
+    name: '币安 · 小号',
+    sandbox: false,
+    marketType: 'swap'
+  },
   takenAt: '2026-10-05T10:40:12.000Z',
   futures: {
     wallet: 320.5,
@@ -172,14 +191,23 @@ export const MOCK_FLAT: ExchangeOverview = {
     assets: [{asset: 'USDT', wallet: 320.5, available: 320.5, unrealized: 0}],
     positions: []
   },
-  c2c: {active: true, totalUsdt: 860, assets: [{asset: 'USDT', balance: 860, usdt: 860}]},
+  c2c: {
+    active: true,
+    totalUsdt: 860,
+    assets: [{asset: 'USDT', balance: 860, usdt: 860}]
+  },
   stats: statsOf([])
 }
 
 /** 刚绑上：合约没入金、C2C 钱包也没激活 */
 export const MOCK_EMPTY: ExchangeOverview = {
   apiKeyId: 3,
-  account: {exchange: 'okx', name: 'OKX 备用', sandbox: false, marketType: 'swap'},
+  account: {
+    exchange: 'okx',
+    name: 'OKX 备用',
+    sandbox: false,
+    marketType: 'swap'
+  },
   takenAt: '2026-10-05T10:44:31.000Z',
   futures: {
     wallet: 0,
@@ -195,7 +223,11 @@ export const MOCK_EMPTY: ExchangeOverview = {
 }
 
 /** 预览页「换一套看」的选项 */
-export const MOCK_ACCOUNTS: {value: number; label: string; data: ExchangeOverview}[] = [
+export const MOCK_ACCOUNTS: {
+  value: number
+  label: string
+  data: ExchangeOverview
+}[] = [
   {value: 1, label: '币安 · 主号（合约 + C2C）', data: MOCK_FULL},
   {value: 2, label: '币安 · 小号（未开仓）', data: MOCK_FLAT},
   {value: 3, label: 'OKX · 空账户', data: MOCK_EMPTY}
@@ -227,22 +259,98 @@ export interface ExchangeTrade {
 
 /** 当前挂单（`fapi/v1/openOrders`，不需要交易对） */
 export const MOCK_OPEN_ORDERS: ExchangeOpenOrder[] = [
-  {id: '1', symbol: 'BTCUSDT', side: 'buy', type: 'limit', price: 82500, amount: 0.005, datetime: '2026-10-05T09:12:44.000Z'},
-  {id: '2', symbol: 'BTCUSDT', side: 'sell', type: 'limit', price: 88400, amount: 0.008, datetime: '2026-10-05T09:40:02.000Z'},
-  {id: '3', symbol: 'ETHUSDT', side: 'buy', type: 'limit', price: 2620, amount: 2, datetime: '2026-10-05T10:01:19.000Z'},
-  {id: '4', symbol: 'SOLUSDT', side: 'buy', type: 'limit', price: 138.4, amount: 12, datetime: '2026-10-05T10:28:57.000Z'}
+  {
+    id: '1',
+    symbol: 'BTCUSDT',
+    side: 'buy',
+    type: 'limit',
+    price: 82500,
+    amount: 0.005,
+    datetime: '2026-10-05T09:12:44.000Z'
+  },
+  {
+    id: '2',
+    symbol: 'BTCUSDT',
+    side: 'sell',
+    type: 'limit',
+    price: 88400,
+    amount: 0.008,
+    datetime: '2026-10-05T09:40:02.000Z'
+  },
+  {
+    id: '3',
+    symbol: 'ETHUSDT',
+    side: 'buy',
+    type: 'limit',
+    price: 2620,
+    amount: 2,
+    datetime: '2026-10-05T10:01:19.000Z'
+  },
+  {
+    id: '4',
+    symbol: 'SOLUSDT',
+    side: 'buy',
+    type: 'limit',
+    price: 138.4,
+    amount: 12,
+    datetime: '2026-10-05T10:28:57.000Z'
+  }
 ]
 
 /** 成交（`fapi/v1/allOrders` / `userTrades`，**必须带交易对**，所以是慢接口） */
 export const MOCK_TRADES: ExchangeTrade[] = [
-  {id: '1001', symbol: 'BTCUSDT', side: 'buy', price: 84620.4, amount: 0.01, cost: 846.2, fee: 0.42, feeCurrency: 'USDT', datetime: '2026-10-05T10:12:03.000Z'},
-  {id: '1002', symbol: 'BTCUSDT', side: 'sell', price: 85110.2, amount: 0.006, cost: 510.66, fee: 0.26, feeCurrency: 'USDT', datetime: '2026-10-05T09:58:31.000Z'},
-  {id: '1003', symbol: 'BTCUSDT', side: 'buy', price: 83880.1, amount: 0.012, cost: 1006.56, fee: 0.5, feeCurrency: 'USDT', datetime: '2026-10-05T09:31:12.000Z'},
-  {id: '1004', symbol: 'ETHUSDT', side: 'sell', price: 2701.05, amount: 2, cost: 5402.1, fee: 2.7, feeCurrency: 'USDT', datetime: '2026-10-05T08:44:50.000Z'}
+  {
+    id: '1001',
+    symbol: 'BTCUSDT',
+    side: 'buy',
+    price: 84620.4,
+    amount: 0.01,
+    cost: 846.2,
+    fee: 0.42,
+    feeCurrency: 'USDT',
+    datetime: '2026-10-05T10:12:03.000Z'
+  },
+  {
+    id: '1002',
+    symbol: 'BTCUSDT',
+    side: 'sell',
+    price: 85110.2,
+    amount: 0.006,
+    cost: 510.66,
+    fee: 0.26,
+    feeCurrency: 'USDT',
+    datetime: '2026-10-05T09:58:31.000Z'
+  },
+  {
+    id: '1003',
+    symbol: 'BTCUSDT',
+    side: 'buy',
+    price: 83880.1,
+    amount: 0.012,
+    cost: 1006.56,
+    fee: 0.5,
+    feeCurrency: 'USDT',
+    datetime: '2026-10-05T09:31:12.000Z'
+  },
+  {
+    id: '1004',
+    symbol: 'ETHUSDT',
+    side: 'sell',
+    price: 2701.05,
+    amount: 2,
+    cost: 5402.1,
+    fee: 2.7,
+    feeCurrency: 'USDT',
+    datetime: '2026-10-05T08:44:50.000Z'
+  }
 ]
 
 /** 已实现盈亏（`fapi/v1/income?incomeType=REALIZED_PNL`，币安专属） */
-export const MOCK_INCOME: {symbol: string; income: number; time: string | null}[] = [
+export const MOCK_INCOME: {
+  symbol: string
+  income: number
+  time: string | null
+}[] = [
   {symbol: 'BTCUSDT', income: 245.8, time: '2026-10-05T10:12:03.000Z'},
   {symbol: 'SOLUSDT', income: 412.35, time: '2026-10-05T09:22:11.000Z'},
   {symbol: 'BTCUSDT', income: 156.2, time: '2026-10-05T05:41:20.000Z'},
