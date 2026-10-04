@@ -10,13 +10,13 @@
   },
   "android": {
     "allowMixedContent": false,
-    "backgroundColor": "#08090b"
+    "backgroundColor": "#121316"
   },
   "plugins": {
     "StatusBar": {
       "overlaysWebView": false,
       "style": "DARK",
-      "backgroundColor": "#08090b"
+      "backgroundColor": "#121316"
     }
   }
 }

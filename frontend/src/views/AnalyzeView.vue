@@ -30,9 +30,11 @@ import TickerHead from '../comps/TickerHead.vue'
 import TickerChanges from '../comps/TickerChanges.vue'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
+import {useSwipeTabs} from '../swipe-tabs'
 import {
   CHART_TAB,
   LEFT_TABS,
+  type LeftTab,
   MOBILE_MAX,
   chartFrom,
   chartRange,
@@ -66,7 +68,13 @@ import {
   testMode,
   testPoint
 } from '../analyze'
-import {balanceBadge, contracts, refreshBalance, refreshConfig, refreshingBalance} from '../store'
+import {
+  balanceBadge,
+  contracts,
+  refreshBalance,
+  refreshConfig,
+  refreshingBalance
+} from '../store'
 import {stopTicker, watchTicker} from '../ticker'
 import {runBtnPos, setRunBtnPos} from '../settings'
 import {
@@ -287,6 +295,26 @@ const tabs = computed(() => {
 })
 
 /* ---------------- 窄屏：左右滑动切换一级 tab ---------------- */
+
+/**
+ * 手势区 = **左边那栏** `.col`（tab 行 + 内容）。
+ *
+ * ⚠️ 不能挂到 `.split` 上：右边那栏是 K 线（`aside.col.side`），
+ *    图上横划是**拖动图表看历史行情**，挂到 `.split` 会把那个手势抢走。
+ *    （现在 K 线只在右栏、不在 `.col` 里，所以这一条天然成立。）
+ *
+ * 用户 2026-10-04：「一级 tab（底下一小段线那种）可滑动切换」。
+ * 调参与避让规则都在 `../swipe-tabs`，这里只负责接线。
+ */
+const swipeRef = ref<HTMLElement | null>(null)
+const {onTouchStart, onTouchMove, onTouchEnd} = useSwipeTabs<LeftTab>({
+  host: () => swipeRef.value,
+  list: () => tabs.value,
+  current: () => leftTab.value,
+  set: v => {
+    leftTab.value = v
+  }
+})
 
 /**
  * 「共 N 个合约」——行情表报上来的数，显示在「合约行情」标题右边
@@ -688,7 +716,14 @@ const heatRows = computed(() => {
         ⚠️ 这一栏**必须常驻**：切到手机上那格「K 线」时，tab 行就在这里面，
         整栏藏了就没地方切回去了。所以只把内容清空（见下面的分支）。
       -->
-      <div class="col">
+      <div
+        ref="swipeRef"
+        class="col"
+        @touchstart.passive="onTouchStart"
+        @touchmove.passive="onTouchMove"
+        @touchend.passive="onTouchEnd"
+        @touchcancel.passive="onTouchEnd"
+      >
         <div class="tab-row">
           <SegTabs v-model="leftTab" :options="tabs" />
           <!--

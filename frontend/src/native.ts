@@ -18,8 +18,16 @@
 import {isNativeShell} from './platform'
 import {setNativeActive} from './live'
 
-/** 应用主背景 —— 跟 `style.css` 里的 `--bg` 保持一致（改色时两处一起改） */
-export const APP_BG = '#08090b'
+/**
+ * App 外壳底色 —— 状态栏 / 导航栏 / 窗底 / WebView 底都用它。
+ *
+ * ⚠️ 它等于**前端窄屏（≤900px）的页面主背景**（`style.css` 窄屏那段的 `--panel`，
+ *    #121316），**不是**深色那档 `--bg`（#08090b）—— 手机上看到的主背景就是前者。
+ *    用户 2026-10-04：「顶部状态栏和底部小白条区域和主背景色一样」。
+ *    改色时四处一起改：这里 · `capacitor.config.json`（两个字段）·
+ *    `values/colors.xml` 的 `app_shell` · `frontend/index.html` 的 `theme-color`。
+ */
+export const APP_SHELL_BG = '#121316'
 
 /** Capacitor App 插件里我们用到的那一小块 */
 interface CapApp {
@@ -78,7 +86,7 @@ export function setupNativeShell(): void {
   const paintStatusBar = (): void => {
     safe(StatusBar?.setStyle({style: 'DARK'}))
     // Android 15 以下还能设底色（15+ 会被系统忽略，不报错）
-    safe(StatusBar?.setBackgroundColor?.({color: APP_BG}))
+    safe(StatusBar?.setBackgroundColor?.({color: APP_SHELL_BG}))
   }
   paintStatusBar()
 

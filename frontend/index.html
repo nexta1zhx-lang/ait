@@ -13,10 +13,13 @@
     />
     <!--
       theme-color：浏览器 / PWA 顶栏和「添加到主屏幕」后的状态栏取这个色。
-      ⚠️ 必须跟 App 主背景一致（`style.css` 的 `--bg`、`values/colors.xml` 的 `app_bg`），
-         否则在 PWA 里状态栏和页面顶部会分成两个色。
+      ⚠️ 它要跟**手机上的**页面主背景一致：窄屏（≤900px）整页铺的是
+         `style.css` 里 `panel` 那个变量（#121316），所以这里写 121316 而不是
+         更暗那档 `bg`（#08090b）—— 否则手机上状态栏和页面顶部就是两个色。
+         （Android 侧的同一组值见 `android/app/src/main/res/values/colors.xml` 的
+         `app_shell`。）
     -->
-    <meta name="theme-color" content="#08090b" />
+    <meta name="theme-color" content="#121316" />
     <meta name="color-scheme" content="dark" />
     <!-- 标签页图标：跟 App 图标同一套，由 `scripts/make-icons.py` 生成 -->
     <link rel="icon" type="image/png" href="/favicon.png" />

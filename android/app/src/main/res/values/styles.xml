@@ -5,23 +5,32 @@
       基础主题。
       ⚠️ 原来是 `Theme.AppCompat.Light.DarkActionBar`（**浅色**），跟 App 的深色界面完全对不上：
          冷启动那一瞬系统按浅色主题画窗底，会白闪一下。
-         2026-10-04 换成深色父主题 + `@color/app_bg` 窗底。
+         2026-10-04 换成深色父主题 + `@color/app_shell` 窗底。
     -->
     <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="colorPrimary">@color/colorPrimary</item>
         <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
         <item name="colorAccent">@color/colorAccent</item>
-        <!-- 窗底 = App 主背景：WebView 没画完时露出来的就是它，不能是白的 -->
-        <item name="android:windowBackground">@color/app_bg</item>
+        <!--
+          窗底 = App 在窄屏下的页面主背景（`app_shell`）：
+          WebView 还没画完的那一瞬露出来的就是它，不能是白的，
+          也不能比页面暗一档（否则冷启动会闪一下、Android 15+ 上
+          状态栏透明时透出来的就是它）。
+        -->
+        <item name="android:windowBackground">@color/app_shell</item>
         <!--
           状态栏 / 导航栏底色 + 图标亮度。
           ⚠️ 我们 `targetSdkVersion = 36`，Android 15+ 起系统**强制 edge-to-edge**：
              这两个 color 项在 15+ 上会被系统忽略（状态栏透明、直接透出 WebView
              自己的内容，页面顶部有安全区内边距垫着，见 `style.css`）。
              留着是给 Android 14 及以下用的 —— 老系统上不设就是白条。
+          ★ 用 `app_shell` 而**不是** `app_bg`（用户 2026-10-04：
+            「顶部状态栏和底部小白条区域和主背景色一样」）——
+            手机窄屏页面铺的是 `panel`（#121316），这两条也得是它；
+            用 `app_bg`（#08090b）就会比页面暗一档，上下两条一眼看出来。
         -->
-        <item name="android:statusBarColor">@color/app_bg</item>
-        <item name="android:navigationBarColor">@color/app_bg</item>
+        <item name="android:statusBarColor">@color/app_shell</item>
+        <item name="android:navigationBarColor">@color/app_shell</item>
         <!-- 深底 → 图标要浅色。false = 不使用深色图标，别搞反 -->
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
@@ -44,10 +53,17 @@
         · `postSplashScreenTheme`         画完切回哪个主题
       不写的话系统会退回去用 App 图标 + 主题默认底色 —— 在深色 App 上就是白闪。
       `android:background` 是给 Android 11 及以下用的（老系统直接拿这张图铺满屏幕）。
+
+      ★ 底色用 `app_shell`（= 窄屏页面主背景）：这一屏 → 页面中间不换色
+        （用户 2026-10-04：「顶部状态栏和底部小白条区域和主背景色一样」，
+        顺手把启动这一屏也对齐）。
+        ⚠️ Android 11 及以下走的是 `android:background` 那张 PNG（`splash.png`，
+        底子仍是近黑 #08090b，由 `scripts/make-icons.py` 生成）——
+        要改得重跑那个脚本，这次没动。
     -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="android:background">@drawable/splash</item>
-        <item name="windowSplashScreenBackground">@color/app_bg</item>
+        <item name="windowSplashScreenBackground">@color/app_shell</item>
         <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
         <item name="postSplashScreenTheme">@style/AppTheme</item>
     </style>

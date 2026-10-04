@@ -25,6 +25,7 @@ import LlmConfigView from './LlmConfigView.vue'
 import ProfileView from './ProfileView.vue'
 import AdminView from './AdminView.vue'
 import {user} from '../session'
+import {useSwipeTabs} from '../swipe-tabs'
 
 type Pane = 'records' | 'kb' | 'llm' | 'profile' | 'admin'
 
@@ -131,6 +132,25 @@ function setAdminTab(v: AdminTab): void {
   writeQuery('admin', v)
 }
 
+/* ---------------- 窄屏：左右滑动切换一级 tab ---------------- */
+
+/**
+ * 手势区 = 整页 `.me`（tab 行 + 内容区）。
+ *
+ * 用户 2026-10-04：「一级 tab（底下一小段线那种）可滑动切换」。
+ * ⚠️ 上面那排 `.me-tabs` 在窄屏是 `overflow-x: auto` 的**横向可滚**排
+ *    （六个 tab 在 360px 上会溢出）—— 那种情况归它自己滚，`../swipe-tabs`
+ *    里那条「能横滚的元素不抢」会自己挡下来，这里不用特殊处理。
+ * 切开时走 `setPane`（而不是直接改 `pane`），地址栏的 `?p=` 会跟着走。
+ */
+const swipeRef = ref<HTMLElement | null>(null)
+const {onTouchStart, onTouchMove, onTouchEnd} = useSwipeTabs<Pane>({
+  host: () => swipeRef.value,
+  list: () => panes.value,
+  current: () => pane.value,
+  set: v => setPane(v)
+})
+
 /*
  * ⚠️ 「历史」那一半里面还有自己的固定布局（`body.fixed-viewport .pane-kb` 那套），
  * 所以这个 class 一直得有。
@@ -155,7 +175,14 @@ onMounted(() => document.body.classList.add('fixed-viewport'))
 </script>
 
 <template>
-  <div class="me">
+  <div
+    ref="swipeRef"
+    class="me"
+    @touchstart.passive="onTouchStart"
+    @touchmove.passive="onTouchMove"
+    @touchend.passive="onTouchEnd"
+    @touchcancel.passive="onTouchEnd"
+  >
     <SegTabs
       class="me-tabs"
       :model-value="pane"

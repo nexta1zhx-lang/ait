@@ -81,6 +81,8 @@ function toneOf(p: number | null | undefined): string {
 }
 
 const overallOk = computed(() => Boolean(s.value?.db.ok))
+/** 首屏还没拿到数据（且没有报错）—— 这会儿显 loading，别显「异常」 */
+const loading = computed(() => !s.value && !error.value)
 
 /* ---------------- 拉数 ---------------- */
 
@@ -105,6 +107,12 @@ async function load(manual = false): Promise<void> {
 
 function render(): void {
   const h = s.value?.history ?? []
+  // 还没采到点：先清空，不 setOption 出一张空坐标轴（首次启动的头几秒会有）
+  if (!h.length) {
+    cpuChart.value?.clear()
+    memChart.value?.clear()
+    return
+  }
   /**
    * 轴上的时间：`HH:mm:ss`。
    *
@@ -270,18 +278,27 @@ function render(): void {
 
 /** 首帧建图（容器这时才有尺寸） */
 function initCharts(): void {
-  if (cpuEl.value && !cpuChart.value) {
+  // 容器没真实尺寸（藏着 / 布局未完成）时先别 init —— 否则 echarts 会刷一屏
+  // 「Can't get DOM width or height」而且实例是坏的；等 ResizeObserver 报出尺寸再建
+  const ready = (el: HTMLElement | null): el is HTMLElement =>
+    !!el && el.clientWidth > 0 && el.clientHeight > 0
+  if (ready(cpuEl.value) && !cpuChart.value) {
     cpuChart.value = echarts.init(cpuEl.value)
   }
-  if (memEl.value && !memChart.value) {
+  if (ready(memEl.value) && !memChart.value) {
     memChart.value = echarts.init(memEl.value)
   }
   render()
 }
 
 function onResize(): void {
-  cpuChart.value?.resize()
-  memChart.value?.resize()
+  // 之前容器没尺寸、图还没建出来 → 这会儿可能露出来了，补建一次
+  if (!cpuChart.value || !memChart.value) {
+    initCharts()
+    return
+  }
+  cpuChart.value.resize()
+  memChart.value.resize()
 }
 
 // 换了窗口立刻重拉一次（后端会把那段历史一起回来，不用自己攒）
@@ -325,10 +342,16 @@ onBeforeUnmount(() => {
   <div class="status">
     <div class="st-head">
       <h2>服务器监测</h2>
-      <span class="dot" :class="overallOk ? 'ok' : 'bad'" />
-      <b :class="overallOk ? 'ok' : 'bad'">{{
-        overallOk ? '运行正常' : '异常'
-      }}</b>
+      <template v-if="loading">
+        <span class="dot" />
+        <b class="dim">加载中…</b>
+      </template>
+      <template v-else>
+        <span class="dot" :class="overallOk ? 'ok' : 'bad'" />
+        <b :class="overallOk ? 'ok' : 'bad'">{{
+          overallOk ? '运行正常' : '异常'
+        }}</b>
+      </template>
       <span class="when" v-if="updatedAt">
         {{ bjTime(updatedAt).slice(-8) }} 更新
       </span>
@@ -340,7 +363,8 @@ onBeforeUnmount(() => {
       <button class="ghost tiny" @click="load(true)">刷新</button>
     </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="loading" class="loading">正在读取服务器状态…</p>
+    <p v-else-if="error" class="error">{{ error }}</p>
 
     <template v-if="s">
       <!-- 四张数：一眼看出哪一项快满了 -->
@@ -395,11 +419,23 @@ onBeforeUnmount(() => {
             CPU / 内存
             <span class="dim">最近 30 分钟 · 每 5 秒一个点</span>
           </h3>
-          <div ref="cpuEl" class="chart" />
+          <div class="chart-holder">
+            <div ref="cpuEl" class="chart" />
+            <div v-if="!s.history.length" class="chart-overlay">
+              <span class="spin" />
+              等待采样…
+            </div>
+          </div>
         </div>
         <div class="chart-box">
           <h3>进程内存<span class="dim">MB</span></h3>
-          <div ref="memEl" class="chart" />
+          <div class="chart-holder">
+            <div ref="memEl" class="chart" />
+            <div v-if="!s.history.length" class="chart-overlay">
+              <span class="spin" />
+              等待采样…
+            </div>
+          </div>
         </div>
       </div>
 
@@ -632,6 +668,10 @@ onBeforeUnmount(() => {
 }
 .chart {
   height: 180px;
+  min-width: 0;
+}
+.chart-holder {
+  position: relative;
   min-width: 0;
 }
 

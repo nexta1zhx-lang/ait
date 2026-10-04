@@ -19,6 +19,8 @@ const props = defineProps<{
   height?: number
   /** 要不要画成交量（知识库卡片里不要，嫌乱） */
   showVolume?: boolean
+  /** 数据还没到 → 只显 loading，不画空图 */
+  loading?: boolean
 }>()
 
 // 跟 `KlineChart.vue`、`style.css` 的 `--ok` / `--bad` 三处必须一致
@@ -68,9 +70,30 @@ function fitSize(): void {
   }
 }
 
+/**
+ * 容器**有真实尺寸**了才建图。
+ *
+ * ⚠️ 藏着 / 布局未完成时宽高是 0，这时 `echarts.init` 会刷一屏
+ *    「Can't get DOM width or height」且实例是坏的 —— 等尺寸回来再建。
+ */
+function ensureChart(): boolean {
+  if (chart.value) return true
+  const box = el.value
+  if (!box || box.clientWidth === 0 || box.clientHeight === 0) return false
+  chart.value = echarts.init(box)
+  return true
+}
+
 function render(): void {
-  if (!chart.value) return
+  if (!ensureChart()) return
   fitSize()
+  const c = chart.value
+  if (!c) return
+  // 等数据到齐再画：loading 或空数据时先清空，别 setOption 出一张空图
+  if (props.loading || !props.candles.length) {
+    c.clear()
+    return
+  }
   const raw = props.candles
   const step = Math.max(1, Math.ceil(raw.length / MAX_BARS))
   const cs = downsample(raw, step)
@@ -82,7 +105,7 @@ function render(): void {
   const withVol = props.showVolume === true && cs.length > 0
   const volH = withVol ? Math.max(12, Math.round(totalH * 0.22)) : 0
 
-  chart.value.setOption(
+  c.setOption(
     {
       animation: false,
       silent: true,
@@ -147,19 +170,17 @@ function render(): void {
 }
 
 onMounted(() => {
-  if (!el.value) return
-  chart.value = echarts.init(el.value)
   render()
   ro = new ResizeObserver(() => {
-    fitSize()
-    // 宽度变了 → 每根能占几个像素也变了，视图要跟着重排
-    if (el.value?.clientWidth) render()
+    // 容器从「藏着」变「露出来」或宽度变了 → 重排一次
+    // （还没建图时 render 会先尝试建图）
+    render()
   })
-  ro.observe(el.value)
+  ro.observe(el.value as Element)
 })
 
 watch(
-  () => [props.candles, props.height, props.showVolume],
+  () => [props.candles, props.height, props.showVolume, props.loading],
   () => render(),
   {
     deep: true
@@ -173,12 +194,30 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="el" class="mini-kline" :style="{height: boxH + 'px'}" />
+  <div class="mini-kline" :style="{height: boxH + 'px'}">
+    <div ref="el" class="mini-kline-el" />
+    <span v-if="loading" class="mini-kline-loading">加载中…</span>
+  </div>
 </template>
 
 <style scoped>
 .mini-kline {
+  position: relative;
   width: 100%;
   min-width: 0;
+}
+.mini-kline-el {
+  position: absolute;
+  inset: 0;
+}
+.mini-kline-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
 }
 </style>

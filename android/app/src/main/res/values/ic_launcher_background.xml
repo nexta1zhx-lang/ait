@@ -3,7 +3,9 @@
     <!--
        自适应图标（`mipmap-anydpi-v26/ic_launcher.xml`）的**底板颜色**。
        原来是 Capacitor 脚手架默认的白色，跟深色 App 不搭；换成 App 主背景。
-       ⚠️ 要跟 `values/colors.xml` 的 `app_bg`、以及前端 `style.css` 里的主背景一致。
+⚠️ 要跟 `values/colors.xml` 的 `app_bg`（#08090b）一致 ——
+        别跟同一个文件里的 `app_shell`（#121316）搞混：
+        那个是**页面 / 状态栏 / 导航栏**的底色，图标底板要比它更暗一档。
 
        注：XML 注释里不能出现**两个连续连字符**（AAPT2 会直接报
        「注释中不允许出现字符串」），所以上面提到前端变量时都不带前缀。

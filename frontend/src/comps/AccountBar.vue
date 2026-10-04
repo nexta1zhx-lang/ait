@@ -101,8 +101,11 @@ async function doLogout(): Promise<void> {
   font-size: 12.5px;
   cursor: pointer;
 }
-.who-btn:hover {
-  border-color: var(--blue);
+/* 悬停：触屏不应用（全站约定，见 style.css 里 `.seg` 上面那段说明） */
+@media (hover: hover) {
+  .who-btn:hover {
+    border-color: var(--blue);
+  }
 }
 .avatar {
   width: 22px;
@@ -146,9 +149,12 @@ async function doLogout(): Promise<void> {
   font-size: 13px;
   cursor: pointer;
 }
-.menu button:hover {
-  background: var(--blue-soft);
-  color: var(--blue);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .menu button:hover {
+    background: var(--blue-soft);
+    color: var(--blue);
+  }
 }
 .menu button.out {
   color: var(--bad);

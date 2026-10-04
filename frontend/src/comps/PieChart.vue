@@ -36,6 +36,8 @@ const props = withDefaults(
     top?: number
     unit?: string
     emptyText?: string
+    /** 数据还没到 → 只显 loading，不画那张空图 */
+    loading?: boolean
   }>(),
   {activeKey: '', top: 8, unit: '次', emptyText: '暂无数据'}
 )
@@ -92,10 +94,17 @@ function fitSize(): void {
 }
 
 function render(): void {
-  if (!chart.value) return
+  if (!ensureChart()) return
+  const c = chart.value
+  if (!c) return
   fitSize()
+  // 等数据到齐再画：loading 或空数据时先清空，别 setOption 出一张空图
+  if (props.loading || !slices.value.length) {
+    c.clear()
+    return
+  }
   const dimmed = Boolean(props.activeKey)
-  chart.value.setOption(
+  c.setOption(
     {
       animationDuration: 240,
       tooltip: {
@@ -134,19 +143,38 @@ function render(): void {
   )
 }
 
-/** 点扇区 = 按这一项筛（「其他」不响应） */
+/**
+ * 点扇区 = 按这一项筛（「其他」不响应）
+ */
 function onClick(p: {name?: string}): void {
   const s = slices.value.find(x => x.label === p.name)
   if (s && pickable(s.key)) emit('pick', s.key)
 }
 
-onMounted(() => {
-  if (!el.value) return
-  chart.value = echarts.init(el.value)
+/**
+ * 容器**有真实尺寸**了才建图。
+ *
+ * ⚠️ 容器藏着（`v-show` / 布局未完成）时宽高是 0，这时 `echarts.init` 会刷一屏
+ *    「Can't get DOM width or height」而且拿到的实例是坏的 —— 等尺寸回来再建。
+ *    隐藏容器变可见时 ResizeObserver 会再报一次，那时才建得出图。
+ */
+function ensureChart(): boolean {
+  if (chart.value) return true
+  const box = el.value
+  if (!box || box.clientWidth === 0 || box.clientHeight === 0) return false
+  chart.value = echarts.init(box)
   chart.value.on('click', onClick)
+  return true
+}
+
+onMounted(() => {
   render()
-  ro = new ResizeObserver(() => fitSize())
-  ro.observe(el.value)
+  ro = new ResizeObserver(() => {
+    // 还没建图 = 容器之前没尺寸，现在可能露出来了 → 试着重来一次
+    if (!chart.value) render()
+    else fitSize()
+  })
+  ro.observe(el.value as Element)
 })
 
 watch(
@@ -164,13 +192,18 @@ onBeforeUnmount(() => {
 <template>
   <div class="pie">
     <!--
-      ⚠️ 图表容器必须**始终可见**（不能用 v-show / v-if 藏）。
-      藏起来时它宽度是 0，echarts 会拿 100×100 兜底，**而且之后不会再自己纠正**
-      —— 实测容器 328px、canvas 死卡在 100px。空数据的提示改成浮在上面一层。
+      ⚠️ 图表容器必须**始终占位**（不能 `v-if` / 折叠掉）——
+      否则宽度是 0 时 echarts 会拿 100×100 兜底且不再自己纠正。
+      就算它真被 `v-show` 藏着也不怕：`ensureChart()` 会等它露出尺寸再建图。
+      空数据的提示浮在上面一层，不占容器尺寸。
     -->
     <div ref="el" class="pie-canvas" />
-    <p v-if="!slices.length" class="pie-none">{{ emptyText }}</p>
-    <ul v-if="slices.length" class="pie-legend">
+    <div v-if="loading" class="chart-overlay">
+      <span class="spin" />
+      加载中…
+    </div>
+    <p v-else-if="!slices.length" class="pie-none">{{ emptyText }}</p>
+    <ul v-if="!loading && slices.length" class="pie-legend">
       <li
         v-for="(s, i) in slices"
         :key="s.key"
@@ -220,8 +253,11 @@ onBeforeUnmount(() => {
   font-size: 12px;
   cursor: pointer;
 }
-.pie-legend li:hover {
-  background: var(--panel-2);
+/* 悬停：触屏不应用（全站约定，见 style.css 里 `.seg` 上面那段说明） */
+@media (hover: hover) {
+  .pie-legend li:hover {
+    background: var(--panel-2);
+  }
 }
 .pie-legend li.dim {
   cursor: default;

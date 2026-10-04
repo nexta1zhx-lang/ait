@@ -1125,6 +1125,19 @@ function draw(data: Candle[], keepView = false) {
       .filter(p => Number.isFinite(p.value))
   )
 
+  /*
+   * 换币 / 换周期 / 换时间（整段重画）时把右侧价格轴交还给**自动缩放**。
+   *
+   * ⚠️ 用户在价格轴上拖过 / 捏过之后，LWC 会把 `autoScale` 关掉（这是它的默认行为）；
+   *    不重开的话，换到新币时价格轴还停在上一个币的区间 —— 新蜡烛可能整个落在框外，
+   *    看着就是「k 线价格没有重置 y 轴」（用户反馈：有时候不重置）。
+   * ⚠️ `keepView`（往前补历史）不能动 —— 那时要把用户正看的那一段钉住，
+   *    这里只在整段重画时重置。
+   */
+  if (!keepView) {
+    refs.chart.priceScale('right').applyOptions({autoScale: true})
+  }
+
   overlay.refPrice = closes[closes.length - 1]
   /*
    * 压力 / 支撑：拿新数据 + 此刻的可见区间先算一遍（换币后那两条线得马上是新币的，

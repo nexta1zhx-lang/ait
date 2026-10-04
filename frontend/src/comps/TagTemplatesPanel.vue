@@ -276,8 +276,11 @@ const summary = computed(
   cursor: pointer;
 }
 
-.tt-head:hover {
-  background: rgba(255, 255, 255, 0.03);
+/* 悬停：触屏不应用（全站约定，见 style.css 里 `.seg` 上面那段说明） */
+@media (hover: hover) {
+  .tt-head:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
 }
 
 .tt-head .t {

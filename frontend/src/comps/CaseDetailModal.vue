@@ -470,9 +470,12 @@ async function remove() {
   cursor: pointer;
 }
 
-.tag-chip:hover {
-  border-color: var(--blue);
-  color: var(--text);
+/* 悬停：触屏不应用（全站约定，见 style.css 里 `.seg` 上面那段说明） */
+@media (hover: hover) {
+  .tag-chip:hover {
+    border-color: var(--blue);
+    color: var(--text);
+  }
 }
 
 .tag-chip.on {
@@ -488,8 +491,11 @@ async function remove() {
   cursor: pointer;
 }
 
-.tag-chip em:hover {
-  opacity: 1;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .tag-chip em:hover {
+    opacity: 1;
+  }
 }
 
 /* 老记录里的自造标签：暗一点，提示该清掉 */
@@ -517,10 +523,13 @@ async function remove() {
   border-style: solid;
 }
 
-.tag-chip.clear:hover {
-  color: #06121f;
-  background: var(--warn);
-  border-color: var(--warn);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .tag-chip.clear:hover {
+    color: #06121f;
+    background: var(--warn);
+    border-color: var(--warn);
+  }
 }
 
 .cm-hint {

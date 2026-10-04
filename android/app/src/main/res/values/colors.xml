@@ -1,21 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-      App 主背景色。
+      两个底色，别再当成一个：
 
-      ⚠️ **四处必须一致**，改色时一起改：
-         · 这里（Android 主题的窗底 / 状态栏 / 导航栏）
-         · `values/ic_launcher_background.xml`（自适应图标底板）
+       · `app_bg`（#08090b）= **应用图标的底板**（见 `ic_launcher_background.xml`）。
+         那是桌面上的东西，不归 App 内部管。
+
+       · `app_shell`（#121316）= **App 里所有「系统画的」底色**：
+         窗底 / 启动图底 / 状态栏 / 导航栏 / WebView 底。
+         它必须等于**前端窄屏（≤900px）的页面主背景**（`style.css` 里
+         窄屏那段给 `body` 和 `#app` 铺的那个 `panel` 变量）——
+         手机上看到的主背景色就是它。
+
+      为什么以前会「上下两条跟页面不是一个色」（用户 2026-10-04：
+      「app 专属优化：顶部状态栏和底部小白条区域和主背景色一样」）：
+        窄屏整页铺的是 `panel`（#121316），而状态栏 / 导航栏 / 窗底原来吃的是
+        `app_bg`（#08090b）—— 于是顶上一横条、底下一横条都比页面暗一档，
+        一眼就能看出来。现在四条全部统一成 121316。
+
+      ⚠️ 改色时四处一起改：
+         · 这里
          · `capacitor.config.json` 的 `android.backgroundColor` 与 `StatusBar.backgroundColor`
-         · 前端 `style.css` 里的主背景变量（以及 `native.ts` 里的 `APP_BG`）
+         · `frontend/src/native.ts` 里的 `APP_SHELL_BG`
+         · `frontend/index.html` 的 `theme-color`
 
       注：XML 注释里不能出现**两个连续连字符**（AAPT2 会报
       「注释中不允许出现字符串」），所以上面提到 CSS 变量时都不带前缀 ——
       要写前端那些以两个连字符开头的变量名时，记得把它改写掉。
-
-      为什么要单独定义：冷启动第一帧、以及 Android 15+ 强制 edge-to-edge 之后
-      状态栏透出来的，都是**系统/WebView 的背景**，不是页面画的 —— 不统一就会白闪
-      或者状态栏和页面顶部两个色。
     -->
     <color name="app_bg">#08090b</color>
+    <color name="app_shell">#121316</color>
 </resources>

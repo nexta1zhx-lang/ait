@@ -365,6 +365,7 @@ onMounted(() => {
             <PieChart
               :items="verdictItems"
               :active-key="verdict"
+              :loading="loading && !stats"
               empty-text="这段时间没有记录"
               @pick="pickVerdict"
             />
@@ -376,6 +377,7 @@ onMounted(() => {
               :items="tagItems"
               :active-key="tag"
               :top="7"
+              :loading="loading && !stats"
               empty-text="还没有带概率的标签"
               @pick="pickTag"
             />
@@ -387,6 +389,7 @@ onMounted(() => {
               :items="symbolItems"
               :active-key="symbol.trim().toUpperCase()"
               :top="7"
+              :loading="loading && !stats"
               empty-text="还没有记录"
               @pick="pickSymbol"
             />
@@ -843,8 +846,11 @@ body.fixed-viewport .list .pager {
   cursor: pointer;
 }
 
-.hist-cards > li:hover {
-  border-color: var(--blue);
+/* 悬停：触屏不应用（全站约定，见 style.css 里 `.seg` 上面那段说明） */
+@media (hover: hover) {
+  .hist-cards > li:hover {
+    border-color: var(--blue);
+  }
 }
 
 .hist-cards .hc-top {

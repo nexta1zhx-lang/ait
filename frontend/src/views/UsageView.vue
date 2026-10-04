@@ -323,7 +323,11 @@ const symbolText = (r: UsageRow) =>
       <h2>
         每天花费 <span class="tag">最近 {{ days }} 天</span>
       </h2>
-      <CostTrend :days="summary?.byDay ?? []" :rate="rate" />
+      <CostTrend
+        :days="summary?.byDay ?? []"
+        :rate="rate"
+        :loading="loading && !summary"
+      />
     </section>
 
     <!-- token 构成 -->

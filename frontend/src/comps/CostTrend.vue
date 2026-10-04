@@ -13,6 +13,8 @@ import {C, darkTooltip, echarts, type ECharts} from '../chart-theme'
 const props = defineProps<{
   days: UsageBucket[]
   rate: number
+  /** 数据还没到 → 只显 loading，不画那张空坐标轴 */
+  loading?: boolean
 }>()
 
 /** 时间升序，图从左到右 */
@@ -39,11 +41,32 @@ function fitSize(): void {
   }
 }
 
+/**
+ * 容器**有真实尺寸**了才建图。
+ *
+ * ⚠️ 藏着（`v-show` / 布局未完成）时宽高是 0，这时 `echarts.init` 会刷一屏
+ *    「Can't get DOM width or height」且实例是坏的 —— 等尺寸回来再建。
+ */
+function ensureChart(): boolean {
+  if (chart.value) return true
+  const box = el.value
+  if (!box || box.clientWidth === 0 || box.clientHeight === 0) return false
+  chart.value = echarts.init(box)
+  return true
+}
+
 function render(): void {
-  if (!chart.value) return
+  if (!ensureChart()) return
   fitSize()
+  const c = chart.value
+  if (!c) return
+  // 等数据到齐再画：loading 或空数据时先清空，别 setOption 出一张空坐标轴
+  if (props.loading || !bars.value.length) {
+    c.clear()
+    return
+  }
   const xs = bars.value.map(b => b.key.slice(5))
-  chart.value.setOption(
+  c.setOption(
     {
       animationDuration: 220,
       grid: {left: 54, right: 12, top: 14, bottom: 24},
@@ -97,11 +120,13 @@ function render(): void {
 }
 
 onMounted(() => {
-  if (!el.value) return
-  chart.value = echarts.init(el.value)
   render()
-  ro = new ResizeObserver(() => fitSize())
-  ro.observe(el.value)
+  ro = new ResizeObserver(() => {
+    // 还没建图 = 容器之前没尺寸，现在可能露出来了 → 试着重来一次
+    if (!chart.value) render()
+    else fitSize()
+  })
+  ro.observe(el.value as Element)
 })
 
 watch(
@@ -123,7 +148,11 @@ onBeforeUnmount(() => {
       echarts 会拿 100×100 兜底且不再自己纠正（实测 canvas 死卡在 100px）。
     -->
     <div ref="el" class="trend" />
-    <p v-if="!bars.length" class="trend-none">这段时间没有调用记录</p>
+    <div v-if="loading" class="chart-overlay">
+      <span class="spin" />
+      加载中…
+    </div>
+    <p v-else-if="!bars.length" class="trend-none">这段时间没有调用记录</p>
   </div>
 </template>
 

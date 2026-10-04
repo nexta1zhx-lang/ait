@@ -310,9 +310,12 @@ defineExpose({load, loadTags})
     transform 0.12s ease;
 }
 
-.kb-card:hover {
-  border-color: var(--blue);
-  transform: translateY(-1px);
+/* 悬停：触屏不应用（全站约定，见 style.css 里 `.seg` 上面那段说明） */
+@media (hover: hover) {
+  .kb-card:hover {
+    border-color: var(--blue);
+    transform: translateY(-1px);
+  }
 }
 
 /* 顶边颜色跟走势：拉升绿 / 下跌红 / 横盘黄 */
@@ -448,9 +451,12 @@ defineExpose({load, loadTags})
   cursor: pointer;
 }
 
-.tag-chip:hover:not(:disabled) {
-  border-color: var(--blue);
-  color: var(--text);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .tag-chip:hover:not(:disabled) {
+    border-color: var(--blue);
+    color: var(--text);
+  }
 }
 
 .tag-chip.on {
@@ -475,8 +481,11 @@ defineExpose({load, loadTags})
   opacity: 0.6;
 }
 
-.tag-chip .x:hover {
-  opacity: 1;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .tag-chip .x:hover {
+    opacity: 1;
+  }
 }
 
 .tag-chip.clear {

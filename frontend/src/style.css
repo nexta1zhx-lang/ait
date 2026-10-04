@@ -247,6 +247,40 @@ summary,
 }
 
 /*
+ * 「长按不要出现选中文字效果」（用户 2026-10-04）。
+ *
+ * 手机上长按一段文字，浏览器会弹出**选择柄 + 放大镜 + 「复制 / 全选」菜单**。
+ * 在一个「看行情、看分析」的 App 里这全是干扰：想滚动或拖动，
+ * 结果手一抖就选中半屏字、还顶起一个系统菜单。所以触屏设备整站默认不可选。
+ *
+ * ⚠️ 为什么包在 `@media (hover: none)` 里而不是无条件写：PC 上还得能选中文字
+ *（把分析结论复制给别人看）。`hover: none` = 「当前没有真正的指针」，
+ * 也就是手机 / 平板 / App 里的 WebView —— 跟上面 hover 那套用的是同一个判据。
+ * ⚠️ 以后要让某一块可复制：给那个元素加 **`selectable`** 类（见下面那条），
+ * 别把这条全局规则删掉。
+ */
+@media (hover: none) {
+  html,
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    /* iOS：长按链接 / 文字的「弹出菜单」也一起关掉 */
+    -webkit-touch-callout: none;
+  }
+
+  /* 输入类放回来 —— 不然连自己填的搜索词都选不了、光标也没法挪 */
+  input,
+  textarea,
+  select,
+  [contenteditable],
+  .selectable {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
+}
+
+/*
  * ⚠️ 手机上「点两下整页就放大」——那是浏览器自带的**双击缩放**（viewport 里没禁）。
  * 这个页面能点的东西密密麻麻（历史分析的明细行、tab、按钮），连点一下就整页变大，
  * 看着就像「刚点的那个 tab 被放大了」（用户 2026-10-03：点击历史明细会放大 tab）。
@@ -377,8 +411,11 @@ a {
   white-space: nowrap;
 }
 
-.nav a:hover {
-  color: var(--text);
+/* 悬停：触屏不应用（否则点一下会一直粘着那个高亮） */
+@media (hover: hover) {
+  .nav a:hover {
+    color: var(--text);
+  }
 }
 
 /*
@@ -476,9 +513,12 @@ a {
   border-color: rgba(255, 183, 77, 0.4);
 }
 
-a.badge:hover {
-  border-color: var(--blue);
-  color: var(--blue);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  a.badge:hover {
+    border-color: var(--blue);
+    color: var(--blue);
+  }
 }
 
 /* ==================== 面板 ==================== */
@@ -593,8 +633,11 @@ button {
   font-family: inherit;
 }
 
-button:hover:not(:disabled) {
-  filter: brightness(1.08);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  button:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
 }
 
 button:disabled {
@@ -615,10 +658,13 @@ button.ghost {
   font-weight: var(--fw-mid);
 }
 
-button.ghost:hover:not(:disabled) {
-  border-color: var(--blue);
-  color: var(--blue);
-  filter: none;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  button.ghost:hover:not(:disabled) {
+    border-color: var(--blue);
+    color: var(--blue);
+    filter: none;
+  }
 }
 
 button.danger {
@@ -630,10 +676,13 @@ button.danger {
   font-weight: 400;
 }
 
-button.danger:hover {
-  color: var(--bad);
-  border-color: color-mix(in srgb, var(--bad) 50%, transparent);
-  filter: none;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  button.danger:hover {
+    color: var(--bad);
+    border-color: color-mix(in srgb, var(--bad) 50%, transparent);
+    filter: none;
+  }
 }
 
 /* 分段按钮 */
@@ -669,6 +718,12 @@ button.danger:hover {
  *  2. 手机点一下就**一直留着 :hover**（直到点别处），而点中的那一格正是要变活动的那个
  *     —— 高亮当场就没了，看起来就是「点哪个都不亮」。
  *     → 整条 hover 只用 `@media (hover: hover)` 包住，触屏设备根本不应用。
+ *
+ * ★★ **2026-10-04 起这是全站约定**（用户：「不需要 hover 效果」）：
+ *    所有 `:hover` 规则一律包进 `@media (hover: hover)` —— 触屏上手指按过之后
+ *    hover 态会一直粘着（直到点别处），看着就像「选中了」。
+ *    找全：`grep -n 'hover: hover' frontend/src`；写新样式时照同一个规矩：
+ *    `:hover` 的包进去，`:active`（按下去那一瞬的反馈）**不要包**。
  */
 @media (hover: hover) {
   .seg button:hover:not(:disabled):not(.active) {
@@ -712,6 +767,30 @@ button.danger:hover {
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--muted);
+}
+
+/*
+ * echarts 图容器上的「加载中 / 暂无数据」浮层。
+ * 盖在图上、容器尺寸不变 —— 这样不会因为藏起来（宽高 0）而让 echarts
+ * 拿 100×100 兜底、之后再也纠正不回来。
+ */
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+.chart-overlay .spin {
+  width: 20px;
+  height: 20px;
+  border-width: 2px;
 }
 
 .empty {
@@ -1429,8 +1508,11 @@ button.danger:hover {
   cursor: pointer;
 }
 
-.table th.sortable:hover {
-  color: var(--text);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .table th.sortable:hover {
+    color: var(--text);
+  }
 }
 
 .table th .ar {
@@ -1447,8 +1529,11 @@ button.danger:hover {
   white-space: nowrap;
 }
 
-.table tbody tr:hover td {
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .table tbody tr:hover td {
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
 }
 
 .table .r {
@@ -1626,10 +1711,17 @@ button.danger:hover {
 }
 
 /* 没排到的那一列：箭头淡着（只当「这里能点」的提示），排到的亮蓝色 */
-.mkt-head th.sortable .sbtn:hover svg {
-  opacity: 0.6;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .mkt-head th.sortable .sbtn:hover svg {
+    opacity: 0.6;
+  }
 }
 
+/*
+ * ⚠️ 下面这组的 `:hover` 变体**不要单独包 media** ——
+ * 它跟 `.sbtn.on svg` 是同一份声明，`:hover` 多了也只是同一个结果，不会「粘出另一个色」。
+ */
 .mkt-head th.sortable .sbtn.on svg,
 .mkt-head th.sortable .sbtn.on:hover svg {
   opacity: 1;
@@ -1749,9 +1841,12 @@ button.danger:hover {
   stroke-width: 2;
   stroke-linejoin: round;
 }
-.mkt-table .pin-b:hover {
-  opacity: 1;
-  background: rgba(255, 255, 255, 0.06);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .mkt-table .pin-b:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.06);
+  }
 }
 .mkt-table .pin-b.on {
   opacity: 1;
@@ -2451,8 +2546,11 @@ body.fixed-viewport .split {
   font-size: 11px;
 }
 
-.hist a:hover {
-  background: var(--panel-2, rgba(255, 255, 255, 0.04));
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .hist a:hover {
+    background: var(--panel-2, rgba(255, 255, 255, 0.04));
+  }
 }
 
 /*
@@ -2570,8 +2668,11 @@ body.fixed-viewport .split {
   text-decoration: none;
 }
 
-.hist-more a:hover {
-  text-decoration: underline;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .hist-more a:hover {
+    text-decoration: underline;
+  }
 }
 
 .col {
@@ -2716,9 +2817,12 @@ body.fixed-viewport .split {
   stroke-linejoin: round;
 }
 
-.tk-head .tk-cfg:hover {
-  color: var(--text);
-  border-color: var(--blue);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .tk-head .tk-cfg:hover {
+    color: var(--text);
+    border-color: var(--blue);
+  }
 }
 
 /* 提炼中：转圈遮罩（**不透明**，别让底下的行情穿透上来） */
@@ -2831,10 +2935,13 @@ body.fixed-viewport .split {
   cursor: pointer;
 }
 
-.chart-foot button.time-pick:hover {
-  color: var(--text);
-  border-color: var(--blue);
-  filter: none;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .chart-foot button.time-pick:hover {
+    color: var(--text);
+    border-color: var(--blue);
+    filter: none;
+  }
 }
 
 .chart-foot button.time-pick.set {
@@ -3164,9 +3271,12 @@ body.fixed-viewport .split {
   border: 1px solid transparent;
 }
 
-.legend [data-toggle]:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: var(--border);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .legend [data-toggle]:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--border);
+  }
 }
 
 .legend [data-toggle].off {
@@ -3598,19 +3708,25 @@ body.fixed-viewport .split {
   line-height: 1;
 }
 
-.combo-box > button:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.09);
-  filter: none;
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .combo-box > button:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.09);
+    filter: none;
+  }
 }
 
 .combo-box .combo-clear {
   right: 27px;
 }
 
-.combo-box .combo-clear:hover {
-  color: #ff8182;
-  background: rgba(255, 129, 130, 0.14);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .combo-box .combo-clear:hover {
+    color: #ff8182;
+    background: rgba(255, 129, 130, 0.14);
+  }
 }
 
 /* 展开箭头：做大一点，手机上也好点 */
@@ -3648,9 +3764,19 @@ body.fixed-viewport .split {
   font-variant-numeric: tabular-nums;
 }
 
-.combo-item:hover,
+/*
+ * `.hot`（键盘上下选中的那一项）跟 `:hover` 原本写在同一个选择器里，
+ * 这里得**拆开** —— 把整条包进 media 会把 `.hot` 的高亮也一起关掉。
+ */
 .combo-item.hot {
   background: var(--accent-soft);
+}
+
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .combo-item:hover {
+    background: var(--accent-soft);
+  }
 }
 
 .combo-empty {
@@ -3780,8 +3906,11 @@ body.fixed-viewport .split {
   color: var(--muted);
 }
 
-.adv summary:hover {
-  color: var(--text);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .adv summary:hover {
+    color: var(--text);
+  }
 }
 
 /* ==================== 用量页 ==================== */
@@ -3940,8 +4069,11 @@ body.fixed-viewport .split {
     filter 0.15s,
     transform 0.1s;
 }
-.dl-btn:hover {
-  filter: brightness(1.08);
+/* 悬停：触屏不应用（`:active` 那条下面留着 —— 触屏正是靠它给反馈） */
+@media (hover: hover) {
+  .dl-btn:hover {
+    filter: brightness(1.08);
+  }
 }
 .dl-btn:active {
   transform: scale(0.98);
@@ -4064,8 +4196,11 @@ body.fixed-viewport .split {
   text-decoration: none;
   transition: background 0.15s;
 }
-.dl-mini:hover {
-  background: var(--accent-soft);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .dl-mini:hover {
+    background: var(--accent-soft);
+  }
 }
 .dl-mini svg {
   width: 13px;
@@ -4176,9 +4311,12 @@ body.bare.fixed-viewport #app {
   cursor: pointer;
 }
 
-.chip:hover {
-  border-color: var(--blue);
-  color: var(--fg, #f0f1f3);
+/* 悬停：触屏不应用 */
+@media (hover: hover) {
+  .chip:hover {
+    border-color: var(--blue);
+    color: var(--fg, #f0f1f3);
+  }
 }
 
 .chip.on {
@@ -4261,10 +4399,13 @@ button.badge:disabled {
 }
 
 /* 悬停时保持自己的色系，别被通用的「悬停变蓝」盖掉 */
-button.badge.balance:hover:not(:disabled) {
-  filter: brightness(1.12);
-  color: inherit;
-  border-color: currentColor;
+/* 悬停：触屏不应用（否则点一下刷新后那颗徽标一直亮着） */
+@media (hover: hover) {
+  button.badge.balance:hover:not(:disabled) {
+    filter: brightness(1.12);
+    color: inherit;
+    border-color: currentColor;
+  }
 }
 
 /* ── 表格：允许换行的列 ── */

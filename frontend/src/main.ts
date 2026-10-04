@@ -26,4 +26,20 @@ setupNativeShell()
  */
 setupAndroidBack(router)
 
+/*
+ * 触屏专属的收尾：**长按不要弹系统菜单**。
+ *
+ * 用户 2026-10-04：「长按不需要出现选中文字效果」。
+ * 文字本身已经在 `style.css` 里做成不可选（`@media (hover: none)` 那一段），
+ * 但长按**链接**（导航、历史明细行都是 `<a>`）时 Android WebView 照样会弹一个
+ * 系统菜单（打开 / 复制链接 / 选词），看着就不是原生 App。所以这里一并挡掉。
+ *
+ * ⚠️ 只在 `hover: none`（没有真正的指针）时挂 —— PC 上的右键菜单不能动。
+ * ⚠️ 项目里**没有**自己实现的右键菜单（`grep contextmenu` 是空的），所以挡掉不亏；
+ *    以后真要加自定义右键菜单，记得把这里改成「只挡链接」之类的条件。
+ */
+if (window.matchMedia('(hover: none)').matches) {
+  window.addEventListener('contextmenu', e => e.preventDefault())
+}
+
 app.mount('#app')

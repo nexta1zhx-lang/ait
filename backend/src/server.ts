@@ -2807,7 +2807,8 @@ async function route(
         openOrders: null,
         orders: null,
         income: null,
-        balanceError: '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）',
+        balanceError:
+          '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）',
         positionsError: null,
         openOrdersError: null,
         ordersError: null,
