@@ -22,7 +22,6 @@ import {
 } from './exchangeMock'
 
 const picked = ref(1)
-const symbol = ref('')
 
 const data = computed(
   () => MOCK_ACCOUNTS.find(a => a.value === picked.value)?.data ?? null
@@ -46,13 +45,11 @@ const hasData = computed(() => (data.value?.futures.positions.length ?? 0) > 0)
     </div>
 
     <ExchangeAccountBoard
-      v-model:symbol="symbol"
       :data="data"
       :open-orders="hasData ? MOCK_OPEN_ORDERS : []"
       :trades="hasData ? MOCK_TRADES : []"
       :income="hasData ? MOCK_INCOME : []"
       @refresh="() => {}"
-      @search="() => {}"
     />
   </div>
 </template>

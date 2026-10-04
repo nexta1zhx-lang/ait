@@ -20,7 +20,6 @@ import {
 } from '../comps/exchangeMock'
 
 const picked = ref(1)
-const symbol = ref('')
 /** 手机宽度 / 宽栏，两种排版对比着看 */
 const wide = ref(false)
 
@@ -57,13 +56,11 @@ const hasTrades = computed(
 
     <div class="stage" :class="{wide}">
       <ExchangeAccountBoard
-        v-model:symbol="symbol"
         :data="data"
         :open-orders="hasTrades ? MOCK_OPEN_ORDERS : []"
         :trades="hasTrades ? MOCK_TRADES : []"
         :income="hasTrades ? MOCK_INCOME : []"
         @refresh="() => {}"
-        @search="() => {}"
       />
     </div>
   </div>

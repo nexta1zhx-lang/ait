@@ -5,13 +5,20 @@
  *   · USDT 合约（USDⓈ-M）—— `GET /fapi/v2/account`（余额 + 多资产明细）+ `fetchPositions()`
  *   · C2C 钱包 —— `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true`
  *
- * ⚠️ 实测踩到的三个坑（别再踩）：
- *   ① 接口里 **C2C 钱包的 `walletName` 实际叫 `Funding`** —— 返回的 10 个钱包
- *      （Spot / Funding / Cross Margin / … / Copy Trading）里**没有 "C2C"**，
- *      按名字找 C2C 会静默拿不到数据。
- *   ② `/fapi/v2/account` 的 `positions[]` **没有 `markPrice` / 强平价**（有 `notional`），
+ * ⚠️⚠️ 实测踩到的四个坑（别再踩）：
+ *   ① **C2C 钱包的名字各账号不一样**：文档写 `walletName` 返回 `"C2C"`，实际这台
+ *      账号返回的是 **`"Funding"`**（10 个钱包：Spot / Funding / Cross Margin / …
+ *      / Copy Trading）。**两个名字都得认**（`/^(c2c|funding)$/i`），只写一个
+ *      就会静默拿不到数据（不报错，数字直接是 0）。
+ *   ②⚠️ **`assetBalances[]` 里没有 `balance` 字段！** 每个币种的钱分散在
+ *      `free` / `locked` / `freeze` / `withdrawing` 四个**字符串**字段里
+ *      （还有 `assetName` / `btcValuation`）。读 `b.balance` 恒等于 0 →
+ *      再被「零余额过滤」一扫就什么都不剩了（2026-10-05 真丢过用户 9.92 USDT）。
+ *      ⇒ 金额 = free + locked + freeze + withdrawing。
+ *      ⚠️ 另外注意钱包**层级**那个 `balance` 是 **BTC 估值**，不是 USDT。
+ *   ③ `/fapi/v2/account` 的 `positions[]` **没有 `markPrice` / 强平价**（有 `notional`），
  *      所以持仓改走 ccxt 的 `fetchPositions()` → `/fapi/v2/positionRisk`。
- *   ③ `positions[]` 会返回**全部 920 个槽位**（绝大多数 `positionAmt = 0`），必须过滤。
+ *   ④ `positions[]` 会返回**全部 920 个槽位**（绝大多数 `positionAmt = 0`），必须过滤。
  *
  * 一次调用打 3 个请求（account / positionRisk / sapi wallet），**共用一个 exchange 实例**
  * —— 不要每块各 createExchange 一遍，那样每次都要 loadMarkets（一两秒）。
@@ -164,19 +171,33 @@ async function valueInUsdt(
 }
 
 /**
- * C2C 钱包（币安里叫 **Funding**，见文件头 ①）。
+ * 一个 `assetBalances[]` 条目里**到底有多少钱**。
+ *
+ * ⚠️ 这里没有 `balance` 这个字段（踩过：读它恒为 0，用户的 9.92 USDT 直接不见了）。
+ *    币安把金额拆成四个**字符串**字段：可用 / 挂单锁定 / 冻结 / 提现中，
+ *    加起来才是这个币的真实持仓。
+ */
+function assetAmount(b: any): number {
+  const sum = n(b?.free) + n(b?.locked) + n(b?.freeze) + n(b?.withdrawing)
+  // 兼容别的交易所 / 以后币安改版：上面四个都拿不到时才看 balance
+  return sum !== 0 ? sum : n(b?.balance)
+}
+
+/**
+ * C2C 钱包。
+ *
+ * ⚠️ 名字要认两个：文档写 `"C2C"`，实测有账号返回 `"Funding"`（见文件头 ①）。
  * 不是币安 / ccxt 没有 sapi 方法 ⇒ 返回 null（界面显示「这个账户没有 C2C 钱包」）。
  */
 async function fetchC2c(ex: any): Promise<ExchangeOverview['c2c']> {
   if (typeof ex.sapiGetAssetWalletBalance !== 'function') return null
   const raw: any = await ex.sapiGetAssetWalletBalance({needBalanceDetail: true})
   const list: any[] = Array.isArray(raw) ? raw : (raw?.wallets ?? [])
-  // ⚠️ 按 Funding 认，不是按 "C2C" 认
-  const w = list.find(x => /^funding$/i.test(String(x?.walletName ?? '')))
+  const w = list.find(x => /^(c2c|funding)$/i.test(String(x?.walletName ?? '').trim()))
   if (!w) return null
 
   const balances = (Array.isArray(w.assetBalances) ? w.assetBalances : [])
-    .map((b: any) => ({currency: String(b?.asset ?? ''), amount: n(b?.balance)}))
+    .map((b: any) => ({currency: String(b?.asset ?? ''), amount: assetAmount(b)}))
     .filter((b: any) => b.currency && b.amount !== 0)
     .sort((a: any, b: any) => b.amount - a.amount)
 

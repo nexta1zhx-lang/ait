@@ -7,89 +7,17 @@
  *   · C2C 钱包 —— `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true`
  *   ⇒ **现货（Spot 钱包）不参与统计**，老版那套「按币种估值的现货余额列表」不要了。
  *
- * ⚠️ `ExchangeOverview` 这个类型是**拟定**的接口形状（用来先摆界面）：
- *    定稿之后挪进 `frontend/src/api.ts`，跟后端 `/api/exchange/overview` 对齐。
- *    字段名尽量贴币安原文（`totalWalletBalance` → `wallet` 这种只是去掉前缀），
- *    以后对不上时好查。
+ * ⚠️ 2026-10-05（M3）：**类型已经定稿并挪进 `frontend/src/api.ts`**，
+ *    跟后端 `/api/exchange/overview` 逐字对齐。这个文件从此**只负责造数据**
+ *    给预览页用（接口字段一改，api.ts 那边就会编译不过 —— 这正是当初想要的约束）。
+ * ⚠️ 上线前要删：这个文件 + `ExchangeAccountMockPanel.vue` + `/preview/account` 预览页。
  */
-
-/** 合约账户里的**多资产**明细（`fapi/v2/account.assets[]`） */
-export interface FuturesAsset {
-  asset: string
-  /** walletBalance */
-  wallet: number
-  /** availableBalance */
-  available: number
-  /** unrealizedProfit */
-  unrealized: number
-}
-
-/** 一个仓位（`fapi/v2/account.positions[]` 里 `positionAmt != 0` 的那些） */
-export interface FuturesPosition {
-  symbol: string
-  /** long / short（币安 `positionSide` 是 LONG/SHORT/BOTH，这里统一成小写） */
-  side: string
-  /** positionAmt 的绝对值 */
-  amount: number
-  /** 名义价值 = |positionAmt| × markPrice */
-  notional: number
-  entryPrice: number
-  markPrice: number
-  liquidationPrice: number | null
-  leverage: number
-  unrealizedPnl: number
-  /** ROE %（交易所给的，或 未实现盈亏 / 起始保证金） */
-  percentage: number | null
-}
-
-/** 一条快照 —— **落库的那一份**（见 `/memories/repo/exchange-module.md` 的架构说明） */
-export interface ExchangeOverview {
-  apiKeyId: number
-  /** 这套 Key 的展示信息（脱敏后，前端要显示「币安 · 主号」） */
-  account: {
-    exchange: string
-    name: string
-    sandbox: boolean
-    marketType: string
-  }
-  /** 快照时间（ISO）—— 前端拿它算「几分钟前」，**先渲染这一份再后台刷新** */
-  takenAt: string
-
-  /** USDT 合约（`fapi/v2/account` + `/fapi/v2/balance`） */
-  futures: {
-    /** totalWalletBalance：钱包余额（不含浮盈） */
-    wallet: number
-    /** totalUnrealizedProfit：未实现盈亏 */
-    unrealized: number
-    /** totalMarginBalance：保证金余额 = 钱包 + 浮盈 ⇒ 界面上那个大数 */
-    margin: number
-    /** availableBalance：可用 */
-    available: number
-    /** 占用 = margin − available（推导值，接口没直接给） */
-    used: number
-    assets: FuturesAsset[]
-    positions: FuturesPosition[]
-  }
-
-  /** C2C 钱包（`sapi/v1/asset/wallet/balance`）—— 没接通的账户给 null */
-  c2c: {
-    active: boolean
-    /** 折 USDT 合计（USDT 按 1，其它币查价折算） */
-    totalUsdt: number
-    /** `assetBalances`（needBalanceDetail=true 才有） */
-    assets: {asset: string; balance: number; usdt: number | null}[]
-  } | null
-
-  /** 仓位统计（从 positions 推，后端算好省得前端重复算） */
-  stats: {
-    longCount: number
-    shortCount: number
-    /** 所有仓位的名义价值之和 */
-    notional: number
-    /** 未实现盈亏之和 */
-    unrealized: number
-  }
-}
+import type {
+  ExchangeOpenOrder,
+  ExchangeOverview,
+  ExchangeTrade,
+  FuturesPosition
+} from '../api'
 
 /* ---------------- 造数据 ---------------- */
 
@@ -140,7 +68,6 @@ const POSITIONS: FuturesPosition[] = [
 
 /** 合约 + C2C 都有的「正常账户」 */
 export const MOCK_FULL: ExchangeOverview = {
-  apiKeyId: 1,
   account: {
     exchange: 'binance',
     name: '币安 · 主号',
@@ -174,7 +101,6 @@ export const MOCK_FULL: ExchangeOverview = {
 
 /** 没开仓、只有钱包余额（也在用 C2C 收付款的那种） */
 export const MOCK_FLAT: ExchangeOverview = {
-  apiKeyId: 2,
   account: {
     exchange: 'binance',
     name: '币安 · 小号',
@@ -201,7 +127,6 @@ export const MOCK_FLAT: ExchangeOverview = {
 
 /** 刚绑上：合约没入金、C2C 钱包也没激活 */
 export const MOCK_EMPTY: ExchangeOverview = {
-  apiKeyId: 3,
   account: {
     exchange: 'okx',
     name: 'OKX 备用',
@@ -233,29 +158,7 @@ export const MOCK_ACCOUNTS: {
   {value: 3, label: 'OKX · 空账户', data: MOCK_EMPTY}
 ]
 
-/* ---------------- 下面这些不进快照：按需查、单独拉 ---------------- */
-
-export interface ExchangeOpenOrder {
-  id: string
-  symbol: string
-  side: string
-  type: string
-  price: number
-  amount: number
-  datetime: string | null
-}
-
-export interface ExchangeTrade {
-  id: string
-  symbol: string
-  side: string
-  price: number
-  amount: number
-  cost: number
-  fee: number
-  feeCurrency: string
-  datetime: string | null
-}
+/* ---------------- 下面这些不进快照：按需查 / 读账本 ---------------- */
 
 /** 当前挂单（`fapi/v1/openOrders`，不需要交易对） */
 export const MOCK_OPEN_ORDERS: ExchangeOpenOrder[] = [
@@ -297,7 +200,7 @@ export const MOCK_OPEN_ORDERS: ExchangeOpenOrder[] = [
   }
 ]
 
-/** 成交（`fapi/v1/allOrders` / `userTrades`，**必须带交易对**，所以是慢接口） */
+/** 成交（账本里的一笔：WS 实时落 + 断线后 REST 补，**不需要交易对**） */
 export const MOCK_TRADES: ExchangeTrade[] = [
   {
     id: '1001',
@@ -308,6 +211,7 @@ export const MOCK_TRADES: ExchangeTrade[] = [
     cost: 846.2,
     fee: 0.42,
     feeCurrency: 'USDT',
+    realized: 245.8,
     datetime: '2026-10-05T10:12:03.000Z'
   },
   {
@@ -319,6 +223,7 @@ export const MOCK_TRADES: ExchangeTrade[] = [
     cost: 510.66,
     fee: 0.26,
     feeCurrency: 'USDT',
+    realized: -120.4,
     datetime: '2026-10-05T09:58:31.000Z'
   },
   {
@@ -330,6 +235,7 @@ export const MOCK_TRADES: ExchangeTrade[] = [
     cost: 1006.56,
     fee: 0.5,
     feeCurrency: 'USDT',
+    realized: 156.2,
     datetime: '2026-10-05T09:31:12.000Z'
   },
   {
@@ -341,6 +247,7 @@ export const MOCK_TRADES: ExchangeTrade[] = [
     cost: 5402.1,
     fee: 2.7,
     feeCurrency: 'USDT',
+    realized: 52.7,
     datetime: '2026-10-05T08:44:50.000Z'
   }
 ]

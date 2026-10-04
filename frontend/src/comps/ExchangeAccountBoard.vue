@@ -21,36 +21,27 @@
  */
 import {computed, ref} from 'vue'
 import {
+  type ExchangeIncomeRow,
   type ExchangeOpenOrder,
   type ExchangeOverview,
   type ExchangeTrade
-} from './exchangeMock'
+} from '../api'
 import {bjTime, fixed, fmt} from '../format'
 import SegTabs from './SegTabs.vue'
 
-/** 已实现盈亏那种「一条一条」的形状 */
-export interface IncomeRow {
-  symbol: string
-  income: number
-  time: string | null
-}
-
 const props = defineProps<{
   data: ExchangeOverview | null
-  /** 下面三块是**慢接口**，按需查，单独传（可能还没拉到 / 单独失败） */
+  /** 挂单是**打交易所按需查**的（慢），单独传（可能还没拉到 / 单独失败） */
   openOrders?: ExchangeOpenOrder[]
+  /** 成交/盈亏来自**后端账本**（WS 实时落 + 断线后 REST 补） */
   trades?: ExchangeTrade[]
-  income?: IncomeRow[]
-  /** 挂单 / 成交 正在拉（慢接口，单独转圈） */
+  income?: ExchangeIncomeRow[]
+  /** 挂单正在拉（慢接口，单独转圈） */
   loadingOrders?: boolean
-  /** 交易对搜索框的值（受控） */
-  symbol?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'refresh'): void
-  (e: 'search', symbol: string): void
-  (e: 'update:symbol', v: string): void
 }>()
 
 const acct = computed(() => props.data?.account ?? null)
@@ -417,30 +408,17 @@ function posText(side: string): string {
             </li>
           </ul>
         </template>
-        <p v-else class="dim">还没有已实现盈亏（币安合约才有这一项）</p>
+        <p v-else class="dim">
+          还没有已实现盈亏（有成交后会自动记进账本）
+        </p>
       </section>
 
-      <!-- 成交 -->
+      <!-- 成交（后端账本：WS 实时落 + 断线后 REST 补） -->
       <section v-show="tab === 'trades'" class="panel">
         <div class="pn-h">
           <h2>最近成交</h2>
           <span class="spacer" />
-          <span class="dim tiny">需要交易对（按需查）</span>
-        </div>
-        <div class="ord-search">
-          <input
-            :value="symbol ?? ''"
-            type="text"
-            spellcheck="false"
-            placeholder="交易对，如 BTCUSDT"
-            @input="
-              emit('update:symbol', ($event.target as HTMLInputElement).value)
-            "
-            @keyup.enter="emit('search', symbol ?? '')"
-          />
-          <button class="ghost tiny" @click="emit('search', symbol ?? '')">
-            查
-          </button>
+          <span class="dim tiny">实时记账本</span>
         </div>
         <ul v-if="trades?.length" class="rows trades">
           <li v-for="t in trades" :key="t.id">
@@ -463,7 +441,7 @@ function posText(side: string): string {
             </div>
           </li>
         </ul>
-        <p v-else class="dim">填个交易对再点「查」</p>
+        <p v-else class="dim">还没有成交记录（下单成交后会自动记进来）</p>
       </section>
 
       <!-- 资产明细（合约多资产 + C2C 钱包） -->
@@ -496,7 +474,9 @@ function posText(side: string): string {
             }}</span>
           </li>
         </ul>
-        <p v-else class="dim">这个账户没有 C2C 钱包</p>
+        <p v-else class="dim">
+          {{ c2c ? 'C2C 钱包是空的' : '这个账户没有 C2C 钱包' }}
+        </p>
       </section>
     </template>
 
@@ -834,18 +814,5 @@ function posText(side: string): string {
 .num {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-}
-.ord-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.ord-search input {
-  flex: 1 1 auto;
-  min-width: 0;
-  box-sizing: border-box;
-  padding: 8px 10px;
-  font-size: 13px;
 }
 </style>

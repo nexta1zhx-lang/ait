@@ -268,7 +268,7 @@ function requiresSymbol(e: unknown): boolean {
  * 把 ccxt 的英文报错翻成人能看的中文（认不出就原样回）。
  * 这几条是绑 Key 时最常撞的。
  */
-function humanize(e: unknown): string {
+export function humanize(e: unknown): string {
   const m = (e as Error)?.message ?? String(e)
   if (/signature|invalid api-key|api[- ]?key.*(invalid|not exist)/i.test(m))
     return 'API Key / Secret 不对（或复制时多了空格）'

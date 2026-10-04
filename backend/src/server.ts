@@ -98,9 +98,14 @@ import {
   updateExchangeKey,
   type ExchangeKey
 } from './db/exchange-keys'
-import {EXCHANGE_CATALOG, fetchExchangeAccount} from './data/exchange-account'
+import {
+  EXCHANGE_CATALOG,
+  fetchExchangeAccount,
+  fetchOpenOrders,
+  humanize
+} from './data/exchange-account'
 import {fetchExchangeOverview} from './data/exchange-overview'
-import {latestSnapshot, saveSnapshot} from './db/exchange-store'
+import {latestSnapshot, listFills, saveSnapshot} from './db/exchange-store'
 import {
   startExchangeStreams,
   startSnapshotSampler,
@@ -2980,6 +2985,7 @@ async function route(
       return sendJson(res, 200, {
         account,
         noSnapshot: true,
+        canRefresh: false,
         reason: '这套账户是现货，不参与统计（只算 USDT 合约 + C2C）'
       })
     }
@@ -2987,6 +2993,7 @@ async function route(
       return sendJson(res, 200, {
         account,
         noSnapshot: true,
+        canRefresh: false,
         reason: '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）'
       })
     }
@@ -2999,6 +3006,8 @@ async function route(
           return sendJson(res, 200, {
             account,
             noSnapshot: true,
+            /* 只是还没采过 —— 跟「现货/没填 key」不同，这个刷一下就有的 （前端据此自动拉一次） */
+            canRefresh: true,
             reason: '还没采过这个账户（点一下刷新）'
           })
         }
@@ -3057,6 +3066,72 @@ async function route(
   }
 
   /*
+   * 成交账本（WS 实时落 + 断线后 REST 补）—— **不需要交易对**。
+   * 老接口「币安必须给交易对才能查成交」那套已经不需要了（M3）。
+   */
+  if (p === '/api/exchange/fills' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    try {
+      const fills = await listFills(
+        me.id,
+        key.id,
+        num(url.searchParams.get('limit')) ?? 60
+      )
+      return sendJson(res, 200, {fills})
+    } catch (e) {
+      return fail(res, 'exchange/fills', e)
+    }
+  }
+
+  /*
+   * 当前挂单 —— **按需打交易所**，不进快照：
+   * 挂单是秒级变化的东西，存下来只会是过期数据（方案里的「实时层」）。
+   * 慢接口（~1s），所以失败也回 200 + `error`，不让整页空着（跟老接口同一个风格）。
+   */
+  if (p === '/api/exchange/open-orders' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret) {
+      return sendJson(res, 200, {
+        openOrders: null,
+        error: '这一套还没填 API Key'
+      })
+    }
+    try {
+      const rows = await fetchOpenOrders({
+        exchange: key.exchange,
+        apiKey: key.apiKey,
+        secret: key.secret,
+        password: key.password,
+        marketType: key.marketType,
+        sandbox: key.sandbox
+      })
+      /* 只回界面要用的七个字段（cost/status 这些挂单列表不显示） */
+      return sendJson(res, 200, {
+        openOrders: rows.map(o => ({
+          id: o.id,
+          symbol: o.symbol,
+          side: o.side,
+          type: o.type,
+          price: o.price,
+          amount: o.amount,
+          datetime: o.datetime
+        })),
+        error: null
+      })
+    } catch (e) {
+      return sendJson(res, 200, {openOrders: null, error: humanize(e)})
+    }
+  }
+
+  /*
    * 交易所资产 · 实时推送（SSE，M2）—— 事件语义见 `handleExchangeStream`。
    * 认证走 `?token=`（EventSource 发不了请求头），见 `bearerToken`。
    */
@@ -3067,7 +3142,7 @@ async function route(
       : await getDefaultExchangeKey(me.id)
     if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
     /*
-     * 不参与统计的两种情况**用 SSE 事件拒绕**，不回 JSON：
+     * 不参与统计的两种情况**用 SSE 事件拒绝**，不回 JSON：
      * EventSource 拿到非 SSE 响应只会静默重连，前端连原因都看不到，
      * 只能干看着它每 3 秒重试一次。
      */

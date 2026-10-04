@@ -170,6 +170,57 @@ export async function upsertFill(
   return rows.length > 0
 }
 
+/** 成交 tab 用的一行（数值都转回 number —— pg 的 NUMERIC 出来是字符串） */
+export interface FillRow {
+  /** 就是 `trade_id`，前端拿它当列表 key + 去重 */
+  id: string
+  symbol: string
+  side: string
+  price: number
+  amount: number
+  cost: number
+  fee: number
+  feeCurrency: string
+  /** 这一笔的已实现盈亏（「盈亏」tab 就是把它按币加起来的） */
+  realized: number
+  datetime: string | null
+}
+
+/**
+ * 账本里最近的成交。
+ *
+ * ⚠️ **不需要交易对** —— 这是 WS 实时落下来的（断线那段还有 REST 补），
+ *    跟老接口「币安必须给交易对才能查成交」完全是两码事。
+ */
+export async function listFills(
+  userId: number,
+  keyId: number,
+  limit = 60
+): Promise<FillRow[]> {
+  const cap = Math.min(500, Math.max(1, Math.round(limit) || 60))
+  const rows = await query<Record<string, unknown>>(
+    `SELECT trade_id, symbol, side, price, amount, cost, fee, fee_ccy,
+            realized, ts
+       FROM exchange_fills
+      WHERE user_id = $1 AND key_id = $2
+      ORDER BY ts DESC
+      LIMIT $3`,
+    [userId, keyId, cap]
+  )
+  return rows.map(r => ({
+    id: String(r.trade_id ?? ''),
+    symbol: String(r.symbol ?? ''),
+    side: String(r.side ?? ''),
+    price: num(r.price),
+    amount: num(r.amount),
+    cost: num(r.cost),
+    fee: num(r.fee),
+    feeCurrency: String(r.fee_ccy ?? ''),
+    realized: num(r.realized),
+    datetime: r.ts ? new Date(String(r.ts)).toISOString() : null
+  }))
+}
+
 /** 读最新一条（接口「秒开」靠它；不打交易所） */
 export async function latestSnapshot(
   userId: number,

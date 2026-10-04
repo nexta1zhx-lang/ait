@@ -25,7 +25,7 @@ import MarketPanel from '../comps/MarketPanel.vue'
  * 后端 `/api/exchange/overview` 做好后换回真容器，详见
  * `comps/ExchangeAccountMockPanel.vue` 顶部说明。
  */
-import ExchangeAccountMockPanel from '../comps/ExchangeAccountMockPanel.vue'
+import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
 import SettingsSheet from '../comps/SettingsSheet.vue'
 import SegTabs from '../comps/SegTabs.vue'
@@ -1019,7 +1019,7 @@ const heatRows = computed(() => {
              （用户 2026-10-05：「只统计 USDT 合约 + C2C，不算现货」）
              ⚠️ 现阶段里面是**模拟数据**（还没接 `/api/exchange/overview`）。 -->
         <div v-else-if="leftTab === 'exchange'" class="scroll-body">
-          <ExchangeAccountMockPanel />
+          <ExchangeAccountLivePanel />
         </div>
 
         <!-- ② 历史分析：只在切到这个 tab 时显示 -->

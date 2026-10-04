@@ -716,6 +716,196 @@ export const fetchExchangeAccount = (
       (symbol ? `&symbol=${encodeURIComponent(symbol)}` : '')
   )
 
+/* ---------------- 交易所资产（新版：只算 USDT 合约 + C2C，2026-10-05） ---------------- */
+
+/**
+ * 为什么是这一套（用户定）：**只统计两个钱包，现货不参与**——
+ *   · USDT 合约（USDⓈ-M）`fapi/v2/account`
+ *   · C2C 钱包（⚠️ 接口里它叫 `Funding`）
+ *
+ * 数字不是每次现拉，而是**后端落库的快照**：先渲染上一份（毫秒级）、
+ * 旧了再后台刷新（stale-while-revalidate），所以界面上永远要显示「几分钟前」。
+ * WS 一旦有动静（下单/成交/余额变动），后端会立刻落一条并推过来（`exchangeStream`）。
+ */
+
+/** 合约账户里的多资产明细（`fapi/v2/account.assets[]`） */
+export interface FuturesAsset {
+  asset: string
+  /** walletBalance */
+  wallet: number
+  available: number
+  unrealized: number
+}
+
+/**
+ * 一个仓位。
+ * ⚠️ `amount` 就是 ccxt 的 `contracts`（仓量绝对值）—— 故意不叫 contracts，
+ *    免得跟下面 `ExchangePositionRow` 那套老接口混起来。
+ */
+export interface FuturesPosition {
+  symbol: string
+  /** long / short */
+  side: string
+  amount: number
+  notional: number
+  entryPrice: number
+  markPrice: number
+  liquidationPrice: number | null
+  leverage: number
+  unrealizedPnl: number
+  /** ROE %（相对保证金） */
+  percentage: number | null
+}
+
+/** 一份快照 —— 后端落库后读回来的那份（见 `docs/EXCHANGE.md`） */
+export interface ExchangeOverview {
+  /** 这套 Key 的展示信息（脱敏；真凭据只在服务端） */
+  account: {exchange: string; name: string; sandbox: boolean; marketType: string}
+  /** 采集时间（ISO）—— 界面拿它算「几分钟前」 */
+  takenAt: string
+  futures: {
+    /** 钱包余额（不含浮盈） */
+    wallet: number
+    unrealized: number
+    /** 保证金余额 = 钱包 + 浮盈（净资产里合约那一半） */
+    margin: number
+    available: number
+    /** 占用 = margin − available（后端推导，接口没直接给） */
+    used: number
+    /** ⚠️ 普通 U 本位账户**只有 USDT 一行**，别假设有很多币 */
+    assets: FuturesAsset[]
+    positions: FuturesPosition[]
+  }
+  /** C2C 钱包；不是币安 / 没接通就是 null */
+  c2c: {
+    active: boolean
+    totalUsdt: number
+    assets: {asset: string; balance: number; usdt: number | null}[]
+  } | null
+  /** 仓位统计（后端算好，前端不重复算） */
+  stats: {
+    longCount: number
+    shortCount: number
+    notional: number
+    unrealized: number
+  }
+}
+
+/** 当前挂单（`fapi/v1/openOrders`，**不需要交易对**） */
+export interface ExchangeOpenOrder {
+  id: string
+  symbol: string
+  side: string
+  type: string
+  price: number
+  amount: number
+  datetime: string | null
+}
+
+/**
+ * 一笔成交 —— 来自**后端账本**（WS 实时落 + 断线后 REST 补），
+ * 所以不需要交易对，也不是「点一下查一次」。
+ */
+export interface ExchangeTrade {
+  id: string
+  symbol: string
+  side: string
+  price: number
+  amount: number
+  cost: number
+  fee: number
+  feeCurrency: string
+  /** 这一笔的已实现盈亏（「盈亏」tab 就是把它按币加起来） */
+  realized: number
+  datetime: string | null
+}
+
+/**
+ * `/api/exchange/overview` 与 `/api/exchange/refresh` 的响应。
+ *
+ * ⚠️ 三种「没数据」都**不算错误**，用 `noSnapshot + reason` 表达：
+ *    现货账户（不参与统计）/ 还没填 Key / 一次都还没采过。
+ *    前两种 `canRefresh: false`（刷也没用），第三种是 `true`（刷一下就有）。
+ */
+export interface ExchangeSnapshotResult {
+  account: ExchangeKey
+  noSnapshot: boolean
+  /** 刷一下能不能解决（现货 / 没填 key 就是 false） */
+  canRefresh?: boolean
+  overview?: ExchangeOverview
+  /** 这条快照是谁写的：boot / ws / poll / manual / shutdown … */
+  source?: string
+  ageSec?: number
+  /** 超过 5 分钟（采样间隔）→ 该去 refresh 了 */
+  stale?: boolean
+  /** 采集时某一侧失败留下的原因（有值 = 这条数据不完整） */
+  err?: string | null
+  reason?: string
+}
+
+/** 读库里**最新一条快照**（毫秒级，不打交易所） */
+export const fetchExchangeOverview = (id?: number) =>
+  get<ExchangeSnapshotResult>(`/api/exchange/overview${id ? `?id=${id}` : ''}`)
+
+/** 现在去拉一次 + 落库（慢，约 2 秒；用户点 ⟳ 用） */
+export const refreshExchangeOverview = (id?: number) =>
+  post<ExchangeSnapshotResult>(
+    `/api/exchange/refresh${id ? `?id=${id}` : ''}`,
+    {}
+  )
+
+/** 读成交账本（WS 实时 + 断线补，**不需要交易对**） */
+export const fetchExchangeFills = (id?: number, limit = 60) =>
+  get<{fills: ExchangeTrade[]}>(
+    `/api/exchange/fills?limit=${limit}${id ? `&id=${id}` : ''}`
+  )
+
+/**
+ * 当前挂单（**打交易所**，按需查）。
+ * 失败时 `openOrders` 是 null、`error` 有原因 —— 别把失败当成「没有挂单」。
+ */
+export const fetchExchangeOpenOrders = (id?: number) =>
+  get<{openOrders: ExchangeOpenOrder[] | null; error: string | null}>(
+    `/api/exchange/open-orders${id ? `?id=${id}` : ''}`
+  )
+
+/**
+ * 订阅「交易所资产」实时推送（SSE）。
+ *
+ * 事件：
+ *   `snapshot` 最新快照 —— 载荷跟 `fetchExchangeOverview` **一模一样**，直接替换
+ *   `fill`     新成交 → 插到成交列表最前面（实时下单能当场看见）
+ *   `backfill` 后端用 REST 补了一批断线期间的成交 → 重拉一次成交列表
+ *   `reject`   这套账户不参与统计（现货 / 没填 Key）→ ⚠️ **上层必须关掉订阅**：
+ *              `liveSse` 不知道「这条流永远不会有数据了」，EventSource 会一直重连。
+ *
+ * 心跳（`heartbeat`）由 `liveSse` 自己吃掉，不会传上来。
+ */
+export function exchangeStream(
+  id: number | undefined,
+  on: {
+    snapshot?: (r: ExchangeSnapshotResult) => void
+    fill?: (t: ExchangeTrade) => void
+    backfill?: (added: number) => void
+    reject?: (reason: string) => void
+    /** 断够了时间又连回来 → 重拉底稿（补断线期间漏的） */
+    reconnect?: () => void
+  }
+): () => void {
+  return liveSse(
+    `/api/exchange/stream${id ? `?id=${id}` : ''}`,
+    ['snapshot', 'fill', 'backfill', 'reject'],
+    (name, data) => {
+      const d = data as Record<string, unknown> | null
+      if (name === 'snapshot') on.snapshot?.(data as ExchangeSnapshotResult)
+      else if (name === 'fill') on.fill?.(data as ExchangeTrade)
+      else if (name === 'backfill') on.backfill?.(Number(d?.added ?? 0))
+      else if (name === 'reject') on.reject?.(String(d?.reason ?? ''))
+    },
+    {onReconnect: on.reconnect}
+  )
+}
+
 /** 改自己的用户名（「个人信息」页） */
 export const authRename = (username: string) =>
   post<{ok: boolean; user: AuthUser}>('/api/auth/profile', {username})
