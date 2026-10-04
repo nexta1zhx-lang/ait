@@ -58,11 +58,24 @@ export interface LatestArgs {
 }
 
 interface Entry {
+  /**
+   * 建这个条目时用的参数（交易所 / 币 / 周期 / 市场类型 / apiBase）。
+   *
+   * ⚠️ 后台保活（`startKlineKeepWarm`）要按它去补尾巴 —— 光有一个 key 拼不回参数。
+   */
+  args: LatestArgs
   candles: Candle[]
   /** 上次**成功**取数的时间（`TAIL_MAX_AGE` 用它） */
   at: number
   /** 正在飞的刷新：同一个 key 复用它，并发用户不会把同一份数据取 N 遍 */
   inflight: Promise<void> | null
+  /**
+   * 上次「补了尾巴但最后一根没往前走」的时刻。
+   *
+   * ⚠️ 保活靠「最后一根是不是旧了」判断该不该补 —— 但**停牌 / 下架的币新数据永远长不出来**，
+   *    不拦一下就会每 10 秒去问一次上游（白烧权重）。所以补完没变化就退避一段。
+   */
+  stuckAt?: number
 }
 
 const store = new Map<string, Entry>()
@@ -176,7 +189,7 @@ export async function getLatestCandles(a: LatestArgs): Promise<Candle[]> {
   const k = keyOf(a)
   let e = store.get(k)
   if (!e) {
-    e = {candles: [], at: 0, inflight: null}
+    e = {args: a, candles: [], at: 0, inflight: null}
     store.set(k, e)
     evict()
   } else {
@@ -218,4 +231,101 @@ export async function getLatestCandles(a: LatestArgs): Promise<Candle[]> {
 /** 诊断用：现在维护了多少个 `(币, 周期)` */
 export function klineStoreSize(): number {
   return store.size
+}
+
+/* ---------------- 保活：别让「看过一次的币」过一会儿又变冷 ---------------- */
+
+/**
+ * 多久扫一遍。只有真的「跨过热线」的条目才会发请求，扫本身不花钱。
+ *
+ * 10 秒是有讲究的：**整点那一刻，所有 1h 条目会同时跨线** ——
+ * 扫得太稀（比如 60 秒），这中间点进来的人就要一起阻塞等补尾巴。
+ */
+const KEEP_WARM_EVERY_MS = 10_000
+/** 一圈最多补几条（别一次把上游打爆） */
+const KEEP_WARM_MAX = 40
+/** 同一圈里的并发：上游一发 ~150ms，8 条并发能把整点那一波压到一秒内 */
+const KEEP_WARM_CONC = 8
+/** 「补了也长不出新数据」的条目退避多久再去试（停牌 / 下架的币） */
+const KEEP_WARM_STUCK_MS = 10 * 60_000
+
+let keepWarmTimer: ReturnType<typeof setInterval> | null = null
+
+/**
+ * 后台保活：把「尾巴已经跨过热线」的条目**提前**补一遍。
+ *
+ * 为什么需要（用户 2026-10-04：「不是添加了行情预热功能吗 60 个币种怎么还是慢」）：
+ *   这个缓存没有硬 TTL，但 `getLatestCandles` 里有个「跨热线」判定 ——
+ *   最后那根已经不是「当前那根」了（`now - last.timestamp >= 一个周期`），
+ *   下一次请求就得**阻塞着**等一次尾部补取（实测 ~150ms，撞上游抖动能到 1.5s）。
+ *   ⇒ **一个 `(币, 周期)` 只要超过「一个周期」没人看，下次点它就要等**
+ *     （1h 图一小时、15m 图 15 分钟、5m 图 5 分钟）。
+ *   于是启动预热的效果**只顶一个周期那么久**，之后 60 个币跟没预热差不多。
+ *
+ * 这里在后台把它们提前补上：用户来的时候永远是「没跨线」那条快路。
+ * 成本可控：只有跨线的条目才发请求，而一个条目**一个周期才跨一次**
+ *   ⇒ 600 个条目全是 1h 也才 0.17 次/秒。
+ */
+export function startKlineKeepWarm(): void {
+  if (keepWarmTimer) return
+  keepWarmTimer = setInterval(keepWarmRound, KEEP_WARM_EVERY_MS)
+  // 别因为这条定时器让进程退不出去
+  keepWarmTimer.unref()
+}
+
+/**
+ * 一轮保活：挑出「跨过热线」的条目，并发补一遍尾巴。
+ *
+ * ⚠️ 整个包在 `try` 里 —— 这是条 `setInterval`，抛出去就是**进程级**未捕获异常。
+ *    保活失败顶多慢一拍，绝不能把整个服务带下去。
+ */
+function keepWarmRound(): void {
+  try {
+    const now = Date.now()
+    const due: string[] = []
+    for (const [k, e] of store) {
+      if (e.inflight || !e.args) continue
+      // 刚试过、上游也没给新数据（停牌 / 下架）→ 退避一会儿再说
+      if (e.stuckAt && now - e.stuckAt < KEEP_WARM_STUCK_MS) continue
+      const last = e.candles[e.candles.length - 1]
+      if (!last) continue
+      // 还热着（没跨热线）就不动它
+      if (now - last.timestamp < TF_MS[e.args.timeframe]) continue
+      due.push(k)
+      if (due.length >= KEEP_WARM_MAX) break
+    }
+    if (!due.length) return
+    /*
+     * 并发跑，但一圈只开这么多：整点那一刻几十个 1h 会同时跨线，
+     * 串行补要几十秒，这期间点进来的人全在等 —— 并发才能把窗口压到一秒内。
+     */
+    let i = 0
+    const worker = (): void => {
+      const k = due[i++]
+      if (k === undefined) return
+      const e = store.get(k)
+      if (!e || !e.args || e.inflight) return worker()
+      const args = e.args
+      void refresh(args, e, false)
+        .then(() => {
+          /*
+           * 补完**还跨着线** = 上游根本没有更新的数据（停牌 / 下架）→ 退避一段，
+           * 否则这个条目会被每 10 秒问一次上游，白烧权重。
+           * 反过来它只要真的往前走了一步（用户那次刷新也算），退避就清掉。
+           */
+          const bar = e.candles[e.candles.length - 1]
+          e.stuckAt =
+            bar && Date.now() - bar.timestamp >= TF_MS[args.timeframe]
+              ? Date.now()
+              : 0
+        })
+        .catch(() => {
+          /* 保活失败无所谓：用户真来的时候会自己补 */
+        })
+        .then(worker)
+    }
+    for (let n = 0; n < Math.min(KEEP_WARM_CONC, due.length); n++) worker()
+  } catch (err) {
+    console.warn(`[kline] 缓存保活出错：${(err as Error).message}`)
+  }
 }

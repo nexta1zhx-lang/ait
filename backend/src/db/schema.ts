@@ -51,6 +51,18 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled  BOOLEAN NOT NULL DEFAUL
 ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_recovery JSONB  NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT NOT NULL DEFAULT 0;
 
+-- 合约行情的置顶币种（2026-10-04，每个用户最多 5 个，见 db/pins.ts）。
+-- 只存 base（BTC，不带 /USDT）；sort 是置顶区里的先后顺序。
+-- ⚠️ 注释里千万别写反引号 —— SCHEMA_SQL 是 JS 模板字符串，会被当场截断。
+CREATE TABLE IF NOT EXISTS user_pins (
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  base       TEXT        NOT NULL,
+  sort       INTEGER     NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, base)
+);
+CREATE INDEX IF NOT EXISTS user_pins_user_idx ON user_pins (user_id, sort);
+
 -- 登录会话：前端存 token，请求带 Authorization: Bearer <token>
 -- （SSE 带不了请求头，所以也接受 ?token=，见 server.ts 的 currentUser）。
 CREATE TABLE IF NOT EXISTS sessions (
@@ -388,6 +400,35 @@ ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS llm_key_id BIGINT
   REFERENCES user_llm_keys (id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS llm_usage_key_idx
   ON llm_usage (llm_key_id, created_at DESC);
+
+-- ──────────────────────────────── 交易所账户（多套，2026-10-04）
+-- 一个用户可以在「我的 → 个人信息 → 交易所」里绑定**多套**交易所 API Key
+-- （各自带名字 / 市场类型），开单分析里那格「交易所账户」用它查余额和订单历史。
+-- 密钥字段是**只读用**的凭据；真 Key 不出网（列表只回掩码，见 db/exchange-keys.ts）。
+CREATE TABLE IF NOT EXISTS user_exchange_keys (
+  id           BIGSERIAL   PRIMARY KEY,
+  user_id      BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- ccxt 交易所 id（binance / okx / bybit …）
+  exchange     TEXT        NOT NULL DEFAULT 'binance',
+  -- 自己起的名字（如「主力」「跟单号」）
+  name         TEXT        NOT NULL DEFAULT '',
+  api_key      TEXT        NOT NULL DEFAULT '',
+  secret       TEXT        NOT NULL DEFAULT '',
+  -- 有些交易所（okx / kucoin）要 passphrase，没有就留空
+  password     TEXT        NOT NULL DEFAULT '',
+  -- spot = 现货，swap = 合约
+  market_type  TEXT        NOT NULL DEFAULT 'swap',
+  -- 沙盒 / 测试网
+  sandbox      BOOLEAN     NOT NULL DEFAULT false,
+  is_default   BOOLEAN     NOT NULL DEFAULT false,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS user_exchange_keys_user_idx
+  ON user_exchange_keys (user_id, id);
+-- 一个用户最多只能有一套默认
+CREATE UNIQUE INDEX IF NOT EXISTS user_exchange_keys_default_idx
+  ON user_exchange_keys (user_id) WHERE is_default;
 `
 
 /**

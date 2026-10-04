@@ -140,14 +140,14 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 
 ## 六、常用命令
 
-| 命令                       | 干什么                                                  |
-| -------------------------- | ------------------------------------------------------- |
-| `npm run apk`              | 一键出 Android APK（= `bash scripts/build-apk.sh`）      |
-| `npm run app:sync`         | 打前端 → 同步进**所有**已添加的原生工程                 |
-| `npm run app:android`      | sync 后用 Android Studio 打开                           |
-| `npm run app:ios`          | sync 后用 Xcode 打开（需先装环境）                      |
-| `npm run app:run:android`  | sync 后直接跑到已连接的设备/模拟器                      |
-| `npm run app:add:ios`      | 生成 iOS 工程（只需一次）                               |
+| 命令                      | 干什么                                              |
+| ------------------------- | --------------------------------------------------- |
+| `npm run apk`             | 一键出 Android APK（= `bash scripts/build-apk.sh`） |
+| `npm run app:sync`        | 打前端 → 同步进**所有**已添加的原生工程             |
+| `npm run app:android`     | sync 后用 Android Studio 打开                       |
+| `npm run app:ios`         | sync 后用 Xcode 打开（需先装环境）                  |
+| `npm run app:run:android` | sync 后直接跑到已连接的设备/模拟器                  |
+| `npm run app:add:ios`     | 生成 iOS 工程（只需一次）                           |
 
 ---
 
@@ -218,15 +218,15 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
      注：手势导航（从屏幕边缘往里滑）跟三键导航、`Esc` 键是**同一个事件**，一并覆盖。
    - ~~SSE 直播流切后台 / 锁屏后会挂起~~ ✅ **已做**：
      · `frontend/src/live.ts` 把「浏览器标签页」和「原生壳」的前后台并成一个信号
-       （原生那边由 `native.ts` 接 `appStateChange` 灌进去）—— 光听 `visibilitychange`
-       在原生壳里**不可靠**，有的机型回前台不补发它。
+     （原生那边由 `native.ts` 接 `appStateChange` 灌进去）—— 光听 `visibilitychange`
+     在原生壳里**不可靠**，有的机型回前台不补发它。
      · `api.ts` 的 `liveSse()`：切后台**当场断开**省电，回前台**立刻重连**；
-       再加一个看门狗（后端 20 秒一次 `event: heartbeat`）收「僵尸连接」。
-       重连后回调上层把断开期间的数据补回来（K 线重拉、行情重拉整表）。
+     再加一个看门狗（后端 20 秒一次 `event: heartbeat`）收「僵尸连接」。
+     重连后回调上层把断开期间的数据补回来（K 线重拉、行情重拉整表）。
    - ~~应用图标、启动图、状态栏配色~~ ✅ **已做**：
      · 图标 / 启动图由 `scripts/make-icons.py` **代码生成**（27 张，含 5 档密度 ×
-       普通 / 圆形 / 自适应前景），改色改比例重跑一遍就行，不用手改图。
+     普通 / 圆形 / 自适应前景），改色改比例重跑一遍就行，不用手改图。
      · 状态栏：`Style.DARK`（= 深底浅字）+ 主题里的状态栏 / 导航栏 / 窗底统一到 `#08090b`。
-       ⚠️ `targetSdkVersion = 36` → Android 15+ **强制 edge-to-edge**，状态栏底色不再由
-       主题决定，而是透出 WebView 内容（靠页面顶部的安全区内边距垫）。
+     ⚠️ `targetSdkVersion = 36` → Android 15+ **强制 edge-to-edge**，状态栏底色不再由
+     主题决定，而是透出 WebView 内容（靠页面顶部的安全区内边距垫）。
      · 启动图底色 = App 主背景 → 冷启动不再白闪。

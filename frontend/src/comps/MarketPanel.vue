@@ -23,8 +23,10 @@
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
   fetchMarkets,
+  fetchPins,
   iconUrl,
   tickerStream,
+  togglePin,
   type MarketRow,
   type TickerPatch
 } from '../api'
@@ -279,6 +281,15 @@ function shouldRun(): boolean {
 /** 状态变了就重新对齐（切 tab / 切后台 / 页面切回前台都会走到这） */
 function sync(): void {
   if (stopped) return
+  /*
+   * ⚠️ 置顶要**在外面**拉，不能塞进 `shouldRun()` 那个分支里。
+   * `shouldRun()` 还要求「页面在前台」，而后台判定（`isForeground()`）在有些环境里
+   * 恒为 false（实测：VS Code 内置浏览器 `document.hidden` 一直是 true）——
+   * 放进去的话那一格永远拿不到置顶（列表倒是正常，因为下面 `!byPair.size` 会补一次
+   * 快照，于是现象特别迷惑：币都看得到、就是星全是灰的）。
+   * 一发 GET 很小，跟「要不要收实时推送」是两回事。
+   */
+  void loadPins()
   if (shouldRun()) {
     // 回来先补一次全表：中间漏掉的增量不追了，直接拿最新的
     void loadSnapshot()
@@ -341,6 +352,57 @@ function letterColor(base: string): string {
   return `hsl(${h} 52% 38%)`
 }
 
+/* ---------------- 置顶（每个用户最多 5 个） ---------------- */
+
+/**
+ * 用户 2026-10-04：「合约行情添加币种置顶功能最多 5 个，**无视排行和用户绑定**」。
+ *
+ * · 存库里（`/api/pins`），所以换设备 / 重装 app 都还在
+ * · 置顶的**永远排在最前**，当前的排序和搜索只决定它们**之后**那一段
+ * · 置顶的币**不受「行情过滤」影响** —— 那是手选的，成交额再小也给显示
+ *   （搜索还是会过它，搜索是「我要找这个」，不该被置顶挡住）
+ */
+const pins = ref<string[]>([])
+const pinMax = ref(5)
+/** 星号操作的提示（超上限 / 失败） */
+const pinTip = ref('')
+const pinBusy = ref('')
+
+const pinSet = computed(() => new Set(pins.value))
+const isPinned = (base: string): boolean => pinSet.value.has(base)
+
+async function loadPins(): Promise<void> {
+  try {
+    const r = await fetchPins()
+    pins.value = r.pins
+    pinMax.value = r.max
+  } catch {
+    /* 未登录 / 网络问题：当没有置顶，不影响看行情 */
+  }
+}
+
+function flashPinTip(text: string, ms = 3200): void {
+  pinTip.value = text
+  window.setTimeout(() => {
+    if (pinTip.value === text) pinTip.value = ''
+  }, ms)
+}
+
+async function onTogglePin(base: string): Promise<void> {
+  if (pinBusy.value) return
+  pinBusy.value = base
+  try {
+    const r = await togglePin(base)
+    pins.value = r.pins
+    pinMax.value = r.max
+    pinTip.value = ''
+  } catch (e) {
+    flashPinTip((e as Error).message)
+  } finally {
+    pinBusy.value = ''
+  }
+}
+
 /* ---------------- 排序 / 筛选 ---------------- */
 
 /**
@@ -354,17 +416,36 @@ const filtered = computed<MarketRow[]>(() => {
   /*
    * 配置里的「行情过滤」：24h 成交额低于阀值的合约直接不列（搜也不给）。
    * 阈值是「百万 USDT」× 1e6；`0` = 不过滤。没成交额（null）的当 0，照样会被滤掉。
+   * ⚠️ **置顶的不受这个阀值限制** —— 那是用户自己手选的，再小也要看得见。
    */
   const floor = marketMinVolUsd.value
   const list = [...byPair.values()]
-  return floor > 0 ? list.filter(r => (r.quoteVolume24h ?? 0) >= floor) : list
+  if (floor <= 0) return list
+  return list.filter(r => (r.quoteVolume24h ?? 0) >= floor || isPinned(r.base))
 })
 
-const shown = computed<MarketRow[]>(() => {
+/**
+ * 置顶那一小段：按**置顶顺序**排（不参与当前排序）。
+ * 只看 `filtered` 里现存的 —— 下架 / 还没拉到的就不显示，不造空行。
+ */
+const pinned = computed<MarketRow[]>(() => {
+  if (!pins.value.length) return []
+  const found = new Map<string, MarketRow>()
+  for (const r of filtered.value) if (isPinned(r.base)) found.set(r.base, r)
+  return pins.value
+    .map(b => found.get(b))
+    .filter((r): r is MarketRow => Boolean(r))
+})
+
+/** 其余那些（按当前排序 / 搜索排好），**不含置顶的** */
+const rest = computed<MarketRow[]>(() => {
+  const base = pinned.value.length
+    ? filtered.value.filter(r => !isPinned(r.base))
+    : filtered.value
   const q = keyword.value.trim().toUpperCase()
   if (q) {
     // 搜索时不切榜单：按成交额排，找币最顺
-    return filtered.value
+    return base
       .filter(r => r.base.includes(q))
       .sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
   }
@@ -372,10 +453,23 @@ const shown = computed<MarketRow[]>(() => {
   // 两列都是**全量排序**（不再按涨/跌筛掉一半）：涨跌幅升序就是「跌得最狠的在前」
   const field = (r: MarketRow) =>
     (sortKey.value === 'volume' ? r.quoteVolume24h : r.change24hPct) ?? 0
-  return [...filtered.value].sort((a, b) => {
+  return [...base].sort((a, b) => {
     const d = field(b) - field(a)
     return desc ? d : -d
   })
+})
+
+/**
+ * 最后看到的顺序 = **置顶的（按置顶顺序）** + 其余（按当前排序）。
+ * 用户说的「无视排行」就是这个意思。
+ *
+ * ⚠️ 搜索时置顶的**也要过一遍搜索** —— 否则搜「SOL」结果里最上面冒出 BTC，
+ *    看着像搜索坏了。
+ */
+const shown = computed<MarketRow[]>(() => {
+  const q = keyword.value.trim().toUpperCase()
+  const head = q ? pinned.value.filter(r => r.base.includes(q)) : pinned.value
+  return [...head, ...rest.value]
 })
 
 const total = computed(() => shown.value.length)
@@ -435,6 +529,9 @@ const toneOf = (v: number | null): string =>
       />
     </div>
 
+    <!-- 星号操作的提示（超上限等）；点一下关掉 -->
+    <p v-if="pinTip" class="mkt-tip" @click="pinTip = ''">{{ pinTip }}</p>
+
     <div v-if="error" class="error">{{ error }}</div>
 
     <!--
@@ -449,46 +546,43 @@ const toneOf = (v: number | null): string =>
         <table class="table fixed">
           <colgroup>
             <!--
-              列宽：币种 30% / 最新价 22% / 成交额 22% / 涨跌幅 26%。
-              按 528 个合约**实测的字符位数**分的：
-                · 币种：要放下图标 + 最长 11 位符号（BROCCOLI714），占 30%
-                · 最新价：最长 8 位（84,761.8）
-                · 成交额：最长 8 位（9946.49万）
-                · 涨跌幅：方块 72px + 两侧留白（用户要「空间再大一点」），所以给到 26%
-              ⚠️ 列宽跟着**列本身**走，不是跟着位置走。
+              列宽写在 CSS 里（`.c-base` / `.c-last` / `.c-chg`）——
+              窄屏要另给一套（最新价 / 涨跌幅用固定像素，剩下的全给币种，
+              见 style.css 里 `.split.m-market` 那段）。
               ⚠️ 表头 / 表身是两张独立的表，**两处 colgroup 必须写成一模一样**。
             -->
-            <col style="width: 30%" />
-            <col style="width: 22%" />
-            <col style="width: 22%" />
-            <col style="width: 26%" />
+            <col class="c-base" />
+            <col class="c-last" />
+            <col class="c-chg" />
           </colgroup>
           <thead>
             <tr>
-              <th>币种</th>
-              <th class="r">最新价</th>
               <!--
-                表头直接当排序钮：点标题那几个字 = 切到这一列，点 ▲ / ▼ = 要哪个方向。
+                币种这格现在装着 24h 成交额，所以「按成交额排」的箭头挂在这儿
+                （它是默认排序，所以这排箭头一进页就是亮着的）。
                 ⚠️ 箭头必须包成 `<button>` 再挂 @click，**不能直接挂 `<svg>`** ——
                 SVG 默认只在自己**画出来的那块** 响应指针，三角形旁边一圈是死的，
                 手指稍偏一点就「点了没反应」（用户：「点击切换没有生效」）。
               -->
-              <!--
-                列顺序（用户 2026-10-04「涨跌幅成交额换个位置」）：
-                  币种 · 最新价 · **成交额** · **涨跌幅**
-                涨跌幅挪到最右边 —— 它是最常扫的一列，贴右边缘顺手。
-                ⚠️ 顺序改了要**同时**改三处：表头这两个 `<th>`、表身的两个 `<td>`、
-                  以及上下两张表的 `colgroup`（列宽跟着列走，不跟着位置走）。
-              -->
-              <th class="r sortable" :class="{on: sortKey === 'volume'}">
+              <th class="sortable vol" :class="{on: sortKey === 'volume'}">
                 <span class="scell">
-                  <span class="s-label" @click="sortBy('volume')">成交额</span>
+                  <!--
+                    表头文案：用户 2026-10-04「币种改为 币种/市值/成交量」——
+                    这一格现在装着三样东西（币种名 / 市值排名 / 24h 成交额），
+                    表头把它们一次说清。
+                    ⚠️ 得能截断：窄屏（320px）这格只剩 142px，八个汉字放不下 ——
+                      给 `.s-label` 上 overflow+ellipsis，让它先缩，排序箭头保住。
+                  -->
+                  <span class="s-label" @click="sortBy('volume')"
+                    >币种/市值/成交量</span
+                  >
                   <span class="sarr">
                     <button
                       type="button"
                       class="sbtn"
                       :class="{on: sortKey === 'volume' && sortDir === 'asc'}"
-                      aria-label="成交额升序（从小到大）"
+                      aria-label="按 24h 成交额升序（从小到大）"
+                      title="按 24h 成交额从小到大"
                       @click="setSort('volume', 'asc')"
                     >
                       <svg viewBox="0 0 10 6" aria-hidden="true">
@@ -499,7 +593,8 @@ const toneOf = (v: number | null): string =>
                       type="button"
                       class="sbtn"
                       :class="{on: sortKey === 'volume' && sortDir === 'desc'}"
-                      aria-label="成交额降序（从大到小）"
+                      aria-label="按 24h 成交额降序（从大到小）"
+                      title="按 24h 成交额从大到小"
                       @click="setSort('volume', 'desc')"
                     >
                       <svg viewBox="0 0 10 6" aria-hidden="true">
@@ -509,6 +604,7 @@ const toneOf = (v: number | null): string =>
                   </span>
                 </span>
               </th>
+              <th class="r">最新价</th>
               <th class="r sortable" :class="{on: sortKey === 'change'}">
                 <span class="scell">
                   <span class="s-label" @click="sortBy('change')">涨跌幅</span>
@@ -547,27 +643,57 @@ const toneOf = (v: number | null): string =>
         <table class="table fixed">
           <colgroup>
             <!-- 和表头那组**必须一模一样**，否则表头跟表身对不上 -->
-            <col style="width: 30%" />
-            <col style="width: 22%" />
-            <col style="width: 22%" />
-            <col style="width: 26%" />
+            <col class="c-base" />
+            <col class="c-last" />
+            <col class="c-chg" />
           </colgroup>
           <tbody>
             <tr v-if="!visible.length">
-              <td colspan="4" class="empty">
+              <td colspan="3" class="empty">
                 {{ error ? '拉不到行情' : '没有匹配的合约' }}
               </td>
             </tr>
             <tr
-              v-for="r in visible"
+              v-for="(r, i) in visible"
               :key="r.symbol"
               class="mkt-row"
-              :class="{on: r.base === symbol.toUpperCase()}"
+              :class="{
+                on: r.base === symbol.toUpperCase(),
+                pin: isPinned(r.base),
+                // 置顶那一段和后面之间来一条分界线（第一行没有前一行，跳过）
+                sep:
+                  i > 0 && isPinned(visible[i - 1]!.base) && !isPinned(r.base)
+              }"
               :title="`切到 ${r.base}`"
               @click="emit('pick', r.base)"
             >
               <td class="s">
                 <span class="icell">
+                  <!--
+                    置顶那颗星：在图标左边，**点它只切置顶、不切币种**（@click.stop）。
+                    ⚠️ 用 SVG 而不是 ★ 字符 —— 字形在不同机型宽度不一样，会把图标挤歪。
+                  -->
+                  <button
+                    type="button"
+                    class="pin-b"
+                    :class="{on: isPinned(r.base)}"
+                    :disabled="pinBusy === r.base"
+                    :aria-label="
+                      isPinned(r.base) ? `取消置顶 ${r.base}` : `置顶 ${r.base}`
+                    "
+                    :title="
+                      isPinned(r.base)
+                        ? '取消置顶'
+                        : `置顶（最多 ${pinMax} 个，不受排行影响）`
+                    "
+                    @click.stop="onTogglePin(r.base)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="M12 2.6l2.9 5.9 6.5.95-4.7 4.6 1.1 6.45L12 17.45 6.2 20.5l1.1-6.45-4.7-4.6 6.5-.95z"
+                      />
+                    </svg>
+                  </button>
                   <img
                     v-if="!iconFailed(r.base)"
                     class="ico"
@@ -583,11 +709,33 @@ const toneOf = (v: number | null): string =>
                   >
                     {{ r.base.slice(0, 1) }}
                   </span>
-                  <span class="icell-t">{{ r.base }}</span>
+                  <!--
+                    币名 + 成交额共用一个两行文本框（用户 2026-10-04：
+                    「图标大一点 成交额和币种放在一起」）。
+                    ⚠️ 两行都得能截断，所以每行各自 `overflow: hidden`，
+                      外面这层只负责 `min-width: 0`（flex 子项的默认 min-width 是 auto，
+                      不写就把整格顶宽）。
+                  -->
+                  <span class="icell-txt">
+                    <span class="icell-t">{{ r.base }}</span>
+                    <!--
+                      第二行：市值排名 + 成交额。
+                      用户 2026-10-04：「24h 替换成市值排名 如 no.1」——
+                      原来的「24h 34.21亿」换成「No.1 · 34.21亿」。
+                      `rank` 是后端从 CoinGecko 贴过来的（见 data/marketcap.ts）；
+                      前 500 名之外的币没有这个数，那就退回去只显示成交额。
+                    -->
+                    <span class="icell-v">
+                      <b v-if="r.rank" class="cap-rank">No.{{ r.rank }}</b>
+                      <span v-if="r.rank" class="cap-sep">·</span>
+                      <span class="cap-vol">{{
+                        bigText(r.quoteVolume24h)
+                      }}</span>
+                    </span>
+                  </span>
                 </span>
               </td>
               <td class="r num">{{ priceText(r.last) }}</td>
-              <td class="r num dim">{{ bigText(r.quoteVolume24h) }}</td>
               <td class="r num">
                 <!-- 24h 涨跌幅：包一层色块，像交易所那样一眼能扫（用户：加上背景） -->
                 <span class="chg" :class="toneOf(r.change24hPct)">

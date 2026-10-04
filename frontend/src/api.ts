@@ -180,6 +180,20 @@ export const setAdminUserPassword = (id: number, password: string) =>
 export const deleteAdminUser = (id: number) =>
   del<{ok: boolean}>(`/api/admin/users/${id}`)
 
+/* ---------------- 合约行情置顶（每个用户最多 5 个） ---------------- */
+
+/**
+ * 用户 2026-10-04：「合约行情添加币种置顶功能最多 5 个，无视排行和用户绑定」。
+ * 置顶的币永远排在最前，跟排序/搜索无关；存在库里，所以换设备也带着。
+ */
+export const fetchPins = () => get<{pins: string[]; max: number}>('/api/pins')
+
+/** 置顶 / 取消置顶（同一颗星按一下就是切换），回来的是切换后的完整列表 */
+export const togglePin = (base: string) =>
+  post<{pins: string[]; pinned: boolean; max: number}>('/api/pins/toggle', {
+    base
+  })
+
 /* ---------------- 通用 ---------------- */
 
 /**
@@ -535,6 +549,158 @@ export const deleteLlmKey = (id: number) =>
 export const setDefaultLlmKey = (id: number) =>
   post<{ok: boolean}>(`/api/llm-keys/${id}/default`, {})
 
+/* ---------------- 交易所账户（多套，2026-10-04） ---------------- */
+
+export interface ExchangeCatalogEntry {
+  id: string
+  label: string
+}
+
+export interface ExchangeKey {
+  id: number
+  /** ccxt 交易所 id，如 binance / okx */
+  exchange: string
+  name: string
+  /** 脱敏后的 API Key（`abcd****wxyz`）；真凭据只在服务端 */
+  apiKey: string
+  apiKeySet: boolean
+  secret: string
+  secretSet: boolean
+  password: string
+  passwordSet: boolean
+  /** spot = 现货，swap = 合约 */
+  marketType: string
+  sandbox: boolean
+  isDefault: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ExchangeKeysResult {
+  keys: ExchangeKey[]
+  /** 下拉里能选的交易所（ccxt id + 中文名） */
+  exchanges: ExchangeCatalogEntry[]
+  marketTypes: string[]
+}
+
+export interface ExchangeKeyInput {
+  exchange?: string
+  name?: string
+  /** 留空 / 传掩码 = 不改 */
+  apiKey?: string
+  secret?: string
+  password?: string
+  marketType?: string
+  sandbox?: boolean
+}
+
+export interface ExchangeBalanceRow {
+  currency: string
+  free: number
+  used: number
+  total: number
+  /** 折 USDT 的估值；查不到价时是 null */
+  usdt: number | null
+}
+
+export interface ExchangeOrderRow {
+  id: string
+  datetime: string | null
+  symbol: string
+  side: string
+  type: string
+  price: number
+  amount: number
+  cost: number
+  status: string
+  fee: number
+  feeCurrency: string
+}
+
+/** 当前持仓（合约） */
+export interface ExchangePositionRow {
+  symbol: string
+  /** long / short */
+  side: string
+  contracts: number
+  notional: number
+  entryPrice: number
+  markPrice: number
+  liquidationPrice: number | null
+  leverage: number
+  unrealizedPnl: number
+  percentage: number | null
+}
+
+/** 已实现盈亏（币安合约专属） */
+export interface ExchangeIncomeRow {
+  symbol: string
+  income: number
+  time: string | null
+}
+
+export interface ExchangeAccountResult {
+  account: ExchangeKey
+  balance: {
+    rows: ExchangeBalanceRow[]
+    totalUsdt: number
+    partial: boolean
+    updatedAt: string
+  } | null
+  /** 当前持仓（现货账户恒为空数组） */
+  positions: ExchangePositionRow[] | null
+  /** 当前挂单（不需要交易对） */
+  openOrders: ExchangeOrderRow[] | null
+  /** 历史订单 / 成交（币安这类要交易对） */
+  orders: {
+    kind: 'orders' | 'trades'
+    rows: ExchangeOrderRow[]
+    /** 交易所不给无交易对的订单，需要用户指定一个（币安） */
+    needSymbol: boolean
+    /** 这次实际查了哪些交易对 */
+    tried: string[]
+  } | null
+  /** 已实现盈亏（非币安为 null） */
+  income: ExchangeIncomeRow[] | null
+  balanceError: string | null
+  positionsError: string | null
+  openOrdersError: string | null
+  ordersError: string | null
+  incomeError: string | null
+}
+
+export const fetchExchangeKeys = () =>
+  get<ExchangeKeysResult>('/api/exchange-keys')
+
+export const createExchangeKey = (body: ExchangeKeyInput) =>
+  post<{ok: boolean; id: number; key: ExchangeKey}>('/api/exchange-keys', body)
+
+export const updateExchangeKey = (id: number, body: ExchangeKeyInput) =>
+  put<{ok: boolean; id: number; key: ExchangeKey}>(
+    `/api/exchange-keys/${id}`,
+    body
+  )
+
+export const deleteExchangeKey = (id: number) =>
+  del<{ok: boolean}>(`/api/exchange-keys/${id}`)
+
+export const setDefaultExchangeKey = (id: number) =>
+  post<{ok: boolean}>(`/api/exchange-keys/${id}/default`, {})
+
+/**
+ * 查某套账户的余额 + 订单历史（不传 id 用默认那套）。
+ * `symbol`：指定查哪个交易对的订单（币安这类必须给）。
+ */
+export const fetchExchangeAccount = (
+  id?: number,
+  limit = 50,
+  symbol?: string
+) =>
+  get<ExchangeAccountResult>(
+    `/api/exchange/account?${id ? `id=${id}&` : ''}limit=${limit}` +
+      (symbol ? `&symbol=${encodeURIComponent(symbol)}` : '')
+  )
+
 /** 改自己的用户名（「个人信息」页） */
 export const authRename = (username: string) =>
   post<{ok: boolean; user: AuthUser}>('/api/auth/profile', {username})
@@ -658,6 +824,11 @@ export interface MarketRow {
   low24h: number | null
   volume24h: number | null
   quoteVolume24h: number | null
+  /**
+   * 全网市值排名（1 = BTC，来源 CoinGecko）。
+   * 不在前 500 名的币是 null（界面就只显示成交额）。
+   */
+  rank?: number | null
 }
 
 /**

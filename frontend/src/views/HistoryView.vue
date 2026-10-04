@@ -778,7 +778,9 @@ onMounted(() => {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding-right: 4px;
+    /* 滚动条贴容器右边，内容离它 12px（跟 `.me-pane` / `.scroll-body` 同一套） */
+    padding-right: 12px;
+    margin-right: -12px;
   }
 }
 
@@ -806,6 +808,9 @@ body.fixed-viewport .list .pager {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
+    /* 同上 */
+    padding-right: 12px;
+    margin-right: -12px;
   }
   body.fixed-viewport .hist-split {
     flex: 0 0 auto;

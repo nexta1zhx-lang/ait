@@ -10,6 +10,7 @@ import {
   ensureContractsFresh,
   loadContracts
 } from './contracts'
+import {marketCapRanks, rankOf, refreshMarketCapRanks} from './data/marketcap'
 import {fullSystem, loadExtractRules, loadRules} from './rules'
 import {
   checkDb,
@@ -84,6 +85,7 @@ import {
   otpauthUrl,
   verifyTotp
 } from './util/totp'
+import {MAX_PINS, listPins, togglePin} from './db/pins'
 import {
   backfillUsageKeys,
   createLlmKey,
@@ -122,7 +124,11 @@ import {
   type MarketRow,
   type TickerInfo
 } from './data/market'
-import {STORE_MAX_LIMIT, getLatestCandles} from './data/kline-store'
+import {
+  STORE_MAX_LIMIT,
+  getLatestCandles,
+  startKlineKeepWarm
+} from './data/kline-store'
 import {subscribeKline, subscribeTickers} from './data/kline-stream'
 import {buildContext} from './context/builder'
 import {judge, type JudgeMeta, type JudgeResult} from './llm/client'
@@ -881,15 +887,23 @@ async function warmTickerCache(
 /**
  * 头部行情条缓存。
  *
- * ⚠️ 2026-10-04 把 TTL 从 **15 秒拉到 60 秒**（stale 300s → **600s**、cap 50 → 200）：
+ * ⚠️ 2026-10-04 把 TTL 从 **15 秒拉到 60 秒**：
  *    15 秒太短 —— 客户端本就是 15 秒一刷，等于**每 15 秒就把当前活跃币重打一遍上游**
  *   （一次 4 趟）。而这个接口冷启实测 **~1.07s**，用户感受得到的慢就在这。
- *    拉长后：60 秒内直接回；60 秒~10 分钟**先给旧的、后台再刷**，永远不会阻塞。
+ *    60 秒内直接回；60 秒以上**先给旧的、后台再刷**。
+ *
+ * ⚠️⚠️ 又一轮（用户：「不是添加了行情预热功能吗 60 个币种怎么还是慢」）：
+ *    `stale` 原来是 **10 分钟** —— 也就是说**启动预热只顶 10 分钟**：
+ *    一个币超过 10 分钟没人看，再点它就走 ③「老老实实等一次」（实测
+ *    `/api/ticker?symbol=XRP` **699ms**、BNB **318ms**，冷启最差 1.07s）。
+ *    60 个币，用户不可能每 10 分钟全看一遍，于是「预热过」的币照样等一秒。
+ *    现在 `stale` 拉到 **24 小时**：预热过的币一整天都走 ②「先给旧的、后台再刷」，
+ *    **永远不会阻塞**；真放了 24 小时没人看，才回退到 ③ 等一次。
  *    价格晚一点无所谓 —— 前端头部吃的实时价是 K 线 WS 推的（`ticker.ts` 的
- *    `freshLivePrice`），资金费率倒计时也是本地算的。
- *    cap 200：要装得下预热那批（成交额前 60 ∪ 异动）。
+ *    `freshLivePrice`），资金费率倒计时也是本地算的；而且**每次访问都会顺手后台刷一份**。
+ *    cap 200 → 300：装下预热那批（成交额前 60 ∪ 异动），再留点余量给随手点开的币。
  */
-const tickerCache = makeCache<TickerInfo>(60_000, 600_000, 200)
+const tickerCache = makeCache<TickerInfo>(60_000, 24 * 60 * 60_000, 300)
 
 /** 头部行情（价格 / 24h / 标记指数 / 资金费率 / 持仓量 / 多周期涨幅） */
 async function handleTicker(url: URL, res: http.ServerResponse): Promise<void> {
@@ -965,7 +979,17 @@ async function handleMarkets(
       }),
       at: Date.now()
     }))
-    sendJson(res, 200, {rows: v.rows, updatedAt: v.at})
+    /*
+     * 顺带把市值排名贴上去（用户 2026-10-04：「24h 替换成市值排名 如 no.1」）。
+     * ⚠️ 贴在这层而**不是** `fetchMarketList` 里：那份是缓存好的，
+     * 排名有自己的 6 小时刷新节奏，混在一起会让行情表被排名拖住/反过来。
+     * `marketCapRanks()` 是同步的，拿不到就是空 Map（少一项而已，不影响行情）。
+     */
+    const ranks = marketCapRanks()
+    const rows = ranks.size
+      ? v.rows.map(r => ({...r, rank: rankOf(ranks, r.base)}))
+      : v.rows
+    sendJson(res, 200, {rows, updatedAt: v.at})
   } catch (e) {
     sendJson(res, 502, {error: (e as Error).message})
   }
@@ -2374,6 +2398,30 @@ async function route(
     return
   }
 
+  /*
+   * 合约行情的置顶币种（每个用户最多 5 个）。
+   * 用户 2026-10-04：「合约行情添加币种置顶功能最多 5 个，无视排行和用户绑定」。
+   * 只存 base（BTC），按 user_id 隔离。
+   */
+  if (p === '/api/pins') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const pins = await listPins(me.id)
+    return sendJson(res, 200, {pins, max: MAX_PINS})
+  }
+
+  /** 置顶 / 取消置顶（行情表那颗星按一下就是切换） */
+  if (p === '/api/pins/toggle' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const r = await togglePin(me.id, str(body.base))
+      return sendJson(res, 200, {...r, max: MAX_PINS})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
   /* ---- 用量统计 ---- */
   if (p === '/api/usage' || p === '/api/usage/summary') {
     const days = url.searchParams.get('days')
@@ -3088,6 +3136,27 @@ async function main(): Promise<void> {
       )
   }
   kickExchange()
+
+  /*
+   * K 线缓存的**后台保活**：让「预热过 / 看过一次」的 (币, 周期) 永远停在
+   * 「没跨热线」那条快路上 —— 否则预热只顶一个周期那么久（用户：
+   * 「不是添加了行情预热功能吗 60 个币种怎么还是慢」）。详见 `data/kline-store.ts`。
+   */
+  startKlineKeepWarm()
+
+  /*
+   * 市值排名（CoinGecko）：也跟着预热一次 —— 不预热的话第一个打开行情页的人
+   * 会看到第二行没有「No.x」（`marketCapRanks()` 同步返回空 Map，后台才去拉）。
+   * 之后每 6 小时由 `data/marketcap.ts` 自己按 TTL 在后台刷。
+   */
+  void refreshMarketCapRanks()
+    .then(n => {
+      if (n)
+        console.log(`  排名    市值排名已就绪（${n} 个币，来源 CoinGecko）`)
+    })
+    .catch(() => {
+      /* 内部已经吞过异常了，这里只是兜底 */
+    })
 
   server.listen(PORT, () => {
     console.log('')

@@ -105,10 +105,7 @@ export interface RecentSR {
  *    8 根 1h，现在不再为它多打一趟交易所）。
  * 数据不足或区间无效时返回 null（调用方据此选择“不画”）。
  */
-export function computeRecentSR(
-  candles: Candle[],
-  hours = 4
-): RecentSR | null {
+export function computeRecentSR(candles: Candle[], hours = 4): RecentSR | null {
   if (!Array.isArray(candles) || candles.length < 2) return null
   const win = candles.slice(-hours)
   if (win.length < 2) return null
@@ -912,6 +909,12 @@ export interface MarketRow {
   volume24h: number | null
   /** 24h 成交额（按计价币算，U 本位就是 USDT） */
   quoteVolume24h: number | null
+  /**
+   * 全网市值排名（CoinGecko，1 = BTC）。
+   * 不在前 500 名的（新上币 / 小币）是 null —— 界面就不显示这一项。
+   * 见 `data/marketcap.ts`。
+   */
+  rank?: number | null
 }
 
 /**

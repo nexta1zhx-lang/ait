@@ -19,6 +19,7 @@ import {
 import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import MarketPanel from '../comps/MarketPanel.vue'
+import ExchangeAccountPanel from '../comps/ExchangeAccountPanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
 import SettingsSheet from '../comps/SettingsSheet.vue'
 import SegTabs from '../comps/SegTabs.vue'
@@ -65,7 +66,7 @@ import {
   testMode,
   testPoint
 } from '../analyze'
-import {contracts, refreshConfig} from '../store'
+import {balanceBadge, contracts, refreshBalance, refreshConfig, refreshingBalance} from '../store'
 import {stopTicker, watchTicker} from '../ticker'
 import {runBtnPos, setRunBtnPos} from '../settings'
 import {
@@ -690,6 +691,26 @@ const heatRows = computed(() => {
       <div class="col">
         <div class="tab-row">
           <SegTabs v-model="leftTab" :options="tabs" />
+          <!--
+            窄屏：把「模型余额」钉在这一行最右侧。
+
+            用户 2026-10-04：「移动端 在开单分析顶部 tab栏最右侧加上 模型余额 fixed 固定」。
+            手机上顶栏整块收起来了（`.topbar { display: none }`），余额原先只在
+            「我的 → 模型配置」里看得到 —— 这里补一颗，点一下刷新（跟顶栏那颗同一个 store）。
+            「固定」靠的是**这一行不参与内容滚动**（内容在下面的 `.scroll-body` 里自己滚），
+            所以它一直看得见，不需要 `position: fixed`。
+            宽屏不露（顶栏已经有账号区了）。
+          -->
+          <button
+            type="button"
+            class="badge balance tab-balance"
+            :class="balanceBadge.cls"
+            :title="balanceBadge.title"
+            :disabled="refreshingBalance"
+            @click="refreshBalance"
+          >
+            {{ refreshingBalance ? '余额 …' : balanceBadge.text }}
+          </button>
         </div>
 
         <!--
@@ -925,6 +946,13 @@ const heatRows = computed(() => {
             </template>
           </div>
         </template>
+
+        <!-- ② 交易所账户：余额 + 订单历史
+             （用户 2026-10-04：「实时分析 tab 后加入交易所账户信息，显示账户余额和订单历史」）
+             账户在「我的 → 个人信息 → 交易所」里绑；这里用 v-if 挂，切走就卸载。 -->
+        <div v-else-if="leftTab === 'exchange'" class="scroll-body">
+          <ExchangeAccountPanel />
+        </div>
 
         <!-- ② 历史分析：只在切到这个 tab 时显示 -->
         <div v-else-if="leftTab === 'history'" class="scroll-body">

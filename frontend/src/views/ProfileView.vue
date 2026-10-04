@@ -27,6 +27,27 @@ import {
 } from '../api'
 import {logout, rename, user} from '../session'
 import {bjTime} from '../format'
+import SegTabs from '../comps/SegTabs.vue'
+import ExchangeKeys from '../comps/ExchangeKeys.vue'
+
+/*
+ * 用户 2026-10-04（本轮）：「个人信息下添加交易所内容（可新增交易所和 key，
+ * 支持多个）；其余内容放两个 tab —— 账户信息 / 登录设备」。
+ *
+ * 所以这页现在顶上一条分段 tab：
+ *   · 账户信息：身份卡 + 基本信息 + 两步验证 + 修改密码 + 退出
+ *   · 交易所：绑多套交易所 API Key
+ *   · 登录设备：多端登录的会话列表（踢设备）
+ */
+type ProfTab = 'account' | 'exchange' | 'devices'
+
+const TABS: {value: ProfTab; label: string}[] = [
+  {value: 'account', label: '账户信息'},
+  {value: 'exchange', label: '交易所'},
+  {value: 'devices', label: '登录设备'}
+]
+
+const tab = ref<ProfTab>('account')
 
 const name = ref('')
 const nameBusy = ref(false)
@@ -255,7 +276,9 @@ async function changePw(): Promise<void> {
 
 <template>
   <div class="profile">
-    <section class="panel who">
+    <SegTabs class="prof-tabs" v-model="tab" :options="TABS" />
+
+    <section v-if="tab === 'account'" class="panel who">
       <span class="avatar">{{ (user?.username ?? '?').slice(0, 1) }}</span>
       <div class="who-text">
         <b>{{ user?.username }}</b>
@@ -265,7 +288,7 @@ async function changePw(): Promise<void> {
       </div>
     </section>
 
-    <section class="panel">
+    <section v-if="tab === 'account'" class="panel">
       <h2>基本信息</h2>
       <label>
         <span>用户名</span>
@@ -291,7 +314,10 @@ async function changePw(): Promise<void> {
       </div>
     </section>
 
-    <section class="panel">
+    <!-- 交易所：绑多套 Key（用户 2026-10-04 新增，独立成一个 tab） -->
+    <ExchangeKeys v-if="tab === 'exchange'" />
+
+    <section v-if="tab === 'devices'" class="panel">
       <h2>
         登录设备
         <small v-if="sessions.length">共 {{ sessions.length }} 台</small>
@@ -350,7 +376,7 @@ async function changePw(): Promise<void> {
     </section>
 
     <!-- 两步验证：只有管理员看得到（后端也按 is_admin 挡着） -->
-    <section v-if="isAdmin" class="panel">
+    <section v-if="isAdmin && tab === 'account'" class="panel">
       <h2>
         两步验证
         <small v-if="totpOn" class="state-on">已开启</small>
@@ -477,7 +503,7 @@ async function changePw(): Promise<void> {
       </div>
     </section>
 
-    <section class="panel">
+    <section v-if="tab === 'account'" class="panel">
       <h2>修改密码</h2>
       <label>
         <span>原密码</span>
@@ -511,7 +537,7 @@ async function changePw(): Promise<void> {
       </div>
     </section>
 
-    <section class="panel">
+    <section v-if="tab === 'account'" class="panel">
       <h2>退出</h2>
       <div class="row">
         <button class="btn" type="button" @click="logout">退出登录</button>

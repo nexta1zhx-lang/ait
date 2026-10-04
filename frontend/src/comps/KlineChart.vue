@@ -252,7 +252,16 @@ const VISIBLE = ref<Record<string, boolean>>({
   sup: false
 })
 
-const LEGEND = computed(() => [
+/*
+ * 图例这四条：`label` 是死的，`tip` 也是死的占位。
+ *
+ * ⚠️ 压力 / 支撑的提示里带**价位和来源那一根**（`levelTip()`），2026-10-04 起
+ *    不再挂在模板上：早先它是 `LEGEND` 这个 computed 里现算的，于是 `levels`
+ *    一变就得重渲染整个组件 —— 而拖动 / 缩放时它**每帧**都在变。
+ *    现在由 `syncLegendTips()` 直接改 `title`，跟模板的响应式彻底脱钩
+ *    （用户：「k 线渲染有点慢」）。
+ */
+const LEGEND = [
   {
     key: 'volume',
     label: '成交量',
@@ -260,13 +269,12 @@ const LEGEND = computed(() => [
     tip: '成交量 ｜ 点一下显示 / 隐藏'
   },
   {key: 'ema42', label: 'EMA42', dot: 'ema', tip: 'EMA42 ｜ 点一下显示 / 隐藏'},
-  /*
-   * 压力 / 支撑**不再是固定的「4 小时」** —— 这两个数按当前可见窗口算（见 `levels.ts`），
-   * 所以标签里不能写死周期了；具体是多少、来自哪一根，写在提示里。
-   */
-  {key: 'res', label: '压力', dot: 'res', tip: levelTip('res')},
-  {key: 'sup', label: '支撑', dot: 'sup', tip: levelTip('sup')}
-])
+  {key: 'res', label: '压力', dot: 'res', tip: '压力 ｜ 点一下显示 / 隐藏'},
+  {key: 'sup', label: '支撑', dot: 'sup', tip: '支撑 ｜ 点一下显示 / 隐藏'}
+]
+
+/** 图例那一行（`syncLegendTips()` 要按 `data-toggle` 找元素） */
+const legendEl = ref<HTMLElement | null>(null)
 
 const chartEl = ref<HTMLElement | null>(null)
 const levelHost = ref<HTMLElement | null>(null)
@@ -286,7 +294,7 @@ interface ChartRefs {
 
 let refs: ChartRefs | null = null
 let priceLines: any[] = []
-let levelLabels: {price: number; el: HTMLElement}[] = []
+let levelLabels: {price: number; color: string; el: HTMLElement}[] = []
 let candles: Candle[] = []
 let candleIndex = new Map<number, number>()
 let volMa: number[] = []
@@ -303,8 +311,6 @@ let overlay: {refPrice: number} = {
  * 口径在 `../levels`，缩放 / 平移之后会重算。
  */
 const levels = ref<Levels>(emptyLevels())
-/** 数据换了就 ++ —— 让「图例提示」那个 computed 跟着重算（`candles` 不是响应式的） */
-const dataSeq = ref(0)
 
 /** 正在往前补历史（防重入） */
 let loadingOlder = false
@@ -550,6 +556,13 @@ function ensureChart(): boolean {
     refs?.chart.applyOptions({layout: {fontFamily: monoStack()}})
   })
 
+  /*
+   * 先把「均线 / 成交量」的显隐按 `VISIBLE`（默认全关）应用一次。
+   * ⚠️ 不能靠 `computeLevels()` 顺手做 —— 那条路现在每帧都跑，
+   *    `applyOptions` 会让 LWC 重算序列并重画，摆在每帧里纯属浪费。
+   */
+  renderOverlays()
+
   return true
 }
 
@@ -574,7 +587,6 @@ function levelList(): {p: number; color: string; title: string}[] {
 
 /** 图例提示：把「这个价位是多少、来自哪一根、怎么来的」写出来 */
 function levelTip(kind: 'res' | 'sup'): string {
-  void dataSeq.value // 数据换了要重算
   const lv = levels.value
   const price = kind === 'res' ? lv.resistance : lv.support
   const i = kind === 'res' ? lv.resIndex : lv.supIndex
@@ -606,15 +618,76 @@ function computeLevels(): void {
    * 拿不到可信的可见区间（图还没铺过、或窄屏切到别的 tab 时宽度为 0）
    * 就退回「图上加载的全部」—— 总比抱着上一次的旧线不放要好。
    */
-  levels.value = candles.length
+  const next = candles.length
     ? nearestLevels(candles, r ? r.from : 0, r ? r.to : candles.length - 1)
     : emptyLevels()
-  // 报给外层：结论区那把「上沿 / 现价 / 下沿」的尺子要用它
-  emit('levels', {
-    resistance: levels.value.resistance,
-    support: levels.value.support
-  })
-  renderOverlays()
+  /*
+   * ⚠️ 数值没变就**什么都别做**（只把标签位置摆一下）。
+   *
+   * 这个函数在拖动 / 缩放时是**每帧**跑的，而「窗口挪了一点、拐点还是同一个」
+   * 是常态（拿真数据量过：每往前挪一根，约一半的步进数值不变）。
+   * `levels` 是响应式的，赋个新对象会重渲染本组件、还会惊动外层整块重渲染 ——
+   * 纯属白扔一帧的预算（用户：「k 线渲染有点慢」）。
+   */
+  if (sameLevels(next, levels.value)) {
+    positionLabels()
+    return
+  }
+  levels.value = next
+  renderLevels()
+  emitLevels(next)
+}
+
+/** 两份压力 / 支撑「算出来是同一份」吗（全等就不必重画、更不必惊动外层） */
+function sameLevels(a: Levels, b: Levels): boolean {
+  return (
+    a.resistance === b.resistance &&
+    a.support === b.support &&
+    a.resIndex === b.resIndex &&
+    a.supIndex === b.supIndex &&
+    a.resSource === b.resSource &&
+    a.supSource === b.supSource
+  )
+}
+
+/* ---------------- 报给外层（节流） ---------------- */
+
+/** 上一次把压力 / 支撑报出去的时刻（毫秒） */
+let lastLevelsEmit = 0
+let levelsEmitTimer: ReturnType<typeof setTimeout> | null = null
+/** 攒着还没报出去的那一份（节流窗口结束时报**最新**的，不是最早的） */
+let levelsEmitPending: Levels | null = null
+/**
+ * 连续拖动时，压力 / 支撑最多这么频繁地报给外层。
+ *
+ * ⚠️ 外层（开单分析结论区那把「上沿 / 现价 / 下沿」的尺子）一拿到这个数就
+ *    **整块重渲染** —— 那是全站最大的一个组件，而 K 线的平移回调是每帧都来的：
+ *    一帧报一次能把主线程吃满（用户：「k 线渲染有点慢」）。
+ *    那把尺子只是个参考刻度，每秒刷几次跟每帧刷肉眼没差别。
+ */
+const LEVELS_EMIT_MS = 150
+
+function flushLevelsEmit(): void {
+  if (levelsEmitTimer) clearTimeout(levelsEmitTimer)
+  levelsEmitTimer = null
+  lastLevelsEmit = Date.now()
+  const v = levelsEmitPending
+  levelsEmitPending = null
+  emit('levels', v ? {resistance: v.resistance, support: v.support} : null)
+}
+
+/** 报压力 / 支撑给外层；传 `null`（图空了）立刻生效，不能等节流 */
+function emitLevels(v: Levels | null): void {
+  if (!v) {
+    levelsEmitPending = null
+    flushLevelsEmit()
+    return
+  }
+  levelsEmitPending = v
+  if (levelsEmitTimer) return
+  const wait = LEVELS_EMIT_MS - (Date.now() - lastLevelsEmit)
+  if (wait <= 0) flushLevelsEmit()
+  else levelsEmitTimer = setTimeout(flushLevelsEmit, wait)
 }
 
 /** 缩放 / 平移时一帧只算一次（回调会连着来） */
@@ -627,25 +700,47 @@ function scheduleLevels(): void {
   })
 }
 
-/** 根据显隐状态重绘均线、成交量、价格线与右侧百分比 */
+/**
+ * 显隐开关变了才走这儿：均线 / 成交量那两条序列的 `visible` 要跟着动。
+ *
+ * ⚠️ 别把它塞进每帧都跑的 `renderLevels()` 里 —— `applyOptions` 会让 LWC
+ *    重算序列并重画，平移时每帧调一次纯属浪费。
+ */
 function renderOverlays() {
   if (!refs) return
   const v = VISIBLE.value
   refs.ema42.applyOptions({visible: v.ema42})
   refs.volume.applyOptions({visible: v.volume})
+  renderLevels()
+}
 
-  for (const l of priceLines) {
-    try {
-      refs.candle.removePriceLine(l)
-    } catch {
-      /* 已移除 */
+/** 重画压力 / 支撑那两条价格线 + 右侧标签 + 图例提示（平移 / 缩放时高频调用） */
+function renderLevels(): void {
+  if (!refs) return
+  const list = levelList()
+  /*
+   * 条数一样就**就地改价格**，别拆了重建 —— 重建会让 LWC 重新排一遍整张图。
+   * （条数变了说明增 / 减了一条线，那时才重建。）
+   */
+  if (priceLines.length === list.length) {
+    for (let i = 0; i < list.length; i++) {
+      priceLines[i].applyOptions({
+        price: list[i]!.p,
+        color: list[i]!.color,
+        title: list[i]!.title
+      })
     }
-  }
-  priceLines = []
-
-  for (const lv of levelList()) {
-    priceLines.push(
-      refs.candle.createPriceLine({
+  } else {
+    for (const l of priceLines) {
+      try {
+        refs.candle.removePriceLine(l)
+      } catch {
+        /* 已移除 */
+      }
+    }
+    const candleSeries = refs.candle
+    priceLines = list.map(lv =>
+      candleSeries.createPriceLine({
         price: lv.p,
         color: lv.color,
         lineWidth: 1,
@@ -655,8 +750,24 @@ function renderOverlays() {
       })
     )
   }
-
   renderLabels()
+  syncLegendTips()
+}
+
+/**
+ * 把「压力 / 支撑」那两条图例的提示（带价位、来源那一根）刷成最新的。
+ *
+ * ⚠️ 故意**不走模板**：早先这是 `LEGEND` 这个 computed 里现算 `levelTip()` 的，
+ *    于是 `levels` 一变就整块重渲染本组件 —— 而它平移时每帧都在变。
+ *    这里直接改 `title`，跟模板的响应式彻底脱钩。
+ */
+function syncLegendTips(): void {
+  const host = legendEl.value
+  if (!host) return
+  for (const kind of ['res', 'sup'] as const) {
+    const el = host.querySelector(`[data-toggle="${kind}"]`)
+    if (el) el.setAttribute('title', levelTip(kind))
+  }
 }
 
 /* ---------------- 右侧百分比标签 ---------------- */
@@ -664,20 +775,36 @@ function renderOverlays() {
 function renderLabels() {
   const host = levelHost.value
   if (!host) return
-  host.innerHTML = ''
-  levelLabels = []
-
   const refPrice = overlay.refPrice
-  if (!refs || !Number.isFinite(refPrice) || refPrice <= 0) return
-
-  for (const lv of levelList()) {
-    const el = document.createElement('span')
-    el.style.color = lv.color
-    el.title = `${lv.title} ${fmt(lv.p)}`
+  const list =
+    refs && Number.isFinite(refPrice) && refPrice > 0 ? levelList() : []
+  /*
+   * ⚠️ 复用已有的 `<span>`，别每次 `innerHTML = ''` 重建：
+   *    这个函数在平移 / 悬停时**每帧**都跑，反复建 / 拆 DOM 会让浏览器不停排版。
+   *    只有「条数变了」（增删了某条线）才重建一次。
+   */
+  if (levelLabels.length !== list.length) {
+    host.innerHTML = ''
+    levelLabels = list.map(lv => {
+      const el = document.createElement('span')
+      el.style.color = lv.color
+      host.appendChild(el)
+      return {price: lv.p, color: lv.color, el}
+    })
+  }
+  for (let i = 0; i < list.length; i++) {
+    const lv = list[i]!
+    const item = levelLabels[i]!
+    item.price = lv.p
     const pct = ((lv.p - refPrice) / refPrice) * 100
-    el.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`
-    host.appendChild(el)
-    levelLabels.push({price: lv.p, el})
+    const text = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`
+    if (item.el.textContent !== text) item.el.textContent = text
+    if (item.color !== lv.color) {
+      item.color = lv.color
+      item.el.style.color = lv.color
+    }
+    const title = `${lv.title} ${fmt(lv.p)}`
+    if (item.el.title !== title) item.el.title = title
   }
   positionLabels()
 }
@@ -929,7 +1056,6 @@ function draw(data: Candle[], keepView = false) {
   if (!ensureChart() || !refs) return
   const view = keepView ? refs.chart.timeScale().getVisibleLogicalRange() : null
   candles = data
-  dataSeq.value++
 
   if (!data.length) {
     refs.candle.setData([])
@@ -941,8 +1067,8 @@ function draw(data: Candle[], keepView = false) {
     overlay.refPrice = NaN
     // 没数据就别留着上一个币那两条线
     levels.value = emptyLevels()
-    emit('levels', null)
-    renderOverlays()
+    emitLevels(null)
+    renderLevels()
     drawSelection()
     return
   }
@@ -1003,7 +1129,10 @@ function draw(data: Candle[], keepView = false) {
   /*
    * 压力 / 支撑：拿新数据 + 此刻的可见区间先算一遍（换币后那两条线得马上是新币的，
    * 不能停在上一个币的价位上）。视图真正铺好之后，下面 `scheduleLevels()` 还会再算一次。
+   * ⚠️ 先把节流计时清零：换币 / 换周期是「一次性」动作，外层该**立刻**拿到新值，
+   *    不能因为刚好落在上一次平移的节流窗口里而等 150ms。
    */
+  lastLevelsEmit = 0
   computeLevels()
   showInfoAt(candles.length - 1)
 
@@ -1755,6 +1884,8 @@ watch(() => props.pointAt, drawPoint)
 onBeforeUnmount(() => {
   stopStream?.()
   stopStream = null
+  if (levelsEmitTimer) clearTimeout(levelsEmitTimer)
+  levelsEmitTimer = null
   try {
     refs?.chart.remove()
   } catch {
@@ -1936,7 +2067,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 指标开关（点一下显示 / 隐藏） -->
-      <div class="legend">
+      <div ref="legendEl" class="legend">
         <span
           v-for="l in LEGEND"
           :key="l.key"

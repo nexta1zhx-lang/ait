@@ -1559,13 +1559,33 @@ button.danger:hover {
 }
 
 .mkt-head th.sortable .s-label {
+  /*
+   * ⚠️ 「币种/市值/成交量」比原来的「币种」长得多，窄屏（320px）这一格只剩 142px
+   *    —— 得让它能缩、能出省略号，而不是把行顶宽 / 把箭头挤出去。
+   *    （`.sarr` 是 `flex: 0 0 auto` 那种固定尺寸，不会跟着缩。）
+   */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
 }
 
+/*
+ * 「币种」那格的排序箭头（排的是 24h 成交额 —— 成交额并进这一格了）。
+ * ⚠️ `.scell` 默认 `justify-content: flex-end`（数字列右对齐用的），
+ *    币种是左对齐的列，得单独扳回 `flex-start`，否则「币种 ▲▼」会飘到格子最右边。
+ */
+.mkt-head th.vol .scell {
+  justify-content: flex-start;
+}
+
 .mkt-head th.sortable .sarr {
   display: inline-flex;
+  /* 文案让位、箭头不让位（上面 `.s-label` 会缩，这里钉住） */
+  flex: 0 0 auto;
   flex-direction: column;
   align-items: center;
   /* ⚠️ 贴近文字：1px 就够（用户：「图标再近一点和文字」） */
@@ -1657,12 +1677,121 @@ button.danger:hover {
   padding: 7px 8px;
 }
 
-/* 币种那一格：图标 + 名字 */
+/*
+ * 三列宽 —— **唯一出处**（两个 `<colgroup>` 都只写 class，不写死宽度）。
+ * 用户 2026-10-04：「最新价和涨跌缩小间距」。
+ *
+ * 原来（40% / 30% / 30%）的问题：价格贴着自己那 30% 的右边，涨跌方块贴着表格
+ * 最右边，两个之间空出一大片 —— 1440 屏实测 **340px**（移动端也有 26~45px）。
+ * 其实那块空是「涨跌幅这列除了 72px 方块剩下的全部余量」。
+ *
+ * ⚠️ 2026-10-04 再改：最新价**不能给百分比**。
+ *    开单分析页在 PC 上是左右分栏，行情列表在左边那一栏（实测只有 430px 宽）：
+ *    `44%` 算出来是 189px，把币种列挤到只剩 145px →
+ *    第二行的「No.235·6441.82万」活活截掉 44px（用户：「pc 端还是会截断」）。
+ *    改成固定像素后，不管容器多宽，最新价/涨跌幅永远是那两个数的大小，
+ *    **剩下的全归币种列**（430px 那栏里币种能拿到 238px，绰绰有余）。
+ *
+ * 结果：最新价和涨跌幅间距**恒定 16px**，币种列吃掉全部余量。
+ */
+.mkt-table .c-base {
+  width: auto;
+}
+/* 96px：最长那个价格（84,989.1 等宽 12px ≈ 58px）+ 两侧 10px 内边距 */
+.mkt-table .c-last {
+  width: 96px;
+}
+/* 96px：72px 方块 + 两侧 12px 内边距 */
+.mkt-table .c-chg {
+  width: 96px;
+}
+
+/* 币种那一格：置顶星 + 图标 + （币名 / 成交额）两行 */
 .mkt-table .icell {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
+}
+
+/*
+ * 置顶那颗星（用户 2026-10-04：「合约行情添加币种置顶功能最多 5 个，无视排行和用户绑定」）。
+ *
+ * · 平时**很淡**（不抢行情本身），置顶了才亮成主色
+ * · 点击区 18×18、图形 13px —— 放在图标左边，`@click.stop` 保证只切置顶不切币种
+ * · 用 SVG 而不是 ★ 字符：字形宽度随字体变，会把后面的图标挤歪
+ *   （⚠️ 窄屏是**绝对定位**、不占宽度，见文件末尾 `.split.m-market` 那一段）
+ */
+.mkt-table .pin-b {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  opacity: 0.42;
+  cursor: pointer;
+  transition:
+    opacity 0.12s,
+    color 0.12s,
+    background 0.12s;
+}
+.mkt-table .pin-b svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.mkt-table .pin-b:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.06);
+}
+.mkt-table .pin-b.on {
+  opacity: 1;
+  color: var(--accent, #d3b583);
+}
+.mkt-table .pin-b.on svg {
+  fill: currentColor;
+}
+.mkt-table .pin-b:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* 置顶的那几行：名字跟着星走，一眼能看出是一个组 */
+.mkt-row.pin .icell-t {
+  color: var(--accent, #d3b583);
+}
+
+/* 置顶段和后面之间一条分界线 */
+.mkt-row.sep td {
+  border-top: 1px solid var(--border);
+}
+
+/* 星号操作的提示条（超上限等）；点一下关掉 */
+.mkt-tip {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  border-radius: var(--r-xs, 8px);
+  background: var(--warn-soft, rgba(240, 180, 41, 0.14));
+  color: var(--warn, #f0b429);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ⚠️ flex 子项的 `min-width` 默认是 auto，不显式写 0 就把整格顶宽、截断失效 */
+.mkt-table .icell-txt {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
 }
 
 .mkt-table .icell-t {
@@ -1672,20 +1801,79 @@ button.danger:hover {
   white-space: nowrap;
 }
 
-/* 图标：32px 的源图缩到 20px（高分屏也清晰）；拿不到就退回首字母圆 */
+/*
+ * 第二行：市值排名 + 成交额。
+ * 用户 2026-10-04 先让「成交额和币种放在一起」，再让「24h 替换成市值排名 如 no.1」
+ * —— 所以这行现在是 `No.1 · 34.21亿`（排名拿不到就只剩成交额）。
+ * ⚠️ 用 flex + gap 排版，不要靠字面空格：Vue 模板里模板插值前后的空白会被压掉，
+ *    写成 `·{{ x }}` 会变成「·34.21亿」粘在一起。
+ */
+.mkt-table .icell-v {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.25;
+}
+
+/* 「No.x」比成交额稍微亮一点（它是拿来认币的，不是陪衬） */
+.mkt-table .icell-v .cap-rank {
+  flex: 0 0 auto;
+  font-weight: var(--fw-mid);
+  color: var(--text);
+  opacity: 0.78;
+}
+.mkt-table .icell-v .cap-sep {
+  flex: 0 0 auto;
+  opacity: 0.5;
+}
+
+/*
+ * 成交额：宽度不够时从这里截断（排名是固定几字符，先保住）。
+ * ⚠️ 类名别叫 `.vol` / `.dot` / `.rk` —— 全局已经有一批同名类
+ *    （`.dot` 是 9×9 的图例小方块、`.dot.vol` 是图例里的成交量色），
+ *    撞上会把这一小格算成 9px 宽、多出一段空白。
+ */
+.mkt-table .icell-v .cap-vol {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 用户 2026-10-04：「加粗一点」—— 第二行也抬一级，别显得太虚 */
+  font-weight: 500;
+}
+
+/* 图标：32px 的源图缩到 26px（高分屏也清晰）；拿不到就退回首字母圆 */
 .mkt-table .ico {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   object-fit: contain;
+}
+
+/*
+ * 用户 2026-10-04：「图标大一点往右一点」—— 图标 24 → 26，
+ * 首格左内边距 8 → 12，把整组（星 + 图标 + 文字）往右挪一点，离左边线不那么贴。
+ *
+ * ⚠️ 表头那格要跟**行里最左边那个东西**（置顶星）的左边缘对齐 ——
+ *    用户 2026-10-04 一连两轮：「币种和下面没有对齐」→「和图标对齐」→
+ *    「我看到和左边还有间距」→ 最终确认「贴到最左边的星」。
+ *    宽屏星是有流的、从 12px 起（= 首格内边距），所以表头也是 12px。
+ *    （窄屏星是绝对定位在 7px，表头单独给 7px，见文件末尾那段。）
+ */
+.mkt-table .table td:first-child,
+.mkt-table .table th:first-child {
+  padding-left: 12px;
 }
 
 .mkt-table .ico-letter {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: var(--fw-bold);
   line-height: 1;
   color: #fff;
@@ -1798,6 +1986,17 @@ button.danger:hover {
 
 .mkt-table .num {
   font-variant-numeric: tabular-nums;
+  /*
+   * 用户 2026-10-04：「（最新价和涨跌）加粗一点」。
+   * 正文本来是 400，而涨跌方块自己那条已经是 700（本来就粗），
+   * 所以这里主要是把**最新价**抬一级到 600。
+   */
+  font-weight: var(--fw-mid);
+  /*
+   * fixed 布局下单元格不会自己撑开（窄屏那套），数字太长会「流出格子」压到
+   * 隔壁 —— 裁掉比压过去强（正常行情下永远碰不到这个阈值）。
+   */
+  overflow: hidden;
 }
 
 .mkt-table .up {
@@ -2099,7 +2298,16 @@ body.fixed-viewport .split {
   flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 4px;
+  /*
+   * 滚动条**贴容器右边**，但内容跟它拉开 12px
+   * （用户 2026-10-04：「滚动条和内容区保持距离」，跟 `MeView` 的 `.me-pane`
+   *   / `ServerStatusView` 的 `.svc` 同一个写法）。
+   *
+   * 只写 `padding-right` 会把滚动条也一起往里推；再加等量的负 `margin-right`
+   * 把它推回边上 —— 净效果 = 轨道在容器边缘、内容离轨道 12px。
+   */
+  padding-right: 12px;
+  margin-right: -12px;
 }
 
 /*
@@ -2384,6 +2592,16 @@ body.fixed-viewport .split {
 .tab-row > :first-child {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/*
+ * 「模型余额」徐标：**只在窄屏露**（用户 2026-10-04：「移动端 在开单分析顶部
+ * tab 栏最右侧加上 模型余额 fixed 固定」）。
+ * 宽屏顶栏本来就有账号区（`AccountBar`），不重复摆。
+ * 窄屏的显隐 + `margin-left: auto`（推到行尾）写在下面 @media (max-width: 900px) 里。
+ */
+.tab-row .tab-balance {
+  display: none;
 }
 
 .side .panel h2 {
@@ -4300,6 +4518,23 @@ button.badge.balance:hover:not(:disabled) {
     background: var(--blue);
     transform: translateX(-50%);
   }
+  /*
+   * 「模型余额」钉在 tab 行**最右侧**（用户 2026-10-04）。
+   * 手机上顶栏整块收起来了，余额原先只在「我的 → 模型配置」里看得到。
+   * `margin-left: auto` 把它推到行尾 —— `.seg` 在窄屏是 `flex: 0 0 auto`（靠左排），
+   * 所以这一格正好落在最右边；它自己 `flex: 0 0 auto`，不会被 tab 挤扁。
+   * 「固定」靠的是这一行不参与内容滚动（内容在 `.scroll-body` 里滚），
+   * 所以始终看得见，不用 `position: fixed`。
+   * 尺寸跟全站其它徐标一套（`.balance` 的 padding / font-size 自己带），
+   * 这里只把行高对齐到 tab 行。
+   */
+  .tab-row .tab-balance {
+    display: inline-flex;
+    margin-left: auto;
+    align-self: center;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
   /* 已经没有悬浮层了，不需要再往内容下面“钻” */
   .tab-row + * {
     margin-top: 0;
@@ -4403,6 +4638,49 @@ button.badge.balance:hover:not(:disabled) {
     min-height: calc(100dvh - 170px);
   }
   /*
+   * 「实时分析」（以及窄屏进不去的「测试」）：这两格原来**漏了**，结果谁都不滚。
+   *
+   * 病根：窄屏把 `#app` 锁成 `100vh` + `overflow: hidden`，而 `.split` 还是
+   * `flex: 0 0 auto`（按内容长）、`.scroll-body` 又是 `overflow: visible`
+   * ⇒ 整页不能滚、内容区也不滚，超出一屏的部分被 `#app` 直接裁掉。
+   * 实测（往面板里塞 2000px 内容）：`#app` clientHeight 844 / scrollHeight 4233、
+   * `documentElement.scrollHeight === 844 === innerHeight`、`scrollTo(0,500)` 后
+   * `scrollY` 仍是 0、`.scroll-body` 的 `scrollTop = 600` 读回 0。
+   *
+   * 修法跟「历史分析 / 合约行情」逐条对齐：高度一路传下去（`#app flex 列` →
+   * `.analyze` → `.split` → `.col` → `.scroll-body`）+ 内容区自己滚，
+   * 这样顶部 tab 行照样钉住不动。
+   *
+   * ⚠️ `.split.m-analysis` 窄屏**只有一栏**（`.side` 是 `display: none`），
+   * 所以模板就一行；`m-test` 那格图还留着（`order: -1` 排在上面、高 52vh），
+   * 用 `auto minmax(0, 1fr)` 正好「图上 + 下面控制面板自己滚」（第一行不空，
+   * 不会白吃一个 gap —— 那正是 `m-history` 踩过的坑）。
+   */
+  body.fixed-viewport:has(.split.m-analysis) .analyze,
+  body.fixed-viewport:has(.split.m-analysis) .split,
+  body.fixed-viewport:has(.split.m-test) .analyze,
+  body.fixed-viewport:has(.split.m-test) .split {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .split.m-analysis {
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .split.m-test {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  /*
+   * 内容区自己滚（要压过上面 `.split > .col, .split .scroll-body { overflow: visible }`）。
+   * ⚠️ `:not(.m-history):not(.m-market)` —— 模板里「历史分析 / 合约行情」也会戴上
+   * `m-analysis`（那条 class 是 `chart → test → 其余` 的三分支），而它们各自那套
+   * 「高度定死 + 内部自己滚」已经调好了，别在这里再给它们套一层 scroll。
+   */
+  .split.m-analysis:not(.m-history):not(.m-market) .scroll-body,
+  .split.m-test .scroll-body {
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  /*
    * 「合约行情」那一格：跟「历史分析」同一套 ——
    * 给个确定高度（吃满除 tab 行之外的整屏），列表再把自己撑满。
    * 不给高度的话面板是「按内容撑」的：列表限高 62vh 之后
@@ -4458,18 +4736,100 @@ button.badge.balance:hover:not(:disabled) {
   /* 行高 / 图标都放大一点：手指点得中，图标也看得清 */
   .split.m-market .mkt-table .table th,
   .split.m-market .mkt-table .table td {
-    padding: 11px 8px;
+    padding: 9px 8px;
     font-size: 13px;
   }
+  /* 用户 2026-10-04：「图标大一点」—— 手机 22 → 26 → 28 */
   .split.m-market .mkt-table .ico {
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
   }
   .split.m-market .mkt-table .ico-letter {
-    font-size: 12px;
+    font-size: 15px;
   }
   .split.m-market .mkt-table .icell {
     gap: 8px;
+  }
+  .split.m-market .mkt-table .icell-v {
+    font-size: 11px;
+  }
+  /*
+   * ⚠️ 手机上的置顶星**不能占位**（2026-10-04 实测）：
+   * 这一档表格是 `table-layout: auto`（宽屏才是 fixed），列宽由内容决定 ——
+   * 星星要是当 flex 项，多出来的 18px + 间距会把表撑到 400px，而容器只有 386px，
+   * 于是列表**横向溢出 14px**（最长符号 BROCCOLI714 那行最明显）。
+   *
+   * 做法：把星**叠在首格的左内边距上**（正好 15px 空着），一点宽度都不吃；
+   * 高度给足 24px 让手指点得中。
+   * ⚠️ 定位的祖先要选 **`td`**（不是 `.icell`）：`left: 0` 才是格子左边缘。
+   *    挂在 `.icell` 上时它的左边缘已经是「内边距之后」了，再 `left: -14px`
+   *    会顶出格子、被 `.mkt-body` 的 `overflow` 裁掉一半（实测过）。
+   */
+  .split.m-market .mkt-table td.s {
+    position: relative;
+  }
+  /*
+   * 列宽：最新价 / 涨跌幅 都给**固定像素**，剩下的全给币种。
+   * 用户 2026-10-04：「最新价和涨跌缩小间距」「成交量不要截断」。
+   *
+   * ⚠️ 窄屏原来是 `table-layout: auto`（全局 `.table.fixed` 那条）—— 列宽由内容
+   *    说了算，实测币种列被钉死在 min-content **178px**、再宽也不长，
+   *    多出来的宽度全被最新价 / 涨跌幅吃掉：两者间距 360px 屏 13px、430px 屏
+   *    已经 **45px**（用户看到的就是这个），而成交额一点没变宽。
+   *    改成 fixed + 固定列宽后：间距**恒定 16px**，币种列吃掉所有余量 ——
+   *    375px 上文字区比原来多 17px、430px 多 56px，成交额再不会被省略号吃掉。
+   * ⚠️ fixed 下宽度完全由 colgroup 说了算、**不看内容**，所以窄到 320px 也不会
+   *    横向滚（挤不下只会截断，见 `.mkt-table .num` 的 overflow）。
+   */
+  .split.m-market .mkt-table .table.fixed {
+    table-layout: fixed;
+  }
+  /* 86px：最长那个价格（84,989.1 等宽 13px ≈ 62px）+ 两侧 8px 内边距，再各留 4px */
+  .split.m-market .mkt-table .c-last {
+    width: 86px;
+  }
+  /* 88px：正好是 72px 方块 + 两侧 8px 内边距 */
+  .split.m-market .mkt-table .c-chg {
+    width: 88px;
+  }
+  /*
+   * ⚠️ 首格左内边距必须**两边一起调**（表头 th + 表身 td），而且选择器要写得比
+   * 下面那条 `padding: 11px 8px`（特异性 0,4,1）更具体 —— 上面那条
+   * `.split.m-market .mkt-table td:first-child { padding-left: 14px }`（0,3,2）
+   * 一直是**死的**，所以手机上真实一直是 8px。
+   * 这里加一个 `.table` 补上那些像素，正好给星星腾出位置。
+   *
+   * 2026-10-04 再调：图标 26 → 28（「图标大一点」），整组要**往右一点**，
+   * 所以 15 → 22 → 24（星跟着 0 → 3 → 7）。
+   *
+   * ⚠️ 表头单独给 **7px**：跟绝对定位的星左边缘齐平（用户最终确认「贴到最左边的星」）。
+   *    所以这一档 td / th 的 padding **必须分开写** —— 行内容要 24（给星腾位置），
+   *    表头要 7（跟星对齐），合在一起写就对不上了。
+   *
+   * ⚠️ 这一格给到多少有**硬上限**：第二行最长的组合实测是
+   *    `No.235·6437.12万` ≈ **111px**（比最长的币名 1000PEPE 的 63px 宽得多），
+   *    而 360px 屏上首格总共只有 182px：182 - 24(内边距) - 28(图标) - 8(间距) - 8(右内边距)
+   *    = 114px —— 只剩 3px 余量。想再往右挪就得先给第二行腾地方
+   *    （降字号 / 缩方块）。
+   */
+  .split.m-market .mkt-table .table td:first-child {
+    padding-left: 24px;
+  }
+  .split.m-market .mkt-table .table th:first-child {
+    padding-left: 7px;
+  }
+  .split.m-market .mkt-table .pin-b {
+    position: absolute;
+    left: 7px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 15px;
+    height: 24px;
+    border-radius: 6px;
+  }
+  .split.m-market .mkt-table .pin-b svg {
+    width: 12px;
+    height: 12px;
   }
   /*
    * 历史分析：**去掉圆角的框**（用户 2026-10-03）。
@@ -5068,5 +5428,8 @@ button.badge.balance:hover:not(:disabled) {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
+    /* 同上：滚动条贴右边，内容离它 12px */
+    padding-right: 12px;
+    margin-right: -12px;
   }
 }

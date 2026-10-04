@@ -107,8 +107,8 @@ const short = (md5: string | null) => (md5 ? md5.slice(0, 12) : '—')
         </h2>
 
         <div v-if="!releases.length" class="empty">
-          还没打过包。在本机跑 <code>bash scripts/build-apk.sh</code>，APK 会出现在
-          <code>downloads/</code> 里，这页自动就有了。
+          还没打过包。在本机跑 <code>bash scripts/build-apk.sh</code>，APK
+          会出现在 <code>downloads/</code> 里，这页自动就有了。
         </div>
 
         <div v-else class="dl-list">
