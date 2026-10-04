@@ -87,6 +87,19 @@ import {
 } from './util/totp'
 import {MAX_PINS, listPins, togglePin} from './db/pins'
 import {
+  MARKET_TYPES,
+  createExchangeKey,
+  deleteExchangeKey,
+  getDefaultExchangeKey,
+  getExchangeKey,
+  listExchangeKeys,
+  maskCred,
+  setDefaultExchangeKey,
+  updateExchangeKey,
+  type ExchangeKey
+} from './db/exchange-keys'
+import {EXCHANGE_CATALOG, fetchExchangeAccount} from './data/exchange-account'
+import {
   backfillUsageKeys,
   createLlmKey,
   deleteLlmKey,
@@ -506,6 +519,27 @@ const num = (v: unknown): number | undefined => {
   const n = Number(v)
   return Number.isFinite(n) ? n : undefined
 }
+
+/**
+ * 交易所 Key 只回**掩码**（`abcd****wxyz`）—— 真凭据只留在服务端拿去连交易所。
+ * 每个 `*Set` 告诉前端「这一栏填过没有」（前端拿它显示「已设置 / 用掩码表示没改」）。
+ */
+const publicExchangeKey = (k: ExchangeKey) => ({
+  id: k.id,
+  exchange: k.exchange,
+  name: k.name,
+  apiKey: maskCred(k.apiKey),
+  apiKeySet: Boolean(k.apiKey),
+  secret: maskCred(k.secret),
+  secretSet: Boolean(k.secret),
+  password: maskCred(k.password),
+  passwordSet: Boolean(k.password),
+  marketType: k.marketType,
+  sandbox: k.sandbox,
+  isDefault: k.isDefault,
+  createdAt: k.createdAt,
+  updatedAt: k.updatedAt
+})
 
 function fail(res: http.ServerResponse, tag: string, e: unknown): void {
   const err = e as Error
@@ -2609,6 +2643,161 @@ async function route(
       )
     }
     return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /*
+   * 「我的 → 个人信息 → 交易所」：**多套交易所 API Key**（2026-10-04）。
+   *
+   * 用户原话：「个人信息下添加交易所内容，可以新增交易所和 key，支持多个」。
+   * 「开单分析 → 交易所账户」那一格用**默认**那套查余额 / 持仓 / 挂单 / 订单。
+   *
+   * ⚠️ 真 Key / Secret **不出网**：只回掩码（`publicExchangeKey`），
+   *    前端也用掩码判断「这一栏没改」。
+   */
+  if (p === '/api/exchange-keys' || p.startsWith('/api/exchange-keys/')) {
+    const bodyOf = async () => {
+      const b = await readJsonBody(req).catch(() => null)
+      if (!b) throw new Error('请求体不是合法 JSON')
+      return b
+    }
+    /** 没传 / 不是字符串都当「没填」（`undefined` 让仓储层用默认值） */
+    const cred = (v: unknown): string | undefined =>
+      typeof v === 'string' ? v : undefined
+
+    // 列表（一套都没有时会自动建一套「默认」，见 db/exchange-keys.ts）
+    if (p === '/api/exchange-keys' && method === 'GET') {
+      const keys = await listExchangeKeys(me.id)
+      return sendJson(res, 200, {
+        keys: keys.map(publicExchangeKey),
+        exchanges: EXCHANGE_CATALOG,
+        marketTypes: [...MARKET_TYPES]
+      })
+    }
+
+    // 新增
+    if (p === '/api/exchange-keys' && method === 'POST') {
+      try {
+        const body = await bodyOf()
+        const key = await createExchangeKey(me.id, {
+          exchange: str(body.exchange),
+          name: str(body.name),
+          apiKey: cred(body.apiKey),
+          secret: cred(body.secret),
+          password: cred(body.password),
+          marketType: str(body.marketType),
+          sandbox: body.sandbox === true
+        })
+        return sendJson(res, 201, {
+          ok: true,
+          id: key.id,
+          key: publicExchangeKey(key)
+        })
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    const m = p.match(/^\/api\/exchange-keys\/(\d+)(\/default)?$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+
+    // 设为默认
+    if (m[2] === '/default') {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      const ok = await setDefaultExchangeKey(me.id, id)
+      return sendJson(
+        res,
+        ok ? 200 : 404,
+        ok ? {ok: true} : {error: '这一套不存在'}
+      )
+    }
+
+    if (method === 'PUT' || method === 'PATCH') {
+      try {
+        const body = await bodyOf()
+        const saved = await updateExchangeKey(me.id, id, {
+          exchange: str(body.exchange),
+          name: str(body.name),
+          apiKey: cred(body.apiKey),
+          secret: cred(body.secret),
+          password: cred(body.password),
+          marketType: str(body.marketType),
+          sandbox: typeof body.sandbox === 'boolean' ? body.sandbox : undefined
+        })
+        return sendJson(
+          res,
+          saved ? 200 : 404,
+          saved
+            ? {ok: true, id: saved.id, key: publicExchangeKey(saved)}
+            : {error: '这一套不存在'}
+        )
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    if (method === 'DELETE') {
+      const ok = await deleteExchangeKey(me.id, id)
+      return sendJson(
+        res,
+        ok ? 200 : 404,
+        ok ? {ok: true} : {error: '这一套不存在'}
+      )
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /*
+   * 「开单分析 → 交易所账户」：查那一套账户的余额 / 持仓 / 挂单 / 订单历史（**只读**）。
+   *
+   * 每一项各自失败只让那一块空着（`fetchExchangeAccount` 会带一组 `*Error` 字段），
+   * 不要把整页打挂 —— 没权限 / 该交易所不支持某个接口都是常事。
+   */
+  if (p === '/api/exchange/account' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const limit = Math.min(
+      200,
+      Math.max(1, num(url.searchParams.get('limit')) ?? 50)
+    )
+    const symbol = (url.searchParams.get('symbol') ?? '').trim() || undefined
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    const account = publicExchangeKey(key)
+    /* 没填 Key 就不用去连交易所了，直接把「空 + 原因」给前端 */
+    if (!key.apiKey || !key.secret) {
+      return sendJson(res, 200, {
+        account,
+        balance: null,
+        positions: null,
+        openOrders: null,
+        orders: null,
+        income: null,
+        balanceError: '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）',
+        positionsError: null,
+        openOrdersError: null,
+        ordersError: null,
+        incomeError: null
+      })
+    }
+    try {
+      const r = await fetchExchangeAccount(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        {orderLimit: limit, symbol}
+      )
+      return sendJson(res, 200, {account, ...r})
+    } catch (e) {
+      return fail(res, 'exchange/account', e)
+    }
   }
 
   /*
