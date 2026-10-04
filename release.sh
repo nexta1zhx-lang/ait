@@ -7,7 +7,7 @@
 #   bash release.sh              # 打包 + 上传 + 部署（会问一句确认）
 #   bash release.sh -y           # 不问，直接发
 #   bash release.sh --dry-run    # 只打包 + 打印命令，不碰服务器
-#   bash release.sh --no-check   # 跳过 tsc 类型检查
+#   bash release.sh --no-check   # 跳过「未提交改动」与 tsc 类型检查
 #
 # 服务器端那个脚本是 deploy.sh（加 swap / 装 Docker / 起容器 / 自检）；
 # 这个脚本只管「把本机代码安全地送过去并让它跑起来」。
@@ -53,6 +53,16 @@ md5of() { if command -v md5 >/dev/null 2>&1; then md5 -q "$1"; else md5sum "$1" 
 [[ -f "$KEY" ]] || die "找不到 SSH 密钥：$KEY"
 
 if (( CHECK )); then
+  # 用户 2026-10-04：「部署的时候先本地保存代码」——
+  # 发出去的代码必须对应一个明确的提交，否则后面出问题没法回溯「当时跑的是哪版」。
+  # 放在类型检查**前面**：脏工作区要立刻报，不浪费时间跑 tsc。
+  if git rev-parse --git-dir >/dev/null 2>&1 \
+     && [[ -n "$(git status --porcelain)" ]]; then
+    git status --short >&2
+    die '工作区有未提交的改动 —— 先「git commit」再发布（要强行跳过就加 --no-check）'
+  fi
+  ok "代码已保存：$(git log -1 --format='%h %s')"
+
   c '类型检查（tsc --noEmit）'
   npm run --silent typecheck
   ok '通过'
