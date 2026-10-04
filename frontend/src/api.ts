@@ -347,12 +347,27 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
     const msg =
       (data as {error?: string} | null)?.error ??
       `请求失败（HTTP ${res.status}）`
-    // 401 = 登录过期：把本地 token 清掉，App 会退回登录页
-    if (res.status === 401) setAuthToken('')
+    /*
+     * 401 = 登录过期：把本地 token 清掉，App 会退回登录页。
+     *
+     * ⚠️ **只有 401 才算「登录失效」** —— 网络不通 / 5xx（部署窗口容器重建、
+     *    数据库抽一下）绝不能清 token，否则一次抖动就把人永久踢下线。
+     *    所以给这个错误打个 `auth` 标记（`initAuth` 靠它区分）。
+     */
+    if (res.status === 401) {
+      setAuthToken('')
+      const err = new Error(msg) as Error & {auth?: boolean}
+      err.auth = true
+      throw err
+    }
     throw new Error(msg)
   }
   return data as T
 }
+
+/** 这个错误是「登录失效（401）」吗 —— 网络不通 / 5xx 都不是 */
+export const isAuthError = (e: unknown): boolean =>
+  Boolean((e as {auth?: boolean} | null)?.auth)
 
 const get = <T>(url: string) => req<T>(url)
 

@@ -7,6 +7,7 @@ import {
   authRename,
   authToken,
   authTotpVerify,
+  isAuthError,
   setAuthToken,
   type AuthUser
 } from './api'
@@ -29,14 +30,25 @@ export async function initAuth(): Promise<void> {
     authReady.value = true
     return
   }
-  try {
-    user.value = (await authMe()).user
-  } catch {
-    // token 失效 / 网络不通：当作未登录（api.ts 里 401 已顺手清掉本地 token）
-    user.value = null
-  } finally {
-    authReady.value = true
+  /*
+   * ⚠️ 「连不上服务器」不能跟「没登录」混为一谈：App 冷启动时正好撞上部署窗口
+   *（容器重建几秒）/ 手机刚出隧道没信号，`/api/auth/me` 都会失败。
+   * 那时如果直接显示登录页，用户就会以为「token 被卡掉了」（其实 token 还在）。
+   * 所以：**只有 401 才算未登录**，其它错误重试两次再认。
+   */
+  for (let i = 0; i < 3; i++) {
+    try {
+      user.value = (await authMe()).user
+      authReady.value = true
+      return
+    } catch (e) {
+      if (isAuthError(e) || i === 2) break
+      await new Promise(r => setTimeout(r, 700 * (i + 1)))
+    }
   }
+  // token 失效 / 网络一直不通：当未登录（api.ts 里 401 已顺手清掉本地 token）
+  user.value = null
+  authReady.value = true
 }
 
 /**

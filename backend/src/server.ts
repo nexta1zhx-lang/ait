@@ -1935,19 +1935,41 @@ function bearerToken(req: http.IncomingMessage, url: URL): string {
   return (url.searchParams.get('token') ?? '').trim()
 }
 
-/** 当前登录用户；没登录返回 null（不抛错） */
+/**
+ * 当前登录用户；没带 token / token 无效 → null。
+ *
+ * ⚠️⚠️ **查库出错要往外抛，不能吞成 null** —— 吞了就等于把「数据库抖了一下」
+ *     变成 401「请先登录」，而前端（`api.ts` 的 `req()`）一见到 401 就
+ *     `setAuthToken('')` 把本地 token **真删掉** → 用户被永久踢下线，
+ *     得重新输密码（还多一道 TOTP）。2026-10-04 线上就这么发生过一次
+ *     （用户报「token 卡掉」）。调用方统一走 `authUser()`，把出错变成 503。
+ */
 async function currentUser(
   req: http.IncomingMessage,
   url: URL
 ): Promise<User | null> {
   const t = bearerToken(req, url)
   if (!t) return null
+  const user = await userByToken(t)
+  if (user) touchSoon(t)
+  return user
+}
+
+/**
+ * 取当前用户，**顺手把「数据库不通」和「没登录」分开**：
+ *  · token 无效 / 没带 → `null`（调用方回 401，客户端该登出就登出）
+ *  · 查库出错 → 写 503 并返回 `undefined`（**调用方直接 return**，别再写响应）
+ */
+async function authUser(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL
+): Promise<User | null | undefined> {
   try {
-    const user = await userByToken(t)
-    if (user) touchSoon(t)
-    return user
-  } catch {
-    return null
+    return await currentUser(req, url)
+  } catch (e) {
+    fail(res, 'auth', e)
+    return undefined
   }
 }
 
@@ -2040,7 +2062,8 @@ async function handleAuth(
   }
 
   if (p === '/api/auth/me' && method === 'GET') {
-    const user = await currentUser(req, url)
+    const user = await authUser(req, res, url)
+    if (user === undefined) return
     if (!user) return sendJson(res, 401, {error: '未登录'})
     return sendJson(res, 200, {user})
   }
@@ -2049,7 +2072,8 @@ async function handleAuth(
   if (p === '/api/auth/password') {
     if (method !== 'POST')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    const user = await currentUser(req, url)
+    const user = await authUser(req, res, url)
+    if (user === undefined) return
     if (!user) return sendJson(res, 401, {error: '请先登录'})
     const body = await readJsonBody(req).catch(() => null)
     if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
@@ -2069,7 +2093,8 @@ async function handleAuth(
   if (p === '/api/auth/profile') {
     if (method !== 'POST')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    const user = await currentUser(req, url)
+    const user = await authUser(req, res, url)
+    if (user === undefined) return
     if (!user) return sendJson(res, 401, {error: '请先登录'})
     const body = await readJsonBody(req).catch(() => null)
     if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
@@ -2179,8 +2204,10 @@ async function handleAuth(
    * `route()` 里 `p.startsWith('/api/auth/')` 会先接走，
    * 写到下面的受保护区会被这里 404（踩过）。
    */
-  const need = async (): Promise<User | null> => {
-    const u = await currentUser(req, url)
+  const need = async (): Promise<User | null | undefined> => {
+    const u = await authUser(req, res, url)
+    /* `undefined` = 数据库不通，`authUser` 已经写过 503 了 */
+    if (u === undefined) return undefined
     if (!u) sendJson(res, 401, {error: '请先登录'})
     return u
   }
@@ -2331,7 +2358,12 @@ async function route(
    * 其余都要登录 —— 分析、存档、知识库、标签、用量、账户、服务器监测
    * 都是「用户自己的东西」。
    */
-  const user = await currentUser(req, url)
+  /*
+   * ⚠️ 数据库出错**不能当成 401**（`authUser` 已经把它写成了 503）——
+   *    客户端见到 401 会把本地 token 删掉，那就等于「库抖一下 = 永久登出」。
+   */
+  const user = await authUser(req, res, url)
+  if (user === undefined) return
   if (!isPublicApi(p) && !user) {
     sendJson(res, 401, {error: '请先登录'})
     return
