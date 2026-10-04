@@ -49,7 +49,15 @@ if (isNativeShell() || coarsePointer) {
   /*
    * 粘滞 hover：手指点过的地方 `:hover` 会一直留着（直到点别处）——
    * 看着就像「那一格被选中了 / 多了一块背景」。抬手时把 pointer-events
-   * 关一帧再打开，强制浏览器重算 `:hover`，把粘住的态冲掉。
+   * 关一下再打开，强制浏览器重算 `:hover`，把粘住的态冲掉。
+   *
+   * ⚠️⚠️ **必须同步恢复**（不能挪到 `requestAnimationFrame` 里，曾经就是这么写的）：
+   * 浏览器是在 `touchend` 之后紧接着派发 `click` 的，如果那一刻
+   * `pointer-events: none` 还挂在被点的元素上，命中测试就落不到它身上 ——
+   * 行情表那一行的 `@click`（`<tr>` 上的）收不到事件，
+   * 用户看到的就是「**轻点币种有时候没反应**」（点到 `<td>` 里哪一格决定中不中）。
+   * 中间那次读 `offsetWidth` 是**强制同步重算**，保证「关 → 开」真的生效，
+   * 又不会把这段状态拖过 `click` 那一瞬间。
    */
   document.addEventListener(
     'touchend',
@@ -57,9 +65,8 @@ if (isNativeShell() || coarsePointer) {
       const el = e.target as HTMLElement | null
       if (!el || !el.style) return
       el.style.pointerEvents = 'none'
-      requestAnimationFrame(() => {
-        el.style.pointerEvents = ''
-      })
+      void el.offsetWidth
+      el.style.pointerEvents = ''
     },
     {passive: true, capture: true}
   )
