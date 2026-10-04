@@ -99,6 +99,8 @@ import {
   type ExchangeKey
 } from './db/exchange-keys'
 import {EXCHANGE_CATALOG, fetchExchangeAccount} from './data/exchange-account'
+import {fetchExchangeOverview} from './data/exchange-overview'
+import {latestSnapshot, saveSnapshot} from './db/exchange-store'
 import {
   backfillUsageKeys,
   createLlmKey,
@@ -2838,6 +2840,100 @@ async function route(
       return sendJson(res, 200, {account, ...r})
     } catch (e) {
       return fail(res, 'exchange/account', e)
+    }
+  }
+
+  /*
+   * 交易所资产（2026-10-05，方案见 docs/EXCHANGE.md）——
+   *   GET  /api/exchange/overview?id=   读库里**最新一条快照**（毫秒级，不打交易所）
+   *   POST /api/exchange/refresh?id=    现在去拉一次 + 落库（用户点 ⟳ 用）
+   * 只统计「USDT 合约 + C2C」；现货账户直接告诉前端“不参与统计”。
+   * 前端流程：先渲染快照 → 发现 ageSec 太大再自动调 refresh（stale-while-revalidate）。
+   */
+  if (
+    (p === '/api/exchange/overview' && method === 'GET') ||
+    (p === '/api/exchange/refresh' && method === 'POST')
+  ) {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    const account = publicExchangeKey(key)
+
+    // 现货账户不参与统计（别硬算成 0，会让人以为真的没钱）
+    if (key.marketType !== 'swap') {
+      return sendJson(res, 200, {
+        account,
+        noSnapshot: true,
+        reason: '这套账户是现货，不参与统计（只算 USDT 合约 + C2C）'
+      })
+    }
+    if (!key.apiKey || !key.secret) {
+      return sendJson(res, 200, {
+        account,
+        noSnapshot: true,
+        reason: '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）'
+      })
+    }
+
+    // ① 读库（快）
+    if (method === 'GET') {
+      try {
+        const snap = await latestSnapshot(me.id, key.id)
+        if (!snap) {
+          return sendJson(res, 200, {
+            account,
+            noSnapshot: true,
+            reason: '还没采过这个账户（点一下刷新）'
+          })
+        }
+        return sendJson(res, 200, {
+          account,
+          noSnapshot: false,
+          overview: {...snap.overview, account: {
+            exchange: account.exchange,
+            name: account.name,
+            marketType: account.marketType,
+            sandbox: account.sandbox
+          }},
+          source: snap.source,
+          ageSec: snap.ageSec,
+          stale: snap.stale,
+          err: snap.err
+        })
+      } catch (e) {
+        return fail(res, 'exchange/overview', e)
+      }
+    }
+
+    // ② 去拉一次 + 落库（慢，~2s）
+    try {
+      const ov = await fetchExchangeOverview({
+        exchange: key.exchange,
+        apiKey: key.apiKey,
+        secret: key.secret,
+        password: key.password,
+        marketType: key.marketType,
+        sandbox: key.sandbox
+      })
+      await saveSnapshot(me.id, key.id, ov, {source: 'manual'})
+      return sendJson(res, 200, {
+        account,
+        noSnapshot: false,
+        overview: {...ov, account: {
+          exchange: account.exchange,
+          name: account.name,
+          marketType: account.marketType,
+          sandbox: account.sandbox
+        }},
+        source: 'manual',
+        ageSec: 0,
+        stale: false,
+        err: null
+      })
+    } catch (e) {
+      return fail(res, 'exchange/refresh', e)
     }
   }
 

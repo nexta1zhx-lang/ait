@@ -6,10 +6,15 @@
  */
 import 'dotenv/config'
 import {ensureSchema, getPool, query} from '../db/client'
+import {latestSnapshot, saveSnapshot} from '../db/exchange-store'
 import {fetchExchangeOverview} from '../data/exchange-overview'
+
+/** 库里就一个用户（实测），写快照要 user_id，这个值从 key 行里读 */
+const USER_ID = 1
 
 interface KeyRow {
   id: number
+  user_id: number
   exchange: string
   name: string
   api_key: string
@@ -40,7 +45,7 @@ async function main(): Promise<void> {
   console.log('索引:', idx.map(x => x.indexname).join(', ') || '(没有)' + '\n')
 
   const rows = await query<KeyRow>(
-    `SELECT id, exchange, name, api_key, secret, password, market_type, sandbox
+    `SELECT id, user_id, exchange, name, api_key, secret, password, market_type, sandbox
        FROM user_exchange_keys
       WHERE api_key <> '' AND secret <> ''
       ORDER BY id LIMIT 1`
@@ -50,7 +55,9 @@ async function main(): Promise<void> {
     console.log('库里没有可用 key')
     return
   }
-  console.log(`用第 ${row.id} 套：${row.exchange} · ${row.name} · ${row.market_type}\n`)
+  console.log(
+    `用第 ${row.id} 套（user_id=${row.user_id}）：${row.exchange} · ${row.name} · ${row.market_type}\n`
+  )
 
   const t0 = Date.now()
   const ov = await fetchExchangeOverview({
@@ -78,6 +85,35 @@ async function main(): Promise<void> {
   if (ov.futures.positions[0]) {
     console.log('一个持仓的形状:', JSON.stringify(ov.futures.positions[0]))
   }
+
+  /* ---------------- 存取往返（验 SQL + 形状） ---------------- */
+  console.log('\n[往返] saveSnapshot → latestSnapshot')
+  await saveSnapshot(row.user_id, row.id, ov, {source: 'manual'})
+  const back = await latestSnapshot(row.user_id, row.id)
+  if (!back) {
+    console.log('  ❌ 读不回来')
+    return
+  }
+  console.log(
+    '  读回来:',
+    JSON.stringify({
+      source: back.source,
+      ageSec: back.ageSec,
+      stale: back.stale,
+      钱包: back.overview.futures.wallet,
+      保证金: back.overview.futures.margin,
+      可用: back.overview.futures.available,
+      资产行: back.overview.futures.assets.length,
+      持仓: back.overview.futures.positions.length,
+      C2C: back.overview.c2c,
+      统计: back.overview.stats
+    })
+  )
+  const rowsN = await query<{n: string}>(
+    `SELECT count(*)::text AS n FROM exchange_snapshots WHERE key_id = $1`,
+    [row.id]
+  )
+  console.log('  这张表里现在有', rowsN[0]?.n, '条（第', row.id, '套 key）')
 }
 
 main()
