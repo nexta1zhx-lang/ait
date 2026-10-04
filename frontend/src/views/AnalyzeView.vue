@@ -317,6 +317,31 @@ const {onTouchStart, onTouchMove, onTouchEnd} = useSwipeTabs<LeftTab>({
 })
 
 /**
+ * 切 tab 时给内容来一下「滑入」。
+ *
+ * 用户 2026-10-05：「滑动切换太生硬，能否平滑切换类似桌面滑动效果」。
+ * 方向跟着 tab 顺序走 —— **往后翻 = 新内容从右边滑进来**（跟滑动 / 翻页同一个方向）。
+ *
+ * ⚠️ 只挂 260ms 的临时类：动画播完就摘掉。理由有两个：
+ *   ① 不摘的话同一个方向连划两次，class 值不变，动画不会重播；
+ *   ② `transform` 长期存在会变成 `fixed` 后代的「包含块」——
+ *      K 线那颗可拖的闪电按钮（窄屏 `position: fixed`）会被带歪。
+ */
+const paneAnim = ref<'' | 'l' | 'r'>('')
+let paneAnimTimer: number | null = null
+watch(leftTab, (nv, ov) => {
+  const i = tabs.value.findIndex(t => t.value === nv)
+  const j = tabs.value.findIndex(t => t.value === ov)
+  if (i < 0 || j < 0 || i === j) return
+  paneAnim.value = i > j ? 'l' : 'r'
+  if (paneAnimTimer) window.clearTimeout(paneAnimTimer)
+  paneAnimTimer = window.setTimeout(() => (paneAnim.value = ''), 260)
+})
+onBeforeUnmount(() => {
+  if (paneAnimTimer) window.clearTimeout(paneAnimTimer)
+})
+
+/**
  * 「共 N 个合约」——行情表报上来的数，显示在「合约行情」标题右边
  * （用户 2026-10-03：把下面那行统计挪到标题右侧、顺手删掉「刷新 / 刚刚更新」那行）。
  * 跟着**筛选后的名单**走：搜索 / 换榜单，这个数也跟着变。
@@ -708,7 +733,9 @@ const heatRows = computed(() => {
             : 'm-analysis',
         // 「历史分析」「合约行情」各自再挂一个类：窄屏要让它跟「K 线」一样吃满整屏
         leftTab === 'history' ? 'm-history' : '',
-        leftTab === 'market' ? 'm-market' : ''
+        leftTab === 'market' ? 'm-market' : '',
+        // 切 tab 的滑入方向（见上面 paneAnim）：'pane-l' | 'pane-r' | ''
+        paneAnim ? 'pane-' + paneAnim : ''
       ]"
     >
       <!--

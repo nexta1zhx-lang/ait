@@ -281,6 +281,28 @@ summary,
 }
 
 /*
+ * 触屏同上，但**以 `html.touch` 类为准**（由 `main.ts` 判定：原生壳 或 主指针粗）。
+ * ⚠️ 为什么不只用上面那个 `@media (hover: none)`：部分 Android WebView 会把
+ *    `(hover: hover)` 误报成 true，那条媒体查询就不命中 → 长按就能拖选文字了
+ *    （用户 2026-10-05：「移动端还是有长按可以拖动选择文字」）。
+ */
+html.touch,
+html.touch body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+html.touch input,
+html.touch textarea,
+html.touch select,
+html.touch [contenteditable],
+html.touch .selectable {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+/*
  * ⚠️ 手机上「点两下整页就放大」——那是浏览器自带的**双击缩放**（viewport 里没禁）。
  * 这个页面能点的东西密密麻麻（历史分析的明细行、tab、按钮），连点一下就整页变大，
  * 看着就像「刚点的那个 tab 被放大了」（用户 2026-10-03：点击历史明细会放大 tab）。
@@ -4658,6 +4680,52 @@ button.badge:disabled {
     border-radius: 999px;
     background: var(--blue);
     transform: translateX(-50%);
+  }
+
+  /*
+   * 切一级 tab 时内容「滑入」——用户 2026-10-05：「滑动切换太生硬，
+   * 能否平滑切换类似桌面滑动效果」。方向由 `AnalyzeView` 的 `paneAnim` 给：
+   * `pane-l` = 往后翻（内容从右滑入）、`pane-r` = 往前翻（从左滑入）。
+   * ⚠️ 左栏内容区用 transform；右边 K 线那栏**只动 opacity** ——
+   *    它里面有一颗 `position: fixed` 的可拖闪电按钮，加 transform 会把它带歪。
+   */
+  .split.pane-l .col > .scroll-body {
+    animation: pane-in-right 0.24s ease both;
+  }
+  .split.pane-r .col > .scroll-body {
+    animation: pane-in-left 0.24s ease both;
+  }
+  .split.pane-l > .side,
+  .split.pane-r > .side {
+    animation: pane-fade-in 0.24s ease both;
+  }
+  @keyframes pane-in-right {
+    from {
+      opacity: 0.35;
+      transform: translateX(18px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes pane-in-left {
+    from {
+      opacity: 0.35;
+      transform: translateX(-18px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes pane-fade-in {
+    from {
+      opacity: 0.35;
+    }
+    to {
+      opacity: 1;
+    }
   }
   /*
    * 「模型余额」钉在 tab 行**最右侧**（用户 2026-10-04）。
