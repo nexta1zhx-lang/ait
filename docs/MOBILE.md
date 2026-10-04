@@ -215,5 +215,18 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
      能后退就路由后退，已经在落地页（`/contracts`）再按才真退出。
      按仓库约定**不 `import` `@capacitor/*`**（那些是 `devDependencies`，生产镜像不装），
      而是从 `window.Capacitor.Plugins.App` 取插件；**Web 上是空操作**。
-   - SSE 直播流在 App 切后台 / 锁屏后会被系统挂起，回前台要重连
-   - 应用图标、启动图、状态栏配色（`@capacitor/status-bar`）
+     注：手势导航（从屏幕边缘往里滑）跟三键导航、`Esc` 键是**同一个事件**，一并覆盖。
+   - ~~SSE 直播流切后台 / 锁屏后会挂起~~ ✅ **已做**：
+     · `frontend/src/live.ts` 把「浏览器标签页」和「原生壳」的前后台并成一个信号
+       （原生那边由 `native.ts` 接 `appStateChange` 灌进去）—— 光听 `visibilitychange`
+       在原生壳里**不可靠**，有的机型回前台不补发它。
+     · `api.ts` 的 `liveSse()`：切后台**当场断开**省电，回前台**立刻重连**；
+       再加一个看门狗（后端 20 秒一次 `event: heartbeat`）收「僵尸连接」。
+       重连后回调上层把断开期间的数据补回来（K 线重拉、行情重拉整表）。
+   - ~~应用图标、启动图、状态栏配色~~ ✅ **已做**：
+     · 图标 / 启动图由 `scripts/make-icons.py` **代码生成**（27 张，含 5 档密度 ×
+       普通 / 圆形 / 自适应前景），改色改比例重跑一遍就行，不用手改图。
+     · 状态栏：`Style.DARK`（= 深底浅字）+ 主题里的状态栏 / 导航栏 / 窗底统一到 `#08090b`。
+       ⚠️ `targetSdkVersion = 36` → Android 15+ **强制 edge-to-edge**，状态栏底色不再由
+       主题决定，而是透出 WebView 内容（靠页面顶部的安全区内边距垫）。
+     · 启动图底色 = App 主背景 → 冷启动不再白闪。

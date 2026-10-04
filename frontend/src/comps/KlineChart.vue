@@ -1242,17 +1242,24 @@ function startStream(): void {
    *    visible）—— 不拦一下就会留一条 SSE 在后台白收推送。
    */
   if (props.active === false) return
-  stopStream = klineStream(symbol, props.timeframe, c => applyTail([c]))
+  stopStream = klineStream(
+    symbol,
+    props.timeframe,
+    c => applyTail([c]),
+    onStreamReconnect
+  )
 }
 
-/** 切到后台 / 切走这一页就断掉（别白收推送），回来立刻重订 */
-function onLiveVisible(): void {
-  if (document.hidden) {
-    stopStream?.()
-    stopStream = null
-    return
-  }
-  startStream()
+/**
+ * 流断够了时间又连回来（切后台回来、或看门狗收掉了一条僵尸连接）：
+ * 把这段时间漏掉的 K 线补回来。
+ *
+ * ⚠️ 只重订不补数据的话，图上会**在中间缺一段** —— 最后一根虽然在跟着动，
+ *    它前面是空的（后台待得越久缺口越大）。
+ */
+function onStreamReconnect(): void {
+  if (testMode.value) return
+  void load()
 }
 
 /* ---------------- 坐标轴工具 ---------------- */
@@ -1717,11 +1724,15 @@ function drawPoint() {
 /* ---------------- 生命周期 ---------------- */
 
 onMounted(load)
-// 实时推送：币种 / 周期 / 测试模式一变就重订（上游 WS → 后端 SSE → 这里）
-onMounted(() => {
-  startStream()
-  document.addEventListener('visibilitychange', onLiveVisible)
-})
+/*
+ * 实时推送：币种 / 周期 / 测试模式一变就重订（上游 WS → 后端 SSE → 这里）。
+ *
+ * ⚠️ 这里**不再自己听 `visibilitychange`** 了：「App 切后台断开 / 回前台重连」
+ *    现在全在 `klineStream` → `liveSse` 里（切后台还顺手断开省电）。
+ *    而且光听 `visibilitychange` 也**不够**：原生壳里切后台 / 锁屏不一定会发它，
+ *    得靠 Capacitor 的 `appStateChange`（见 `native.ts` + `live.ts`）。
+ */
+onMounted(startStream)
 watch([() => props.symbol, () => props.timeframe, testMode], startStream)
 // 「这一页被切走 / 切回来」也要断和重订（路由 KeepAlive 之后组件不卸载了）
 watch(() => props.active, startStream)
@@ -1744,7 +1755,6 @@ watch(() => props.pointAt, drawPoint)
 onBeforeUnmount(() => {
   stopStream?.()
   stopStream = null
-  document.removeEventListener('visibilitychange', onLiveVisible)
   try {
     refs?.chart.remove()
   } catch {

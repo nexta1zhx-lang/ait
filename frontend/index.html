@@ -11,8 +11,16 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="theme-color" content="#0d1117" />
+    <!--
+      theme-color：浏览器 / PWA 顶栏和「添加到主屏幕」后的状态栏取这个色。
+      ⚠️ 必须跟 App 主背景一致（`style.css` 的 `--bg`、`values/colors.xml` 的 `app_bg`），
+         否则在 PWA 里状态栏和页面顶部会分成两个色。
+    -->
+    <meta name="theme-color" content="#08090b" />
     <meta name="color-scheme" content="dark" />
+    <!-- 标签页图标：跟 App 图标同一套，由 `scripts/make-icons.py` 生成 -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/favicon.png" />
     <!-- 「添加到主屏幕」后全屏运行（PWA / iOS 独立模式） -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
@@ -20,9 +28,9 @@
       name="apple-mobile-web-app-status-bar-style"
       content="black-translucent"
     />
-    <meta name="apple-mobile-web-app-title" content="开单分析" />
+    <meta name="apple-mobile-web-app-title" content="Ait" />
     <!-- 首屏标题：原来这里是「用量与花费」，明显是复制残留，路由会覆盖但会闪一下 -->
-    <title>开单分析</title>
+    <title>Ait</title>
   </head>
   <body>
     <div id="app"></div>

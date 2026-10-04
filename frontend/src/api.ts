@@ -2,6 +2,7 @@
 
 import {ref} from 'vue'
 import {isNativeShell} from './platform'
+import {isForeground, onForegroundChange} from './live'
 
 /* ---------------- 登录态 ---------------- */
 
@@ -202,6 +203,120 @@ export const apiUrl = (path: string): string => `${API_BASE}${path}`
 /** 开一条 SSE。**必须走绝对地址**，否则原生壳里连不上；顺手带上登录 token */
 const openSse = (path: string): EventSource =>
   new EventSource(apiUrl(withToken(path)))
+
+/**
+ * **长期订阅**（K 线 / 全市场行情）专用的 SSE 壳。
+ *
+ * 裸 `EventSource` 在手机上有两个不够用的地方，这个壳就是来补这两块的：
+ *
+ *   ① **僵尸连接**：App 切后台 / 锁屏时 WebView 被系统挂起，底层 socket 其实已经
+ *      断了，可是浏览器不一定马上知道 —— 不报 error、也不触发它自己那套重连，
+ *      界面就定格在那儿（看着像「卡死」，等多久都不动）。所以这里挂了**看门狗**：
+ *      `idleMs` 之内一个事件都没收到，就判定连接已死，主动拆掉重连。
+ *      ⚠️ 这一条**依赖后端喂心跳**：后端 20 秒推一次 `event: heartbeat`
+ *         （`server.ts` 里的 `beat`）。**不能**用 SSE 注释行（`: ping`）——
+ *         注释行浏览器压根不派发给 JS，前端看不见，看门狗只能瞎猜。
+ *
+ *   ② **回前台要立刻恢复**：不能干等浏览器那套指数退避（最久几十秒）。
+ *      这里直接盯着 `live.ts` 的前台信号：切后台**当场断开**（别在后台耗电，
+ *      也别留着僵尸连接），回前台**立刻重连**，并回调 `onReconnect` 让上层把
+ *      断开期间漏掉的数据补回来（K 线重拉一段、行情重拉整表）。
+ *
+ * `onReconnect` 只在**真的断过一段时间**的重连上回调：快速抖动（几秒内又连回来）
+ * 漏掉的东西很少，下一批推送就盖上了，不值得把整份底稿重拉一遍 —— 否则网络一抖
+ * 就会看到一连串全量请求。首连也不回调（上层订阅前基本都自己取过底稿了）。
+ *
+ * ⚠️ **任务型的一次性流不要用它**（`analyzeStream` / `collectStream`）：那两种流断了
+ *    重连没有意义 —— 后端那份任务还在跑，重连只会再开一个任务、白花一次钱。
+ *
+ * @param events 要转发的**具名事件**（后端 `send('kline', ...)` 里的那个名字）
+ * @param onEvent 收到事件时回调（消息体已经 `JSON.parse` 过了）
+ * @param opts.idleMs 多久没动静算死（默认 75 秒；后端心跳 20 秒，留了三拍余量）
+ * @param opts.onReconnect 断够了时间又连回来时回调，用来补数据
+ * @returns 取消函数，组件卸载时务必调用
+ */
+function liveSse(
+  path: string,
+  events: string[],
+  onEvent: (name: string, data: unknown) => void,
+  opts: {idleMs?: number; onReconnect?: () => void} = {}
+): () => void {
+  const idleMs = opts.idleMs ?? 75_000
+  /** 断开超过这么久才值得重拉底稿（快抖就交给下一批推送） */
+  const RESYNC_GAP_MS = 10_000
+
+  let es: EventSource | null = null
+  let watchdog: ReturnType<typeof setInterval> | null = null
+  /** 最近一次「收到任何东西」的时刻：数据事件和心跳都算 */
+  let lastAt = 0
+  /** 是否成功连上过 —— 用来区分「首连」和「重连」 */
+  let connected = false
+  let stopped = false
+
+  /** 只关连接，**别停看门狗** —— 看门狗自己重连时还要接着用 */
+  const closeSocket = (): void => {
+    es?.close()
+    es = null
+  }
+
+  const connect = (): void => {
+    if (stopped || es) return
+    // 先记下断了多久，再刷新 lastAt（否则看门狗会把「正在连」当成又死了一次）
+    const gap = Date.now() - lastAt
+    lastAt = Date.now()
+    const cur = openSse(path)
+    es = cur
+
+    // 浏览器层的 `open`：每次（重）连上都会来一次
+    cur.addEventListener('open', () => {
+      lastAt = Date.now()
+      if (connected && gap > RESYNC_GAP_MS) opts.onReconnect?.()
+      connected = true
+    })
+
+    // 后端 20 秒一次的心跳：只喂看门狗，不往上层转发
+    cur.addEventListener('heartbeat', () => {
+      lastAt = Date.now()
+    })
+
+    for (const name of events) {
+      cur.addEventListener(name, e => {
+        lastAt = Date.now()
+        try {
+          onEvent(name, JSON.parse((e as MessageEvent).data))
+        } catch {
+          /* 一条坏消息不影响后面的 */
+        }
+      })
+    }
+  }
+
+  // 已经在前台才连（一打开就在后台的，等切回前台再连）
+  if (isForeground()) connect()
+
+  // 看门狗：前台还一直没消息 = 连接已经死了，拆了重连
+  watchdog = setInterval(() => {
+    if (stopped || !es) return
+    if (Date.now() - lastAt <= idleMs) return
+    closeSocket()
+    connect()
+  }, 5_000)
+
+  // 切后台当场断开，回前台立刻重连（连上会走上面的 `open` → `onReconnect`）
+  const offForeground = onForegroundChange(active => {
+    if (stopped) return
+    if (active) connect()
+    else closeSocket()
+  })
+
+  return () => {
+    stopped = true
+    if (watchdog) clearInterval(watchdog)
+    watchdog = null
+    closeSocket()
+    offForeground()
+  }
+}
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   // 带上登录态（公开接口带了也无害）
@@ -503,24 +618,31 @@ export const fetchTicker = (symbol: string, market?: string) => {
  *
  * 上游是币安合约 WS（后端中转，见 `backend/src/data/kline-stream.ts`）；
  * 推来的就是一根 K 线，**正在长的那根也会推**（`timestamp` 跟当前最后一根相同就是同一根在更新）。
- * 返回取消函数；`EventSource` 断了会自己重连，不用管。
+ *
+ * 断线 / 切后台全交给 `liveSse`（切后台断开、回前台重连、看门狗收僵尸连接），
+ * 这里只需把 `onReconnect` 透出去 —— **只重订不补数据的话图上会在中间缺一段**
+ * （最后一根虽然在动，前面是空的）。
+ *
+ * @param onReconnect 断够了时间又连回来时回调（用来重拉 K 线）
+ * @returns 取消函数，组件卸载时务必调用
  */
 export function klineStream(
   symbol: string,
   timeframe: string,
-  onCandle: (c: Candle) => void
+  onCandle: (c: Candle) => void,
+  onReconnect?: () => void
 ): () => void {
   const qs = new URLSearchParams({symbol, timeframe})
-  const es = openSse(`/api/kline/stream?${qs}`)
-  es.addEventListener('kline', e => {
-    try {
-      const d = JSON.parse((e as MessageEvent).data) as {candle?: Candle}
+  return liveSse(
+    `/api/kline/stream?${qs}`,
+    ['kline'],
+    (_name, data) => {
+      const d = data as {candle?: Candle}
       if (d?.candle) onCandle(d.candle)
-    } catch {
-      /* 一条坏消息不影响后面的 */
-    }
-  })
-  return () => es.close()
+    },
+    /* 闲置判定给得宽：冷门币可能几十秒没成交，但 20 秒一次的心跳会把它刷新 */
+    {idleMs: 75_000, onReconnect}
+  )
 }
 
 /* ---------------- 合约行情列表 ---------------- */
@@ -571,23 +693,26 @@ export interface TickerPatch {
  * 上游是币安的 `!ticker@arr`（一条流管所有币，后端中转）：
  * **每秒一批，但每批里只有刚变过的两三百个币**，所以必须先拿一次
  * `fetchMarkets()` 当底稿，再拿增量按 `pair` 往里盖。
- * 返回取消函数；`EventSource` 断了会自己重连。
+ *
+ * 断线 / 切后台全交给 `liveSse`；`onReconnect` 是「断够了时间又连回来了」的回调 ——
+ * 中间漏掉的增量不追了，**直接重拉一次整表**最省事（一张表 ~100KB，不是增量）。
+ *
+ * @returns 取消函数，组件卸载时务必调用
  */
 export function tickerStream(
-  onBatch: (updates: TickerPatch[]) => void
+  onBatch: (updates: TickerPatch[]) => void,
+  onReconnect?: () => void
 ): () => void {
-  const es = openSse('/api/tickers/stream')
-  es.addEventListener('ticker', e => {
-    try {
-      const d = JSON.parse((e as MessageEvent).data) as {
-        updates?: TickerPatch[]
-      }
+  return liveSse(
+    '/api/tickers/stream',
+    ['ticker'],
+    (_name, data) => {
+      const d = data as {updates?: TickerPatch[]}
       if (d?.updates?.length) onBatch(d.updates)
-    } catch {
-      /* 一条坏消息不影响后面的 */
-    }
-  })
-  return () => es.close()
+    },
+    /* 这条流每秒都有数据，30 秒没动静基本可以确定是死了 */
+    {idleMs: 30_000, onReconnect}
+  )
 }
 
 /**

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      App 主背景色。
+
+      ⚠️ **四处必须一致**，改色时一起改：
+         · 这里（Android 主题的窗底 / 状态栏 / 导航栏）
+         · `values/ic_launcher_background.xml`（自适应图标底板）
+         · `capacitor.config.json` 的 `android.backgroundColor` 与 `StatusBar.backgroundColor`
+         · 前端 `style.css` 里的主背景变量（以及 `native.ts` 里的 `APP_BG`）
+
+      注：XML 注释里不能出现**两个连续连字符**（AAPT2 会报
+      「注释中不允许出现字符串」），所以上面提到 CSS 变量时都不带前缀 ——
+      要写前端那些以两个连字符开头的变量名时，记得把它改写掉。
+
+      为什么要单独定义：冷启动第一帧、以及 Android 15+ 强制 edge-to-edge 之后
+      状态栏透出来的，都是**系统/WebView 的背景**，不是页面画的 —— 不统一就会白闪
+      或者状态栏和页面顶部两个色。
+    -->
+    <color name="app_bg">#08090b</color>
+</resources>

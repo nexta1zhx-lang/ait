@@ -93,5 +93,5 @@ export const router = createRouter({
 
 router.afterEach(to => {
   const t = (to.meta.title as string) ?? ''
-  document.title = t ? `${t} · 开单分析` : '开单分析'
+  document.title = t ? `${t} · Ait` : 'Ait'
 })

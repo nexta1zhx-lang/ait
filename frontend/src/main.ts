@@ -2,6 +2,7 @@ import {createApp} from 'vue'
 import App from './App.vue'
 import {router} from './router'
 import {setupAndroidBack} from './back-button'
+import {setupNativeShell} from './native'
 /*
  * 自托管字体（Noto Sans SC）—— ⚠️ 必须在 `style.css` **之前** import，
  * 否则它自己的 `@font-face` 会排在后面，`--font-sans` 里的回退顺序就乱了。
@@ -13,8 +14,15 @@ import './style.css'
 const app = createApp(App).use(router)
 
 /*
- * Android 物理返回键：**不接的话按一下就直接退出 App**（看着像崩了）。
- * 只在原生壳里生效，Web 上是空操作 —— 详情见 `back-button.ts`。
+ * 原生壳（Android / iOS App）接线：状态栏 + 前后台状态（`native.ts`）。
+ * Web 上是空操作。必须在 `use(router)` 之后 —— 里面的返回键要用 router 后退。
+ */
+setupNativeShell()
+
+/*
+ * 返回键**单独挂**（要用 router），见 `back-button.ts`。
+ * 不接的话 Android 上按一下就直接退出 App，看着像崩了。
+ * ⚠️ 别再往 `native.ts` 里加一份 —— 一个键被处理两遍会后退两次 / 直接退出。
  */
 setupAndroidBack(router)
 

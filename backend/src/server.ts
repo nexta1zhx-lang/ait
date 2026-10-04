@@ -1369,7 +1369,13 @@ async function handleKlineStream(
   const unsubscribe = subscribeKline(symbol, timeframe, candle =>
     send('kline', {candle})
   )
-  const beat = setInterval(() => res.write(': ping\n\n'), 20_000)
+  /*
+   * 心跳：**必须是具名事件**，不能写成 SSE 注释行（`: ping`）。
+   * 注释行浏览器不会派发给 JS，前端那套「多久没动静就判定连接已死」的看门狗
+   * 就瞎了 —— 手机切后台回来的僵尸连接全靠它收（见 `frontend/src/api.ts` 的 `liveSse`）。
+   * 下面 analyze / knowledge 那两条是**任务型**一次性流，不收僵尸，用注释行就行。
+   */
+  const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
   let closed = false
   const done = () => {
@@ -1409,7 +1415,8 @@ async function handleTickerStream(
   const unsubscribe = subscribeTickers(patches =>
     send('ticker', {updates: patches})
   )
-  const beat = setInterval(() => res.write(': ping\n\n'), 20_000)
+  /* 心跳必须是具名事件，理由同上 */
+  const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
   let closed = false
   const done = () => {

@@ -29,6 +29,7 @@ import {
   type TickerPatch
 } from '../api'
 import {decimalsFor, fmt} from '../format'
+import {isForeground, onForegroundChange} from '../live'
 import {marketMinVolUsd} from '../settings'
 
 const props = defineProps<{
@@ -236,7 +237,11 @@ function start(): void {
   if (stopped) return
   if (!unsubscribe) {
     lastEventAt = Date.now()
-    unsubscribe = tickerStream(applyBatch)
+    /*
+     * 第二个参数是「流断够了时间又连回来」的回调（切后台回来 / 看门狗收掉僵尸连接）：
+     * 中间漏掉的增量**不追了**，直接重拉一次整表最省事。
+     */
+    unsubscribe = tickerStream(applyBatch, () => void loadSnapshot())
   }
   if (!aliveTimer) aliveTimer = setInterval(checkAlive, 5000)
   if (!resyncTimer)
@@ -261,10 +266,14 @@ function stop(): void {
 /**
  * 该干活吗：**这一格正被看着** + 页面在前台。
  *
- * 两个条件缺一个都停：切到别的 tab 不该继续收推送，手机锁屏/切后台也不该。
+ * 两个条件缺一个都停：切到别的 tab 不该继续收推送，手机锁屏 / 切后台也不该。
+ *
+ * ⚠️ 前台判断走 `isForeground()`，**不是** `document.hidden`：原生壳里切后台 /
+ *    锁屏不一定发 `visibilitychange`；就算发了，`document.hidden` 也可能回不到
+ *    false（机型差异，详见 `live.ts` 顶部）。
  */
 function shouldRun(): boolean {
-  return props.active !== false && !document.hidden
+  return props.active !== false && isForeground()
 }
 
 /** 状态变了就重新对齐（切 tab / 切后台 / 页面切回前台都会走到这） */
@@ -288,10 +297,18 @@ function sync(): void {
 watch(() => props.active, sync)
 
 let bodyRO: ResizeObserver | null = null
+/** 前台变化的取消函数：组件卸载时必须调，否则监听会一直挂着 */
+let offForeground: (() => void) | null = null
 
 onMounted(() => {
   sync()
-  document.addEventListener('visibilitychange', sync)
+  /*
+   * 前后台翻转就重新对齐。
+   *
+   * ⚠️ 走 `onForegroundChange` 而不是自己听 `visibilitychange`：后者只覆盖 Web
+   *    标签页级别，原生壳切后台 / 锁屏不一定发（见 `live.ts`）。
+   */
+  offForeground = onForegroundChange(sync)
   if (bodyEl.value && typeof ResizeObserver !== 'undefined') {
     bodyRO = new ResizeObserver(() => measureScrollbar())
     bodyRO.observe(bodyEl.value)
@@ -302,9 +319,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopped = true
   stop() // 里面会取消排队的刷新 / 清掉缓冲
+  offForeground?.()
+  offForeground = null
   bodyRO?.disconnect()
   bodyRO = null
-  document.removeEventListener('visibilitychange', sync)
 })
 
 /* ---------------- 图标 ---------------- */

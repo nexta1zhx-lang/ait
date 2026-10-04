@@ -1,12 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <!-- Base application theme. -->
-    <style name="AppTheme" parent="Theme.AppCompat.Light.DarkActionBar">
-        <!-- Customize your theme here. -->
+    <!--
+      基础主题。
+      ⚠️ 原来是 `Theme.AppCompat.Light.DarkActionBar`（**浅色**），跟 App 的深色界面完全对不上：
+         冷启动那一瞬系统按浅色主题画窗底，会白闪一下。
+         2026-10-04 换成深色父主题 + `@color/app_bg` 窗底。
+    -->
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="colorPrimary">@color/colorPrimary</item>
         <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
         <item name="colorAccent">@color/colorAccent</item>
+        <!-- 窗底 = App 主背景：WebView 没画完时露出来的就是它，不能是白的 -->
+        <item name="android:windowBackground">@color/app_bg</item>
+        <!--
+          状态栏 / 导航栏底色 + 图标亮度。
+          ⚠️ 我们 `targetSdkVersion = 36`，Android 15+ 起系统**强制 edge-to-edge**：
+             这两个 color 项在 15+ 上会被系统忽略（状态栏透明、直接透出 WebView
+             自己的内容，页面顶部有安全区内边距垫着，见 `style.css`）。
+             留着是给 Android 14 及以下用的 —— 老系统上不设就是白条。
+        -->
+        <item name="android:statusBarColor">@color/app_bg</item>
+        <item name="android:navigationBarColor">@color/app_bg</item>
+        <!-- 深底 → 图标要浅色。false = 不使用深色图标，别搞反 -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
     </style>
 
     <style name="AppTheme.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
@@ -15,8 +33,22 @@
         <item name="android:background">@null</item>
     </style>
 
+    <!--
+      启动画面主题（`AndroidManifest.xml` 里 MainActivity 用的就是它）。
+      父主题 `Theme.SplashScreen` 来自 `androidx.core:core-splashscreen`
+      （依赖见 `app/build.gradle`）。
 
+      Android 12（API 31）起，冷启动时**系统**会先画一屏，用的是这三个属性：
+        · `windowSplashScreenBackground`  底色
+        · `windowSplashScreenAnimatedIcon` 中间那个图标（系统会裁成圆形）
+        · `postSplashScreenTheme`         画完切回哪个主题
+      不写的话系统会退回去用 App 图标 + 主题默认底色 —— 在深色 App 上就是白闪。
+      `android:background` 是给 Android 11 及以下用的（老系统直接拿这张图铺满屏幕）。
+    -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="android:background">@drawable/splash</item>
+        <item name="windowSplashScreenBackground">@color/app_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/AppTheme</item>
     </style>
 </resources>

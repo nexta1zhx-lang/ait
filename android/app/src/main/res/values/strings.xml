@@ -1,7 +1,14 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">开单分析</string>
-    <string name="title_activity_main">开单分析</string>
+    <!--
+      桌面图标下面显示的名字（用户能看到的就这两个）。
+      ⚠️ 必须跟 `capacitor.config.json` 的 `appName`、`frontend/index.html` 的
+         `title` / `apple-mobile-web-app-title` 保持一致。
+         包名（appId）**不跟着改** —— 改了 Android 会当成另一个应用，
+         必须卸载重装才行。
+    -->
+    <string name="app_name">Ait</string>
+    <string name="title_activity_main">Ait</string>
     <string name="package_name">cn.bitcoooin.advisor</string>
     <string name="custom_url_scheme">cn.bitcoooin.advisor</string>
 </resources>
