@@ -24,6 +24,8 @@ APP_DIR="${APP_DIR:-/opt/crypto-advisor}"
 DOMAIN="${DOMAIN:-bitcoooin.cn}"
 LOCAL_TAR="${LOCAL_TAR:-/tmp/ca.tgz}"
 REMOTE_TAR="${REMOTE_TAR:-/tmp/ca.tgz}"
+# 需要单独补传的 APK 先落在服务器的这个暂存目录（见「4b. APK 按需上传」）
+REMOTE_APK_DIR="${REMOTE_APK_DIR:-/tmp/ca-apk}"
 
 ASSUME_YES=0
 DRY_RUN=0
@@ -77,22 +79,28 @@ rm -f "$LOCAL_TAR"
 # ⚠️ --exclude='.env' 绝不能漏：服务器那份 .env 里有随机化过的 PGPASSWORD 和你的 Key
 # ./android 是 Capacitor 的原生工程（含 Gradle 构建产物，几十 MB），服务器只跑
 #   后端 + 前端 dist，完全用不到它 —— 排掉能让包小一大截。
-# ./downloads 反而**要**传：APK 放在那儿，Caddy 按 /dl/* 发出去。
+# ./downloads 要传（`releases.json` 是下载页的数据源），但 **`*.apk` 排除在外**——
+#   APK 一个就有 9MB，而服务器上已经有的不必重传（它们不走镜像，是
+#   Caddy 从裸机目录发 `/dl/*` 的）。需要新的那份由「4b. APK 按需上传」单独 scp。
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$LOCAL_TAR" \
   --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='.env.local' \
   --exclude='backend/dist' --exclude='frontend/dist' --exclude='logs' \
   --exclude='.DS_Store' --exclude='._*' --exclude='backup*.dump' \
   --exclude='./android' \
+  --exclude='./downloads/*.apk' \
   -C . .
 
 if tar tzf "$LOCAL_TAR" | grep -qx '\./\.env'; then
   die '包里混进了 .env —— 会覆盖服务器上的密钥，已中止'
 fi
-for f in './package.json' './backend/src/server.ts' './docker-compose.prod.yml' './Caddyfile' './deploy.sh'; do
+for f in './package.json' './backend/src/server.ts' './docker-compose.prod.yml' './Caddyfile' './deploy.sh' './downloads/releases.json'; do
   if ! tar tzf "$LOCAL_TAR" | grep -qxF "$f"; then
     die "包里缺 $f —— 打包内容不对，已中止"
   fi
 done
+if tar tzf "$LOCAL_TAR" | grep -q '\.apk$'; then
+  die '包里混进了 .apk —— 应该由「4b. APK 按需上传」单独传，已中止'
+fi
 ok "$(du -h "$LOCAL_TAR" | cut -f1) · $(tar tzf "$LOCAL_TAR" | wc -l | tr -d ' ') 项 · 已确认不含 .env"
 
 LOCAL_MD5_TS="$(md5of backend/src/server.ts)"
@@ -101,8 +109,9 @@ LOCAL_MD5_DEPLOY="$(md5of deploy.sh)"
 if (( DRY_RUN )); then
   c 'DRY RUN —— 不连服务器。真要执行的是：'
   printf '    scp %s %s@%s:%s\n' "$LOCAL_TAR" "$SSH_USER" "$HOST" "$REMOTE_TAR"
-  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env）→ 解包 → md5 核对 → sudo bash deploy.sh\n' \
+  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env / downloads）→ 解包 → md5 核对 → sudo bash deploy.sh\n' \
     "$SSH_USER" "$HOST" "$APP_DIR"
+  printf '    （APK 不在主包里，只把服务器上没有的那些单独 scp 到 %s）\n' "$REMOTE_APK_DIR"
   printf '    curl https://%s/api/health\n' "$DOMAIN"
   exit 0
 fi
@@ -132,12 +141,51 @@ c '上传'
 scp -q -o BatchMode=yes -i "$KEY" "$LOCAL_TAR" "$SSH_USER@$HOST:$REMOTE_TAR"
 ok "已传到 $HOST:$REMOTE_TAR"
 
+# ---------------------------------------------------------------- 4b. APK 按需上传
+# 用户 2026-10-04：发布包一度 30M —— 大头是 downloads/ 里 3 个 APK 各 ~9MB（自托管字体
+# 让 APK 从 4.1MB 涨到 9.1MB）。而这些 APK 不走镜像、是 Caddy 从裸机目录发 /dl/* 的，
+# **服务器上已经有的不用重传**。所以主包排除了 *.apk，这里只挑缺的 / 大小对不上的。
+# 判定用「文件名 + 字节数」：名字一样、大小一样就认为服务器上那份就是它。
+c "APK 按需上传（本地 $(find downloads -maxdepth 1 -name '*.apk' 2>/dev/null | wc -l | tr -d ' ') 个）"
+# find -printf 是 GNU find 的（服务器是 Linux，没问题）
+SERVER_APKS="$(ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" \
+  "find '$APP_DIR/downloads' -maxdepth 1 -name '*.apk' -printf '%f %s\\n' 2>/dev/null" || true)"
+
+UPLOAD_LIST=''   # 每行：文件名 字节数 md5
+for f in downloads/*.apk; do
+  [[ -f "$f" ]] || continue          # 没有 apk 时 glob 会原样返回，挡掉
+  name="$(basename "$f")"
+  size="$(wc -c < "$f" | tr -d ' ')"
+  if printf '%s\n' "$SERVER_APKS" | grep -qxF "$name $size"; then
+    ok "服务器上已有，跳过：$name"
+  else
+    UPLOAD_LIST="${UPLOAD_LIST}${name} ${size} $(md5of "$f")"$'\n'
+  fi
+done
+
+if [[ -z "$UPLOAD_LIST" ]]; then
+  ok '没有需要上传的 APK'
+else
+  ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" \
+    "rm -rf '$REMOTE_APK_DIR' && mkdir -p '$REMOTE_APK_DIR'"
+  printf '%s' "$UPLOAD_LIST" > /tmp/ca-apk-manifest.txt
+  scp -q -o BatchMode=yes -i "$KEY" /tmp/ca-apk-manifest.txt \
+    "$SSH_USER@$HOST:$REMOTE_APK_DIR/MANIFEST"
+  while read -r name size md5; do
+    [[ -n "$name" ]] || continue
+    scp -q -o BatchMode=yes -i "$KEY" "downloads/$name" \
+      "$SSH_USER@$HOST:$REMOTE_APK_DIR/$name"
+    ok "已传 ${name}（$(( size / 1048576 )) MB）"
+  done <<< "$UPLOAD_LIST"
+  rm -f /tmp/ca-apk-manifest.txt
+fi
+
 # ---------------------------------------------------------------- 5. 远端：检查 → 清旧 → 解包 → 核对 → 部署
 c '远端执行（清旧 → 解包 → 核对 → deploy.sh）'
 ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" \
-  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY'" <<'REMOTE'
+  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR'" <<'REMOTE'
 set -euo pipefail
-APP_DIR="$1"; TAR="$2"; WANT_TS="$3"; WANT_DEPLOY="$4"
+APP_DIR="$1"; TAR="$2"; WANT_TS="$3"; WANT_DEPLOY="$4"; APK_STAGE="$5"
 
 echo "==> 前置检查"
 [[ -d "$APP_DIR" ]] || { echo "✗ $APP_DIR 不存在 —— 首次部署请按 DEPLOY.md 手动走一遍" >&2; exit 1; }
@@ -185,6 +233,27 @@ got_deploy=$(md5sum "$APP_DIR/deploy.sh" | cut -d' ' -f1)
 if [[ "$got_ts" != "$WANT_TS" ]]; then echo "✗ server.ts 不一致：$got_ts ≠ $WANT_TS" >&2; exit 1; fi
 if [[ "$got_deploy" != "$WANT_DEPLOY" ]]; then echo "✗ deploy.sh 不一致" >&2; exit 1; fi
 echo "    ✓ server.ts / deploy.sh 都与本机 md5 相同"
+
+echo "==> 安装新 APK（如有）"
+# 本机按需挑出来的那几个，已落在 ${APK_STAGE}（带一份 MANIFEST 写期望 md5）
+if [[ -f "$APK_STAGE/MANIFEST" ]]; then
+  while read -r name size md5; do
+    [[ -n "$name" ]] || continue
+    src="$APK_STAGE/$name"
+    [[ -f "$src" ]] || { echo "✗ 没收到 $name" >&2; exit 1; }
+    got=$(md5sum "$src" | cut -d' ' -f1)
+    if [[ "$got" != "$md5" ]]; then
+      echo "✗ ${name} md5 不符（${got} ≠ ${md5}）—— 传输坏了" >&2; exit 1
+    fi
+    # 先试直接 mv（downloads 目录正常是 ubuntu 的）；不行再 sudo
+    mv "$src" "$APP_DIR/downloads/$name" 2>/dev/null \
+      || sudo mv "$src" "$APP_DIR/downloads/$name"
+    echo "    ✓ $name"
+  done < "$APK_STAGE/MANIFEST"
+  rm -rf "$APK_STAGE"
+else
+  echo "    （没有新的 APK）"
+fi
 
 echo "==> 跑 deploy.sh（构建镜像 + 起容器 + 自检），2 核机器要等几分钟"
 cd "$APP_DIR"
