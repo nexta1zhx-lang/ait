@@ -76,7 +76,7 @@ scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.tgz \
   ubuntu@57.181.38.200:/tmp/
 
 # 服务器（⚠️ 必须先 chown 成 ubuntu：`sudo mkdir` 建出来是 root 所有，
-#   而 release.sh 是**非 sudo** 解包 —— 文件得归 ubuntu，不 chown 后面会解压失败）
+#   而 scripts/release.sh 是**非 sudo** 解包 —— 文件得归 ubuntu，不 chown 后面会解压失败）
 ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200 \
   'sudo mkdir -p /opt/crypto-advisor && sudo chown ubuntu:ubuntu /opt/crypto-advisor \
    && cd /opt/crypto-advisor && tar xzf /tmp/ca.tgz'
@@ -86,14 +86,14 @@ ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200 \
 
 > 💡 **APK 不在这条 tar 里**（一个就 9MB，而且服务器上已经有的不必重传）。
 > 首次部署想让 `/dl/*` 有东西可下，把 `downloads/*.apk` 单独 `scp` 到
-> `/opt/crypto-advisor/downloads/`；之后就交给 `bash release.sh`（它会按需补传）。
+> `/opt/crypto-advisor/downloads/`；之后就交给 `bash scripts/release.sh`（它会按需补传）。
 
-> 💡 只是**更新**的话，不用做这一步 —— 直接 `bash release.sh` 一条命令。
-> 这一步只在**全新机器 / APP_DIR 还不存在**时做（`release.sh` 检测到目录不在会提示你回来）。
+> 💡 只是**更新**的话，不用做这一步 —— 直接 `bash scripts/release.sh` 一条命令。
+> 这一步只在**全新机器 / APP_DIR 还不存在**时做（`scripts/release.sh` 检测到目录不在会提示你回来）。
 
 > ⚠️ **一定排除 `.env`**。服务器上的 `.env` 是「在服务器上管」的：里面有随机化过的
 > `PGPASSWORD`。用本机的 `.env` 覆盖它，会让**应用连不上数据库**（密码与 db 容器里
-> 那个对不上）。首次部署时 `.env` 不存在，`deploy.sh` 会从 `.env.example` 生成一份，
+> 那个对不上）。首次部署时 `.env` 不存在，`scripts/deploy.sh` 会从 `.env.example` 生成一份，
 > 并把 `PGPASSWORD` 换成随机值。
 
 ### 2. 一键部署
@@ -101,10 +101,10 @@ ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200 \
 ```bash
 ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200
 cd /opt/crypto-advisor
-sudo bash deploy.sh
+sudo bash scripts/deploy.sh
 ```
 
-`deploy.sh` 幂等，按顺序做：
+`scripts/deploy.sh` 幂等，按顺序做：
 
 1. 内存 < 1.9G 就加 2GB swap（这台机器 909MB，**必须加**，否则 Postgres / Node 容易被 OOM 杀）
 2. 没装 Docker 就装
@@ -235,19 +235,19 @@ curl -s -o /dev/null -w 'http  %{http_code}\n' http://bitcoooin.cn/api/health   
 
 ## 后续更新
 
-**更新 = 本机提交 → 打包 → 上传 → 服务器上重跑 `deploy.sh`**。
+**更新 = 本机提交 → 打包 → 上传 → 服务器上重跑 `scripts/deploy.sh`**。
 在本机跑一条命令就行（**不用 `git pull`**：tar 把工作区直接搬过去）：
 
 ```bash
 cd /Users/nexta1/Documents/预测
-bash release.sh            # 会问一句确认；加 -y 不问，加 --dry-run 只看不发
+bash scripts/release.sh            # 会问一句确认；加 -y 不问，加 --dry-run 只看不发
 ```
 
-`release.sh` 按顺序做：**先要求工作区已提交**（有未提交改动直接停，加 `--no-check` 可跳过）
+`scripts/release.sh` 按顺序做：**先要求工作区已提交**（有未提交改动直接停，加 `--no-check` 可跳过）
 → `tsc` 类型检查 → 打包（排除 `.env` / `android` / `*.apk`，并断言包里确实没有 `.env`）
 → 检查 SSH（本机代理劫持时给出提示）→ `scp` 上传主包 → **按需补传 APK**
 （服务器上已有同名同大小的不传）→ 远端「校验包 → 清空旧文件（保留 `.env` / `downloads`）
-→ 解包 → md5 与本机核对 → `sudo bash deploy.sh` → 重建 caddy」→
+→ 解包 → md5 与本机核对 → `sudo bash scripts/deploy.sh` → 重建 caddy」→
 最后 `curl https://bitcoooin.cn/api/health` 验收。**任一步失败就停住**，不会留下半个部署。
 
 先分清哪一类改动：
@@ -259,7 +259,7 @@ bash release.sh            # 会问一句确认；加 -y 不问，加 --dry-run 
 - **在服务器上改的**：`.env`（只剩 `PGPASSWORD` / 汇率这些）—— 服务器上直接编辑后
   `restart app`，**别**拿本机那份覆盖
 
-### ⚠️ 三条不能忘（`release.sh` 已经帮你挡住了）
+### ⚠️ 三条不能忘（`scripts/release.sh` 已经帮你挡住了）
 
 - **`--exclude='.env'` 不能漏**：服务器 `.env` 里有随机化过的 `PGPASSWORD`，被本机那份
   覆盖就再也连不上数据库（日志里是「⚠️ 数据库不可用」）。真碰上了：
@@ -291,10 +291,9 @@ bash release.sh            # 会问一句确认；加 -y 不问，加 --dry-run 
 2. 把同级手写的 **`downloads/releases.json`** 合进来 —— 那里面写「这一版叫什么、
    改了啥、什么时候发的」。
 
-所以**加一版新包只要两步**：`bash build-apk.sh`（
-
-自动把 APK 放进 `downloads/`）→ 在 `downloads/releases.json` 里补一条 →
-`bash release.sh -y`。页面不用改代码。没登记的 APK 也会列出来，标「未登记」。
+所以**加一版新包只要两步**：`bash scripts/build-apk.sh`（自动把 APK 放进
+`downloads/`）→ 在 `downloads/releases.json` 里补一条 →
+`bash scripts/release.sh -y`。页面不用改代码。没登记的 APK 也会列出来，标「未登记」。
 
 > `releases.json` 里的 `app` 段是整页的介绍文案（名称 / 包名 / 说明 / 安装步骤）；
 > `releases[]` 每条对应一个版本（`version` / `file` / `date` / `title` / `notes`）。
@@ -318,15 +317,15 @@ https://bitcoooin.cn/dl/entry-advisor-0.1.0.apk
 换文件时一起传上去：
 
 ```bash
-bash build-apk.sh        # 顺带把新 APK 放进 downloads/（并在 releases.json 里补一条）
-bash release.sh -y       # 打包上传 + 重建 caddy 容器
+bash scripts/build-apk.sh        # 顺带把新 APK 放进 downloads/（并在 releases.json 里补一条）
+bash scripts/release.sh -y       # 打包上传 + 重建 caddy 容器
 ```
 
 > 💭 本地 `npm run web` 也能下：线上 `/dl/*` 是 Caddy 发的，本地没有 Caddy，
 > 后端 `serveDownload()` 会自己发一份（`backend/src/server.ts`）。效果一样，
 > 所以 `/download` 页在本机就能完整验收。
 
-⚠️ 第一次加这个挂载**必须重建 caddy**（`release.sh` 走的就是
+⚠️ 第一次加这个挂载**必须重建 caddy**（`scripts/release.sh` 走的就是
 `up -d --build`，会按新配置重建），否则容器里没有 `/srv/dl`。
 
 ## 常用命令

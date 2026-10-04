@@ -2,7 +2,7 @@
 #
 # 构建 Android debug APK（自用安装包，不签名不上架）。
 #
-#   bash build-apk.sh
+#   bash scripts/build-apk.sh
 #
 # 干了三件事：打前端 → 同步进原生工程 → Gradle 编 APK。
 # 产物：android/app/build/outputs/apk/debug/app-debug.apk
@@ -12,7 +12,9 @@
 #
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# 脚本在 scripts/ 下，统一切到仓库根
+# （下面全是相对仓库根的路径：package.json / android/ / downloads/）
+cd "$(dirname "$0")/.."
 
 # ---------------------------------------------------------------- JDK 21
 #
@@ -97,10 +99,10 @@ echo "✓ 已放入下载目录：downloads/entry-advisor-$VER.apk"
 if [[ -f "$DEST/releases.json" ]] && ! grep -q "\"version\": \"$VER\"" "$DEST/releases.json"; then
   echo
   echo "⚠️  downloads/releases.json 里还没有 v$VER 这条 —— /download 页会把它列成「未登记」。"
-  echo "    补一条（title / date / notes）再跑 release.sh。"
+  echo "    补一条（title / date / notes）再跑 scripts/release.sh。"
 fi
 ls -lh "$DEST"
 echo
 echo "装到手机（需要 adb）：adb install -r \"$APK\""
 echo "本机下载：cd downloads && python3 -m http.server 8899 --bind 0.0.0.0"
-echo "线上下载：https://bitcoooin.cn/dl/entry-advisor-$VER.apk（跑 bash release.sh 之后）"
+echo "线上下载：https://bitcoooin.cn/dl/entry-advisor-$VER.apk（跑 bash scripts/release.sh 之后）"

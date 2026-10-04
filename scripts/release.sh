@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 #
 # 本机一键发布（在自己电脑上跑，不用先登服务器）：
-#   打包 → 上传 → 服务器清旧解包 → 重跑 deploy.sh → 公网验收
+#   打包 → 上传 → 服务器清旧解包 → 重跑 scripts/deploy.sh → 公网验收
 #
-# 用法：
-#   bash release.sh              # 打包 + 上传 + 部署（会问一句确认）
-#   bash release.sh -y           # 不问，直接发
-#   bash release.sh --dry-run    # 只打包 + 打印命令，不碰服务器
-#   bash release.sh --no-check   # 跳过「未提交改动」与 tsc 类型检查
+# 用法（在仓库根目录跑）：
+#   bash scripts/release.sh              # 打包 + 上传 + 部署（会问一句确认）
+#   bash scripts/release.sh -y           # 不问，直接发
+#   bash scripts/release.sh --dry-run    # 只打包 + 打印命令，不碰服务器
+#   bash scripts/release.sh --no-check   # 跳过「未提交改动」与 tsc 类型检查
 #
-# 服务器端那个脚本是 deploy.sh（加 swap / 装 Docker / 起容器 / 自检）；
+# 服务器端那个脚本是 scripts/deploy.sh（加 swap / 装 Docker / 起容器 / 自检）；
 # 这个脚本只管「把本机代码安全地送过去并让它跑起来」。
 #
 # 可覆盖的环境变量（一般不用动）：
 #   HOST / SSH_USER / KEY / APP_DIR / DOMAIN
 
 set -euo pipefail
+
+# 脚本在 scripts/ 下，统一切到仓库根 —— 下面全是相对仓库根的路径
+# （tar -C .、package.json、backend/src/…）。`bash scripts/release.sh`
+# 和 `bash /abs/path/scripts/release.sh` 两种调法都能正确定位。
+cd "$(dirname "$0")/.."
 
 HOST="${HOST:-57.181.38.200}"
 SSH_USER="${SSH_USER:-ubuntu}"
@@ -50,8 +55,8 @@ die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 md5of() { if command -v md5 >/dev/null 2>&1; then md5 -q "$1"; else md5sum "$1" | cut -d' ' -f1; fi; }
 
 # ---------------------------------------------------------------- 0. 本机前置检查
-[[ -f package.json && -f backend/src/server.ts && -f docker-compose.prod.yml && -f deploy.sh ]] \
-  || die '请在仓库根目录跑（需要 package.json / backend/src/server.ts / docker-compose.prod.yml / deploy.sh）'
+[[ -f package.json && -f backend/src/server.ts && -f docker-compose.prod.yml && -f scripts/deploy.sh ]] \
+  || die '请在仓库根目录跑（需要 package.json / backend/src/server.ts / docker-compose.prod.yml / scripts/deploy.sh）'
 [[ -f "$KEY" ]] || die "找不到 SSH 密钥：$KEY"
 
 if (( CHECK )); then
@@ -93,7 +98,7 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$LOCAL_TAR" \
 if tar tzf "$LOCAL_TAR" | grep -qx '\./\.env'; then
   die '包里混进了 .env —— 会覆盖服务器上的密钥，已中止'
 fi
-for f in './package.json' './backend/src/server.ts' './docker-compose.prod.yml' './Caddyfile' './deploy.sh' './downloads/releases.json'; do
+for f in './package.json' './backend/src/server.ts' './docker-compose.prod.yml' './Caddyfile' './scripts/deploy.sh' './downloads/releases.json'; do
   if ! tar tzf "$LOCAL_TAR" | grep -qxF "$f"; then
     die "包里缺 $f —— 打包内容不对，已中止"
   fi
@@ -104,12 +109,12 @@ fi
 ok "$(du -h "$LOCAL_TAR" | cut -f1) · $(tar tzf "$LOCAL_TAR" | wc -l | tr -d ' ') 项 · 已确认不含 .env"
 
 LOCAL_MD5_TS="$(md5of backend/src/server.ts)"
-LOCAL_MD5_DEPLOY="$(md5of deploy.sh)"
+LOCAL_MD5_DEPLOY="$(md5of scripts/deploy.sh)"
 
 if (( DRY_RUN )); then
   c 'DRY RUN —— 不连服务器。真要执行的是：'
   printf '    scp %s %s@%s:%s\n' "$LOCAL_TAR" "$SSH_USER" "$HOST" "$REMOTE_TAR"
-  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env / downloads）→ 解包 → md5 核对 → sudo bash deploy.sh\n' \
+  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env / downloads）→ 解包 → md5 核对 → sudo bash scripts/deploy.sh\n' \
     "$SSH_USER" "$HOST" "$APP_DIR"
   printf '    （APK 不在主包里，只把服务器上没有的那些单独 scp 到 %s）\n' "$REMOTE_APK_DIR"
   printf '    curl https://%s/api/health\n' "$DOMAIN"
@@ -181,7 +186,7 @@ else
 fi
 
 # ---------------------------------------------------------------- 5. 远端：检查 → 清旧 → 解包 → 核对 → 部署
-c '远端执行（清旧 → 解包 → 核对 → deploy.sh）'
+c '远端执行（清旧 → 解包 → 核对 → scripts/deploy.sh）'
 ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" \
   "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR'" <<'REMOTE'
 set -euo pipefail
@@ -189,7 +194,7 @@ APP_DIR="$1"; TAR="$2"; WANT_TS="$3"; WANT_DEPLOY="$4"; APK_STAGE="$5"
 
 echo "==> 前置检查"
 [[ -d "$APP_DIR" ]] || { echo "✗ $APP_DIR 不存在 —— 首次部署请按 docs/DEPLOY.md 手动走一遍" >&2; exit 1; }
-# 服务器上的 .env 是 root:600（deploy.sh 建的），所以只能用 sudo 读
+# 服务器上的 .env 是 root:600（scripts/deploy.sh 建的），所以只能用 sudo 读
 # ⚠️ 大模型配置（LLM_API_KEY）2026-10-04 起已经不放 .env 了 ——
 #    Key 按用户存在数据库，网页「我的 → 模型配置」里填。
 #    所以这里只检查 .env 存在（数据库账号密码还在里面）。
@@ -229,10 +234,10 @@ tar xzf "$TAR" -C "$APP_DIR" --warning=no-unknown-keyword
 
 echo "==> 核对内容与本机一致"
 got_ts=$(md5sum "$APP_DIR/backend/src/server.ts" | cut -d' ' -f1)
-got_deploy=$(md5sum "$APP_DIR/deploy.sh" | cut -d' ' -f1)
+got_deploy=$(md5sum "$APP_DIR/scripts/deploy.sh" | cut -d' ' -f1)
 if [[ "$got_ts" != "$WANT_TS" ]]; then echo "✗ server.ts 不一致：$got_ts ≠ $WANT_TS" >&2; exit 1; fi
-if [[ "$got_deploy" != "$WANT_DEPLOY" ]]; then echo "✗ deploy.sh 不一致" >&2; exit 1; fi
-echo "    ✓ server.ts / deploy.sh 都与本机 md5 相同"
+if [[ "$got_deploy" != "$WANT_DEPLOY" ]]; then echo "✗ scripts/deploy.sh 不一致" >&2; exit 1; fi
+echo "    ✓ server.ts / scripts/deploy.sh 都与本机 md5 相同"
 
 echo "==> 安装新 APK（如有）"
 # 本机按需挑出来的那几个，已落在 ${APK_STAGE}（带一份 MANIFEST 写期望 md5）
@@ -255,9 +260,9 @@ else
   echo "    （没有新的 APK）"
 fi
 
-echo "==> 跑 deploy.sh（构建镜像 + 起容器 + 自检），2 核机器要等几分钟"
+echo "==> 跑 scripts/deploy.sh（构建镜像 + 起容器 + 自检），2 核机器要等几分钟"
 cd "$APP_DIR"
-sudo bash deploy.sh
+sudo bash scripts/deploy.sh
 
 echo "==> 重建 caddy（Caddyfile 改了靠这一步生效）"
 # Caddyfile 是 bind mount 的**单个文件**：内容变了 compose 看不出来，`up -d` 不会重建容器，

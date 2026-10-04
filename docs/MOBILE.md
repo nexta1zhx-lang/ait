@@ -44,7 +44,7 @@
 ### 一键出 APK
 
 ```bash
-bash build-apk.sh
+bash scripts/build-apk.sh
 ```
 
 产物：`android/app/build/outputs/apk/debug/app-debug.apk`，装到手机：
@@ -68,7 +68,7 @@ brew install openjdk@21        # 没装才需要
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 ```
 
-`build-apk.sh` 已经自动处理这段探测，手动跑 Gradle 时才需要自己 export。
+`scripts/build-apk.sh` 已经自动处理这段探测，手动跑 Gradle 时才需要自己 export。
 
 ### 其他依赖
 
@@ -133,7 +133,8 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 > 本地联调时后端要监听 `0.0.0.0` 且手机与电脑同一局域网。
 > ⚠️ 后端的 CORS 是**白名单**（`backend/src/server.ts` 的 `CORS_ORIGIN_RE`），
 > 只放行 `bitcoooin.cn` + `https://localhost`（Android 壳）+ `capacitor://localhost`（iOS 壳）
-> + 本机开发端口。**指到别的地址要记得把那个来源加进去**，否则请求会被浏览器拦掉。
+>
+> - 本机开发端口。**指到别的地址要记得把那个来源加进去**，否则请求会被浏览器拦掉。
 
 ---
 
@@ -141,7 +142,7 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 
 | 命令                      | 干什么                                  |
 | ------------------------- | --------------------------------------- |
-| `bash build-apk.sh`       | 一键出 Android APK                      |
+| `bash scripts/build-apk.sh`       | 一键出 Android APK                      |
 | `npm run app:sync`        | 打前端 → 同步进**所有**已添加的原生工程 |
 | `npm run app:android`     | sync 后用 Android Studio 打开           |
 | `npm run app:ios`         | sync 后用 Xcode 打开（需先装环境）      |
@@ -164,10 +165,10 @@ https://bitcoooin.cn/dl/entry-advisor-<版本>.apk
 发一次：
 
 ```bash
-bash release.sh          # 会连 downloads/ 一起打上去，并重建 caddy 容器
+bash scripts/release.sh          # 会连 downloads/ 一起打上去，并重建 caddy 容器
 ```
 
-`build-apk.sh` 每次都会把新 APK 自动放进 `downloads/entry-advisor-<版本>.apk`，
+`scripts/build-apk.sh` 每次都会把新 APK 自动放进 `downloads/entry-advisor-<版本>.apk`，
 版本号读的是 `package.json` 的 `version`。
 
 ### 本机：同一个 WiFi 下最快
@@ -185,7 +186,7 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 - `dig bitcoooin.cn` 返回 **198.18.x.x**（RFC 2544 假 IP 段，代理的 fake-IP）
 - `nc -z <任意IP> <任意端口>` **全部"成功"**（结果是伪造的，别信）
 
-**关掉代理的 TUN（或给 `57.181.38.200` 加一条直连规则）再跑 `release.sh`。**
+**关掉代理的 TUN（或给 `57.181.38.200` 加一条直连规则）再跑 `scripts/release.sh`。**
 
 ### 安装提示
 

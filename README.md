@@ -71,8 +71,8 @@ npm run dev -- BTC/USDT -t 4h -d 30     # 换周期 / 换天数
 完整步骤与运维看 [`docs/DEPLOY.md`](./docs/DEPLOY.md)，日常就一件事：
 
 ```bash
-bash release.sh            # 本机跑：类型检查 → 打包 → 上传 → 远端部署 → 公网验收
-bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服务器
+bash scripts/release.sh            # 本机跑：提交检查 → 类型检查 → 打包 → 上传 → 远端部署 → 验收
+bash scripts/release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服务器
 ```
 
 它内部用 tar + scp 搬运（不要用 rsync：macOS 自带的是 openrsync，和服务器 rsync 3.x
@@ -91,13 +91,13 @@ bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服
 
 | 路由         | 干什么                                                                 |
 | ------------ | ---------------------------------------------------------------------- |
-| `/contracts` | **合约行情**（默认页）。全市场榜单，点一行就去开单分析                  |
+| `/contracts` | **合约行情**（默认页）。全市场榜单，点一行就去开单分析                 |
 | `/analyze`   | **开单分析**。行情条 + K 线，左栏一级 tab 见下                         |
 | `/history`   | **预测历史**（`?tab=kb` 切知识库）。左三张饼图，右记录列表；点饼图即筛 |
 | `/usage`     | **用量**。每次调用花了多少钱                                           |
 | `/me`        | **我的**：预测历史 / 知识库 / 模型配置 / 用量 / 管理 / 个人信息        |
 | `/download`  | **下载**。列全部历史安装包（独立页，不进导航）                         |
-| 其余          | 302 到上面几个                                                         |
+| 其余         | 302 到上面几个                                                         |
 
 开单分析左栏一级 tab：**合约行情 / K 线 / 实时分析 / 测试 / 历史分析 / 添加案例**
 （窄屏会去掉「测试」和「添加案例」，把它们并进 K 线头部的「＋」）。
@@ -192,12 +192,12 @@ bash release.sh --dry-run  # 只看打包结果和要执行的命令，不碰服
 
 **写在代码里**，两份常量（`backend/src/llm/prompts.ts`）：
 
-| 常量             | 干什么                                                             | 谁在用               |
-| ---------------- | ------------------------------------------------------------------ | -------------------- |
+| 常量             | 干什么                                                             | 谁在用                 |
+| ---------------- | ------------------------------------------------------------------ | ---------------------- |
 | `PREDICT_PROMPT` | **分析预测**：怎么读行情、怎么预测、怎么给概率、**结论三档怎么判** | 每次分析（`/analyze`） |
-| `EXTRACT_PROMPT` | **知识库提炼**：收录案例时怎么把这段行情写成一条案例               | 知识库「收录」       |
+| `EXTRACT_PROMPT` | **知识库提炼**：收录案例时怎么把这段行情写成一条案例               | 知识库「收录」         |
 
-- **改提示词 = 改这个文件 + 重新部署**（`bash release.sh`）。网页上没有编辑入口
+- **改提示词 = 改这个文件 + 重新部署**（`bash scripts/release.sh`）。网页上没有编辑入口
   （原 `/prompts` 页已撤）。
 - 每次分析会把「正文 + 输出契约」一起算 hash 存进 `analyses`，能对出当时用的是哪版。
 - 标签池 = **标签模板**（知识库页维护）∪ **知识库里用过的标签**。
@@ -260,9 +260,9 @@ docker-compose.yml       PostgreSQL 16（本地开发，只起 db）
 docker-compose.prod.yml  生产：app + db + caddy（线上用这份）
 Dockerfile               多阶段构建，运行阶段只带生产依赖
 Caddyfile                域名与反代（Caddy 跑在 compose 里）
-deploy.sh                服务器上一键部署（加 swap / 装 Docker / 起服务 / 自检）
-release.sh               本机一键发布（提交检查 → 打包 → 上传 → 触发 deploy.sh → 验收）
-build-apk.sh             打 Android APK 并放进 downloads/
+scripts/deploy.sh        服务器上一键部署（加 swap / 装 Docker / 起服务 / 自检）
+scripts/release.sh       本机一键发布（提交检查 → 打包 → 上传 → 触发 deploy.sh → 验收）
+scripts/build-apk.sh     打 Android APK 并放进 downloads/
 docs/DEPLOY.md           部署与运维文档
 docs/MOBILE.md           打包成 App（Capacitor）
 ```

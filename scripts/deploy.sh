@@ -2,9 +2,9 @@
 #
 # 服务器端一键部署（Ubuntu）。已经在 AWS Lightsail 上验证过路径。
 #
-# 用法（在服务器的终端里跑）：
-#   bash deploy.sh                  # 代码已经放在当前目录 / APP_DIR
-#   bash deploy.sh <git仓库地址>     # 自动 clone 到 /opt/crypto-advisor
+# 用法（在服务器的终端里跑，仓库根）：
+#   bash scripts/deploy.sh                  # 代码已经放在当前目录 / APP_DIR
+#   bash scripts/deploy.sh <git仓库地址>     # 自动 clone 到 /opt/crypto-advisor
 #
 # 💡 这个脚本可以整段粘进 AWS Lightsail 控制台的「浏览器终端」——
 #    本机网络如果劫持了 SSH（实测本机就是），浏览器终端是唯一入口。
@@ -76,7 +76,7 @@ fi
 
 if [[ ! -f "$APP_DIR/docker-compose.prod.yml" ]]; then
   die "在 $APP_DIR 里找不到 docker-compose.prod.yml。
-    先把代码放进去，或者用：bash deploy.sh <git仓库地址>"
+    先把代码放进去，或者用：bash scripts/deploy.sh <git仓库地址>"
 fi
 cd "$APP_DIR"
 ok "工作目录 $APP_DIR"
