@@ -2,10 +2,10 @@
 /**
  * 收录一个案例进知识库（网页「知识库」页签是同一个链路）。
  *
- *   npm run learn -- MAGMA 4h --do "回调不破，右侧进的"
- *   npm run learn -- ROBO 1h --dont "突破一点后续没力量"
- *   npm run learn -- MAGMA 4h --do "..." --from 2026-09-01 --to 2026-09-15
- *   npm run learn -- MAGMA 4h --do "..." --dry-run   只预览不落库
+ *   npm run learn -- MAGMA 4h --note "回调不破，右侧进的"
+ *   npm run learn -- MAGMA 4h --note "..." --from 2026-09-01 --to 2026-09-15
+ *   npm run learn -- MAGMA 4h --note "..." --exact   区间原样用，前后不补
+ *   npm run learn -- MAGMA 4h --note "..." --dry-run 只预览不落库
  */
 import {checkDb, dbHelpMessage, ensureSchema} from '../db/client'
 import {collectCase} from '../knowledge-service'

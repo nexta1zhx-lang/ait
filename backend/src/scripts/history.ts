@@ -3,14 +3,18 @@
  * 历史分析。
  *
  *   npm run history                   最近 20 条
- *   npm run history -- --grade A      只看 A 档
  *   npm run history -- --symbol BTC   只看某个币
- *   npm run history -- --go           只看「可做」的
- *   npm run history -- --stats        档位分布
+ *   npm run history -- --go           只看「可做」的（go）
+ *   npm run history -- --stats        标签分布（按形状标签统计）
+ *   npm run history -- --grade A      只看**老记录**的 A 档 ——
+ *                                     2026-10-02 起不再判档，新记录没有档位
  *   npm run history -- 12             看第 12 条的完整详情
  *
- * 2026-10-02 大简化之后，AI 只回四个字段（档位 / 标签 / 理由 / 结论），
- * 所以这里不再有 计划 / 止损止盈 / 仓位 / 护栏 / 清单 / 结算与 R 倍数。
+ * 通用筛选：--days N（默认 365）· --limit N（默认 20）· --offset N
+ *
+ * 2026-10-02 大简化之后，AI 只回 6 个字段（标签 + 概率 / 理由 / 走势 /
+ * 走势概率 / 结论 / 推荐），所以这里不再有 计划 / 止损止盈 / 仓位 / 护栏 /
+ * 清单 / 结算与 R 倍数。
  */
 import {analysisStats, getAnalysis, listAnalyses} from '../db/analyses'
 import {defaultUserId} from '../db/users'
