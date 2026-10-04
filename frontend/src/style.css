@@ -64,7 +64,7 @@
 
   /*
    * 等宽 —— **全站的数字都走这里**（现价 / 概率 / 涨跌幅方块 / 时间戳 / 图表坐标轴 / md5 …）。
-   * ⚠️ `'Red Hat Mono'` 是自托管的（`fonts.css`，2 块 / 36 KB，只有 latin + latin-ext）。
+   * ⚠️ `'Inconsolata'` 是自托管的（`fonts.css`，3 块 / 62 KB）。
    *    不挂它的话，Mac 是 SF Mono、安卓是 Roboto Mono，数字列宽照样对不齐。
    *
    * ⚠️ **第二个必须是 `'Noto Sans SC'`**：等宽字体（不管哪一款）都**没有汉字**，
@@ -73,12 +73,16 @@
    *    —— 也就是又回到了「多机型不一致」。规则和 `--font-sans` 一样：
    *    **拉丁/数字走第一款，汉字落到第二款**。
    *
-   * ⚠️ 换过四轮（用户 2026-10-04）：Noto Sans Mono → JetBrains Mono → Geist Mono
-   *    → **Red Hat Mono**（前三个用户都说「不行」）。最后是摆了一张 13 款对比页
-   *    （`/tmp/font-candidates.mjs` 生成的）让他自己挑的 —— 再猜下去没意义。
+   * ⚠️ 换过五轮（都是用户驱动）：
+   *    2026-10-04 Noto Sans Mono → JetBrains Mono → Geist Mono → **Red Hat Mono**；
+   *    2026-10-05 用户：「数字的感觉太宽了」→ 一次性实测了 35 款等宽的字宽，
+   *    发现**绝大多数等宽都是 0.6em、宽度一模一样**，只有 **0.5em** 的才真的窄 17%
+   *    → 换成 **Inconsolata**（0.5em，比 Red Hat Mono 窄 17%）。
+   *    ⚠️ 下次再挑，先看进位：0.6em 的那一堆（IBM Plex / Roboto Mono / JetBrains /
+   *    Geist / Fira / Source Code Pro …）换哪个宽度都不变，只是字形不同。
    */
   --mono:
-    'Red Hat Mono', 'Noto Sans SC', ui-monospace, 'SF Mono', SFMono-Regular,
+    'Inconsolata', 'Noto Sans SC', ui-monospace, 'SF Mono', SFMono-Regular,
     Menlo, Consolas, 'Roboto Mono', 'Droid Sans Mono', monospace;
 
   /*
@@ -2055,7 +2059,7 @@ button.danger {
   /*
    * 字重比表格正文重一级（正文是 `--fw-mid` 600，这里 700）：
    * 不写的话方块里是 400，配淡底偏轻、扫一列看不太出来（用户 2026-10-04：
-   * 「字体可以粗一点」）。Red Hat Mono 是可变字体（400..700），700 是真字重。
+   * 「字体可以粗一点」）。Inconsolata 是可变字体（400..700），700 是真字重。
    */
   font-weight: var(--fw-bold);
   border-radius: var(--r-xs);
