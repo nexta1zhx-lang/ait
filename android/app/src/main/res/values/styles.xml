@@ -31,6 +31,22 @@
         -->
         <item name="android:statusBarColor">@color/app_shell</item>
         <item name="android:navigationBarColor">@color/app_shell</item>
+        <!--
+          ★★ Android 15+（targetSdk≥35）两条系统栏是**透明**的，颜色一律由
+             「背后的内容」决定 —— 改 `statusBarColor`/`navigationBarColor` 或
+             插件 `setBackgroundColor` 都是无效的。正解是 **edge-to-edge**：
+             让 WebView 铺到屏幕边缘（页面背景透到系统栏下方），再靠 CSS 的
+             安全区内边距垫内容。对应改的是：
+               · `capacitor.config.json` 的 `StatusBar.overlaysWebView = true`
+               · `frontend/src/style.css` 的安全区内边距变量 / env(safe-area-inset-*)
+
+          下面这两条 = **关掉系统在导航条/状态栏后面自动加的「对比度蒙层」。**
+           Android 10(API 29) 起，透明导航条 + 浅色内容时系统会叠一层半透明白/
+           黑蒙层来保证手势条可见 —— 结果底栏就比页面多一档色差。显式关掉。
+           （这两个属性 API 29+ 才有，compileSdk 36 认得，低版本自动忽略。）
+        -->
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
         <!-- 深底 → 图标要浅色。false = 不使用深色图标，别搞反 -->
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
@@ -63,6 +79,15 @@
     -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="android:background">@drawable/splash</item>
+        <!--
+          ★ decor 底色也直接钉成 app_shell。
+          Capacitor **内置**的 SystemBars 插件在 start 时会
+          `decorView.setBackgroundColor(主题的 windowBackground)` —— 这正是
+          WebView 老版本（<140，走「原生内边距」那条路）时，系统栏背后露出的那层。
+          主题刚从启动图切到 AppTheme 的那一瞬若还没生效，读到的就是启动图主题的
+          默认窗底（偏黑）→ 顶/底各露一条暗色。两个主题都写 app_shell 最稳。
+        -->
+        <item name="android:windowBackground">@color/app_shell</item>
         <item name="windowSplashScreenBackground">@color/app_shell</item>
         <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
         <item name="postSplashScreenTheme">@style/AppTheme</item>
