@@ -41,7 +41,7 @@ export interface ExchangeCredentials {
 }
 
 /** 稳定币：直接按 1 美元算，不用再查价 */
-const STABLES = new Set([
+export const STABLES = new Set([
   'USDT',
   'USDC',
   'BUSD',
@@ -394,7 +394,12 @@ export interface PositionRow {
   percentage: number | null
 }
 
-function mapPosition(p: any): PositionRow {
+/*
+ * 导出是给新的「交易所资产」模块（data/exchange-overview.ts）复用的 ——
+ * 它在**同一个 exchange 实例**上一次性取「合约账户 + 持仓 + C2C」，
+ * 不想再 createExchange + loadMarkets 一遍（那要一两秒）。
+ */
+export function mapPosition(p: any): PositionRow {
   const contracts = n(p?.contracts)
   const amt = n(p?.info?.positionAmt)
   const side =

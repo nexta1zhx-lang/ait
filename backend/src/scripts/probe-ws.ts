@@ -81,7 +81,26 @@ async function main(): Promise<void> {
     }
   }
 
-  /* ---------------- ② 连裸 WS ---------------- */
+  /* ---------------- ①c 持仓字段（决定要不要另打 positionRisk） ---------------- */
+  console.log('\n[1c] 持仓字段名')
+  try {
+    const acc: any = await (ex.fapiPrivateV2GetAccount ?? ex.fapiPrivateGetAccount).call(ex)
+    console.log(
+      '    account.positions[0]:',
+      Object.keys(acc?.positions?.[0] ?? {}).join(', ') || '(取不到)'
+    )
+  } catch (e) {
+    console.log('    account ❌', (e as Error).message.slice(0, 160))
+  }
+  try {
+    const risk: any = await ex.fapiPrivateGetPositionRisk()
+    const one = Array.isArray(risk) ? risk[0] : Object.values(risk ?? {})[0]
+    console.log('    positionRisk[0]:   ', Object.keys(one ?? {}).join(', ') || '(取不到)')
+  } catch (e) {
+    console.log('    positionRisk ❌', (e as Error).message.slice(0, 160))
+  }
+
+
   // 合约用户数据流：主网是 fstream.binance.com（不是 stream.binance.com）
   const url = `wss://fstream.binance.com/ws/${listenKey}`
   console.log(`[2] 连 ${url.replace(listenKey, '<listenKey>')}`)

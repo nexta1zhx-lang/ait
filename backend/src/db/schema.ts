@@ -429,6 +429,72 @@ CREATE INDEX IF NOT EXISTS user_exchange_keys_user_idx
 -- 一个用户最多只能有一套默认
 CREATE UNIQUE INDEX IF NOT EXISTS user_exchange_keys_default_idx
   ON user_exchange_keys (user_id) WHERE is_default;
+
+-- ──────────────────────────────── 交易所资产（2026-10-05）
+-- 只统计「USDT 合约 + C2C」两个钱包（现货不参与），方案见 docs/EXCHANGE.md。
+--
+-- 快照 = 某一瞬间的「资产体检报告」：前端秒开就是读最新那一条；
+-- 攒下来的序列就是资产曲线，**分级保留**（5m 留 7 天 / 1h 留 90 天 / 1d 永久）。
+-- ⚠️ 本文件是 JS 模板字符串，注释里**千万别写反引号**（会被当场截断）。
+CREATE TABLE IF NOT EXISTS exchange_snapshots (
+  id          BIGSERIAL   PRIMARY KEY,
+  user_id     BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  key_id      BIGINT      NOT NULL REFERENCES user_exchange_keys (id) ON DELETE CASCADE,
+  -- 粒度：5m = 原始采样；1h / 1d = 归档聚合出来的
+  kind        TEXT        NOT NULL DEFAULT '5m',
+  taken_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- 净资产（margin + c2c_total）在该时间桶里的振幅。5m 原始行 high = low = 自身净值，
+  -- 这样查曲线时三种粒度能用同一套 SQL（聚合**不取平均**，见 docs/EXCHANGE.md）
+  high        NUMERIC(24,8),
+  high_at     TIMESTAMPTZ,
+  low         NUMERIC(24,8),
+  low_at      TIMESTAMPTZ,
+  -- 合约（fapi/v2/account）
+  wallet      NUMERIC(24,8) NOT NULL DEFAULT 0,   -- totalWalletBalance
+  unrealized  NUMERIC(24,8) NOT NULL DEFAULT 0,   -- totalUnrealizedProfit
+  margin      NUMERIC(24,8) NOT NULL DEFAULT 0,   -- totalMarginBalance（净资产里合约那半）
+  available   NUMERIC(24,8) NOT NULL DEFAULT 0,   -- availableBalance
+  positions   JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  assets      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  -- C2C 钱包（sapi/v1/asset/wallet/balance）—— ⚠️ 接口里它的 walletName 实际叫 Funding
+  c2c_total   NUMERIC(24,8),
+  c2c_detail  JSONB,
+  -- 这一条是谁写的 / 有没有失败
+  -- poll | ws | manual（日常）+ bind | boot | shutdown（锚点）+ snapshotApi（补的日点）+ agg（聚合）
+  source      TEXT        NOT NULL DEFAULT 'poll',
+  err         TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS exchange_snapshots_key_idx
+  ON exchange_snapshots (user_id, key_id, kind, taken_at DESC);
+-- 归档去重：同一档位、同一个时间桶只允许一条（归档任务重跑不会写重复）
+CREATE UNIQUE INDEX IF NOT EXISTS exchange_snapshots_bucket_idx
+  ON exchange_snapshots (key_id, kind, taken_at);
+
+-- 成交账本：**永久保留**。
+-- ⚠️ 币安只帮存 3 个月（userTrades / income 都是），不落库就等于永久丢，
+-- 以后想统计月度盈亏 / 胜率 / 手续费都拿不回来。挂单不存（那是可变状态）。
+CREATE TABLE IF NOT EXISTS exchange_fills (
+  id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  key_id     BIGINT      NOT NULL REFERENCES user_exchange_keys (id) ON DELETE CASCADE,
+  order_id   TEXT        NOT NULL,
+  trade_id   TEXT        NOT NULL,              -- 币安事件里的 t，去重靠它
+  symbol     TEXT        NOT NULL,
+  side       TEXT        NOT NULL,              -- buy / sell
+  price      NUMERIC(24,8) NOT NULL DEFAULT 0,
+  amount     NUMERIC(24,8) NOT NULL DEFAULT 0,
+  cost       NUMERIC(24,8) NOT NULL DEFAULT 0,
+  fee        NUMERIC(24,8) NOT NULL DEFAULT 0,
+  fee_ccy    TEXT,
+  realized   NUMERIC(24,8) NOT NULL DEFAULT 0,  -- 这一笔的已实现盈亏
+  ts         TIMESTAMPTZ NOT NULL,
+  raw        JSONB,                             -- 原始报文，对不上账时能翻
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (key_id, trade_id)
+);
+CREATE INDEX IF NOT EXISTS exchange_fills_user_idx ON exchange_fills (user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, symbol, ts DESC);
 `
 
 /**

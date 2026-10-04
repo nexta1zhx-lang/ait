@@ -95,8 +95,18 @@ exchange_snapshots 里的一行（举例）
 删掉 7 天前的 `5m`、90 天前的 `1h`（**`1d` 永不删**）。
 界面上按看的范围自动选粒度（`1 天 → 5m`、`30 天 → 1h`、`1 年 → 1d`）。
 
-⚠️ 聚合出来的点要标清楚是**聚合值**还是**实测值**（`source` 里区分），
-图上不要让用户把“小时均值”当成“那一个瞬间的余额”。
+### 聚合**不取平均**，留「最高 / 最低」（用户 2026-10-05 定）
+
+- `high` = 桶内所有子行 `high` 的**最大值**（⚠️ **不是 close 的最大值** ——
+  这样 5m → 1h → 1d 两级聚合都不会把振幅丢掉）；`high_at` 记最高出现在哪一刻
+- `low` = 最小的 `low`；`low_at` 同理
+- `margin` / `c2c_total` 取桶内**最后一条**的值 = 这一格的 **close**
+- `5m` 原始行：`high = low = 自身净值` ⇒ 查曲线时三种粒度可以用同一套 SQL
+- `open` **不存**：它就是上一个桶的 close（断档时那两个点本来就该断开）
+- `amplitude`（振幅）**不存**：`(high − low) / low` 现算
+
+⇒ 曲线的画法：**close 画折线 + high/low 画区间带**
+（看一年时，一根日柱就是“那天最高到多少、最低到多少”）
 
 **成交永久**（账本不能丢，而且交易所只帮存 3 个月）。
 
@@ -140,6 +150,11 @@ CREATE TABLE IF NOT EXISTS exchange_snapshots (
   -- 粒度：5m = 原始采样；1h / 1d = 归档聚合出来的
   kind        TEXT        NOT NULL DEFAULT '5m',
   taken_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- 该时间桶内「净资产 = margin + c2c_total」的振幅（5m 行 high = low = 自身净值）
+  high        NUMERIC(24,8),
+  high_at     TIMESTAMPTZ,
+  low         NUMERIC(24,8),
+  low_at      TIMESTAMPTZ,
   -- 合约
   wallet      NUMERIC(24,8) NOT NULL DEFAULT 0,   -- totalWalletBalance
   unrealized  NUMERIC(24,8) NOT NULL DEFAULT 0,   -- totalUnrealizedProfit
@@ -325,13 +340,15 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 
 ---
 
-## 11. 待定（等你拍板）
+## 11. 已定 / 已否决（方案收官）
 
-1. ~~资产曲线这轮做吗~~ → **用户定：后面做**（分级保留的采样从现在就开始攒，否则以后曲线前面是空的）
-2. ~~快照保留 30 天~~ → **改成分级保留**：5m 留 7 天 / 1h 留 90 天 / **1d 永久**
-   （稳态 6.5 MB + 0.5 MB/年/套，比一刀切 30 天还省，而且曲线能永久看）
-3. 界面 tab 文案：现在叫「**交易所账户**」，内容已经是资产 + 仓位 ⇒ 改叫「**交易所资产**」？
-4. ~~删号后曲线留不留~~ → **用户定：删 key 就一起删**（`CASCADE` 不变）——
-   “结束”指的就是**删 key**。所以“从注册到结束”= 从绑定到删 key，全程都有曲线（靠 1d 点）。
-5. 补数据用到的 `/sapi/v1/accountSnapshot?type=FUTURES` 是 **00:00 UTC（北京 08:00）**
-   的日点，粒度很粗 —— 只用来“把长期断档的天点补上”，不当主数据。
+| 问题 | 结论 |
+|---|---|
+| 资产曲线 | **后面做**（分级保留的采样从现在就开始攒） |
+| 快照保留 | 5m 留 7 天 / 1h 留 90 天 / **1d 永久** |
+| 聚合算法 | **不取平均，留 high/low（振幅）** + close |
+| 删 key | **数据一起删**（`CASCADE`），“从注册到结束”= 绑定 → 删 key |
+| tab 文案 | **不改**，继续叫「交易所账户」 |
+| 断档补数据 | 可以用 `/sapi/v1/accountSnapshot?type=FUTURES`（日点，北京 08:00，回溯 30 天） |
+
+⇒ 方案已定，开工顺序见上面「M0~M5」（**M0 已完成**）。
