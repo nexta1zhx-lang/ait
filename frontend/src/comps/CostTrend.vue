@@ -2,8 +2,13 @@
 import {computed, ref} from 'vue'
 import {cny, tok, usd} from '../format'
 import type {UsageBucket} from '../api'
+// 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
+import {monoStack} from '../fonts'
 
 /** 按天花费柱状图（纯 SVG，不引图表库） */
+
+/** 横轴那排日期是数字，跟全站其它数字用同一款等宽 */
+const mono = monoStack()
 
 const props = defineProps<{
   days: UsageBucket[]
@@ -100,6 +105,7 @@ const gridLines = computed(() =>
               left: ((x(i) + barW / 2) / W) * 100 + '%',
               transform: 'translateX(-50%)',
               fontSize: '10px',
+              fontFamily: mono,
               fontVariantNumeric: 'tabular-nums'
             }"
           >

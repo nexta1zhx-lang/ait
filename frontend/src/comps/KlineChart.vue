@@ -3,14 +3,9 @@ import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import * as LWC from 'lightweight-charts'
 import {fetchCandles, klineStream, type Candle, type LevelSR} from '../api'
 import {CHART_BARS} from '../analyze'
-import {
-  MIN_SAVED_BARS,
-  chartBars,
-  keepChartZoom,
-  rememberShown,
-  saveChartBars
-} from '../settings'
 import {setLivePrice} from '../ticker'
+// 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
+import {monoStack, whenFontsReady} from '../fonts'
 import TimeModal from './TimeModal.vue'
 import {
   bjInputToMs,
@@ -98,6 +93,36 @@ function rangeMs(v: string | undefined): number {
 /** 拉多少根是**内部策略**，不往界面上摆（用户只看时间） */
 const DEFAULT_BARS = CHART_BARS
 
+/*
+ * ---------------- 显示多少根：**按屏幕宽度算** ----------------
+ *
+ * 用户 2026-10-04：「k 线显示根数根据屏幕宽度来」。
+ *
+ * 之前是死值 `CHART_BARS = 200` —— 不管屏多宽都铺 200 根：
+ * 桌面（绘图区 ~798px）刚好 4px 一根，手机上（绘图区 ~280px）就只有 1.4px，
+ * 挤成一片糊。现在改成「**一根占多宽**固定，根数 = 可用宽度 ÷ 每根宽度」，
+ * 于是桌面/手机看到的**密度一样**，手机自然少铺几根。
+ *
+ * `PX_PER_BAR = 4.2` 是拿桌面当前的效果反推的（798 ÷ 4.2 ≈ 190 ≈ 原来的 200），
+ * 所以**桌面观感不变**，只是手机不再挤。
+ */
+const PX_PER_BAR = 4.2
+/** 再窄也留这么多根，否则一屏就几根看着太空 */
+const MIN_BARS = 30
+/** 再宽也别超过（防超大屏一次铺太多卡住） */
+const MAX_BARS = 400
+
+/**
+ * 这块绘图区该铺多少根。
+ *
+ * ⚠️ 用 `timeScale().width()` 而不是容器宽度 —— 它已经扣掉了右边价格轴，
+ * 就是真正能放 K 线的那段宽度（实测桌面 798 / 手机 280）。
+ */
+function barsForWidth(w: number): number {
+  if (!Number.isFinite(w) || w <= 0) return DEFAULT_BARS
+  return Math.min(MAX_BARS, Math.max(MIN_BARS, Math.round(w / PX_PER_BAR)))
+}
+
 /**
  * 「看某一刻」时，那一刻摆在图的**正中间**，左右各显示多少根。
  *
@@ -176,11 +201,11 @@ function historyBars(): number {
   return HISTORY_BARS[props.timeframe] ?? 1000
 }
 
-/**
- * 要拉多少根。
+/** 拉多少根。
  *
  * 以某一刻为中心 = 左右各 `CENTER_BARS` 根（+ 缓冲）；
  * 其余情况就是最近的 `DEFAULT_BARS` 根 —— 不再是「从那一刻一直拉到现在」。
+ * ⚠️ 这里算的是**拉多少数据**，跟屏幕宽度无关：多拉一点，缩放时不用立刻又去拉。
  */
 function barsToLoad(): number {
   if (centered.value) return (CENTER_BARS + CENTER_MARGIN) * 2 + 1
@@ -278,8 +303,7 @@ const fading = ref(false)
 /** 淡出至少留这么久，免得请求太快时看着像原地一颠 */
 const FADE_MIN_MS = 140
 /**
- * 图上此刻的可见区间（跟 `settings` 里存的那份不同：这份是「正在看」，那份是「记住的」）。
- * 换币 / 切走 / 关页时拿它去存（用户：在关闭 K 线图或者切换 K 线图保存）。
+ * 图上此刻的可见区间。往前补历史时要把视图钉在原位，用它。
  */
 let liveRange: {from: number; to: number} | null = null
 /**
@@ -288,17 +312,6 @@ let liveRange: {from: number; to: number} | null = null
  */
 let applySeq = 0
 
-/**
- * 用户**自己**缩出来的根数（要存进配置的就是它）。
- *
- * ⚠️ 不能直接拿「当前可见多少根」去存：程序重铺（换币、图从藏着变露出来）
- * 中间会短暂报出一个**被卡住的**数字（实测要 200 根先报 129），
- * 存下去就把全局那个数污染了 —— 以后每个币都只显示 129 根。
- * 所以只认「手动手势之后」报上来的值：`userZoomed` 由 pointerdown / wheel 置位，
- * 每次 `load()`（程序重画）开头清掉。
- */
-let userBars = 0
-let userZoomed = false
 /** 上一次的图宽度：用来判断「刚从藏着变成露出来」（0 → 非 0） */
 let lastWidth = 0
 /** 已经拉到头了（交易所没有更早的了） */
@@ -384,7 +397,14 @@ function ensureChart(): boolean {
        * 字小了，LWC 会把刻度排得更密（刻度间距跟着小），轴也跟着变窄。
        */
       fontSize: 9,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      /*
+       * ⚠️ 写死字体名是个坑 —— 这里原来是
+       *    `'ui-monospace, SFMono-Regular, Menlo, monospace'`，
+       *    于是**轴上那串数字一直没跟着页面的 `--mono` 走**，
+       *    Mac 上是 SF Mono、安卓上是 Roboto Mono，跟别处也不是一款字。
+       *    现在统一从 CSS 变量读（`fonts.ts`）。
+       */
+      fontFamily: monoStack(),
       /*
        * 去掉图左下角那个 TradingView 水印 / 链接（用户 2026-10-03 要求）。
        * 这是 LWC 自带的 `layout.attributionLogo`（默认 true）。
@@ -484,13 +504,21 @@ function ensureChart(): boolean {
     positionLabels()
   })
 
-  // 只有用户自己动过（拖动 / 滚轮 / 双指）才算「想看更早的」+ 算「他缩到了多少根」
+  // 用户自己动过（拖动 / 滚轮 / 双指）才算「想看更早的」
   const markPanned = () => {
     userPanned = true
-    userZoomed = true
   }
   chartEl.value.addEventListener('pointerdown', markPanned)
   chartEl.value.addEventListener('wheel', markPanned, {passive: true})
+
+  /*
+   * 自托管字体是**异步**加载的，而 canvas 上画好的字不会自己更新 ——
+   * 字体没到位时轴上画的是回退字体，之后也不会重画。
+   * 所以字体就绪后再把字体应用一次，逼 LWC 重排重画一帧。
+   */
+  whenFontsReady(() => {
+    refs?.chart.applyOptions({layout: {fontFamily: monoStack()}})
+  })
 
   return true
 }
@@ -781,49 +809,29 @@ function showLastN(ts: TimeScaleLike, len: number, n: number): void {
 }
 
 /**
- * 按当前配置把视图铺一次（居中那种情况不走这里，它是用户明确点的）。
+ * 按当前**屏幕宽度**把视图铺一次（居中那种情况不走这里，它是用户明确点的）。
  *
- * 「保持 K 线缩放样式」打开 → 铺**全局那个根数**（所有币种共用）；
- * 没缩过 / 关掉 → 铺默认那一屏。
- *
- * ⚠️ 以前这里是「这个币记过就还原它自己那段」，一个币一个样；
- * 用户 2026-10-03：「保持 k 线缩放的根数是所有币种都要」→ 改成只认 `chartBars`。
- * 顺带好处：不存在「某个币套用了别的币的区间」这类错位了。
+ * ⚠️ 2026-10-04 改：以前这里读「存下来的根数」（`keepChartZoom` / `chartBars`），
+ *    整套跟着删了（用户：「k 线保持样式缩放逻辑全部删掉」）。现在**每次都按绘图区
+ *    宽度算** —— 用户手动缩放只影响当下这一屏，切走 / 换币就回到按宽度算的值。
  */
 function applyView(): void {
   if (!refs || !candles.length) return
-  const saved = keepChartZoom.value && chartBars.value >= MIN_SAVED_BARS
-  showLastN(
-    refs.chart.timeScale(),
-    candles.length,
-    saved ? chartBars.value : DEFAULT_BARS
-  )
-}
-
-/** 当前用户自己缩出来的根数（拿它去存；程序重排不会动它） */
-function liveBars(): number {
-  return userBars
+  const ts = refs.chart.timeScale()
+  showLastN(ts, candles.length, barsForWidth(ts.width()))
 }
 
 /**
- * 告诉配置面板「现在看多少根 / 是哪个币」。
+ * 只把当前可见区间记在 `liveRange` 里（往前补历史时要把视图钉在原位，要用它）。
  *
- * ⚠️ 不能只在可见区间变化时上报：区间**没变**的话 LWC 不回调
- * （比如切到另一个币、铺出来恰好是同一段），面板就会一直显示上一个币的数字。
+ * ⚠️ 不再往配置面板报「现在显示多少根」了 —— 那个读数跟着缩放记忆一起删了。
  */
 function reportShown(): void {
   if (!refs) return
   const ts = refs.chart.timeScale()
-  const w = ts.width()
-  if (w <= 0) return // 图没露出来（窄屏切到别的 tab），这时报的区间没意义
+  if (ts.width() <= 0) return // 图没露出来（窄屏切到别的 tab），这时报的区间没意义
   const r = ts.getVisibleLogicalRange()
-  if (!r) return
-  liveRange = {from: r.from, to: r.to}
-  // 报给配置面板的「显示多少根」要扣掉右侧空档 —— 那 8 格没 K 线
-  const n = r.to - r.from + 1 - RIGHT_GAP
-  rememberShown(n, `${props.symbol} · ${props.timeframe}`)
-  // 只有用户自己缩/拖过，这个数才作数（见 `userBars` 那段注释）
-  if (userZoomed) userBars = n
+  if (r) liveRange = {from: r.from, to: r.to}
 }
 
 /**
@@ -972,8 +980,6 @@ async function load() {
   const startedAt = performance.now()
   reloading = true
   fading.value = true
-  // 接下来是程序重铺（不是用户缩的）—— 从现在起到这次画完，报上来的根数都不作数
-  userZoomed = false
   try {
     reachedStart = false
     userPanned = false
@@ -1113,16 +1119,22 @@ function applyTail(tail: Candle[]): void {
   drawSelection()
 }
 
-/** 订上实时推送（测试/回看是历史视图，不订） */
+/** 订上实时推送（测试/回看是历史视图，不订；这一页被切走也不订） */
 function startStream(): void {
   stopStream?.()
   stopStream = null
   const symbol = props.symbol.trim()
   if (!symbol || testMode.value) return
+  /*
+   * ⚠️ 2026-10-04 加了路由 `KeepAlive` 之后，切走这一页组件**不再卸载**，
+   *    而 `visibilitychange` 只反映「浏览器标签页」级别的前后台（站内切 tab 一直是
+   *    visible）—— 不拦一下就会留一条 SSE 在后台白收推送。
+   */
+  if (props.active === false) return
   stopStream = klineStream(symbol, props.timeframe, c => applyTail([c]))
 }
 
-/** 切到后台就断掉（别让手机在后台白收推送），回来立刻重订 */
+/** 切到后台 / 切走这一页就断掉（别白收推送），回来立刻重订 */
 function onLiveVisible(): void {
   if (document.hidden) {
     stopStream?.()
@@ -1600,6 +1612,8 @@ onMounted(() => {
   document.addEventListener('visibilitychange', onLiveVisible)
 })
 watch([() => props.symbol, () => props.timeframe, testMode], startStream)
+// 「这一页被切走 / 切回来」也要断和重订（路由 KeepAlive 之后组件不卸载了）
+watch(() => props.active, startStream)
 watch(() => props.symbol, load)
 watch(() => props.timeframe, load)
 watch(() => props.from, load)
@@ -1611,37 +1625,12 @@ watch(() => candles.length, drawSelection)
 watch(() => props.pointAt, drawPoint)
 
 /*
- * 换币 / 换周期 / 切走这一格：都把「现在显示多少根」存一下。
- *
- * ⚠️ 存的是**全局一个数**（`chartBars`，所有币种共用），跟币种无关 ——
- * 所以这里不需要旧币种、也不需要 `liveRange` 的位置，只要那个**跨度**。
- * 以前是「每个币各记一段 {from,to}」，而回调里读的 `props.symbol` 已经是新币了，
- * 于是旧币的区间被写进新币名下（用户：「切换币种，看不到 k 线，没有自动布局」）。
+ * ⚠️ 这里原来还有三处「存下现在显示多少根」的 watcher（换币/换周期、配置面板那颗
+ *    「保持缩放」开关、切走这一格），2026-10-04 跟着缩放记忆**一起删了** ——
+ *    现在显示根数只由屏幕宽度决定（`barsForWidth`），没什么可存的。
  */
-watch([() => props.symbol, () => props.timeframe], () => {
-  saveChartBars(liveBars())
-})
-
-/*
- * 配置面板里拨了那颗开关：**立刻重铺一次**（面板上写着「改完立刻生效」）。
- * 打开 → 铺全局那个根数；关掉 → 回到默认那一屏。
- */
-watch(keepChartZoom, () => applyView())
-
-/*
- * 切走这一格（窄屏换成别的 tab）：也算「关闭 K 线图」，存一下。
- * 桌面上图一直在（`active` 恒 true），走不到这里。
- */
-watch(
-  () => props.active,
-  (on, was) => {
-    if (was !== false && on === false) saveChartBars(liveBars())
-  }
-)
 
 onBeforeUnmount(() => {
-  // 关掉这一页也算「关闭 K 线图」：把当前那段存回去
-  saveChartBars(liveBars())
   stopStream?.()
   stopStream = null
   document.removeEventListener('visibilitychange', onLiveVisible)

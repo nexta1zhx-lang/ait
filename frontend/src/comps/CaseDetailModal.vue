@@ -518,8 +518,7 @@ async function remove() {
 }
 
 .tag-chip.clear:hover {
-  /* 醇珀底上的字：跟主色那套墨字一样，别再用偏蓝的 #06121f */
-  color: #1a1408;
+  color: #06121f;
   background: var(--warn);
   border-color: var(--warn);
 }

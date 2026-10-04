@@ -8,6 +8,8 @@
  */
 import {onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import type {Candle} from '../api'
+// 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
+import {monoStack, whenFontsReady} from '../fonts'
 
 const props = defineProps<{
   candles: Candle[]
@@ -143,7 +145,8 @@ function paint() {
 
   // 右侧：最高 / 最低
   ctx.fillStyle = TEXT
-  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'
+  // ⚠️ 原来写死的 `ui-monospace, …, Menlo, monospace` 没跟着 `--mono` 走
+  ctx.font = '10px ' + monoStack()
   ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
   const fmtPrice = (p: number) =>
@@ -159,6 +162,11 @@ function schedule() {
 
 onMounted(() => {
   schedule()
+  /*
+   * canvas 画好的字不会自己更新 —— 自托管字体是异步到的，
+   * 字体就绪后必须重画一帧，否则最高/最低那两个数字一直是回退字体的样子。
+   */
+  whenFontsReady(schedule)
   if (host.value && typeof ResizeObserver !== 'undefined') {
     ro = new ResizeObserver(schedule)
     ro.observe(host.value)

@@ -205,6 +205,8 @@ const pickable = (key: string) => key !== '__other__'
   fill: var(--fg, #e6edf3);
   font-size: 17px;
   font-weight: 600;
+  /* 中间那个合计数是数字，跟全站其它数字统一走等宽 */
+  font-family: var(--mono);
   text-anchor: middle;
   font-variant-numeric: tabular-nums;
   pointer-events: none;

@@ -1,6 +1,6 @@
 {
   "name": "crypto-entry-advisor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "币圈开单分析：拉行情 → 算口径 → 大模型按我的规则判档 → 给结论",
   "bin": {

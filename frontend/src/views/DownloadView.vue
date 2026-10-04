@@ -138,11 +138,7 @@ const short = (md5: string | null) => (md5 ? md5.slice(0, 12) : '—')
                 md5 {{ short(r.md5) }}
               </span>
               <span class="dl-spacer"></span>
-              <a
-                class="dl-mini"
-                :href="downloadUrl(r.url)"
-                :download="r.file"
-              >
+              <a class="dl-mini" :href="downloadUrl(r.url)" :download="r.file">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 4v10" />
                   <path d="M8 10.5 12 14.5 16 10.5" />
@@ -156,8 +152,8 @@ const short = (md5: string | null) => (md5 ? md5.slice(0, 12) : '—')
 
         <p v-if="releases.length" class="dim dl-note">
           装新版本直接覆盖安装即可（同一个包名
-          <code>{{ app.packageId || 'cn.bitcoooin.advisor' }}</code>，数据不会丢）。
-          想回退就下对应的旧版本号。
+          <code>{{ app.packageId || 'cn.bitcoooin.advisor' }}</code
+          >，数据不会丢）。 想回退就下对应的旧版本号。
         </p>
       </section>
     </template>

@@ -381,10 +381,20 @@ const toneOf = (v: number | null): string =>
       <div class="mkt-head" :style="{paddingRight: sbw + 'px'}">
         <table class="table fixed">
           <colgroup>
+            <!--
+              列宽：币种 30% / 最新价 22% / 成交额 22% / 涨跌幅 26%。
+              按 528 个合约**实测的字符位数**分的：
+                · 币种：要放下图标 + 最长 11 位符号（BROCCOLI714），占 30%
+                · 最新价：最长 8 位（84,761.8）
+                · 成交额：最长 8 位（9946.49万）
+                · 涨跌幅：方块 72px + 两侧留白（用户要「空间再大一点」），所以给到 26%
+              ⚠️ 列宽跟着**列本身**走，不是跟着位置走。
+              ⚠️ 表头 / 表身是两张独立的表，**两处 colgroup 必须写成一模一样**。
+            -->
             <col style="width: 30%" />
-            <col style="width: 24%" />
             <col style="width: 22%" />
-            <col style="width: 24%" />
+            <col style="width: 22%" />
+            <col style="width: 26%" />
           </colgroup>
           <thead>
             <tr>
@@ -396,35 +406,13 @@ const toneOf = (v: number | null): string =>
                 SVG 默认只在自己**画出来的那块** 响应指针，三角形旁边一圈是死的，
                 手指稍偏一点就「点了没反应」（用户：「点击切换没有生效」）。
               -->
-              <th class="r sortable" :class="{on: sortKey === 'change'}">
-                <span class="scell">
-                  <span class="s-label" @click="sortBy('change')">涨跌幅</span>
-                  <span class="sarr">
-                    <button
-                      type="button"
-                      class="sbtn"
-                      :class="{on: sortKey === 'change' && sortDir === 'asc'}"
-                      aria-label="涨跌幅升序（跌得最狠在前）"
-                      @click="setSort('change', 'asc')"
-                    >
-                      <svg viewBox="0 0 10 6" aria-hidden="true">
-                        <path d="M5 .4 9.6 5.6H.4z" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      class="sbtn"
-                      :class="{on: sortKey === 'change' && sortDir === 'desc'}"
-                      aria-label="涨跌幅降序（涨得最多在前）"
-                      @click="setSort('change', 'desc')"
-                    >
-                      <svg viewBox="0 0 10 6" aria-hidden="true">
-                        <path d="M5 5.6.4.4h9.2z" />
-                      </svg>
-                    </button>
-                  </span>
-                </span>
-              </th>
+              <!--
+                列顺序（用户 2026-10-04「涨跌幅成交额换个位置」）：
+                  币种 · 最新价 · **成交额** · **涨跌幅**
+                涨跌幅挪到最右边 —— 它是最常扫的一列，贴右边缘顺手。
+                ⚠️ 顺序改了要**同时**改三处：表头这两个 `<th>`、表身的两个 `<td>`、
+                  以及上下两张表的 `colgroup`（列宽跟着列走，不跟着位置走）。
+              -->
               <th class="r sortable" :class="{on: sortKey === 'volume'}">
                 <span class="scell">
                   <span class="s-label" @click="sortBy('volume')">成交额</span>
@@ -454,6 +442,35 @@ const toneOf = (v: number | null): string =>
                   </span>
                 </span>
               </th>
+              <th class="r sortable" :class="{on: sortKey === 'change'}">
+                <span class="scell">
+                  <span class="s-label" @click="sortBy('change')">涨跌幅</span>
+                  <span class="sarr">
+                    <button
+                      type="button"
+                      class="sbtn"
+                      :class="{on: sortKey === 'change' && sortDir === 'asc'}"
+                      aria-label="涨跌幅升序（跌得最狠在前）"
+                      @click="setSort('change', 'asc')"
+                    >
+                      <svg viewBox="0 0 10 6" aria-hidden="true">
+                        <path d="M5 .4 9.6 5.6H.4z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="sbtn"
+                      :class="{on: sortKey === 'change' && sortDir === 'desc'}"
+                      aria-label="涨跌幅降序（涨得最多在前）"
+                      @click="setSort('change', 'desc')"
+                    >
+                      <svg viewBox="0 0 10 6" aria-hidden="true">
+                        <path d="M5 5.6.4.4h9.2z" />
+                      </svg>
+                    </button>
+                  </span>
+                </span>
+              </th>
             </tr>
           </thead>
         </table>
@@ -462,10 +479,11 @@ const toneOf = (v: number | null): string =>
       <div ref="bodyEl" class="mkt-body" @scroll="onListScroll">
         <table class="table fixed">
           <colgroup>
+            <!-- 和表头那组**必须一模一样**，否则表头跟表身对不上 -->
             <col style="width: 30%" />
-            <col style="width: 24%" />
             <col style="width: 22%" />
-            <col style="width: 24%" />
+            <col style="width: 22%" />
+            <col style="width: 26%" />
           </colgroup>
           <tbody>
             <tr v-if="!visible.length">
@@ -502,13 +520,13 @@ const toneOf = (v: number | null): string =>
                 </span>
               </td>
               <td class="r num">{{ priceText(r.last) }}</td>
+              <td class="r num dim">{{ bigText(r.quoteVolume24h) }}</td>
               <td class="r num">
                 <!-- 24h 涨跌幅：包一层色块，像交易所那样一眼能扫（用户：加上背景） -->
                 <span class="chg" :class="toneOf(r.change24hPct)">
                   {{ pctText(r.change24hPct) }}
                 </span>
               </td>
-              <td class="r num dim">{{ bigText(r.quoteVolume24h) }}</td>
             </tr>
           </tbody>
         </table>

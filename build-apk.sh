@@ -44,6 +44,31 @@ export JAVA_HOME="$JDK_HOME"
 echo "JAVA_HOME=$JAVA_HOME"
 "$JAVA_HOME/bin/java" -version 2>&1 | head -1
 
+# ------------------------------------------------- 版本号对齐 package.json
+#
+# ⚠️ 以前只把**文件名**写成 `entry-advisor-<版本>.apk`，而 APK **内部**的版本一直是
+#    Capacitor 模板里的默认值（`versionName "1.0"` / `versionCode 1`）——
+#    结果装到手机上「关于」里永远显示 1.0，根本分不出装的是哪一版，
+#    而且 versionCode 不变的话 Android 也不认为它是「新版本」（用户 2026-10-04：
+#    「app 版本号要区分」）。
+#
+# 现在**只在 package.json 一处维护版本号**，每次打包把它同步进去：
+#   versionName = 原样（0.2.0）
+#   versionCode = 主*10000 + 次*100 + 修订（0.2.0 → 200），单调递增
+node -e '
+  const fs = require("fs");
+  const ver = require("./package.json").version;
+  const [a, b, c] = ver.split(".").map(Number);
+  const code = a * 10000 + b * 100 + (c || 0);
+  const p = "android/app/build.gradle";
+  let s = fs.readFileSync(p, "utf8");
+  s = s
+    .replace(/versionCode \d+/, `versionCode ${code}`)
+    .replace(/versionName "[^"]*"/, `versionName "${ver}"`);
+  fs.writeFileSync(p, s);
+  console.log(`✓ APK 内部版本已对齐 package.json：versionName "${ver}" / versionCode ${code}`);
+'
+
 # ---------------------------------------------------------------- 构建
 echo
 echo "→ 打前端 + 同步到 Android 工程"

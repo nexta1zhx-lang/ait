@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import {computed, onMounted, ref, watch} from 'vue'
-import {useRoute, useRouter} from 'vue-router'
+import {RouterLink, useRoute, useRouter} from 'vue-router'
 import SegTabs from '../comps/SegTabs.vue'
 import DataTable, {type Column} from '../comps/DataTable.vue'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import RecIcon from '../comps/RecIcon.vue'
 import PieChart, {type PieItem} from '../comps/PieChart.vue'
+import KnowledgePanel from '../comps/KnowledgePanel.vue'
+import TagTemplatesPanel from '../comps/TagTemplatesPanel.vue'
 import {
   deleteAnalysis,
   fetchAnalyses,
@@ -38,6 +40,23 @@ import {contracts} from '../store'
 
 const route = useRoute()
 const router = useRouter()
+
+/* ---------------- 页内分段：预测历史 / 知识库 ---------------- */
+
+/**
+ * 2026-10-04 用户要求「预测历史和历史知识库合并，改叫历史」：
+ * 两项做成页内分段，路由只留 `/history`（老链接 `/knowledge` 会重定向到
+ * `/history?tab=kb` 直接落到知识库那半）。
+ */
+const PAGES = [
+  {value: 'records' as const, label: '预测历史'},
+  {value: 'kb' as const, label: '知识库'}
+]
+
+const pane = ref<'records' | 'kb'>(route.query.tab === 'kb' ? 'kb' : 'records')
+
+/** 「知识库」那半：标签模板改完要让它重新拉一遍标签 */
+const panel = ref<InstanceType<typeof KnowledgePanel> | null>(null)
 
 /* ---------------- 筛选 ---------------- */
 
@@ -304,104 +323,179 @@ onMounted(() => {
 
 <template>
   <div class="hist">
-    <!-- 顶部筛选：时间范围是全局的（左右都受影响），其余对应右边列表 -->
-    <section class="panel filter-bar">
-      <SegTabs v-model="days" :options="RANGES" />
-      <div style="width: 150px">
-        <SymbolCombo v-model="symbol" :contracts="contracts" />
-      </div>
-      <SegTabs v-model="verdict" :options="VERDICTS" />
-      <label class="chk">
-        <input v-model="actionable" type="checkbox" />
-        只看「可做」
-      </label>
-      <span style="flex: 1"></span>
-      <span v-if="updatedAt" class="dim">
-        {{ ago(new Date(updatedAt).toISOString()) }}更新
-      </span>
-      <button class="ghost" :disabled="loading" @click="load">
-        {{ loading ? '加载中…' : '刷新' }}
-      </button>
-    </section>
-
-    <div v-if="error" class="error">
-      <b>读取失败</b>
-      <div>{{ error }}</div>
-      <div class="dim">数据库没起来？在项目目录执行 npm run db:up</div>
+    <!--
+      页内分段：预测历史 / 知识库（用户 2026-10-04：「两个合一个，改叫历史」）。
+      放在最上面并且**不跟筛选栏同流** —— 筛选只作用于「预测历史」那半。
+    -->
+    <div class="tab-row page-tabs">
+      <SegTabs v-model="pane" :options="PAGES" />
     </div>
 
-    <div class="hist-split">
-      <!-- ── 左：三张饼图（点扇区或图例就筛，跟上面的筛选联动） ── -->
-      <aside class="col charts">
-        <section class="panel">
-          <h2>
-            结论分布 <span class="tag">最近 {{ days }} 天</span>
-          </h2>
-          <PieChart
-            :items="verdictItems"
-            :active-key="verdict"
-            empty-text="这段时间没有记录"
-            @pick="pickVerdict"
-          />
-        </section>
+    <!--
+      「预测历史」那半。外壳 `.pane-records` 是 `display: contents`（见 style.css）——
+      它自己不出盒子，里面的筛选栏 / `.hist-split` 仍然是 `.hist` 的直接子项，
+      所以 `body.fixed-viewport` 那套「整体不滚、两列各自滚」的布局一点没变。
+      用 `v-show` 而不是 `v-if`：来回切的时候筛选条件、翻页、滚动位置都留着。
+    -->
+    <div v-show="pane === 'records'" class="pane-records">
+      <!-- 顶部筛选：时间范围是全局的（左右都受影响），其余对应右边列表 -->
+      <section class="panel filter-bar">
+        <SegTabs v-model="days" :options="RANGES" />
+        <div style="width: 150px">
+          <SymbolCombo v-model="symbol" :contracts="contracts" />
+        </div>
+        <SegTabs v-model="verdict" :options="VERDICTS" />
+        <label class="chk">
+          <input v-model="actionable" type="checkbox" />
+          只看「可做」
+        </label>
+        <span style="flex: 1"></span>
+        <span v-if="updatedAt" class="dim">
+          {{ ago(new Date(updatedAt).toISOString()) }}更新
+        </span>
+        <button class="ghost" :disabled="loading" @click="load">
+          {{ loading ? '加载中…' : '刷新' }}
+        </button>
+      </section>
 
-        <section class="panel">
-          <h2>标签分布 <span class="tag">按出现次数</span></h2>
-          <PieChart
-            :items="tagItems"
-            :active-key="tag"
-            :top="7"
-            empty-text="还没有带概率的标签"
-            @pick="pickTag"
-          />
-        </section>
+      <div v-if="error" class="error">
+        <b>读取失败</b>
+        <div>{{ error }}</div>
+        <div class="dim">数据库没起来？在项目目录执行 npm run db:up</div>
+      </div>
 
-        <section class="panel">
-          <h2>币种分布 <span class="tag">按分析次数</span></h2>
-          <PieChart
-            :items="symbolItems"
-            :active-key="symbol.trim().toUpperCase()"
-            :top="7"
-            empty-text="还没有记录"
-            @pick="pickSymbol"
-          />
-        </section>
-      </aside>
+      <div class="hist-split">
+        <!-- ── 左：三张饼图（点扇区或图例就筛，跟上面的筛选联动） ── -->
+        <aside class="col charts">
+          <section class="panel">
+            <h2>
+              结论分布 <span class="tag">最近 {{ days }} 天</span>
+            </h2>
+            <PieChart
+              :items="verdictItems"
+              :active-key="verdict"
+              empty-text="这段时间没有记录"
+              @pick="pickVerdict"
+            />
+          </section>
 
-      <!-- ── 右：记录列表 ── -->
-      <div class="col list">
-        <section class="panel">
-          <h2>
-            分析记录 <span class="tag">共 {{ int(total) }} 条</span>
-            <span v-if="filterText" class="picked">
-              {{ filterText }}
-              <button class="ghost tiny" @click="clearFilters">清掉筛选</button>
-            </span>
-          </h2>
+          <section class="panel">
+            <h2>标签分布 <span class="tag">按出现次数</span></h2>
+            <PieChart
+              :items="tagItems"
+              :active-key="tag"
+              :top="7"
+              empty-text="还没有带概率的标签"
+              @pick="pickTag"
+            />
+          </section>
 
-          <div class="only-desktop">
-            <DataTable
-              :columns="listCols"
-              :rows="rows"
-              fixed
-              initial-sort="createdAt"
-              empty="这段时间没有分析记录。去「开单分析」跑一次，结果会自动存到这里。"
-            >
-              <template #createdAt="{row}">
-                <a class="linkish" @click="open(row.id)">
-                  {{ bjTime(row.createdAt) }}
-                </a>
-              </template>
-              <template #symbol="{row}">
-                <b>{{ row.symbol }}</b>
-                <div class="dim" style="font-size: 11px">
-                  {{ row.timeframes.join(' · ') }}
-                </div>
-              </template>
-              <template #tags="{row}">
-                <!-- 列表里一最多摆 3 个 —— 再多就换行把行高撑起来了；
+          <section class="panel">
+            <h2>币种分布 <span class="tag">按分析次数</span></h2>
+            <PieChart
+              :items="symbolItems"
+              :active-key="symbol.trim().toUpperCase()"
+              :top="7"
+              empty-text="还没有记录"
+              @pick="pickSymbol"
+            />
+          </section>
+        </aside>
+
+        <!-- ── 右：记录列表 ── -->
+        <div class="col list">
+          <section class="panel">
+            <h2>
+              分析记录 <span class="tag">共 {{ int(total) }} 条</span>
+              <span v-if="filterText" class="picked">
+                {{ filterText }}
+                <button class="ghost tiny" @click="clearFilters">
+                  清掉筛选
+                </button>
+              </span>
+            </h2>
+
+            <div class="only-desktop">
+              <DataTable
+                :columns="listCols"
+                :rows="rows"
+                fixed
+                initial-sort="createdAt"
+                empty="这段时间没有分析记录。去「开单分析」跑一次，结果会自动存到这里。"
+              >
+                <template #createdAt="{row}">
+                  <a class="linkish" @click="open(row.id)">
+                    {{ bjTime(row.createdAt) }}
+                  </a>
+                </template>
+                <template #symbol="{row}">
+                  <b>{{ row.symbol }}</b>
+                  <div class="dim" style="font-size: 11px">
+                    {{ row.timeframes.join(' · ') }}
+                  </div>
+                </template>
+                <template #tags="{row}">
+                  <!-- 列表里一最多摆 3 个 —— 再多就换行把行高撑起来了；
                    多的只报个数，想看全部进详情 -->
-                <span v-if="(row.tags ?? []).length" class="tags">
+                  <span v-if="(row.tags ?? []).length" class="tags">
+                    <span
+                      v-for="t in row.tags.slice(0, 3)"
+                      :key="t.name"
+                      class="tag"
+                    >
+                      {{ t.name }}
+                      <i v-if="t.probability">{{ t.probability }}%</i>
+                    </span>
+                    <span
+                      v-if="row.tags.length > 3"
+                      class="tag more"
+                      :title="
+                        row.tags
+                          .slice(3)
+                          .map(t => t.name)
+                          .join('、')
+                      "
+                    >
+                      +{{ row.tags.length - 3 }}
+                    </span>
+                  </span>
+                  <span v-else class="dim">—</span>
+                </template>
+                <template #verdict="{row}">
+                  <span :class="['v', verdictTone(row.verdict)]">
+                    {{ verdictText(row.verdict) }}
+                  </span>
+                </template>
+                <template #costUsd="{row}">{{ rmb(row.costUsd) }}</template>
+                <template #actions="{row}">
+                  <button class="ghost tiny" @click="open(row.id)">详情</button>
+                  <button class="ghost tiny danger" @click="remove(row.id)">
+                    删
+                  </button>
+                </template>
+              </DataTable>
+            </div>
+
+            <!-- 手机端：7 列表格塞不下（实测 584px 挤在 390px 屏幕里）→ 卡片 -->
+            <ul class="hist-cards">
+              <li v-if="!rows.length" class="hc-empty dim">
+                这段时间没有分析记录
+              </li>
+              <li v-for="row in rows" :key="row.id" @click="open(row.id)">
+                <div class="hc-top">
+                  <b>{{ row.symbol }}</b>
+                  <span class="dim hc-tf">{{
+                    row.timeframes.join(' · ')
+                  }}</span>
+                  <span :class="['v', verdictTone(row.verdict)]">
+                    {{ verdictText(row.verdict) }}
+                  </span>
+                </div>
+                <div class="hc-meta dim">
+                  {{ bjTime(row.createdAt) }} · 当时价 {{ fmt(row.price) }} ·
+                  {{ rmb(row.costUsd) }}
+                </div>
+                <div v-if="(row.tags ?? []).length" class="tags">
                   <span
                     v-for="t in row.tags.slice(0, 3)"
                     :key="t.name"
@@ -410,82 +504,49 @@ onMounted(() => {
                     {{ t.name }}
                     <i v-if="t.probability">{{ t.probability }}%</i>
                   </span>
-                  <span
-                    v-if="row.tags.length > 3"
-                    class="tag more"
-                    :title="
-                      row.tags
-                        .slice(3)
-                        .map(t => t.name)
-                        .join('、')
-                    "
-                  >
+                  <span v-if="row.tags.length > 3" class="tag more">
                     +{{ row.tags.length - 3 }}
                   </span>
-                </span>
-                <span v-else class="dim">—</span>
-              </template>
-              <template #verdict="{row}">
-                <span :class="['v', verdictTone(row.verdict)]">
-                  {{ verdictText(row.verdict) }}
-                </span>
-              </template>
-              <template #costUsd="{row}">{{ rmb(row.costUsd) }}</template>
-              <template #actions="{row}">
-                <button class="ghost tiny" @click="open(row.id)">详情</button>
-                <button class="ghost tiny danger" @click="remove(row.id)">
-                  删
-                </button>
-              </template>
-            </DataTable>
-          </div>
+                </div>
+              </li>
+            </ul>
 
-          <!-- 手机端：7 列表格塞不下（实测 584px 挤在 390px 屏幕里）→ 卡片 -->
-          <ul class="hist-cards">
-            <li v-if="!rows.length" class="hc-empty dim">
-              这段时间没有分析记录
-            </li>
-            <li v-for="row in rows" :key="row.id" @click="open(row.id)">
-              <div class="hc-top">
-                <b>{{ row.symbol }}</b>
-                <span class="dim hc-tf">{{ row.timeframes.join(' · ') }}</span>
-                <span :class="['v', verdictTone(row.verdict)]">
-                  {{ verdictText(row.verdict) }}
-                </span>
-              </div>
-              <div class="hc-meta dim">
-                {{ bjTime(row.createdAt) }} · 当时价 {{ fmt(row.price) }} ·
-                {{ rmb(row.costUsd) }}
-              </div>
-              <div v-if="(row.tags ?? []).length" class="tags">
-                <span
-                  v-for="t in row.tags.slice(0, 3)"
-                  :key="t.name"
-                  class="tag"
-                >
-                  {{ t.name }}
-                  <i v-if="t.probability">{{ t.probability }}%</i>
-                </span>
-                <span v-if="row.tags.length > 3" class="tag more">
-                  +{{ row.tags.length - 3 }}
-                </span>
-              </div>
-            </li>
-          </ul>
-
-          <div class="pager">
-            <button class="ghost" :disabled="page <= 1" @click="go(-1)">
-              上一页
-            </button>
-            <span class="dim">
-              第 {{ page }} / {{ pages }} 页 · 每页 {{ limit }}
-            </span>
-            <button class="ghost" :disabled="page >= pages" @click="go(1)">
-              下一页
-            </button>
-          </div>
-        </section>
+            <div class="pager">
+              <button class="ghost" :disabled="page <= 1" @click="go(-1)">
+                上一页
+              </button>
+              <span class="dim">
+                第 {{ page }} / {{ pages }} 页 · 每页 {{ limit }}
+              </span>
+              <button class="ghost" :disabled="page >= pages" @click="go(1)">
+                下一页
+              </button>
+            </div>
+          </section>
+        </div>
       </div>
+    </div>
+
+    <!--
+      ② 知识库（原来单独一页 `/knowledge`，2026-10-04 合并进来）。
+      内容跟老页面一字不差；原来那层 `<div class="col">` 去掉了 ——
+      外壳 `.hist` 本来就是 flex 列，再套一层只会多出一层 gap。
+    -->
+    <div v-show="pane === 'kb'" class="pane-kb">
+      <section class="panel">
+        <h2>已记录的案例 <span class="tag">卡片</span></h2>
+        <p class="hint" style="margin-bottom: 10px">
+          这里只放已经记下来的。要加新案例，去
+          <RouterLink to="/analyze">开单分析</RouterLink>
+          的「添加案例」tab —— 点「画范围」再在右边 K
+          线上拖一段，就只提炼那一段。 点卡片看经验、为什么这样走、勾标签。
+        </p>
+
+        <!-- 标签模板我自己维护，改完直接生效 -->
+        <TagTemplatesPanel @changed="panel?.loadTags()" />
+
+        <KnowledgePanel ref="panel" />
+      </section>
     </div>
 
     <!-- 详情 -->

@@ -1,5 +1,21 @@
 <script setup lang="ts">
-import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
+/*
+ * 组件名要钉死：`App.vue` 的 `<KeepAlive :include="['AnalyzeView','ContractsView']">`
+ * 是按**组件名**匹配的，而名字对不上会**静默失效**（整页都不再缓存，看不出错）——
+ * 不靠文件名推断，写死在这里。
+ */
+defineOptions({name: 'AnalyzeView'})
+
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onBeforeUnmount,
+  onDeactivated,
+  onMounted,
+  ref,
+  watch
+} from 'vue'
 import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import MarketPanel from '../comps/MarketPanel.vue'
@@ -12,6 +28,7 @@ import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import TickerChanges from '../comps/TickerChanges.vue'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
+import {useScrollMemory} from '../scroll'
 import {
   CHART_TAB,
   LEFT_TABS,
@@ -103,22 +120,32 @@ function onViewport(): void {
   const m = window.innerWidth <= MOBILE_MAX
   if (m === isMobile.value) return
   isMobile.value = m
-  // 「K 线」这一格桌面端没有；「测试 / 添加案例」反过来只有桌面有
-  if (!m && leftTab.value === 'chart') leftTab.value = 'live'
-  if (m && MOBILE_HIDDEN_TABS.includes(leftTab.value)) leftTab.value = 'live'
+  /*
+   * 宽窄切换时把「对方不存在的那一格」收回来：
+   * 「K 线」只在窄屏有，「合约行情」只在宽屏有（2026-10-04 提成单独一页了），
+   * 「测试 / 添加案例」反过来只有宽屏有。
+   */
+  if (!m && leftTab.value === 'chart') leftTab.value = 'market'
+  if (
+    m &&
+    (leftTab.value === 'market' || MOBILE_HIDDEN_TABS.includes(leftTab.value))
+  ) {
+    leftTab.value = 'chart'
+  }
 }
 
 /**
- * 窄屏的 tab 顺序：**合约行情排第一个**（用户要求：它也是默认落的那一格），
- * 然后是「K 线」和桌面那套去掉「测试 / 添加案例」（那两个只桌面能用）。
+ * 窄屏的 tab：「K 线」排第一个（它也是默认落的那一格），
+ * 后面跟宽屏那套去掉「合约行情 / 测试 / 添加案例」。
+ *
+ * ⚠️ 「合约行情」已经搬去底栏的「合约」页（用户 2026-10-04），窄屏不再摆。
  */
 const tabs = computed(() => {
   if (!isMobile.value) return LEFT_TABS
-  const market = LEFT_TABS.filter(t => t.value === 'market')
   const rest = LEFT_TABS.filter(
     t => t.value !== 'market' && !MOBILE_HIDDEN_TABS.includes(t.value)
   )
-  return [...market, CHART_TAB, ...rest]
+  return [CHART_TAB, ...rest]
 })
 
 /* ---------------- 窄屏：左右滑动切换一级 tab ---------------- */
@@ -130,90 +157,15 @@ const tabs = computed(() => {
  */
 const marketCount = ref(0)
 
-/** 滑多远才算「切一下」（px）—— 太小会跟「点一下」抢，太大手腕划不动 */
-const SWIPE_MIN = 52
-/** 横向位移得是纵向的这么多倍 —— 斜着划多半是想上下滚内容 */
-const SWIPE_DOMINANCE = 1.3
-
-const swipeRef = ref<HTMLElement | null>(null)
-
-let swipe: {
-  x: number
-  y: number
-  dx: number
-  dy: number
-  fired: boolean
-} | null = null
-
-/**
- * 这个元素（往上到 `.col` 为止）自己要不要吃横向手势？要就别抢：
- * - 输入框：手指横划是在选文字
- * - 自己能横向滚的（`overflow-x: auto` 且真滚得动）：那是滚动，不是切 tab
- * - K 线画布：横划是拖动图表（它在右边那栏，正常走不到这儿，顺手挡住）
- * - 图表那两个 tab 行（周期 / 榜单）都是 `flex: 1 1 0`，窄屏不会横向滚，所以不受影响
- */
-function ownsHorizontal(el: EventTarget | null): boolean {
-  const host = swipeRef.value
-  for (let n = el as HTMLElement | null; n && n !== host; n = n.parentElement) {
-    if (!(n instanceof HTMLElement)) break
-    if (
-      n.matches(
-        'input, textarea, select, [contenteditable="true"], .chart-wrap'
-      )
-    )
-      return true
-    const ox = getComputedStyle(n).overflowX
-    if ((ox === 'auto' || ox === 'scroll') && n.scrollWidth > n.clientWidth + 4)
-      return true
-  }
-  return false
-}
-
-function onSwipeStart(e: TouchEvent): void {
-  swipe = null
-  if (!isMobile.value || e.touches.length !== 1) return
-  const t = e.touches[0]
-  if (ownsHorizontal(e.target)) return
-  swipe = {x: t.clientX, y: t.clientY, dx: 0, dy: 0, fired: false}
-}
-
-function onSwipeMove(e: TouchEvent): void {
-  if (!swipe || e.touches.length !== 1) return
-  const t = e.touches[0]
-  swipe.dx = t.clientX - swipe.x
-  swipe.dy = t.clientY - swipe.y
-  /*
-   * 一旦够远就「认定」是切 tab（`fired`），之后手指再飘也不会取消 ——
-   * 不然划到一半往上一提就当没发生过，手感很飘。
-   */
-  if (
-    !swipe.fired &&
-    Math.abs(swipe.dx) >= SWIPE_MIN &&
-    Math.abs(swipe.dx) >= Math.abs(swipe.dy) * SWIPE_DOMINANCE
-  ) {
-    swipe.fired = true
-  }
-}
-
-/**
- * 抬手（或者手势被系统打断）才真切 ——
- * 划到一半就切的话，内容在手指底下换掉，人会以为划错了。
- */
-function onSwipeEnd(): void {
-  const s = swipe
-  swipe = null
-  if (!s?.fired) return
-  // 往左划 = 看右边那一格（跟翻页同一个方向）
-  stepTab(s.dx < 0 ? 1 : -1)
-}
-
-/** 按 tab 行的顺序挪一格；已经在头 / 尾就不动 */
-function stepTab(delta: number): void {
-  const list = tabs.value
-  const i = list.findIndex(t => t.value === leftTab.value)
-  const next = list[i + delta]
-  if (i >= 0 && next) leftTab.value = next.value
-}
+/*
+ * ⚠️ 这里原来有一套「窄屏左右滑动切换一级 tab」（`swipeRef` / `onSwipeStart/Move/End`
+ * / `stepTab` / `ownsHorizontal`），2026-10-04 **整套删掉**（用户：「移动端滑动切换
+ * tab 逻辑删掉」）。
+ *
+ * 删之前实测过它确实是坏的：监听挂在 `.col` 这个盒子上，而 `.col` 的高度等于当前
+ * tab 内容的高度 —— 切到「K 线」时图在隔壁的 `.col.side` 里，`.col` 只剩 40px
+ * （就那行 tab 按钮），「实时分析」也只有 144px。所以绝大多数地方划了没反应。
+ * 与其修，不如不要（用户的选择）。
 
 /* ---------- 历史列表：能放几行就放几行，列表自己不出滚动条 ---------- */
 const histBox = ref<HTMLElement | null>(null)
@@ -325,6 +277,40 @@ const cfgOpen = ref(false)
 const chartActive = computed(
   () => !isMobile.value || leftTab.value === 'chart' || leftTab.value === 'test'
 )
+
+/**
+ * 这一页现在是不是「当前页」。
+ *
+ * 2026-10-04 给 `<RouterView>` 加了 `KeepAlive`：切到别的底栏 tab 时组件**不再卸载**
+ * （好处就是用户要的：回来还是走之前那样 —— 分析结果、选中的 tab、图上缩放全在）。
+ * 代价是**后台的实时推送不会自己停**（`document.hidden` 只反映「浏览器标签页」
+ * 级别的前后台，切站内 tab 它一直是 visible）→ 拿这个标志补上。
+ */
+const pageAlive = ref(true)
+
+/** 整页根节点：给「滚动位置记忆」用（见 `../scroll`） */
+const rootRef = ref<HTMLElement | null>(null)
+/*
+ * `KeepAlive` 会把这一页的 DOM 整棵摘出文档再插回来，`scrollTop` 那时已经归零
+ * （用户 2026-10-04：「滚动条没缓存」）—— 这里把左栏 / 行情表 / 历史列表
+ * 各处的滚动位置一并记回来。
+ */
+useScrollMemory(() => rootRef.value)
+/** 首次激活就是「刚挂载」，别把同一个请求拉两遍（onActivated 在首次挂载后也会触发） */
+let firstActivate = true
+onActivated(() => {
+  pageAlive.value = true
+  if (firstActivate) {
+    firstActivate = false
+    return
+  }
+  // 缓存了页面 = 不再重新挂载，回来时顺手把「历史分析」那一列刷一下
+  // （翻页 / 币种 / 滚动位置都留着，只换数据）
+  void loadHistory(symbol.value, true)
+})
+onDeactivated(() => {
+  pageAlive.value = false
+})
 /** 一次性提示（几秒后自己消失，点一下也消失） */
 const toast = ref<{text: string; tone: 'ok' | 'bad'} | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | null = null
@@ -535,7 +521,7 @@ const heatRows = computed(() => {
 </script>
 
 <template>
-  <div class="analyze">
+  <div ref="rootRef" class="analyze">
     <!-- ============ 查询 ============ -->
     <!-- 币种下拉与「AI 分析」按钮都移到右边 K 线的头部了（2026-10-03 用户要求） -->
 
@@ -560,14 +546,7 @@ const heatRows = computed(() => {
         ⚠️ 这一栏**必须常驻**：切到手机上那格「K 线」时，tab 行就在这里面，
         整栏藏了就没地方切回去了。所以只把内容清空（见下面的分支）。
       -->
-      <div
-        ref="swipeRef"
-        class="col"
-        @touchstart.passive="onSwipeStart"
-        @touchmove.passive="onSwipeMove"
-        @touchend.passive="onSwipeEnd"
-        @touchcancel.passive="onSwipeEnd"
-      >
+      <div class="col">
         <div class="tab-row">
           <SegTabs v-model="leftTab" :options="tabs" />
         </div>
@@ -593,7 +572,7 @@ const heatRows = computed(() => {
             </h2>
             <MarketPanel
               :symbol="symbol"
-              :active="leftTab === 'market'"
+              :active="pageAlive && leftTab === 'market'"
               @pick="onPickMarket"
               @count="marketCount = $event"
             />
@@ -915,7 +894,7 @@ const heatRows = computed(() => {
           :symbol="symbol"
           :timeframe="chartTf"
           :from="chartFrom"
-          :active="chartActive"
+          :active="pageAlive && chartActive"
           :selectable="chartSelectable"
           :range="chartRange"
           :drawing="rangeDrawing"

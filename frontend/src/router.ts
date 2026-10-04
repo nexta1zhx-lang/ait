@@ -1,14 +1,25 @@
 import {createRouter, createWebHashHistory, createWebHistory} from 'vue-router'
 import {isNativeShell} from './platform'
 import AnalyzeView from './views/AnalyzeView.vue'
+import ContractsView from './views/ContractsView.vue'
 import HistoryView from './views/HistoryView.vue'
-import KnowledgeView from './views/KnowledgeView.vue'
 import UsageView from './views/UsageView.vue'
 import DownloadView from './views/DownloadView.vue'
 
 export const routes = [
+  /*
+   * `/` **不再是开单分析**（用户 2026-10-04：默认落在「合约」）——
+   * 打开 App / 网站先看到的是一片市场列表。开单分析挪到 `/analyze`。
+   */
+  {path: '/', redirect: '/contracts'},
   {
-    path: '/',
+    path: '/contracts',
+    name: 'contracts',
+    component: ContractsView,
+    meta: {title: '合约', nav: '合约'}
+  },
+  {
+    path: '/analyze',
     name: 'analyze',
     component: AnalyzeView,
     meta: {title: '开单分析', nav: '开单分析'}
@@ -17,14 +28,13 @@ export const routes = [
     path: '/history',
     name: 'history',
     component: HistoryView,
-    meta: {title: '预测历史', nav: '预测历史'}
+    meta: {title: '历史', nav: '历史'}
   },
-  {
-    path: '/knowledge',
-    name: 'knowledge',
-    component: KnowledgeView,
-    meta: {title: '历史知识库', nav: '历史知识库'}
-  },
+  /*
+   * 「历史知识库」2026-10-04 已合并进「历史」页（用户：「预测历史和历史知识库
+   * 合并，改叫历史」）。老书签走这里 —— 带上 `tab=kb` 直接落到知识库那半。
+   */
+  {path: '/knowledge', redirect: {path: '/history', query: {tab: 'kb'}}},
   {
     path: '/usage',
     name: 'usage',
@@ -40,10 +50,10 @@ export const routes = [
   /*
    * 「AI 提示词」页 2026-10-04 已删（用户：「没什么用，都要和代码绑定」）——
    * 提示词现在是 `backend/src/llm/prompts.ts` 里的常量。
-   * 老书签 / 老链接进 /prompts 会被下面这条捕到，直接回首页，不留白屏。
+   * 老书签 / 老链接进 /prompts 会被下面那条捕到，直接回落地页，不留白屏。
    */
-  {path: '/prompts', redirect: '/'},
-  {path: '/:pathMatch(.*)*', redirect: '/'}
+  {path: '/prompts', redirect: '/contracts'},
+  {path: '/:pathMatch(.*)*', redirect: '/contracts'}
 ]
 
 export const router = createRouter({

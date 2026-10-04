@@ -3,18 +3,18 @@
  * 配置（底部弹出）。
  *
  * 入口在 K 线头部「AI 分析 / ＋」那一行最右边那颗按钮上。
- * 现在三条：
- *   · 保持 K 线缩放样式（开关，默认**打开**）
- *   · 显示多少根 K 线 —— **不是给用户选的档位**，只是把「现在显示多少根」报出来。
- *     这个根数是**全局一份、所有币种共用**的（用户 2026-10-03：
- *     「保持 k 线缩放的根数是所有币种都要」）。
+ * 现在只剩一条：
  *   · 行情过滤 —— 24h 成交额 ≥ N 百万 USDT 的合约才在行情列表里显示
  *     （用户 2026-10-03：「行情过滤 可以配置 24h 成交多少 m，大于这个数合约行情才显示」）。
+ *
+ * ⚠️ 2026-10-04 删掉了两条（用户：「k 线保持样式缩放逻辑全部删掉」）：
+ *    「保持 K 线缩放样式」开关 + 「显示多少根 K 线」读数。
+ *    现在图上显示多少根由**屏幕宽度**决定，用户不用管、也没得调。
  *
  * 值都在 `settings.ts`（落 localStorage），这里只负责画和改。
  */
 import {computed} from 'vue'
-import {keepChartZoom, marketMinVolM, shownBars, shownKey} from '../settings'
+import {marketMinVolM} from '../settings'
 
 defineProps<{
   open: boolean
@@ -49,45 +49,7 @@ const PRESETS = [0, 1, 5, 10, 50]
         </button>
       </header>
 
-      <!-- ① 保持 K 线缩放样式 -->
-      <div class="sheet-row">
-        <div class="sheet-text">
-          <b>保持 K 线缩放样式</b>
-          <p>
-            打开后，图上显示多少根<b>所有币种共用</b>：在哪个币上缩到多少根，
-            换币 / 换周期 / 切页回来都还是这个根数（右边缘始终贴齐最新一根）。
-            关掉就是每次都自动适配最新行情。
-          </p>
-        </div>
-        <button
-          type="button"
-          class="switch"
-          :class="{on: keepChartZoom}"
-          :aria-pressed="keepChartZoom"
-          @click="keepChartZoom = !keepChartZoom"
-        >
-          <span />
-        </button>
-      </div>
-
-      <!-- ② 显示多少根 K 线：只读（跟着你的缩放走，切走时自动存） -->
-      <div class="sheet-row col">
-        <div class="sheet-text">
-          <b>显示多少根 K 线</b>
-          <p>
-            <template v-if="shownBars">
-              现在 <em>{{ shownKey }}</em> 图上显示 <em>{{ shownBars }}</em>
-              根 —— 这是你缩放 / 拖出来的，不在这儿选；
-              这个根数<b>所有币种共用</b>，切走或换币时自动记住。
-            </template>
-            <template v-else
-              >打开 K 线图后，这里会显示当前看了多少根。</template
-            >
-          </p>
-        </div>
-      </div>
-
-      <!-- ③ 行情过滤：24h 成交额低于这个数的合约不显示 -->
+      <!-- 行情过滤：24h 成交额低于这个数的合约不显示 -->
       <div class="sheet-row col">
         <div class="sheet-text">
           <b>行情过滤</b>

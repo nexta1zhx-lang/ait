@@ -62,7 +62,75 @@
   --r-md: 14px;
   --r-lg: 18px;
 
-  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  /*
+   * 等宽 —— **全站的数字都走这里**（现价 / 概率 / 涨跌幅方块 / 时间戳 / 图表坐标轴 / md5 …）。
+   * ⚠️ `'Red Hat Mono'` 是自托管的（`fonts.css`，2 块 / 36 KB，只有 latin + latin-ext）。
+   *    不挂它的话，Mac 是 SF Mono、安卓是 Roboto Mono，数字列宽照样对不齐。
+   *
+   * ⚠️ **第二个必须是 `'Noto Sans SC'`**：等宽字体（不管哪一款）都**没有汉字**，
+   *    后面那串 `ui-monospace / SF Mono / Menlo / …` 也全是纯拉丁的。
+   *    不把中文兜住的话，凡是挂了 `var(--mono)` 的元素里的汉字会落到**系统默认中文**
+   *    —— 也就是又回到了「多机型不一致」。规则和 `--font-sans` 一样：
+   *    **拉丁/数字走第一款，汉字落到第二款**。
+   *
+   * ⚠️ 换过四轮（用户 2026-10-04）：Noto Sans Mono → JetBrains Mono → Geist Mono
+   *    → **Red Hat Mono**（前三个用户都说「不行」）。最后是摆了一张 13 款对比页
+   *    （`/tmp/font-candidates.mjs` 生成的）让他自己挑的 —— 再猜下去没意义。
+   */
+  --mono:
+    'Red Hat Mono', 'Noto Sans SC', ui-monospace, 'SF Mono', SFMono-Regular,
+    Menlo, Consolas, 'Roboto Mono', 'Droid Sans Mono', monospace;
+
+  /*
+   * ---------------- 字体：多机型一致性 ----------------
+   * 用户 2026-10-04：「移动端的字体和我调试的不太一样」「如何保持多机型一样」。
+   *
+   * 排查时实测到的（canvas 量文字宽度，13px 字号），留在这里当依据：
+   *   · **汉字在任何字体里都是 1em 定宽** —— 苹方 / 冬青 / 通用 sans-serif
+   *     量「开单分析走势概率」全是 104px（8 字 × 13px）。
+   *     所以**字号本身不会因字体而变**，13px 到哪儿都是 13px。
+   *   · 差的是**数字**：「0123456789」苹方 74.72 / 冬青 85.46，**差 14%**。
+   *     ⇒ 价格那几列的列宽会跟着飘（窄屏表格是 `table-layout: auto`）。
+   *   · **字重是差得最狠的一处**：
+   *       · 苹方（苹果）有 Semibold(600)、**没有 Bold** → `700` 被降级成 600
+   *       · Noto Sans CJK（安卓）有 Medium(500)+Bold(700)、**没有 600** → `600` 升成 700
+   *     同一份 CSS，安卓上所有「半粗」都比 Mac 重一档。
+   *
+   * ⇒ 结论：只靠调 CSS **消不掉**，因为根子是「两端根本是两款不同的字」。
+   *    所以改为**自托管 Noto Sans SC**（见 `--font-sans`），字形 + 字重彻底统一。
+   */
+  /*
+   * 字体栈分三层，**顺序就是优先级**（浏览器按「这款字有没有这个字符」逐款往下找）：
+   *
+   *   ①  `'Inter'`            —— **英文 / 数字**（用户 2026-10-04「英文和数字换个字体」）。
+   *       它只带拉丁/希腊/西里尔那几个 unicode-range，**不含汉字**，
+   *       所以中文会自然落到下一层的 Noto Sans SC，两不打架。
+   *   ②  `'Noto Sans SC'`     —— **中文**（含它自己的拉丁，但会被 ① 先接走）。
+   *   ③  系统字体           —— 只当「字体还没加载出来 / 被禁」时的回退。
+   *
+   * 三款都是自托管的（`fonts.css`），所以**多机型完全一致**。
+   * 为什么必须自托管：苹果用苹方、安卓用 Noto Sans CJK / MiSans / HarmonyOS Sans，
+   * 同一份 CSS 在不同机型上字形、字重、数字宽度全不一样。苹方是苹果私有字体不能分发。
+   */
+  --font-sans:
+    'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'HarmonyOS Sans SC', 'MiSans', 'Noto Sans CJK SC',
+    'Microsoft YaHei', sans-serif;
+
+  /*
+   * 字重三档。
+   *
+   * ⚠️ 自托管之后 `600` 是**真字重**了（Noto Sans SC 是可变字体，wght 400~700 全覆盖），
+   *    所以这里回到最初的 600 —— 那是当初在 Mac 上定版的值，现在安卓也一样。
+   *    （中间为了绕开「安卓没有 600」曾临时改成 500，自托管后就不需要了。）
+   *
+   * ⚠️ 但**回退字体**仍然没有 600（苹方没有、Noto Sans CJK 也没有），
+   *    字体没加载出来的那一瞬会稍微偏一点 —— 那只是一瞬间的事。
+   * ⚠️ `--fw-bold`(700)：Noto Sans SC 里有真 Bold，400~700 全都有。
+   */
+  --fw-normal: 400;
+  --fw-mid: 600;
+  --fw-bold: 700;
 
   /*
    * 刘海 / 状态栏那一截的高度 —— 只有**打包成 App**（WebView 铺满整屏）时才有值，
@@ -85,14 +153,37 @@ body {
   min-height: 100%;
 }
 
+/*
+ * ⚠️ **安卓 / iOS 会自己把字放大**（Chrome 的「字体放大 / Font Boosting」、
+ *    iOS Safari 的文本自动缩放）。不写这两条，同一个 `font-size: 13px`
+ *    在手机上可能比电脑上大一档 —— 而且 Chrome DevTools 的机型模拟
+ *    **不会触发**这个行为，所以调试时压根看不出来（用户 2026-10-04：
+ *    「移动端的字体和我调试的不太一样」）。
+ *
+ *    100% 只是「别动」，不是禁止用户放大 —— 系统级的字号设置、双指缩放都还在。
+ */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  /*
+   * 字体栈见 `:root` 的 `--font-sans`（那段注释解释了多机型差异是怎么来的）。
+   */
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
+  /*
+   * 关掉「假加粗 / 假斜体」。
+   *
+   * 某些机型的厂商字体缺字重时，浏览器会**自己描一遍**把字加粗 ——
+   * 结果笔画糊、字还变宽，同一段文字在另一台机器上却没有。
+   * 关掉之后，缺字重就老实退回最接近的真实字重（也就是最多和别处一样粗）。
+   */
+  font-synthesis: none;
 }
 
 /*
@@ -229,7 +320,7 @@ h1 {
 h2 {
   margin: 0 0 12px;
   font-size: 15px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   color: #cdd9e5;
   display: flex;
   align-items: center;
@@ -238,7 +329,7 @@ h2 {
 h3 {
   margin: 0 0 6px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: var(--fw-mid);
   color: var(--muted);
 }
 
@@ -282,7 +373,7 @@ a {
   padding: 6px 14px;
   border-radius: var(--r-xs);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   white-space: nowrap;
 }
 
@@ -497,7 +588,7 @@ button {
   border-radius: var(--r-sm);
   padding: 9px 20px;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   cursor: pointer;
   font-family: inherit;
 }
@@ -521,7 +612,7 @@ button.ghost {
   color: var(--text);
   padding: 6px 12px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: var(--fw-mid);
 }
 
 button.ghost:hover:not(:disabled) {
@@ -561,7 +652,7 @@ button.danger:hover {
   color: var(--muted);
   padding: 6px 12px;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   border-radius: 0;
 }
 
@@ -639,7 +730,7 @@ button.danger:hover {
 
 .grade {
   font-size: 15px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   padding: 7px 13px;
   border-radius: 9px;
   background: var(--panel-2);
@@ -688,7 +779,7 @@ button.danger:hover {
 
 .pill {
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   padding: 3px 10px;
   border-radius: 999px;
   background: var(--panel-2);
@@ -738,7 +829,7 @@ button.danger:hover {
  * 涨 / 跌 / 结构词不上色 —— 推荐那三行本来就有绿 / 红标签，不重复。
  */
 .concl .kw {
-  font-weight: 700;
+  font-weight: var(--fw-bold);
 }
 .concl .kw-key {
   color: var(--blue);
@@ -757,7 +848,7 @@ button.danger:hover {
 
 .concl-h {
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
 }
 
 .concl-sub {
@@ -771,7 +862,7 @@ button.danger:hover {
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
 }
 
 /* ① 推荐：最重要的一块（三行动作各自配色，标题绿） */
@@ -828,7 +919,7 @@ button.danger:hover {
   min-width: 48px;
   margin-top: 3px;
   font-size: 11.5px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   white-space: nowrap;
   color: var(--muted);
 }
@@ -916,7 +1007,7 @@ button.danger:hover {
 .stat .v {
   display: block;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   font-variant-numeric: tabular-nums;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -995,7 +1086,7 @@ button.danger:hover {
 .prob-num {
   font-family: var(--mono);
   font-size: 30px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   line-height: 1;
   letter-spacing: -1px;
   color: var(--text);
@@ -1005,7 +1096,7 @@ button.danger:hover {
 .prob-num i {
   font-size: 15px;
   font-style: normal;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   margin-left: 1px;
   color: var(--muted);
 }
@@ -1170,7 +1261,7 @@ button.danger:hover {
   color: var(--ok);
 }
 .lv-row.now .v {
-  font-weight: 700;
+  font-weight: var(--fw-bold);
 }
 
 /* ==================== 周期标识 ==================== */
@@ -1198,7 +1289,7 @@ button.danger:hover {
 }
 .tf-chip b {
   color: var(--text);
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 .tf-chip.up span {
   color: var(--ok);
@@ -1249,7 +1340,7 @@ button.danger:hover {
   border-left-color: var(--blue);
 }
 .tf-notes .tf-name {
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   font-variant-numeric: tabular-nums;
 }
 .tf-notes .tf-name i {
@@ -1305,7 +1396,7 @@ button.danger:hover {
 }
 
 .heat-row .v {
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   text-align: right;
   word-break: break-word;
 }
@@ -1326,7 +1417,7 @@ button.danger:hover {
 
 .table th {
   text-align: left;
-  font-weight: 500;
+  font-weight: var(--fw-mid);
   color: var(--muted);
   padding: 7px 10px;
   border-bottom: 1px solid var(--border);
@@ -1364,7 +1455,7 @@ button.danger:hover {
   text-align: right;
 }
 .table .s {
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 .table td.struct {
   text-align: right;
@@ -1595,7 +1686,7 @@ button.danger:hover {
   align-items: center;
   justify-content: center;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   line-height: 1;
   color: #fff;
 }
@@ -1604,13 +1695,15 @@ button.danger:hover {
   cursor: pointer;
 }
 
-/* 当前币种那一行：淡蓝底 + 左边一条蓝，跟交易所一个样 */
+/*
+ * 当前币种那一行：**只留一层底色**（`--blue-soft`，跟着主题走）。
+ *
+ * 用户 2026-10-04：「合约行情选择币种左侧不要加边框的颜色」——
+ * 原来这行左边还插了一条 2px 的主色（`inset 2px 0 0 var(--blue)`，学交易所那种），
+ * 现在去掉，选中状态靠底色认就够了。
+ */
 .mkt-row.on td {
   background: var(--blue-soft);
-}
-
-.mkt-row.on td:first-child {
-  box-shadow: inset 2px 0 0 var(--blue);
 }
 
 /*
@@ -1625,22 +1718,45 @@ button.danger:hover {
  * 纯主色铺在近黑底上会「浮」起来，像贴上去的；掺 15% 面板色之后才坐回页面里，
  * 白字对比度也顺带从 2.4 提到 3.2。圆角同时改回主题那一档（`--r-xs`）。
  *
- * ⚠️ 字是**白色**（用户明确要的）。白字在亮绿上偏弱，想更清楚只能把底压深。
+ * ⚠️ 字色是**涨跌本色**（不是白字了，见下面 `.chg.up/.down` 的注释）。
  */
 .mkt-table .chg {
-  display: inline-block;
-  min-width: 62px;
-  padding: 2px 6px;
+  /*
+   * **固定尺寸 + 内容居中**（用户 2026-10-04：「涨跌幅的方块大小固定，内容居中」）。
+   *
+   * ⚠️ 原来是 `min-width: 62px` + `padding: 2px 6px` —— 那是**内容说了算**：
+   *    「-0.38%」(6 位) 正好 62px，但「+13.27%」(7 位) 会把它撑宽，
+   *    一列扫下来宽度参差，看着像锯齿。这里直接钉死宽高，多长的数字都不撑开。
+   *
+   * 宽度按最长的涨跌幅留的余量：528 个合约实测最长 7 位（+13.27%），
+   * 8 位（+123.45%）是理论上限，按它算。实际只用了 66px 里的一半多一点。
+   *
+   * ⚠️ 用等宽（`--mono`）+ 居中 ⇒ 每行的小数点都落在同一列上，对比起来一眼就看出大小。
+   * ⚠️ 因为改成 flex 居中，原来那条「负右边距抵掉右内边距、让数字贴列右边」
+   *    的修法就不需要了 —— padding 已经是 0，方块的右边就是单元格内容的右边。
+   */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * 尺寸（用户 2026-10-04：「格子空间再大一点，有点间距和方块」—— 66×21 → 72×23）：
+   * 等宽下 13px 一个字符 7.8px，7 位（+13.27%）占 54.6px，
+   * 72px 旁边留 8.7px、8 位（+123.45%）也还剩 4.8px —— 数字再长也不会贴边。
+   */
+  width: 72px;
+  height: 23px;
+  padding: 0;
+  font-family: var(--mono);
+  /*
+   * 字重比表格正文重一级（正文是 `--fw-mid` 600，这里 700）：
+   * 不写的话方块里是 400，配淡底偏轻、扫一列看不太出来（用户 2026-10-04：
+   * 「字体可以粗一点」）。Red Hat Mono 是可变字体（400..700），700 是真字重。
+   */
+  font-weight: var(--fw-bold);
   border-radius: var(--r-xs);
   background: var(--panel-2);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-  /*
-   * 负的右边距正好抵掉胶囊自己的右内边距：
-   * 这样**数字**贴着列右边缘，跟表头「24h」对齐
-   * （不抵的话数字比表头往里缩 6px + 单元格 8px 内边距，看着就是没对齐）。
-   */
-  margin-right: -6px;
 }
 
 /*
@@ -1654,14 +1770,30 @@ button.danger:hover {
   }
 }
 
+/*
+ * 涨 / 跌：**淡底 + 本色文字** —— 跟全站同一套说话方式。
+ *
+ * 一级 tab 的选中格、余额徽标、提示条、K 线头部那行涨跌，用的都是这个套路；
+ * **实心色块全站只留给 CTA 按钮**（大沙底 + 墨字）。
+ *
+ * ⚠️ 原来是 `color-mix(涨色 85%, 面板)` 的**实心色块 + 白字** —— 在一屏都是
+ *    暖沙 / 低饱和的页面里，它是最扎眼的一处，像贴上去的
+ *    （用户 2026-10-04：「换成适配我的页面风格的样式」）。
+ *
+ * 底色直接用现成的 `--ok-soft` / `--bad-soft`（14%），跟其它提示块同一个来源。
+ * 另外加一圈细描边把这个方块「框」出来 —— 用 `box-shadow: inset` 而不是
+ * `border`：72×23 是钉死的尺寸，加 border 会把内容区挤小 / 让外框变大。
+ */
 .mkt-table .chg.up {
-  background: color-mix(in srgb, var(--ok) 85%, var(--panel));
-  color: #fff;
+  background: var(--ok-soft);
+  color: var(--ok);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 30%, transparent);
 }
 
 .mkt-table .chg.down {
-  background: color-mix(in srgb, var(--bad) 85%, var(--panel));
-  color: #fff;
+  background: var(--bad-soft);
+  color: var(--bad);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bad) 30%, transparent);
 }
 
 .mkt-table .num {
@@ -1704,7 +1836,7 @@ body.fixed-viewport .analyze {
 
 .btn-run {
   padding: 7px 22px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 
 /* ==================== 测试模式（回到某一刻） ==================== */
@@ -1768,7 +1900,7 @@ body.fixed-viewport .analyze {
   min-width: 0;
   font-size: 12.5px;
   font-family: var(--mono);
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 
 .follow-row .v em {
@@ -1840,7 +1972,7 @@ body.fixed-viewport .analyze {
   background: var(--blue-soft);
   color: var(--blue);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1887,7 +2019,7 @@ body.fixed-viewport .analyze {
 
 .step b {
   display: block;
-  font-weight: 500;
+  font-weight: var(--fw-mid);
   color: var(--text);
 }
 
@@ -2015,7 +2147,7 @@ body.fixed-viewport .split {
 }
 
 .steps-collapsed .t {
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   white-space: nowrap;
 }
 
@@ -2087,15 +2219,15 @@ body.fixed-viewport .split {
  */
 .hist .v.go {
   color: var(--ok);
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 .hist .v.wait {
   color: var(--warn);
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 .hist .v.no {
   color: var(--bad);
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 
 .hist .t {
@@ -2163,7 +2295,7 @@ body.fixed-viewport .split {
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   line-height: 1.6;
   text-align: center;
 }
@@ -2723,7 +2855,7 @@ body.fixed-viewport .split {
   background: rgba(11, 15, 20, 0.82);
   font-family: var(--mono);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   white-space: nowrap;
 }
 
@@ -2779,7 +2911,7 @@ body.fixed-viewport .split {
   background: rgba(13, 17, 23, 0.9);
   font-family: var(--mono);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
 }
 
 .cursor-delta.up {
@@ -2860,7 +2992,7 @@ body.fixed-viewport .split {
   min-width: 30px;
   padding: 3px 9px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--panel-2);
@@ -2935,7 +3067,7 @@ body.fixed-viewport .split {
 .tk-head .tk-last {
   font-family: var(--mono);
   font-size: 23px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   line-height: 1.05;
   letter-spacing: -0.3px;
   /* 基色：涨绿跌红（见下面 `--tk-base`） */
@@ -3040,7 +3172,7 @@ body.fixed-viewport .split {
 }
 
 .tk-head .tk-chip b {
-  font-weight: 700;
+  font-weight: var(--fw-bold);
 }
 
 .tk-head .tk-arrow {
@@ -3178,7 +3310,7 @@ body.fixed-viewport .split {
 .tk-changes .v {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   color: var(--text);
 }
 
@@ -3327,7 +3459,7 @@ body.fixed-viewport .split {
   background: transparent;
   color: var(--text);
   font-size: 15px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   line-height: 1.1;
 }
 
@@ -3401,7 +3533,7 @@ body.fixed-viewport .split {
 .kb-title {
   flex: 1;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 
 .kb-lesson {
@@ -3458,7 +3590,7 @@ body.fixed-viewport .split {
 }
 .card .v {
   font-size: 20px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   font-variant-numeric: tabular-nums;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3556,7 +3688,7 @@ body.fixed-viewport .split {
 
 .dl-app {
   font-size: 19px;
-  font-weight: 650;
+  font-weight: var(--fw-mid);
   letter-spacing: 0.2px;
 }
 
@@ -3583,10 +3715,12 @@ body.fixed-viewport .split {
   background: var(--accent);
   color: var(--accent-ink);
   font-size: 13.5px;
-  font-weight: 650;
+  font-weight: var(--fw-mid);
   text-decoration: none;
   white-space: nowrap;
-  transition: filter 0.15s, transform 0.1s;
+  transition:
+    filter 0.15s,
+    transform 0.1s;
 }
 .dl-btn:hover {
   filter: brightness(1.08);
@@ -3653,7 +3787,7 @@ body.fixed-viewport .split {
 .dl-ver {
   font-family: var(--mono);
   font-size: 13.5px;
-  font-weight: 650;
+  font-weight: var(--fw-mid);
 }
 
 .dl-title {
@@ -3708,7 +3842,7 @@ body.fixed-viewport .split {
   border-radius: 999px;
   color: var(--accent);
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   text-decoration: none;
   transition: background 0.15s;
 }
@@ -3881,7 +4015,7 @@ button.badge:disabled {
   align-items: center;
   padding: 2px 9px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
   line-height: 1.5;
   font-variant-numeric: tabular-nums;
   background: rgba(139, 148, 158, 0.14);
@@ -4131,7 +4265,7 @@ button.badge.balance:hover:not(:disabled) {
     border: 0;
     border-radius: 0;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: var(--fw-mid);
     text-align: left;
     background: transparent;
     color: var(--muted);
@@ -4389,7 +4523,7 @@ button.badge.balance:hover:not(:disabled) {
     border-right: 0;
     padding: 5px 10px;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: var(--fw-mid);
     border-radius: 0;
     color: var(--muted);
   }
@@ -4448,7 +4582,7 @@ button.badge.balance:hover:not(:disabled) {
     align-items: center;
     justify-content: center;
     font-size: 14px;
-    font-weight: 700;
+    font-weight: var(--fw-bold);
     line-height: 1;
   }
   .tk-plus.on {
@@ -4643,7 +4777,7 @@ button.badge.balance:hover:not(:disabled) {
 .sheet-text em {
   color: var(--blue);
   font-style: normal;
-  font-weight: 600;
+  font-weight: var(--fw-mid);
 }
 
 .sheet-seg button {
@@ -4762,5 +4896,93 @@ button.badge.balance:hover:not(:disabled) {
   .dl-date {
     flex: 1 1 100%;
     margin-left: 0;
+  }
+}
+
+/* ==================================================================
+ * 数字统一（用户 2026-10-04：「全部统一」）
+ *
+ * 把**所有以数字为主**的地方都挂上 `var(--mono)`（Geist Mono），
+ * 让价格 / 涨跌 / 成交量 / 概率 / 时间戳在全站长得一模一样、并且成列对齐。
+ *
+ * ⚠️ 为什么写成一条聚合规则、而且放在文件**最末尾**：
+ *    ① 集中写才不会漏 —— 零散地在十几处各加一行 `font-family`，下次有人改就会漏；
+ *    ② 这里和上面那些基础规则**特异性相同**，靠"后面覆盖前面"生效，
+ *       所以必须排在它们之后（文件里后面还有窄屏 @media 段，所以放最尾部最稳）。
+ *
+ * ⚠️ 这些元素里往往混着中文标签（如「24h 涨跌」「成交量」）。**没关系** ——
+ *    等宽字体没有汉字，中文会自动落到 `--mono` 里排第二的 `'Noto Sans SC'`，
+ *    等于「数字用等宽的、中文用 Noto」，两边不打架。
+ * ================================================================== */
+.mkt-table,
+.mkt-table .num,
+.table .r,
+.stat .v,
+.card .v,
+.heat-row .v,
+.chart-info,
+.tf-chip,
+.hist .t,
+.hist .r,
+.step .ms,
+.balance,
+.until-tag,
+.tag i,
+.chip i,
+.stack-legend b,
+.combo-item {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==================================================================
+ * 「合约」独立页 + 「历史」页内分段（2026-10-04 用户：tab 大改）
+ * ================================================================== */
+
+/*
+ * 「合约」页：从开单分析左栏搬出来的全市场行情，整页只有一栏。
+ * 窄屏那套满屏 / 通栏 / 大行高的规则全挂在 `.split.m-market` 上（原样复用），
+ * 这里只负责把「两栏」压成「一栏」。
+ */
+.split.mkt-page {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/*
+ * 「历史」页顶部的页内分段（预测历史 / 知识库）。
+ * 只有两个选项，不能跟着 `.tab-row .seg { flex: 1 1 auto }` 拉满整行 ——
+ * 一拉满，宽屏上就变成两个巨大的按钮。
+ */
+.page-tabs {
+  flex: 0 0 auto;
+}
+
+.page-tabs .seg {
+  flex: 0 0 auto;
+}
+
+/*
+ * 「预测历史」那半的外壳用 `display: contents` **化掉自己**：
+ * 这样里面的 `.filter-bar` / `.hist-split` 依旧是 `.hist` 的直接子项，
+ * 布局（含 `body.fixed-viewport` 那套「整体不滚、两列各自滚」）一点不变。
+ * ⚠️ 切到「知识库」时 `v-show` 写的是行内 `display:none`，会盖住这条 —— 正是想要的。
+ */
+.pane-records {
+  display: contents;
+}
+
+/* 「知识库」那半：一块整面板（窄屏整页滚、宽屏自己滚） */
+.pane-kb {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+@media (min-width: 1101px) {
+  body.fixed-viewport .pane-kb {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
   }
 }

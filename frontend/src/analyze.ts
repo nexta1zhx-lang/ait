@@ -124,8 +124,9 @@ export const error = ref('')
 /**
  * 左侧一级 tab：合约行情 / 实时分析 / 测试 / 历史分析 / 添加案例。
  *
- * 「合约行情」摆在最前面（用户 2026-10-03：在实时分析**左侧**加一格）——
- * 参考币安合约行情页：一眼扫全市场，点一行就切币。
+ * ⚠️ 2026-10-04 之后「合约行情」**只属于桌面端** —— 用户把合约行情提成了
+ * 底栏单独一页（`/contracts`），手机端这一页就只剩「K 线 / 实时分析 / 历史分析」；
+ * 桌面端宽屏放得下，保持「左行情 + 右 K 线」不变（用户：「pc 端开单分析保持不变」）。
  */
 export const LEFT_TABS = [
   {value: 'market' as const, label: '合约行情'},
@@ -140,11 +141,17 @@ export type LeftTab = (typeof LEFT_TABS)[number]['value'] | 'chart'
 export const MOBILE_MAX = 900
 
 /**
- * 一级 tab 默认选哪一格 —— **宽屏窄屏都是「合约行情」**（用户 2026-10-03：
- * 移动端和 pc 都默认显示合约行情）。一进来先扫全市场，点一行就切币去看图。
+ * 一级 tab 默认选哪一格 —— **按屏幕宽度定**（用户 2026-10-04）：
+ * 桌面端停「合约行情」（左行情右 K 线，一进来先扫全市场）；
+ * 手机端那一格已经搬去 `/contracts` 了，就停「K 线」。
+ *
  * 模块只初始化一次 —— 之后一律按用户自己选的记住。
  */
-export const leftTab = ref<LeftTab>('market')
+export const leftTab = ref<LeftTab>(
+  typeof window !== 'undefined' && window.innerWidth <= MOBILE_MAX
+    ? 'chart'
+    : 'market'
+)
 
 /**
  * 「K 线」这一格 —— **只在手机端**存在。
