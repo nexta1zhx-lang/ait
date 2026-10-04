@@ -75,8 +75,30 @@ exchange_snapshots 里的一行（举例）
 2. 攒下来的序列就是**资产曲线**（曲线后做，但数据得从现在开始攒）
 3. 排查问题时能回放「3 小时前账上是什么样」
 
-**量和保留**：一套 key 每天 288 条（5 分钟一条），每条约 1.5 KB（大头是 `positions` jsonb）
-⇒ **约 13 MB / 30 天 / 套**。快照保留 30 天（滚动删）；**成交永久**（账本不能丢）。
+**量和保留：分级保留（降采样），而不是一刀切 30 天**
+
+⚠️ 一刀切“保留 30 天”的话，**30 天前的曲线就没了**；而币安的日快照
+（`accountSnapshot`）也只回溯 30 天 ⇒ 补也补不到更早。
+要“从注册到结束”都有曲线，就得**按粒度分级留**：
+
+| 粒度 | 保留多久 | 一套 key 的条数 | 用途 |
+|---|---|---|---|
+| **5 分钟**（原始） | **7 天** | 288 × 7 ≈ 2000 | 看最近几小时/几天的细节 |
+| **1 小时**（聚合） | **90 天** | 24 × 90 ≈ 2200 | 看最近一个月 |
+| **1 天**（聚合） | **永久** | **365 / 年** | “从注册到结束”的长期曲线 |
+
+⇒ 稳态总量 ≈ **4200 条 ≈ 6.5 MB + 每年 0.5 MB / 套** ——
+**比“5 分钟留 30 天”（约 13 MB）还省，同时曲线能永久看**。
+
+归档怎么做：`exchange_snapshots` 加一列 `kind`（`5m | 1h | 1d`），
+每天跑一次归档任务：前一天的点聚合成 `1h`；再聚合成 `1d`；
+删掉 7 天前的 `5m`、90 天前的 `1h`（**`1d` 永不删**）。
+界面上按看的范围自动选粒度（`1 天 → 5m`、`30 天 → 1h`、`1 年 → 1d`）。
+
+⚠️ 聚合出来的点要标清楚是**聚合值**还是**实测值**（`source` 里区分），
+图上不要让用户把“小时均值”当成“那一个瞬间的余额”。
+
+**成交永久**（账本不能丢，而且交易所只帮存 3 个月）。
 
 ⚠️ 和「成交」的区别：快照是**状态**（可以丢采样点、可以覆盖），
 成交是**事件账本**（一行都不能丢，而且交易所只帮存 3 个月）。
@@ -115,6 +137,8 @@ CREATE TABLE IF NOT EXISTS exchange_snapshots (
   id          BIGSERIAL   PRIMARY KEY,
   user_id     BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   key_id      BIGINT      NOT NULL REFERENCES user_exchange_keys (id) ON DELETE CASCADE,
+  -- 粒度：5m = 原始采样；1h / 1d = 归档聚合出来的
+  kind        TEXT        NOT NULL DEFAULT '5m',
   taken_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- 合约
   wallet      NUMERIC(24,8) NOT NULL DEFAULT 0,   -- totalWalletBalance
@@ -133,7 +157,10 @@ CREATE TABLE IF NOT EXISTS exchange_snapshots (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS exchange_snapshots_key_idx
-  ON exchange_snapshots (user_id, key_id, taken_at DESC);
+  ON exchange_snapshots (user_id, key_id, kind, taken_at DESC);
+-- 归档去重：同一档位、同一个时间桶只允许一条（重跑归档不会写重复）
+CREATE UNIQUE INDEX IF NOT EXISTS exchange_snapshots_bucket_idx
+  ON exchange_snapshots (key_id, kind, taken_at);
 
 -- ── 成交账本（永久保留；不存就永久丢，见上面 ⚠️）
 CREATE TABLE IF NOT EXISTS exchange_fills (
@@ -262,7 +289,7 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 | WS 常驻连接 | **1 条**（每套 key 一条） |
 | REST | C2C 轮询 1/5min + 对账 2/15min + listenKey 续期 1/30min ≈ **0.37 请求/分钟/套** |
 | 权重（保守估） | ≈ **3.3 权重/分钟/套**（fapi 预算 2400/分钟/IP） |
-| 磁盘 | **≈ 13 MB / 30 天 / 套**（快照为主；成交那点量可忽略） |
+| 磁盘 | **≈ 6.5 MB / 套**（分级保留的稳态）+ **0.5 MB / 年**（`1d` 点永久） |
 
 **各自的天花板**：
 
@@ -270,13 +297,13 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 |---|---|
 | WS 连接（Node 侧） | 几百条无压力（1 条约 50KB 内存）⚠️ 但**启动时连握手要错开**（币安限 300 次/5 分钟/IP）⇒ 限速 **1 条/秒** |
 | REST 额度 | 2400 / 3.3 ≈ **700 套**（保守算 500） |
-| **磁盘** ← 真正的瓶颈 | 100 套 = 1.3 GB、300 套 = 4 GB、1000 套 = 13 GB（机器盘通常 20~40 GB） |
+| **磁盘** ← 真正的瓶颈 | 100 套 ≈ 0.7 GB、300 套 ≈ 2 GB、1000 套 ≈ 6.5 GB（另加 0.5 GB/年）—— 比“一刀切 30 天”宽一倍 |
 
 ⇒ **单实例（现在这套部署）舒适区 ≈ 100~300 套 key**，
 ≈ **50~150 个用户**（假设每人 2 套）。到 300 套时磁盘 4 GB、REST 只用掉 1/3 额度，都还宽松。
 
-**超过 300 套再优化**：① 快照降采样（7 天内 5 分钟、更早按小时）② C2C 轮询 5 → 15 分钟
-③ 分片（一条流固定挂某个副本）。
+**超过 300 套再优化**：① 把 1h 档的保留期从 90 天缩到 30 天 ② C2C 轮询 5 → 15 分钟
+③ 分片（一条流固定挂某个副本）。（降采样已经内置了，不是以后的选项）
 
 ⚠️ 以上全部基于**单实例**：多副本会重复订阅同一个 key（同一账户多条连接会互相干扰）
 ⇒ 到时候要么加分布式锁、要么把这条流指定给主副本。
@@ -300,12 +327,11 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 
 ## 11. 待定（等你拍板）
 
-1. ~~资产曲线这轮做吗~~ → **用户定：后面做**（快照从现在开始攒就行）
-2. **快照保留 30 天**行不行？（一套 13 MB，300 套 4 GB）
+1. ~~资产曲线这轮做吗~~ → **用户定：后面做**（分级保留的采样从现在就开始攒，否则以后曲线前面是空的）
+2. ~~快照保留 30 天~~ → **改成分级保留**：5m 留 7 天 / 1h 留 90 天 / **1d 永久**
+   （稳态 6.5 MB + 0.5 MB/年/套，比一刀切 30 天还省，而且曲线能永久看）
 3. 界面 tab 文案：现在叫「**交易所账户**」，内容已经是资产 + 仓位 ⇒ 改叫「**交易所资产**」？
-4. ⚠️ **“从注册到结束”与“删了就删了”冲突**：现在定的是 `CASCADE`，
-   删 key = **曲线一起消失**（变成“从注册到删号”）。要想删号后还能看历史，
-   得改成 `SET NULL` + 存一份 `key_label` 文本（仓库先例：`llm_usage.llm_key_id`）。
-   建议：快照（曲线）**跟删**；若成交账本要长期留，就单独给它 `SET NULL`。
+4. ~~删号后曲线留不留~~ → **用户定：删 key 就一起删**（`CASCADE` 不变）——
+   “结束”指的就是**删 key**。所以“从注册到结束”= 从绑定到删 key，全程都有曲线（靠 1d 点）。
 5. 补数据用到的 `/sapi/v1/accountSnapshot?type=FUTURES` 是 **00:00 UTC（北京 08:00）**
    的日点，粒度很粗 —— 只用来“把长期断档的天点补上”，不当主数据。
