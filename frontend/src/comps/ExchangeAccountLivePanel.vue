@@ -45,8 +45,11 @@ const reason = ref('')
 const err = ref('')
 
 const refreshing = ref(false)
-/** SSE 连上过（界面角上点一下「实时」） */
-const live = ref(false)
+
+/** 顶部那个下拉用的账户列表（只取显名） */
+const accountOptions = computed(() =>
+  keys.value.map(k => ({id: k.id, name: k.name}))
+)
 
 const openOrders = ref<ExchangeOpenOrder[]>([])
 const ordersErr = ref('')
@@ -144,11 +147,9 @@ function startStream(id: number | undefined): void {
   stopStream?.()
   stopStream = exchangeStream(id, {
     snapshot: r => {
-      live.value = true
       applySnapshot(r)
     },
     fill: t => {
-      live.value = true
       // 同一笔可能「实时事件」和「REST 回补」都给到 → 按 tradeId 去重
       if (fills.value.some(f => f.id === t.id)) return
       fills.value = [t, ...fills.value].slice(0, FILLS_MAX)
@@ -161,7 +162,6 @@ function startStream(id: number | undefined): void {
        */
       reason.value = r
       data.value = null
-      live.value = false
       stopStream?.()
       stopStream = null
     },
@@ -181,7 +181,6 @@ watch(picked, id => {
   openOrders.value = []
   ordersErr.value = ''
   fills.value = []
-  live.value = false
   void loadSnapshot(id)
   void loadFills(id)
   void loadOrders(id)
@@ -208,27 +207,6 @@ onUnmounted(() => {
 
 <template>
   <div class="live">
-    <div v-if="keys.length > 1" class="bar">
-      <select v-model.number="picked" aria-label="选择账户">
-        <option v-for="k in keys" :key="k.id" :value="k.id">
-          {{ k.name }}（{{ k.marketType === 'swap' ? '合约' : '现货' }}）
-        </option>
-      </select>
-    </div>
-
-    <div class="stat">
-      <span v-if="refreshing" class="dim tiny">
-        <span class="spin" />刷新中…
-      </span>
-      <span v-else-if="live" class="dot" title="正在接收实时推送">
-        实时已连
-      </span>
-      <span class="spacer" />
-      <button class="ghost tiny" :disabled="refreshing" @click="doRefresh()">
-        刷新
-      </button>
-    </div>
-
     <p v-if="err" class="err">{{ err }}</p>
 
     <section v-if="!keys.length && !loading" class="panel empty">
@@ -237,13 +215,20 @@ onUnmounted(() => {
     <section v-else-if="reason" class="panel empty">
       {{ reason }}
     </section>
+    <!--
+      ⚠️ 账户切换现在就在 board 的「净资产」那一行（绑定的 key 名字），
+      所以这里不再另开一行；刷新也是用 board 里那个 ⟳。
+    -->
     <ExchangeAccountBoard
       v-else
+      v-model="picked"
+      :accounts="accountOptions"
       :data="data"
       :open-orders="openOrders"
       :trades="fills"
       :income="income"
       :loading-orders="loadingOrders"
+      :refreshing="refreshing"
       @refresh="doRefresh()"
     />
 
@@ -270,24 +255,6 @@ onUnmounted(() => {
   width: 100%;
   padding: 7px 9px;
   font-size: 13px;
-}
-.stat {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.stat .dot {
-  font-size: 11.5px;
-  color: var(--ok, #5eba89);
-}
-.stat .dot::before {
-  content: '';
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 5px;
-  border-radius: 50%;
-  background: var(--ok, #5eba89);
 }
 .err {
   margin: 0;

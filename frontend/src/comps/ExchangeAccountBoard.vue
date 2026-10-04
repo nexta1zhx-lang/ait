@@ -38,11 +38,27 @@ const props = defineProps<{
   income?: ExchangeIncomeRow[]
   /** 挂单正在拉（慢接口，单独转圈） */
   loadingOrders?: boolean
+  /** 正在刷新快照（⟳ 转圈 + 禁点） */
+  refreshing?: boolean
+  /**
+   * 绑定的账户（**多套 key 时顶部变下拉切换**）。
+   * ⚠️ 纯展示：切换只往上 emit，重新取数由外层负责。
+   */
+  accounts?: {id: number; name: string}[]
+  /** 当前选中的账户 id（配合 `update:modelValue`） */
+  modelValue?: number | null
 }>()
 
 const emit = defineEmits<{
   (e: 'refresh'): void
+  (e: 'update:modelValue', id: number): void
 }>()
+
+/** 下拉选中的值从 DOM 出来是字符串，这里转回数字再往上抛 */
+function onPick(v: string): void {
+  const id = Number(v)
+  if (Number.isFinite(id)) emit('update:modelValue', id)
+}
 
 const acct = computed(() => props.data?.account ?? null)
 const fx = computed(() => props.data?.futures ?? null)
@@ -208,13 +224,29 @@ function posText(side: string): string {
       <section class="panel hero">
         <div class="hero-h">
           <span class="hero-k">净资产</span>
-          <span class="tag">合约 + C2C</span>
+          <!-- 绑定的 key：多套就在这儿切；只有一套时当一个普通标签显示名字 -->
+          <select
+            v-if="(accounts?.length ?? 0) > 1"
+            class="acct"
+            :value="modelValue ?? ''"
+            aria-label="切换账户"
+            @change="onPick(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="a in accounts" :key="a.id" :value="a.id">
+              {{ a.name }}
+            </option>
+          </select>
+          <span v-else class="tag">{{
+            accounts?.[0]?.name ?? '合约 + C2C'
+          }}</span>
           <span class="spacer" />
           <span class="age" :class="{stale}" :title="bjTime(data.takenAt)">
             {{ ageText }}
           </span>
           <button
             class="ghost tiny rf"
+            :class="{busy: refreshing}"
+            :disabled="refreshing"
             title="立即刷新"
             @click="emit('refresh')"
           >
@@ -814,5 +846,17 @@ function posText(side: string): string {
 .num {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
+}
+/* 账户下拉：挤在「净资产」旁边一行里，所以别太长、字号跟小标签一致 */
+.acct {
+  max-width: 46%;
+  padding: 2px 6px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+/* 刷新中：⟳ 转圈（keyframes spin 是全局的，见 style.css） */
+.rf.busy {
+  animation: spin 0.8s linear infinite;
+  cursor: default;
 }
 </style>
