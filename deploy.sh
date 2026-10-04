@@ -90,19 +90,8 @@ fi
 [[ -f .env ]] || die '.env 不是普通文件。删掉重建：rm -rf .env && cp .env.example .env'
 chmod 600 .env
 
-if ! grep -qE '^LLM_API_KEY=.+' .env; then
-  printf '\n请粘贴 DeepSeek API Key（输入不回显，粘贴后按回车）：'
-  read -rs KEY
-  echo
-  [[ -n "$KEY" ]] || die 'API Key 不能为空'
-  KEY="$KEY" awk '/^LLM_API_KEY=/{print "LLM_API_KEY=" ENVIRON["KEY"]; next} {print}' .env > .env.new
-  mv .env.new .env
-  chmod 600 .env
-  ok 'API Key 已写入 .env'
-  unset KEY
-else
-  ok '.env 里已有 LLM_API_KEY'
-fi
+# 大模型配置 2026-10-04 起不放 .env：Key / 模型 / 接口地址都在网页
+# 「我的 → 模型配置」里按用户存数据库；管理员账号会自动接手旧 .env 里的那份。
 
 if grep -q '^PGPASSWORD=ca_local_dev' .env; then
   if command -v openssl >/dev/null 2>&1; then

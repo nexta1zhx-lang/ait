@@ -9,6 +9,7 @@
  *   npm run cost -- --clear --yes 清空记录
  */
 import {UsageBucket, UsageRow, clearUsage, usageSummary} from '../db/usage'
+import {defaultUserId} from '../db/users'
 import {dbHelpMessage, ensureSchema} from '../db/client'
 import {
   formatCny,
@@ -136,7 +137,11 @@ async function main(): Promise<void> {
     return
   }
 
-  const s = await usageSummary({days: opts.days, recent: opts.recent})
+  const s = await usageSummary({
+    userId: await defaultUserId().catch(() => null),
+    days: opts.days,
+    recent: opts.recent
+  })
 
   if (opts.json) {
     process.stdout.write(JSON.stringify(s, null, 2) + '\n')
@@ -180,9 +185,7 @@ async function main(): Promise<void> {
     L.push('')
   }
   if (t.calls > 0 && perCall < 0.05) {
-    L.push(
-      `参考：按目前节奏，100 次分析约 ${formatCny(perCall * 100)}。`
-    )
+    L.push(`参考：按目前节奏，100 次分析约 ${formatCny(perCall * 100)}。`)
     L.push('')
   }
 

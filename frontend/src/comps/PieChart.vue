@@ -1,11 +1,22 @@
 <script setup lang="ts">
 /**
- * 手绘 SVG 环形饼图 —— 不引图表库。
+ * 环形饼图（echarts）。
  *
- * 为什么不用 CSS `conic-gradient`：扇区要**可点**、要有 tooltip、要跟图例联动高亮，
- * SVG path 直接挂事件就行，也不用为了一个饼图装个依赖。
+ * 原来是自己手绘的 SVG（用户 2026-10-04：「统计图改为 echarts，触碰暗色主题」）。
+ * **对外接口一个字没改**（props / emit / `PieItem`），所以调用方不用动。
+ *
+ * 图例仍然是自己画的 HTML（不用 echarts 的 legend）：echarts 的 legend 点击
+ * 默认是「把这扇区隐藏掉」，而这里要的是「按这个条件去筛」，行为对不上；
+ * 自己画还能顺手显示数值和百分比。
  */
-import {computed} from 'vue'
+import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
+import {
+  CHART_COLORS,
+  C,
+  darkTooltip,
+  echarts,
+  type ECharts
+} from '../chart-theme'
 
 export interface PieItem {
   /** 点击时回传的标识（标签名 / 结论 / 币种） */
@@ -31,255 +42,214 @@ const props = withDefaults(
 
 const emit = defineEmits<{(e: 'pick', key: string): void}>()
 
-/**
- * 配色：够 9 块用。
- *
- * 2026-10-03 换主题时一起来的：原来头两块是 `#58a6ff` / `#79c0ff`（GitHub 亮蓝），
- * 跟新的暖沙主色格格不入 —— 换成**暖色打头 + 整体降饱和**的一组，
- * 蓝色只留一个雾蓝（`#8fb8d6`）当分类色，不再是刺眼的高饱和亮蓝。
- */
-const COLORS = [
-  '#d3b583',
-  '#39c5bb',
-  '#e0a33e',
-  '#e08aa8',
-  '#a98fd6',
-  '#7ec46b',
-  '#e08a5a',
-  '#8fb8d6',
-  '#e07a72'
-]
+/** 合并出来的那一块（不可点） */
+const OTHER = '__other__'
 
-const R = 52
-const INNER = 31
-const C = 60
-
-function pt(rad: number, angle: number): [number, number] {
-  return [C + rad * Math.cos(angle), C + rad * Math.sin(angle)]
-}
-
-/** 环形扇区路径；整圆必须拆成两段，否则 A 命令会退化画不出来 */
-function donut(start: number, end: number): string {
-  const span = end - start
-  if (span >= Math.PI * 2 - 1e-6) {
-    return [
-      donut(start, start + Math.PI),
-      donut(start + Math.PI, start + Math.PI * 2)
-    ].join(' ')
-  }
-  const [x0, y0] = pt(R, start)
-  const [x1, y1] = pt(R, end)
-  const [x2, y2] = pt(INNER, end)
-  const [x3, y3] = pt(INNER, start)
-  const large = span > Math.PI ? 1 : 0
-  return `M ${x0} ${y0} A ${R} ${R} 0 ${large} 1 ${x1} ${y1} L ${x2} ${y2} A ${INNER} ${INNER} 0 ${large} 0 ${x3} ${y3} Z`
-}
-
-const total = computed(() => props.items.reduce((s, i) => s + i.value, 0))
+const el = ref<HTMLElement | null>(null)
+const chart = shallowRef<ECharts | null>(null)
+let ro: ResizeObserver | null = null
 
 const slices = computed(() => {
   const sorted = [...props.items].sort((a, b) => b.value - a.value)
   const head = sorted.slice(0, props.top)
   const tail = sorted.slice(props.top)
-  const list = tail.length
-    ? [
-        ...head,
-        {
-          key: '__other__',
-          label: `其他 ${tail.length} 项`,
-          value: tail.reduce((s, i) => s + i.value, 0)
-        }
-      ]
-    : head
-
-  const sum = list.reduce((s, i) => s + i.value, 0) || 1
-  let angle = -Math.PI / 2
-  return list.map((it, i) => {
-    const span = (it.value / sum) * Math.PI * 2
-    const out = {
-      ...it,
-      color: COLORS[i % COLORS.length],
-      pct: (it.value / sum) * 100,
-      d: donut(angle, angle + span)
+  if (!tail.length) return head
+  return [
+    ...head,
+    {
+      key: OTHER,
+      label: '其他',
+      value: tail.reduce((s, i) => s + i.value, 0),
+      note: `${tail.length} 项`
     }
-    angle += span
-    return out
-  })
+  ]
 })
 
-/** 「其他」是聚合出来的，点了没法筛 */
-const pickable = (key: string) => key !== '__other__'
+const total = computed(() => slices.value.reduce((s, i) => s + i.value, 0))
+
+const pickable = (key: string): boolean => key !== OTHER
+
+function pctOf(v: number): string {
+  return total.value > 0 ? ((v / total.value) * 100).toFixed(1) + '%' : '0%'
+}
+
+const colorOf = (i: number): string => CHART_COLORS[i % CHART_COLORS.length]
+
+/**
+ * ⚠️ 容器刚「从隐藏变可见」时，echarts 可能已经拿 100×100 兜底过了，
+ * 而且它**不会自己纠正**（实测容器明明 328px，canvas 死卡在 100px）。
+ * 所以每次渲染前拿容器的真实尺寸对一遍，不一致就显式 resize。
+ */
+function fitSize(): void {
+  const c = chart.value
+  const box = el.value
+  if (!c || !box) return
+  const w = box.clientWidth
+  const h = box.clientHeight
+  if (w > 0 && h > 0 && (c.getWidth() !== w || c.getHeight() !== h)) {
+    c.resize({width: w, height: h})
+  }
+}
+
+function render(): void {
+  if (!chart.value) return
+  fitSize()
+  const dimmed = Boolean(props.activeKey)
+  chart.value.setOption(
+    {
+      animationDuration: 240,
+      tooltip: {
+        ...darkTooltip,
+        trigger: 'item',
+        formatter: (p: {data?: {value?: number; note?: string}}) => {
+          const v = p.data?.value ?? 0
+          const extra = p.data?.note ? `<br/>${p.data.note}` : ''
+          return `${props.unit} ${v}（${pctOf(v)}）${extra}`
+        }
+      },
+      series: [
+        {
+          type: 'pie',
+          radius: ['52%', '78%'],
+          center: ['50%', '50%'],
+          avoidLabelOverlap: true,
+          itemStyle: {borderColor: C.panel, borderWidth: 2},
+          label: {show: false},
+          labelLine: {show: false},
+          emphasis: {scale: true, scaleSize: 4, itemStyle: {shadowBlur: 0}},
+          data: slices.value.map((s, i) => ({
+            name: s.label,
+            value: s.value,
+            note: s.note,
+            itemStyle: {
+              color: colorOf(i),
+              // 选了某一项 → 其余变暗（跟原来手绘那套一致）
+              opacity: !dimmed || props.activeKey === s.key ? 1 : 0.28
+            }
+          }))
+        }
+      ]
+    },
+    true
+  )
+}
+
+/** 点扇区 = 按这一项筛（「其他」不响应） */
+function onClick(p: {name?: string}): void {
+  const s = slices.value.find(x => x.label === p.name)
+  if (s && pickable(s.key)) emit('pick', s.key)
+}
+
+onMounted(() => {
+  if (!el.value) return
+  chart.value = echarts.init(el.value)
+  chart.value.on('click', onClick)
+  render()
+  ro = new ResizeObserver(() => fitSize())
+  ro.observe(el.value)
+})
+
+watch(
+  () => [props.items, props.activeKey, props.top],
+  () => render(),
+  {deep: true}
+)
+
+onBeforeUnmount(() => {
+  ro?.disconnect()
+  chart.value?.dispose()
+})
 </script>
 
 <template>
   <div class="pie">
-    <div v-if="!total" class="pie-empty">{{ emptyText }}</div>
-
-    <template v-else>
-      <svg class="pie-svg" viewBox="0 0 120 120" role="img">
-        <g v-for="s in slices" :key="s.key">
-          <path
-            :d="s.d"
-            :fill="s.color"
-            :class="{
-              on: !!activeKey && activeKey === s.key,
-              off: !!activeKey && activeKey !== s.key
-            }"
-            :style="pickable(s.key) ? null : {cursor: 'default'}"
-            @click="pickable(s.key) && emit('pick', s.key)"
-          >
-            <title>
-              {{ s.label }} · {{ s.value }} {{ unit }}（{{
-                s.pct.toFixed(1)
-              }}%）
-            </title>
-          </path>
-        </g>
-        <text class="pie-total" x="60" y="58">{{ total }}</text>
-        <text class="pie-total-label" x="60" y="70">合计</text>
-      </svg>
-
-      <ul class="pie-legend">
-        <li
-          v-for="s in slices"
-          :key="s.key"
-          :class="{
-            on: !!activeKey && activeKey === s.key,
-            dim: !!activeKey && activeKey !== s.key,
-            flat: !pickable(s.key)
-          }"
-          :title="
-            pickable(s.key) ? '点一下只看这一类' : '聚合出来的，不能直接筛'
-          "
-          @click="pickable(s.key) && emit('pick', s.key)"
-        >
-          <i :style="{background: s.color}" />
-          <span class="name">{{ s.label }}</span>
-          <span class="num">
-            {{ s.value }}<em>{{ s.pct.toFixed(0) }}%</em>
-          </span>
-        </li>
-      </ul>
-    </template>
+    <!--
+      ⚠️ 图表容器必须**始终可见**（不能用 v-show / v-if 藏）。
+      藏起来时它宽度是 0，echarts 会拿 100×100 兜底，**而且之后不会再自己纠正**
+      —— 实测容器 328px、canvas 死卡在 100px。空数据的提示改成浮在上面一层。
+    -->
+    <div ref="el" class="pie-canvas" />
+    <p v-if="!slices.length" class="pie-none">{{ emptyText }}</p>
+    <ul v-if="slices.length" class="pie-legend">
+      <li
+        v-for="(s, i) in slices"
+        :key="s.key"
+        :class="{on: s.key === activeKey, dim: !pickable(s.key)}"
+        :title="s.note"
+        @click="pickable(s.key) && emit('pick', s.key)"
+      >
+        <i :style="{background: colorOf(i)}" />
+        <span class="lb">{{ s.label }}</span>
+        <span class="vv">{{ s.value }}</span>
+        <span class="pc">{{ pctOf(s.value) }}</span>
+      </li>
+    </ul>
   </div>
 </template>
 
 <style scoped>
 .pie {
+  position: relative;
+  min-width: 0;
+}
+.pie-none {
+  position: absolute;
+  inset: 0;
+  margin: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 132px;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
 }
-
-.pie-empty {
-  flex: 1;
-  text-align: center;
-  color: var(--dim, #8b949e);
-  font-size: 12px;
+.pie-canvas {
+  width: 100%;
+  height: 180px;
 }
-
-.pie-svg {
-  width: 132px;
-  height: 132px;
-  flex: 0 0 auto;
-  overflow: visible;
-}
-
-.pie-svg path {
-  cursor: pointer;
-  transition:
-    opacity 0.15s,
-    transform 0.15s;
-  transform-origin: 60px 60px;
-}
-
-.pie-svg path.on {
-  transform: scale(1.04);
-}
-.pie-svg path.off {
-  opacity: 0.32;
-}
-
-.pie-total {
-  fill: var(--fg, #e6edf3);
-  font-size: 17px;
-  font-weight: 600;
-  /* 中间那个合计数是数字，跟全站其它数字统一走等宽 */
-  font-family: var(--mono);
-  text-anchor: middle;
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
-}
-
-.pie-total-label {
-  fill: var(--dim, #8b949e);
-  font-size: 9px;
-  text-anchor: middle;
-  pointer-events: none;
-}
-
 .pie-legend {
-  list-style: none;
-  margin: 0;
+  margin: 6px 0 0;
   padding: 0;
-  flex: 1;
-  min-width: 0;
-  max-height: 148px;
-  overflow-y: auto;
+  list-style: none;
 }
-
 .pie-legend li {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 5px;
-  border-radius: 5px;
+  padding: 3px 4px;
+  border-radius: 6px;
   font-size: 12px;
   cursor: pointer;
 }
-
 .pie-legend li:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--panel-2);
 }
-
+.pie-legend li.dim {
+  cursor: default;
+  opacity: 0.75;
+}
 .pie-legend li.on {
   background: var(--blue-soft);
-  color: var(--fg, #f0f1f3);
 }
-
-.pie-legend li.dim {
-  opacity: 0.5;
-}
-
-.pie-legend li.flat {
-  cursor: default;
-}
-
 .pie-legend i {
   width: 8px;
   height: 8px;
   border-radius: 2px;
   flex: 0 0 auto;
 }
-
-.pie-legend .name {
-  flex: 1;
+.pie-legend .lb {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-.pie-legend .num {
-  color: var(--dim, #8b949e);
+.pie-legend .vv {
   font-variant-numeric: tabular-nums;
 }
-
-.pie-legend .num em {
-  font-style: normal;
-  margin-left: 5px;
-  font-size: 10px;
-  opacity: 0.75;
+.pie-legend .pc {
+  min-width: 44px;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 </style>

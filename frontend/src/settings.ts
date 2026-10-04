@@ -19,6 +19,8 @@ const OLD_KEY = 'ca-settings-v1'
 interface Stored {
   /** 行情过滤：24h 成交额低于这个数（**百万 USDT**）的合约不显示。0 = 不过滤 */
   marketMinVolM?: number
+  /** 手机端那颗「分析」闪电被拖到的位置（**视口坐标** px）。没有 = 没拖过，停在原位 */
+  runBtnPos?: {x: number; y: number}
 }
 
 function read(): Stored {
@@ -27,7 +29,14 @@ function read(): Stored {
     if (raw) {
       const v = JSON.parse(raw) as Stored & Record<string, unknown>
       // 只取认得的字段 —— 删掉的 `keepChartZoom` / `chartBars` 别跟着写回去
-      return {marketMinVolM: v.marketMinVolM}
+      // 位置要校验一下：存进去的东西可能是被手改过的，NaN 会让按钮直接飞出去
+      const p = v.runBtnPos as {x?: unknown; y?: unknown} | undefined
+      const posOk =
+        !!p && Number.isFinite(p.x as number) && Number.isFinite(p.y as number)
+      return {
+        marketMinVolM: v.marketMinVolM,
+        runBtnPos: posOk ? {x: p!.x as number, y: p!.y as number} : undefined
+      }
     }
     // 老键里已经没有认得的东西了（旧配置全部废弃）
     void localStorage.getItem(OLD_KEY)
@@ -52,13 +61,31 @@ export const marketMinVolM = ref(Math.max(0, saved.marketMinVolM ?? 0))
 /** 阈值换算成 USDT 原值（列表那边直接比） */
 export const marketMinVolUsd = computed(() => marketMinVolM.value * 1e6)
 
+/**
+ * 手机端那颗「分析」闪电被拖到的位置（**视口坐标** px）。
+ *
+ * 用户 2026-10-04：「移动端闪电图标位置可以自由移动固定 保存位置」。
+ * `null` = **没拖过** → 按钮停在它原本的位置（币种行里那个位置，看 CSS）。
+ */
+export const runBtnPos = ref<{x: number; y: number} | null>(
+  saved.runBtnPos ?? null
+)
+
+/** 存下「分析」闪电的位置（拖完松手时调一次）。传 `null` = 恢复原位 */
+export function setRunBtnPos(p: {x: number; y: number} | null): void {
+  runBtnPos.value = p
+}
+
 watch(
-  marketMinVolM,
+  [marketMinVolM, runBtnPos],
   () => {
     try {
       localStorage.setItem(
         KEY,
-        JSON.stringify({marketMinVolM: marketMinVolM.value})
+        JSON.stringify({
+          marketMinVolM: marketMinVolM.value,
+          runBtnPos: runBtnPos.value
+        })
       )
     } catch {
       // 写不了就算了，不影响用

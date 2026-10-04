@@ -19,6 +19,7 @@ import {
   type AnalyzeResult,
   type AnalyzeStep
 } from './api'
+import {prefetchCandles} from './candles'
 import {config, refreshConfig} from './store'
 import {failRunning, mergeStep} from './steps'
 
@@ -87,6 +88,24 @@ const TF_MS: Record<string, number> = {
  * 2026-10-03 用户要求「图表默认显示 200 根」：从 300 降到 200（1h ≈ 8.3 天）。
  */
 export const CHART_BARS = 200
+
+/**
+ * 一次到底拉多少根 —— 图上铺 200 根，再给 50 根余量（缩放时不用立刻又去拉）。
+ *
+ * ⚠️ `candles.ts` 的预取**必须用同一个数**：服务端缓存 key 里带 `limit`，
+ *    差一根就落到另一个条目上，「提前取好」这件事直接失效。
+ */
+export const KLINE_BARS = CHART_BARS + 50
+
+/**
+ * 点某个币时先发一次请求（**只在真点击时**）。
+ *
+ * ⚠️ 2026-10-04 起**没有「空闲时批量预热」那套了**（见 `candles.ts` 顶部说明）——
+ * 后端已经在启动时把「成交额前 60 ∪ 异动」预热带好，前端再暖只是重复传 1.5MB。
+ */
+export function prefetchSymbol(base: string): void {
+  prefetchCandles(base, chartTf.value, KLINE_BARS)
+}
 
 /**
  * 主周期要看多少天 —— **不给用户填，就是图上那段**。

@@ -36,7 +36,15 @@ bitcoooin.cn {
 	# 访问日志走 stdout，用 docker compose logs caddy 看
 	log {
 		output stdout
-		format console
+		# ⚠️ 登录 token 会出现在 SSE 的 URL 里（EventSource 发不了请求头，只能走
+		# `?token=`），原样记 = 把 token 明文写进日志。用 filter 编码器在写日志时
+		# 把这个 query 参数抹掉。（`Authorization` 头 Caddy 本来就默认记成 REDACTED）
+		format filter {
+			wrap console
+			request>uri query {
+				replace token REDACTED
+			}
+		}
 	}
 }
 

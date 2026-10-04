@@ -1,15 +1,18 @@
 <script setup lang="ts">
 /**
- * 迷你 K 线图（原生 canvas 手绘，不依赖 lightweight-charts）。
+ * 迷你 K 线（echarts）—— 画知识库卡片里「收录时存下的那段行情」。
  *
- * 用途：知识库卡片里画「这条案例收录时存下的那段行情」。
- * 控件里可能同时挂着十几张，所以刻意做得很轻；
- * **不标拉伸区间**（用户不要），只看整段长什么样。
+ * 原来是手绘 canvas（用户 2026-10-04：「统计图改为 echarts」）。
+ *
+ * ⚠️ 一屏可能同时挂十几张，所以刻意压开销：
+ *    · `animation: false`（不要入场动画）
+ *    · `silent: true`（卡片里的小图不需要任何悬停/点击）
+ *    · 坐标轴全部 `show: false`（原来就是纯图形，没有刻度）
+ *    · 根数太多先按 OHLC 降采样，否则一根不到一个像素会糊成一团
  */
-import {onBeforeUnmount, onMounted, ref, watch} from 'vue'
+import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
 import type {Candle} from '../api'
-// 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
-import {monoStack, whenFontsReady} from '../fonts'
+import {echarts, type ECharts} from '../chart-theme'
 
 const props = defineProps<{
   candles: Candle[]
@@ -18,195 +21,164 @@ const props = defineProps<{
   showVolume?: boolean
 }>()
 
-const host = ref<HTMLCanvasElement | null>(null)
-let ro: ResizeObserver | null = null
-let raf = 0
-
 // 跟 `KlineChart.vue`、`style.css` 的 `--ok` / `--bad` 三处必须一致
 const UP = '#5eba89'
 const DOWN = '#e35561'
-const GRID = 'rgba(139, 148, 158, 0.22)'
-const TEXT = 'rgba(139, 148, 158, 0.95)'
+
+/** 图上最多画多少根（超了按 OHLC 合并） */
+const MAX_BARS = 160
+
+const el = ref<HTMLElement | null>(null)
+const chart = shallowRef<ECharts | null>(null)
+let ro: ResizeObserver | null = null
+
+const boxH = computed(() => props.height ?? 118)
 
 /** 根数太多时按 OHLC 合并，否则一根不到一个像素会糊成一团 */
-function downsample(
-  candles: Candle[],
-  max: number
-): {data: Candle[]; size: number} {
-  if (candles.length <= max) return {data: candles, size: 1}
-  const size = Math.ceil(candles.length / max)
+function downsample(cs: Candle[], step: number): Candle[] {
+  if (step <= 1) return cs
   const out: Candle[] = []
-  for (let i = 0; i < candles.length; i += size) {
-    const seg = candles.slice(i, i + size)
+  for (let i = 0; i < cs.length; i += step) {
+    const g = cs.slice(i, i + step)
+    if (!g.length) continue
     out.push({
-      timestamp: seg[0].timestamp,
-      open: seg[0].open,
-      high: Math.max(...seg.map(c => c.high)),
-      low: Math.min(...seg.map(c => c.low)),
-      close: seg[seg.length - 1].close,
-      volume: seg.reduce((s, c) => s + c.volume, 0)
+      time: g[0].time,
+      open: g[0].open,
+      high: Math.max(...g.map(c => c.high)),
+      low: Math.min(...g.map(c => c.low)),
+      close: g[g.length - 1].close,
+      volume: g.reduce((s, c) => s + c.volume, 0)
     })
   }
-  return {data: out, size}
+  return out
 }
 
-function paint() {
-  const el = host.value
+/**
+ * ⚠️ 容器刚「从隐藏变可见」时，echarts 可能已经拿 100×100 兜底过了，
+ * 而且它**不会自己纠正** —— 每次渲染前拿真实尺寸对一遍。
+ */
+function fitSize(): void {
+  const c = chart.value
+  const box = el.value
+  if (!c || !box) return
+  const w = box.clientWidth
+  const h = box.clientHeight
+  if (w > 0 && h > 0 && (c.getWidth() !== w || c.getHeight() !== h)) {
+    c.resize({width: w, height: h})
+  }
+}
+
+function render(): void {
+  if (!chart.value) return
+  fitSize()
   const raw = props.candles
-  if (!el || !raw.length) return
+  const step = Math.max(1, Math.ceil(raw.length / MAX_BARS))
+  const cs = downsample(raw, step)
+  const xs = cs.map(c => String(c.time))
+  // echarts 的蜡烛数据顺序是 [开, 收, 低, 高]
+  const ohlc = cs.map(c => [c.open, c.close, c.low, c.high])
 
-  // 根数太多就合并（一根不到一个像素会糊成一团）
-  const {data} = downsample(raw, 180)
+  const totalH = boxH.value
+  const withVol = props.showVolume === true && cs.length > 0
+  const volH = withVol ? Math.max(12, Math.round(totalH * 0.22)) : 0
 
-  const dpr = window.devicePixelRatio || 1
-  const w = Math.max(60, el.clientWidth)
-  const h = props.height ?? 118
-  if (el.width !== Math.round(w * dpr) || el.height !== Math.round(h * dpr)) {
-    el.width = Math.round(w * dpr)
-    el.height = Math.round(h * dpr)
-  }
-  const ctx = el.getContext('2d')
-  if (!ctx) return
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, w, h)
-
-  const padT = 10
-  const padB = 14
-  const padL = 4
-  const padR = 40
-  const showVol = props.showVolume === true
-  const volH = showVol ? 16 : 0
-  const priceH = h - padT - padB - volH
-  const plotW = w - padL - padR
-
-  let lo = Infinity
-  let hi = -Infinity
-  let maxVol = 0
-  for (const c of data) {
-    if (c.low < lo) lo = c.low
-    if (c.high > hi) hi = c.high
-    if (c.volume > maxVol) maxVol = c.volume
-  }
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return
-  const pad = (hi - lo) * 0.06
-  lo -= pad
-  hi += pad
-
-  const n = data.length
-  const step = plotW / n
-  const bodyW = Math.max(1, Math.min(step * 0.68, 9))
-
-  const y = (p: number) => padT + priceH * (1 - (p - lo) / (hi - lo))
-  const x = (i: number) => padL + step * (i + 0.5)
-
-  // 参考线：最高 / 最低
-  ctx.strokeStyle = GRID
-  ctx.lineWidth = 1
-  ctx.setLineDash([3, 3])
-  for (const p of [hi - pad, lo + pad]) {
-    const yy = Math.round(y(p)) + 0.5
-    ctx.beginPath()
-    ctx.moveTo(padL, yy)
-    ctx.lineTo(padL + plotW, yy)
-    ctx.stroke()
-  }
-  ctx.setLineDash([])
-
-  // 蜡烛
-  for (let i = 0; i < n; i++) {
-    const c = data[i]
-    const up = c.close >= c.open
-    ctx.strokeStyle = up ? UP : DOWN
-    ctx.fillStyle = up ? UP : DOWN
-    const cx = x(i)
-    ctx.beginPath()
-    ctx.moveTo(cx, y(c.high))
-    ctx.lineTo(cx, y(c.low))
-    ctx.lineWidth = 1
-    ctx.stroke()
-    const yo = y(c.open)
-    const yc = y(c.close)
-    const top = Math.min(yo, yc)
-    const bh = Math.max(1, Math.abs(yc - yo))
-    ctx.fillRect(cx - bodyW / 2, top, bodyW, bh)
-  }
-
-  // 成交量
-  if (showVol && maxVol > 0) {
-    const vTop = padT + priceH + 3
-    for (let i = 0; i < n; i++) {
-      const c = data[i]
-      const bh = Math.max(1, (c.volume / maxVol) * volH)
-      ctx.fillStyle =
-        c.close >= c.open ? 'rgba(94,186,137,0.42)' : 'rgba(227,85,97,0.42)'
-      ctx.fillRect(x(i) - bodyW / 2, vTop + volH - bh, bodyW, bh)
-    }
-  }
-
-  // 右侧：最高 / 最低
-  ctx.fillStyle = TEXT
-  // ⚠️ 原来写死的 `ui-monospace, …, Menlo, monospace` 没跟着 `--mono` 走
-  ctx.font = '10px ' + monoStack()
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'middle'
-  const fmtPrice = (p: number) =>
-    p >= 1000 ? p.toFixed(1) : p >= 1 ? p.toFixed(3) : p.toFixed(6)
-  ctx.fillText(fmtPrice(hi - pad), padL + plotW + 5, y(hi - pad))
-  ctx.fillText(fmtPrice(lo + pad), padL + plotW + 5, y(lo + pad))
-}
-
-function schedule() {
-  cancelAnimationFrame(raf)
-  raf = requestAnimationFrame(paint)
+  chart.value.setOption(
+    {
+      animation: false,
+      silent: true,
+      grid: withVol
+        ? [
+            {left: 0, right: 0, top: 0, height: totalH - volH - 4},
+            {left: 0, right: 0, top: totalH - volH, height: volH}
+          ]
+        : [{left: 0, right: 0, top: 0, bottom: 0}],
+      xAxis: withVol
+        ? [
+            {type: 'category', data: xs, show: false, boundaryGap: true},
+            {
+              type: 'category',
+              data: xs,
+              gridIndex: 1,
+              show: false,
+              boundaryGap: true
+            }
+          ]
+        : [{type: 'category', data: xs, show: false, boundaryGap: true}],
+      yAxis: withVol
+        ? [
+            {type: 'value', scale: true, show: false},
+            {type: 'value', gridIndex: 1, show: false}
+          ]
+        : [{type: 'value', scale: true, show: false}],
+      series: [
+        {
+          type: 'candlestick',
+          data: ohlc,
+          barMaxWidth: 6,
+          itemStyle: {
+            color: UP,
+            color0: DOWN,
+            borderColor: UP,
+            borderColor0: DOWN
+          }
+        },
+        ...(withVol
+          ? [
+              {
+                type: 'bar' as const,
+                xAxisIndex: 1,
+                yAxisIndex: 1,
+                data: cs.map(c => ({
+                  value: c.volume,
+                  itemStyle: {
+                    color: c.close >= c.open ? UP : DOWN,
+                    opacity: 0.45
+                  }
+                })),
+                barMaxWidth: 6
+              }
+            ]
+          : [])
+      ]
+    },
+    // notMerge：换了案例（比如弹窗里换一条）别把上一条的 series 留着
+    true
+  )
 }
 
 onMounted(() => {
-  schedule()
-  /*
-   * canvas 画好的字不会自己更新 —— 自托管字体是异步到的，
-   * 字体就绪后必须重画一帧，否则最高/最低那两个数字一直是回退字体的样子。
-   */
-  whenFontsReady(schedule)
-  if (host.value && typeof ResizeObserver !== 'undefined') {
-    ro = new ResizeObserver(schedule)
-    ro.observe(host.value)
-  }
+  if (!el.value) return
+  chart.value = echarts.init(el.value)
+  render()
+  ro = new ResizeObserver(() => {
+    fitSize()
+    // 宽度变了 → 每根能占几个像素也变了，视图要跟着重排
+    if (el.value?.clientWidth) render()
+  })
+  ro.observe(el.value)
 })
 
-watch(() => props.candles, schedule, {deep: false})
+watch(
+  () => [props.candles, props.height, props.showVolume],
+  () => render(),
+  {
+    deep: true
+  }
+)
 
 onBeforeUnmount(() => {
-  cancelAnimationFrame(raf)
   ro?.disconnect()
-  ro = null
+  chart.value?.dispose()
 })
 </script>
 
 <template>
-  <div class="mini-kline">
-    <canvas ref="host" :style="{height: (height ?? 118) + 'px'}" />
-    <div v-if="!candles.length" class="mini-empty">这条案例没存下 K 线</div>
-  </div>
+  <div ref="el" class="mini-kline" :style="{height: boxH + 'px'}" />
 </template>
 
 <style scoped>
 .mini-kline {
-  position: relative;
   width: 100%;
-}
-.mini-kline canvas {
-  display: block;
-  width: 100%;
-  border-radius: 6px;
-  background: var(--panel);
-}
-.mini-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: var(--muted);
+  min-width: 0;
 }
 </style>

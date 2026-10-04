@@ -133,6 +133,14 @@ export interface AppConfig {
   lookbackDays: number
   /** 口径参数（算公式用的数字），来自 `config/calibers.yaml` */
   calibers: Calibers
+  /**
+   * 分析 / 用量流水保留多少天（<= 0 = 不清理）。
+   *
+   * 用户 2026-10-04：「历史统计数据保存 3 个月的」→ 默认 **90**。
+   * ⚠️ 只删 `analyses` / `llm_usage` 这两张流水表，
+   *    `knowledge`（一条条攒的经验案例）和提示词**绝不碰**。
+   */
+  keepDays: number
   llm: {
     apiKey: string
     baseUrl: string

@@ -25,7 +25,8 @@ export interface ChatCallOptions {
  * 实测同一道题：思考 1350/1626 tok（83%）、7477ms；关掉后 0 tok、2024ms，
  * 而且正文反而更长（884 字 vs 585 字）。
  *
- * 所以默认关（`LLM_REASONING=none`）。要让模型自己想，改 .env 就行。
+ * 所以默认关（思考力度 = `none`）。想让模型自己想，
+ * 在「我的 → 模型配置」里把思考力度改成 minimal / high（存 `user_llm`）。
  */
 export function chatParams(o: ChatCallOptions): Record<string, unknown> {
   const p: Record<string, unknown> = {

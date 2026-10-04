@@ -2,7 +2,8 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import {createHash} from 'node:crypto'
+import {createHash, randomBytes} from 'node:crypto'
+import QRCode from 'qrcode'
 import {loadConfig, ROOT_DIR} from './config'
 import {
   CONTRACTS_MAX_AGE_MS,
@@ -17,6 +18,8 @@ import {
   ensureSchema,
   query
 } from './db/client'
+import {collectServerStatus, recentSamples, startSampling} from './system'
+import {pruneOldData} from './db/prune'
 import {
   CaseLabel,
   MoveType,
@@ -35,7 +38,65 @@ import {
   moveTagTemplate,
   renameTagTemplate
 } from './db/tags'
-import {recordUsage, usageCalls, usageHeadline, usageSummary} from './db/usage'
+import {
+  recordUsage,
+  usageByKey,
+  usageCalls,
+  usageHeadline,
+  usageSummary
+} from './db/usage'
+import {
+  ADMIN_USERNAME,
+  accountForTotp,
+  changePassword,
+  checkLogin,
+  cleanupSessions,
+  consumeRecoveryCode,
+  createUser,
+  deleteSession,
+  deleteUser,
+  disableTotp,
+  enableTotp,
+  ensureAdmin,
+  getTotpState,
+  listSessions,
+  listUsersForAdmin,
+  readTotpPending,
+  renameUser,
+  revokeOtherSessions,
+  revokeSession,
+  seedAdminLlmFromEnv,
+  setTotpLastStep,
+  setTotpPending,
+  setUserPassword,
+  startSession,
+  touchSession,
+  userByToken,
+  verifyUserPassword,
+  type SessionMeta,
+  type User
+} from './db/users'
+import {clientIp} from './util/device'
+import {
+  generateRecoveryCodes,
+  generateSecret,
+  hashRecovery,
+  otpauthUrl,
+  verifyTotp
+} from './util/totp'
+import {
+  backfillUsageKeys,
+  createLlmKey,
+  deleteLlmKey,
+  getDefaultLlmKey,
+  listLlmKeys,
+  maskKey,
+  migrateLegacyLlm,
+  resolveUserLlm,
+  saveUserLlm,
+  setDefaultLlmKey,
+  updateLlmKey
+} from './db/llm-keys'
 import {
   analysisStats,
   deleteAnalysis,
@@ -46,7 +107,6 @@ import {
 } from './db/analyses'
 import {oneLineCost, usdToCny} from './llm/pricing'
 import {fetchBalance, fetchModels, type ModelsResult} from './llm/account'
-import {writeEnvVar} from './util/envfile'
 import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
 import {bjFull, collectCase, reeditCase} from './knowledge-service'
 import {stepRecorder, type AnalyzeStep, type OnStep} from './step'
@@ -58,9 +118,11 @@ import {
   fetchMarketList,
   fetchSnapshot,
   fetchTickerInfo,
+  warmExchange,
   type MarketRow,
   type TickerInfo
 } from './data/market'
+import {STORE_MAX_LIMIT, getLatestCandles} from './data/kline-store'
 import {subscribeKline, subscribeTickers} from './data/kline-stream'
 import {buildContext} from './context/builder'
 import {judge, type JudgeMeta, type JudgeResult} from './llm/client'
@@ -92,11 +154,41 @@ const HASHED_ASSET = /-[\w-]{8,}\.(js|css|woff2)$/
 /* 基础设施                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 所有响应都带上，前端独立部署也能调 */
+/**
+ * 跨域放行名单（2026-10-04 收窄：原来是 `Access-Control-Allow-Origin: *`）。
+ *
+ * 真正需要跨域的只有**手机 App**：Capacitor 把页面放在 WebView 的本地来源下
+ * （Android → `https://localhost`、iOS → `capacitor://localhost`），
+ * 调 `https://bitcoooin.cn` 是真跨域，必须放行。
+ * 网页版是同源（前端就是这个进程托管的）本来用不到 CORS；
+ * 本机开发（`http://localhost:5173` 之类）顺手放行，别把自己卡住。
+ *
+ * 现在**按 Origin 白名单**回：命中就把那个 Origin 原样回过去，没命中就不带这个头
+ * （浏览器自己会拦）。认证走 `Authorization` 头、不是 Cookie，所以收窄后
+ * 也不会引入 CSRF 问题。
+ */
+const CORS_ORIGIN_RE =
+  /^(https?:\/\/localhost(:\d+)?|capacitor:\/\/localhost|https:\/\/bitcoooin\.cn)$/
+
+/** 这些头跟 Origin 无关，所有响应都带上 */
 const CORS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+  // 同一个 URL 对不同 Origin 回的 CORS 头不一样，必须告诉缓存分键
+  Vary: 'Origin'
+}
+
+/**
+ * 请求一进来就把 CORS 头挂到响应上。
+ * 用 `setHeader`（**不是** writeHead）—— 后面各处 `res.writeHead(...)` 会自动
+ * 合并已经设过的头，所以 `sendJson` 和那几个 SSE / 图标出口一个都不用改。
+ */
+function applyCors(req: http.IncomingMessage, res: http.ServerResponse): void {
+  for (const [k, v] of Object.entries(CORS)) res.setHeader(k, v)
+  const origin = String(req.headers.origin ?? '').slice(0, 200)
+  if (origin && CORS_ORIGIN_RE.test(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+  }
 }
 
 function sendJson(
@@ -430,6 +522,100 @@ function fail(res: http.ServerResponse, tag: string, e: unknown): void {
 /* 行情 / 图表                                                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 缓存 + **同 key 并发合并** + **过期先给旧的、后台悄悄刷** —— 给「图表初次取数」用。
+ *
+ * 为什么需要（2026-10-04 实测定位）：
+ *  · `/api/candles` 是唯一**没有缓存**的取数接口（`markets` 5s、`ticker` 15s），
+ *    每次开页面 / 切回来都冷着打一趟交易所；
+ *  · 非 1h 周期时它**一次要打两趟**（本周期 + 8 根 1h 算压力支撑），
+ *    而 fapi 会间歇性 TLS 抖动（实测约 1/6），`withRetry` 退避 200→400ms，
+ *    所以实际分布是「**大多数 ~0.2s，偶尔 2.4s**」；
+ *  · 页面一打开好几个接口同时发，同一条数据还会并发重复请求。
+ *
+ * 三段行为：
+ *  ① `age < ttlMs`                → 直接回，连交易所都不碰（重复开页面变瞬时）
+ *  ② `ttlMs ≤ age < staleMs`      → **先把旧的给出去**，同时后台刷新一份
+ *     —— 这一条是关键：只靠 ① 的话，冷却后的**第一次**照样得等币安，
+ *        而用户注意到的恰恰是第一次（实测端到端 2.6s）
+ *  ③ 再旧                           → 老老实实等一次（数据不能无限陈旧）
+ * 外加：**同一个 key 正在飞就等它**，不再另开一条到交易所的连接（减少抖动机会）。
+ *
+ * ⚠️ 缓存 key 必须带上全部影响结果的参数（币种 / 周期 / 根数 / 区间）——
+ *    不然切币种会拿到上一个币的数据。所以干脆用「请求参数的原文」当 key。
+ * ⚠️ 失败**不缓存**（把条目删掉），否则一次抖动会让这个 key 在 TTL 内一直错。
+ * ⚠️ 后台刷新**必须自己吞掉异常**，否则是一个无人处理的 rejection。
+ */
+function makeCache<T>(ttlMs: number, staleMs: number, cap: number) {
+  type Entry = {at: number; data?: T; inflight?: Promise<T>}
+  const map = new Map<string, Entry>()
+
+  function evict(): void {
+    // 超过上限就丢最旧的几条（key 空间是「币种 × 周期 × 根数」，不清理会一直涨）
+    if (map.size <= cap) return
+    const old = [...map.entries()].sort((a, b) => a[1].at - b[1].at)
+    for (const [k] of old.slice(0, map.size - cap)) map.delete(k)
+  }
+
+  /** 真的去打一趟；成功才落缓存 */
+  function fetchNow(key: string, fn: () => Promise<T>): Promise<T> {
+    const inflight = fn().then(
+      data => {
+        map.set(key, {at: Date.now(), data})
+        evict()
+        return data
+      },
+      err => {
+        /*
+         * ⚠️ 失败**不要**把整个条目删掉（那是第一版，实测反而更慢）：
+         *    删了 = 旧数据也没了，下一发只能阻塞着去问币安，又撞一次抖动
+         *    （实测 12 轮里 2 轮 651ms / 1392ms）。
+         *    正确做法：**保住旧数据**、只把 inflight 清掉 —— 下一次继续「先给旧的、
+         *    后台再刷」。数据真的老到超过 stale 窗口时，③ 那条路自然会强制刷新。
+         *    只有「压根没拿到过数据」时才删条目。
+         */
+        const cur = map.get(key)
+        if (!cur || cur.data === undefined) map.delete(key)
+        else delete cur.inflight
+        throw err
+      }
+    )
+    map.set(key, {
+      at: map.get(key)?.at ?? Date.now(),
+      data: map.get(key)?.data,
+      inflight
+    })
+    return inflight
+  }
+
+  return async function load(key: string, fn: () => Promise<T>): Promise<T> {
+    const hit = map.get(key)
+    if (hit) {
+      const age = Date.now() - hit.at
+      if (hit.data !== undefined) {
+        if (age < ttlMs) return hit.data
+        if (age < staleMs) {
+          // 后台刷一份，这份**不 await**：失败就当没发生（吞掉，别变 unhandled）
+          if (!hit.inflight) {
+            hit.inflight = fetchNow(key, fn).catch(() => {
+              // 刷失败 → 把 inflight 清掉，下次再来；旧数据继续用
+              const cur = map.get(key)
+              if (cur && cur.inflight === hit.inflight) delete cur.inflight
+              return hit.data as T
+            }) as Promise<T>
+          }
+          return hit.data
+        }
+      }
+      if (hit.inflight) return hit.inflight // 并发合并
+    }
+    return fetchNow(key, fn)
+  }
+}
+
+/** 图表 K 线：4 秒内直接回；4~30 秒之间先给旧的、后台刷 */
+const candlesCache = makeCache<Candle[]>(4_000, 30_000, 60)
+
 async function handleCandles(
   url: URL,
   res: http.ServerResponse
@@ -465,56 +651,245 @@ async function handleCandles(
   const rangeFrom = ranged ? fromReq : now - limit * step
   const rangeTo = ranged ? toReq : now
 
-  const [candles, h1] = await Promise.all([
-    ranged || limit > 1000
-      ? fetchCandlesRange({
-          exchangeId: config.exchange,
-          symbol,
-          timeframe,
-          from: rangeFrom,
-          to: rangeTo,
-          marketType: config.marketType,
-          apiBase: config.apiBase,
-          maxCandles: limit
-        })
-      : fetchCandles({
+  /*
+   * ⚠️⚠️ 缓存 key 里**不能**放「每次现算的时间」。
+   *
+   * 第一版写成 `...|${rangeFrom}|${rangeTo}`，而**不指定区间**时（正常看图就是
+   * 这样）那两个值是 `now - limit*step` 和 `now`，都用 `Date.now()` 算 ——
+   * key 每毫秒都不一样，**缓存一次都不会命中**，等于白加（实测才发现：
+   * 连打 20 次每次都是 160ms 的真实取数耗时）。
+   *
+   * 所以：不指定区间就是「最新 N 根」，跟「哪一刻问的」无关，key 里只放
+   * `latest`；只有真的带了 from/to 才把区间写进去。
+   */
+  const cacheKey = ranged
+    ? `${config.exchange}|${config.marketType}|${symbol}|${timeframe}|${limit}|${rangeFrom}|${rangeTo}`
+    : `${config.exchange}|${config.marketType}|${symbol}|${timeframe}|${limit}|latest`
+
+  /*
+   * 「最新 N 根」走**服务端常驻缓存**（`data/kline-store.ts`）：
+   * 已收盘的 K 线永不变、只有当前那根在动 —— 没必要让每个用户都把 250 根整体重取一遍
+   *（原来走 `candlesCache`，TTL 4 秒 + 528 个币 = 528 次真实上游请求 **× 用户数**）。
+   * 带 from/to 的历史区间、以及超大 limit 照旧走下面那条（很少发生）。
+   */
+  const candles =
+    !ranged && limit <= STORE_MAX_LIMIT
+      ? await getLatestCandles({
           exchangeId: config.exchange,
           symbol,
           timeframe,
           limit,
           marketType: config.marketType,
           apiBase: config.apiBase
-        }),
-    timeframe === '1h'
-      ? Promise.resolve<Candle[]>([])
-      : fetchCandles({
-          exchangeId: config.exchange,
-          symbol,
-          timeframe: '1h',
-          limit: 8,
-          marketType: config.marketType,
-          apiBase: config.apiBase
         })
-  ])
+      : await candlesCache(cacheKey, () =>
+          ranged || limit > 1000
+            ? fetchCandlesRange({
+                exchangeId: config.exchange,
+                symbol,
+                timeframe,
+                from: rangeFrom,
+                to: rangeTo,
+                marketType: config.marketType,
+                apiBase: config.apiBase,
+                maxCandles: limit
+              })
+            : fetchCandles({
+                exchangeId: config.exchange,
+                symbol,
+                timeframe,
+                limit,
+                marketType: config.marketType,
+                apiBase: config.apiBase
+              })
+        )
 
-  const srSource = timeframe === '1h' ? candles : h1
   sendJson(res, 200, {
     symbol,
     timeframe,
     ranged,
     candles,
-    sr: computeRecentSR(srSource, 4)
+    /*
+     * 压力 / 支撑。
+     *
+     * ⚠️ 2026-10-04 起**前端不再用它了** —— 图上那两条线改成「按当前可见窗口 +
+     *    摆动高低点」现算（见 `frontend/src/levels.ts`），因为固定「最近 4 根 1h」
+     *    看 5 分图时跟屏幕上的 K 线没什么关系。
+     *    但**字段保留**（老版本 App 还在读它），只是改成用**已经拿到的这串 K 线**算，
+     *    不再为它多打一趟交易所 —— 以前非 1h 周期都要额外取 8 根 1h，
+     *    等于每次取数都多一次撞币安 TLS 抖动的机会。
+     */
+    sr: computeRecentSR(candles, 4)
   })
+}
+
+/* ---------------- 启动预热：常用币的 K 线 ---------------- */
+
+/**
+ * 只吞不吐的响应壳。
+ *
+ * ⚠️ 只能喂给 `handleCandles` 这种「只调 `sendJson(res, ...)`」的处理函数
+ *    （`sendJson` 只用到 `writeHead` + `end`）。
+ */
+function silentResponse(): http.ServerResponse {
+  return {
+    writeHead: () => {},
+    end: () => {}
+  } as unknown as http.ServerResponse
+}
+
+/**
+ * 启动预热：把「最常点的几个币 × 最常用的周期」的 K 线先取一份放进缓存。
+ *
+ * 用户 2026-10-04 要的效果：**点币种跳过去，K 线就该已经画出来了**。
+ *
+ * 路由那一下的等待由前端解决（划过 / 按下某一行时就先取，见
+ * `frontend/src/candles.ts`），但**每次部署或重启后的第一个用户**没人替他预取 ——
+ * 他要吃一整套冷启动：**这个币的 K 线**（+ 非 1h 周期还要多打一趟 8 根 1h 算压力支撑）。
+ * 实测线上那一下是 **2.4s**（之后才降到 0.4s）。这里先把最可能被点的那几个拉好，
+ * 于是第一发也是**缓存命中**。
+ *
+ * ⚠️⚠️ **故意直接调 HTTP 处理器**（假 URL + 丢弃响应的 res），而不是另写一份取数：
+ *    缓存 key 是用**请求参数原文**拼的（见 `handleCandles` 里那段注释），
+ *    另写一份就有两套 key —— 改一边忘一边 = 预热全白做，而且不报错。
+ *    走同一条路，就永远对得上。
+ * ⚠️ 串行执行、不 await 在启动流程上（一个 ~150~400ms）；失败只少暖一个币，
+ *    用户真点的时候 `withRetry` 会再来一次。
+ */
+/** 成交额前多少个（与前端 `MarketPanel` 的 `TOP_VOL` 同口径） */
+const WARM_TOP_VOL = 60
+/** |24h 涨跌幅| 超这个百分比也算要暖的（正在异动，用户大概率会去看） */
+const WARM_BIG_MOVE_PCT = 20
+/** 拿不到行情清单时的兜底名单 */
+const WARM_FALLBACK = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE']
+/**
+ * 启动预热哪些周期。
+ *
+ * ⚠️ 每多一个周期 = 启动时多「名单长度」次上游请求（60 个币 → **+60 次，约 +10s**；
+ *    后台跑、不挡启动，但会占带宽与币安权重）。
+ *
+ * 用户 2026-10-04 在这里反复调整过（「不用全周期」→「只保留 1h」→ 又发现 **15m 慢**），
+ * 所以做成可配：`.env` 里写 `WARM_TFS=1h,15m,5m`；不写就用默认的 **1h + 15m**。
+ * 不预热的那几个周期，每个 `(币, 周期)` 的**第一次**请求会现打交易所（~160ms，
+ * 撞抖动 0.5~2s），之后就常驻内存（`data/kline-store.ts`）。
+ */
+const WARM_TIMEFRAMES: Timeframe[] = (() => {
+  const list = (process.env.WARM_TFS ?? '1h,15m')
+    .split(',')
+    .map(s => s.trim())
+    .filter((s): s is Timeframe => (VALID_TFS as string[]).includes(s))
+  return list.length ? list : ['1h']
+})()
+/** ⚠️ 必须跟前端一次拉多少根一致（`frontend/src/analyze.ts` 的 `KLINE_BARS` = 250） */
+const WARM_LIMIT = 250
+
+/** 预热名单 = 成交额前 N ∪ |24h 涨跌| > 20% —— 与前端 `MarketPanel.warmTargets` 同一个口径 */
+async function warmPicks(): Promise<string[]> {
+  try {
+    const cfg = loadConfig()
+    const rows = await fetchMarketList({
+      exchangeId: cfg.exchange,
+      marketType: cfg.marketType,
+      apiBase: cfg.apiBase
+    })
+    const picked = new Set(
+      [...rows]
+        .sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
+        .slice(0, WARM_TOP_VOL)
+        .map(r => r.base)
+    )
+    for (const r of rows) {
+      if (Math.abs(r.change24hPct ?? 0) > WARM_BIG_MOVE_PCT) picked.add(r.base)
+    }
+    return [...picked]
+  } catch {
+    /* 交易所抖了就拿不到清单 —— 退回常用那几个，别因为预热把启动流程搞挂 */
+    return WARM_FALLBACK
+  }
+}
+
+async function warmCandlesCache(): Promise<{
+  ok: number
+  total: number
+  /** 名单回给调用方，接着用它预热头部行情 */
+  bases: string[]
+}> {
+  const bases = await warmPicks()
+  const total = bases.length * WARM_TIMEFRAMES.length
+  let ok = 0
+  for (const symbol of bases) {
+    for (const timeframe of WARM_TIMEFRAMES) {
+      try {
+        const url = new URL(
+          `/api/candles?symbol=${symbol}&timeframe=${timeframe}&limit=${WARM_LIMIT}`,
+          'http://warm.local'
+        )
+        await handleCandles(url, silentResponse())
+        ok += 1
+      } catch {
+        /* 暖不到就算了 —— 用户真点的时候会自己取 */
+      }
+    }
+  }
+  return {ok, total, bases}
+}
+
+/**
+ * 同时最多预热几个币的头部行情。
+ *
+ * ⚠️ 每个币要并发打 4 趟交易所，不限并发会在启动瞬间把币安权重打满。
+ */
+const WARM_TICKER_CONC = 3
+
+/**
+ * 启动预热：把同一批币的**头部行情条**也先取好。
+ *
+ * 为什么需要：`/api/ticker` 一次要并发打 4 趟交易所（ticker + 资金费率 + 持仓量 +
+ * 366 根日线），**冷启实测 ~1.07s** —— 点一个新币，头顶那条行情要空一秒
+ *（用户 2026-10-04：「k 线图上面的数据信息能否缓存，现在感觉太慢了」）。
+ * 预热后就是缓存命中（1~2ms）。
+ *
+ * ⚠️ 走的是同一个 `handleTicker`（假 URL + 丢弃响应的 res）—— 缓存 key 对得上。
+ */
+async function warmTickerCache(
+  bases: string[]
+): Promise<{ok: number; total: number}> {
+  let ok = 0
+  let i = 0
+  const worker = async (): Promise<void> => {
+    while (i < bases.length) {
+      const symbol = bases[i++]
+      try {
+        await handleTicker(
+          new URL(`/api/ticker?symbol=${symbol}`, 'http://warm.local'),
+          silentResponse()
+        )
+        ok += 1
+      } catch {
+        /* 暖不到就算了 */
+      }
+    }
+  }
+  await Promise.all(
+    Array.from({length: Math.min(WARM_TICKER_CONC, bases.length)}, () =>
+      worker()
+    )
+  )
+  return {ok, total: bases.length}
 }
 
 /**
  * 头部行情条缓存。
  *
- * 界面上十几秒刷一次，同一个币短时间内重复打交易所没意义；
- * 缓存 15 秒 → 同时开两个页面也只打一次。
+ * ⚠️ 2026-10-04 把 TTL 从 **15 秒拉到 60 秒**（stale 300s → **600s**、cap 50 → 200）：
+ *    15 秒太短 —— 客户端本就是 15 秒一刷，等于**每 15 秒就把当前活跃币重打一遍上游**
+ *   （一次 4 趟）。而这个接口冷启实测 **~1.07s**，用户感受得到的慢就在这。
+ *    拉长后：60 秒内直接回；60 秒~10 分钟**先给旧的、后台再刷**，永远不会阻塞。
+ *    价格晚一点无所谓 —— 前端头部吃的实时价是 K 线 WS 推的（`ticker.ts` 的
+ *    `freshLivePrice`），资金费率倒计时也是本地算的。
+ *    cap 200：要装得下预热那批（成交额前 60 ∪ 异动）。
  */
-const tickerCache = new Map<string, {at: number; data: TickerInfo}>()
-const TICKER_TTL_MS = 15_000
+const tickerCache = makeCache<TickerInfo>(60_000, 600_000, 200)
 
 /** 头部行情（价格 / 24h / 标记指数 / 资金费率 / 持仓量 / 多周期涨幅） */
 async function handleTicker(url: URL, res: http.ServerResponse): Promise<void> {
@@ -532,27 +907,16 @@ async function handleTicker(url: URL, res: http.ServerResponse): Promise<void> {
   const config = loadConfig({marketType: market})
 
   const key = `${config.marketType}|${symbol}`
-  const hit = tickerCache.get(key)
-  if (hit && Date.now() - hit.at < TICKER_TTL_MS) {
-    sendJson(res, 200, hit.data)
-    return
-  }
 
   try {
-    const data = await fetchTickerInfo({
-      exchangeId: config.exchange,
-      symbol,
-      marketType: config.marketType,
-      apiBase: config.apiBase
-    })
-    tickerCache.set(key, {at: Date.now(), data})
-    // 缓存别无限长大：只留最近用过的 50 个币
-    if (tickerCache.size > 50) {
-      const oldest = [...tickerCache.entries()].sort(
-        (a, b) => a[1].at - b[1].at
-      )[0]
-      if (oldest) tickerCache.delete(oldest[0])
-    }
+    const data = await tickerCache(key, () =>
+      fetchTickerInfo({
+        exchangeId: config.exchange,
+        symbol,
+        marketType: config.marketType,
+        apiBase: config.apiBase
+      })
+    )
     sendJson(res, 200, data)
   } catch (e) {
     // 头部行情挂了不该拖垮整个页面：前端自己会把这项显示成「—」
@@ -563,11 +927,20 @@ async function handleTicker(url: URL, res: http.ServerResponse): Promise<void> {
 /**
  * 合约行情列表（参考币安「合约行情」页）。
  *
- * 界面上几秒刷一次，**必须缓存**：一次请求就是交易所全量 24h ticker，
- * 多开几个标签页 / 多人同时看时不能各打各的。5 秒足够「实时」了。
+ * 界面上几秒刷一次，**必须缓存**：一次请求就是交易所全量 24h ticker
+ * （实测 ~24KB / 528 个合约），多开几个标签页 / 多人同时看时不能各打各的。
+ * 5 秒足够「实时」了。
+ *
+ * ⚠️ 2026-10-04 改成与 K 线同一套 `makeCache`：冷的时候同样会撞币安 TLS 抖动
+ *    （线上实测有一次 2.097s），而它是**首页**那个列表的数据源。
+ *    所以：5 秒内直接回；5 秒~2 分钟之间**先给旧的、后台再刷**。
+ *    （列表本身每秒都有 WS 增量在推，这份快照只当「底稿」，旧几秒毫无影响）
  */
-const marketsCache = new Map<string, {at: number; rows: MarketRow[]}>()
-const MARKETS_TTL_MS = 5_000
+const marketsCache = makeCache<{rows: MarketRow[]; at: number}>(
+  5_000,
+  120_000,
+  10
+)
 
 async function handleMarkets(
   url: URL,
@@ -581,21 +954,18 @@ async function handleMarkets(
   const config = loadConfig({marketType: market})
   const key = `${config.exchange}|${config.marketType}|${config.apiBase ?? ''}`
 
-  const hit = marketsCache.get(key)
-  if (hit && Date.now() - hit.at < MARKETS_TTL_MS) {
-    sendJson(res, 200, {rows: hit.rows, updatedAt: hit.at})
-    return
-  }
-
   try {
-    const rows = await fetchMarketList({
-      exchangeId: config.exchange,
-      marketType: config.marketType,
-      apiBase: config.apiBase
-    })
-    const at = Date.now()
-    marketsCache.set(key, {at, rows})
-    sendJson(res, 200, {rows, updatedAt: at})
+    // 「取数时刻」跟数据一起进缓存：命中（包括直接给旧那份）时报的才是**上次真正拉到的**时间，
+    // 而不是「这次请求的时间」—— 那种写法会假装刚更新过。
+    const v = await marketsCache(key, async () => ({
+      rows: await fetchMarketList({
+        exchangeId: config.exchange,
+        marketType: config.marketType,
+        apiBase: config.apiBase
+      }),
+      at: Date.now()
+    }))
+    sendJson(res, 200, {rows: v.rows, updatedAt: v.at})
   } catch (e) {
     sendJson(res, 502, {error: (e as Error).message})
   }
@@ -717,6 +1087,8 @@ function parseAt(raw: string | null): number | null {
  * 网页（JSON）、网页（SSE 进度）、命令行都走这里，避免几份实现各写一遍。
  */
 async function runAnalysis(opts: {
+  /** 谁在分析（用户系统） */
+  userId: number
   symbol: string
   market?: MarketType
   /** 主周期（图上那个） */
@@ -747,7 +1119,13 @@ async function runAnalysis(opts: {
       : '（没有启用的角色/规则文档，本次按知识库经验判断）'
   )
 
-  const config = loadConfig({marketType: market, timeframes: [timeframe]})
+  // 用哪把密钥：**默认**那把（多密钥，2026-10-04）；用量会记到它名下
+  const resolved = await resolveUserLlm(opts.userId)
+  const config = loadConfig({
+    marketType: market,
+    timeframes: [timeframe],
+    llm: resolved.llm
+  })
   const cal = config.calibers
   /** 主周期看多少天（前端传的是「图上那段」的天数；没传就用配置默认值） */
   const days = Math.max(1, opts.days || config.lookbackDays)
@@ -761,8 +1139,8 @@ async function runAnalysis(opts: {
   let tags: string[] = []
   try {
     const [templates, used] = await Promise.all([
-      loadTagTemplates(),
-      listTags()
+      loadTagTemplates(opts.userId),
+      listTags(opts.userId)
     ])
     tags = [...new Set([...templates, ...used.map(u => u.tag)])]
   } catch (e) {
@@ -841,6 +1219,8 @@ async function runAnalysis(opts: {
     testAt ? '记账（测试跑不存档）' : '记账并存档'
   )
   const billed = await recordUsage({
+    userId: opts.userId,
+    llmKeyId: resolved.keyId,
     kind: 'judge',
     model: meta.model,
     symbol: baseSymbol(snapshot.symbol),
@@ -862,6 +1242,7 @@ async function runAnalysis(opts: {
     // 否则历史列表和胜率统计里会混进一堆事后诸葛
     if (!testAt) {
       analysisId = await saveAnalysis({
+        userId: opts.userId,
         symbol: baseSymbol(snapshot.symbol),
         ccxtSymbol: snapshot.symbol,
         exchange: config.exchange,
@@ -937,7 +1318,8 @@ async function runAnalysis(opts: {
 
 async function handleAnalyze(
   url: URL,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const params = analyzeParams(url.searchParams)
   if (!params.symbol) {
@@ -945,7 +1327,7 @@ async function handleAnalyze(
     return
   }
   try {
-    sendJson(res, 200, await runAnalysis(params))
+    sendJson(res, 200, await runAnalysis({...params, userId: user.id}))
   } catch (e) {
     sendJson(res, 502, {error: (e as Error).message})
   }
@@ -1157,7 +1539,8 @@ async function handleIcon(
 async function handleAnalyzeStream(
   url: URL,
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1185,6 +1568,7 @@ async function handleAnalyzeStream(
   try {
     const outcome = await runAnalysis({
       ...params,
+      userId: user.id,
       onStep: s => {
         if (!closed) send('step', s)
       }
@@ -1250,7 +1634,8 @@ function collectInput(get: (k: string) => unknown):
 
 async function handleCollectCase(
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const body = await readJsonBody(req)
   const params = collectInput(k => body[k])
@@ -1258,7 +1643,7 @@ async function handleCollectCase(
     sendJson(res, 400, {error: params.error})
     return
   }
-  sendJson(res, 200, await collectCase(params))
+  sendJson(res, 200, await collectCase({...params, userId: user.id}))
 }
 
 /**
@@ -1268,7 +1653,8 @@ async function handleCollectCase(
 async function handleCollectStream(
   url: URL,
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1295,6 +1681,7 @@ async function handleCollectStream(
   try {
     const outcome = await collectCase({
       ...params,
+      userId: user.id,
       onStep: s => {
         if (!closed) send('step', s)
       }
@@ -1309,7 +1696,8 @@ async function handleCollectStream(
 
 async function handleListCases(
   url: URL,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const q = url.searchParams
   const labelRaw = q.get('label') ?? 'all'
@@ -1324,6 +1712,7 @@ async function handleListCases(
     : 'all'
   const withCandles = q.get('candles') === '1'
   const cases = await listCases({
+    userId: user.id,
     label,
     moveType,
     tag: q.get('tag') ?? '',
@@ -1337,8 +1726,14 @@ async function handleListCases(
 }
 
 /** GET /api/knowledge/tags —— 标签模板（我自己维护）+ 已用统计 + 模板外的老标签 */
-async function handleListTags(res: http.ServerResponse): Promise<void> {
-  const [rows, used] = await Promise.all([listTagTemplates(), listTags()])
+async function handleListTags(
+  res: http.ServerResponse,
+  user: User
+): Promise<void> {
+  const [rows, used] = await Promise.all([
+    listTagTemplates(user.id),
+    listTags(user.id)
+  ])
   const counts = new Map(used.map(t => [t.tag, t.n]))
   const names = rows.map(r => r.name)
   sendJson(res, 200, {
@@ -1352,12 +1747,13 @@ async function handleListTags(res: http.ServerResponse): Promise<void> {
 /** 标签模板的增 / 删 / 改 / 排序 —— 全部由我自己在网页上维护 */
 async function handleAddTagTemplate(
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const body = await readJsonBody(req).catch(() => null)
   if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
   try {
-    sendJson(res, 201, await addTagTemplate(body.name))
+    sendJson(res, 201, await addTagTemplate(user.id, body.name))
   } catch (e) {
     sendJson(res, 400, {error: (e as Error).message})
   }
@@ -1366,12 +1762,13 @@ async function handleAddTagTemplate(
 async function handleUpdateTagTemplate(
   id: number,
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const body = await readJsonBody(req).catch(() => null)
   if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
   try {
-    const row = await renameTagTemplate(id, body.name)
+    const row = await renameTagTemplate(user.id, id, body.name)
     sendJson(res, row ? 200 : 404, row ?? {error: '模板不存在'})
   } catch (e) {
     sendJson(res, 400, {error: (e as Error).message})
@@ -1381,19 +1778,21 @@ async function handleUpdateTagTemplate(
 async function handleMoveTagTemplate(
   id: number,
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const body = await readJsonBody(req).catch(() => null)
   const dir = body?.dir === 'up' ? 'up' : 'down'
-  const ok = await moveTagTemplate(id, dir)
+  const ok = await moveTagTemplate(user.id, id, dir)
   sendJson(res, 200, {ok})
 }
 
 async function handleDeleteTagTemplate(
   id: number,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
-  const ok = await deleteTagTemplate(id)
+  const ok = await deleteTagTemplate(user.id, id)
   sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '模板不存在'})
 }
 
@@ -1401,7 +1800,8 @@ async function handleDeleteTagTemplate(
 async function handleUpdateCase(
   id: number,
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const body = await readJsonBody(req)
   const patch: UpdateCaseInput = {}
@@ -1421,7 +1821,7 @@ async function handleUpdateCase(
   if (body.features && typeof body.features === 'object')
     patch.features = body.features as UpdateCaseInput['features']
 
-  const ok = await updateCase(id, patch)
+  const ok = await updateCase(id, user.id, patch)
   sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '案例不存在'})
 }
 
@@ -1429,10 +1829,12 @@ async function handleUpdateCase(
 async function handleReeditCase(
   id: number,
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
   const body = await readJsonBody(req)
   const result = await reeditCase(id, {
+    userId: user.id,
     note: typeof body.note === 'string' ? body.note : undefined
   })
   sendJson(res, 200, result)
@@ -1440,14 +1842,393 @@ async function handleReeditCase(
 
 async function handleGetCase(
   id: number,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  user: User
 ): Promise<void> {
-  const row = await getCase(id)
+  const row = await getCase(id, user.id)
   if (!row) {
     sendJson(res, 404, {error: '案例不存在'})
     return
   }
   sendJson(res, 200, {case: row})
+}
+
+/* ------------------------------------------------------------------ */
+/* 认证                                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 从请求里取 token。
+ *
+ * 首选 `Authorization: Bearer <token>`；SSE（EventSource）**发不了请求头**，
+ * 所以也接受 `?token=`。
+ */
+function bearerToken(req: http.IncomingMessage, url: URL): string {
+  const h = req.headers.authorization ?? ''
+  const m = /^Bearer\s+(.+)$/i.exec(h)
+  if (m) return m[1].trim()
+  return (url.searchParams.get('token') ?? '').trim()
+}
+
+/** 当前登录用户；没登录返回 null（不抛错） */
+async function currentUser(
+  req: http.IncomingMessage,
+  url: URL
+): Promise<User | null> {
+  const t = bearerToken(req, url)
+  if (!t) return null
+  try {
+    const user = await userByToken(t)
+    if (user) touchSoon(t)
+    return user
+  } catch {
+    return null
+  }
+}
+
+/*
+ * 「最后活跃」刷新节流。
+ *
+ * 用户 2026-10-04：「账户支持多端登录」→ 设备列表要显示最后活跃时间。
+ * 每个请求都写一行库太浪费（一次分析就是十几个请求），所以**同一 token
+ * 每分钟最多写一次** —— 精确到分钟够用了。
+ */
+const touchAt = new Map<string, number>()
+const TOUCH_MS = 60_000
+
+function touchSoon(token: string): void {
+  const now = Date.now()
+  const last = touchAt.get(token) ?? 0
+  if (now - last < TOUCH_MS) return
+  touchAt.set(token, now)
+  if (touchAt.size > 2000) {
+    for (const [k, v] of touchAt) if (now - v > TOUCH_MS * 10) touchAt.delete(k)
+  }
+  void touchSession(token).catch(() => undefined)
+}
+
+/*
+ * 两步验证的「中间票」：密码过了、6 位码还没过的那一小段。
+ *
+ * 放内存就够（5 分钟、最多错 5 次）；重启丢掉也只是让人重新输一次密码，
+ * 不值得为它建表。
+ */
+interface TotpTicket {
+  userId: number
+  exp: number
+  tries: number
+}
+const totpTickets = new Map<string, TotpTicket>()
+const TICKET_MS = 5 * 60_000
+const TICKET_TRIES = 5
+
+function issueTicket(userId: number): string {
+  const now = Date.now()
+  for (const [k, v] of totpTickets) if (v.exp <= now) totpTickets.delete(k)
+  const t = randomBytes(24).toString('hex')
+  totpTickets.set(t, {userId, exp: now + TICKET_MS, tries: 0})
+  return t
+}
+
+/** 登录时顺手记的设备信息（给「登录设备」列表用） */
+function sessionMeta(req: http.IncomingMessage): SessionMeta {
+  return {
+    userAgent: String(req.headers['user-agent'] ?? ''),
+    ip: clientIp(
+      req.headers as Record<string, unknown>,
+      req.socket.remoteAddress
+    )
+  }
+}
+
+/**
+ * 不需要登录的接口：行情 / K 线 / 币种 / 图标 / 健康检查 / 下载清单。
+ * 其余（分析、存档、知识库、标签、用量、账户、服务器监测）全要登录。
+ */
+function isPublicApi(p: string): boolean {
+  return (
+    p === '/api/health' ||
+    p === '/api/contracts' ||
+    p === '/api/candles' ||
+    p === '/api/ticker' ||
+    p === '/api/markets' ||
+    p === '/api/kline/stream' ||
+    p === '/api/tickers/stream' ||
+    p === '/api/downloads' ||
+    p.startsWith('/api/icon/')
+  )
+}
+
+/** `/api/auth/*` */
+async function handleAuth(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL,
+  p: string
+): Promise<void> {
+  const method = req.method ?? 'GET'
+
+  if (p === '/api/auth/logout' && method === 'POST') {
+    const t = bearerToken(req, url)
+    if (t) await deleteSession(t).catch(() => undefined)
+    return sendJson(res, 200, {ok: true})
+  }
+
+  if (p === '/api/auth/me' && method === 'GET') {
+    const user = await currentUser(req, url)
+    if (!user) return sendJson(res, 401, {error: '未登录'})
+    return sendJson(res, 200, {user})
+  }
+
+  /* 改密码：成功后会踢掉所有会话，前端要重新登录 */
+  if (p === '/api/auth/password') {
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const user = await currentUser(req, url)
+    if (!user) return sendJson(res, 401, {error: '请先登录'})
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      await changePassword(
+        user.id,
+        str(body.oldPassword),
+        str(body.newPassword)
+      )
+      return sendJson(res, 200, {ok: true, relogin: true})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  /* 改用户名（「个人信息」页） */
+  if (p === '/api/auth/profile') {
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const user = await currentUser(req, url)
+    if (!user) return sendJson(res, 401, {error: '请先登录'})
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const updated = await renameUser(user.id, body.username)
+      return sendJson(res, 200, {ok: true, user: updated})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (p === '/api/auth/register' || p === '/api/auth/login') {
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    /*
+     * 用户 2026-10-04：「不开放注册」—— 账号一律由管理员在
+     * 「我的 → 管理」里创建。这里直接挡掉，别再让人自己注册。
+     */
+    if (p === '/api/auth/register') {
+      return sendJson(res, 403, {
+        error: '注册已关闭，请联系管理员创建账号'
+      })
+    }
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const check = await checkLogin({
+        username: str(body.username),
+        password: str(body.password)
+      })
+      /*
+       * 开了两步验证的账号：**这里先不发 token**，给一张 5 分钟的中间票，
+       * 等 `/api/auth/totp/verify` 过了第二关才真正登录。
+       */
+      if (check.totpEnabled) {
+        return sendJson(res, 200, {
+          needTotp: true,
+          username: check.user.username,
+          ticket: issueTicket(check.user.id)
+        })
+      }
+      const s = await startSession(check.user.id, sessionMeta(req))
+      return sendJson(res, 200, {
+        token: s.token,
+        expiresAt: s.expiresAt,
+        user: check.user
+      })
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  /* 两步验证第二关：中间票 + 6 位动态口令（也收恢复码） */
+  if (p === '/api/auth/totp/verify') {
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const ticket = str(body.ticket)
+    const code = str(body.code).trim()
+    const tk = totpTickets.get(ticket)
+    if (!tk || tk.exp <= Date.now()) {
+      totpTickets.delete(ticket)
+      return sendJson(res, 400, {error: '验证超时了，请重新登录'})
+    }
+    if (++tk.tries > TICKET_TRIES) {
+      totpTickets.delete(ticket)
+      return sendJson(res, 400, {error: '错误次数太多，请重新登录'})
+    }
+    const acc = await accountForTotp(tk.userId)
+    if (!acc?.secret) {
+      totpTickets.delete(ticket)
+      return sendJson(res, 400, {error: '这个账号没开两步验证，请重新登录'})
+    }
+    /*
+     * 6 位纯数字 = 动态口令；其它形状当**恢复码**（用一次就作废）。
+     */
+    const looksLikeCode = /^\d{6}$/.test(code)
+    let pass = false
+    if (looksLikeCode) {
+      const step = verifyTotp(acc.secret, code)
+      // 同一个时间步只准用一次（防止别人截到屏幕上的码直接复用）
+      if (step !== null && step > acc.lastStep) {
+        await setTotpLastStep(tk.userId, step)
+        pass = true
+      }
+    } else if (code) {
+      pass = await consumeRecoveryCode(tk.userId, hashRecovery(code))
+    }
+    if (!pass) {
+      return sendJson(res, 400, {
+        error: looksLikeCode ? '动态口令不对' : '恢复码不对或已经用过'
+      })
+    }
+    totpTickets.delete(ticket)
+    const s = await startSession(tk.userId, sessionMeta(req))
+    return sendJson(res, 200, {
+      token: s.token,
+      expiresAt: s.expiresAt,
+      user: acc.user,
+      recoveryUsed: !looksLikeCode
+    })
+  }
+
+  /*
+   * 以下都要先登录 —— 放在 `handleAuth` 里是**必须**的：
+   * `route()` 里 `p.startsWith('/api/auth/')` 会先接走，
+   * 写到下面的受保护区会被这里 404（踩过）。
+   */
+  const need = async (): Promise<User | null> => {
+    const u = await currentUser(req, url)
+    if (!u) sendJson(res, 401, {error: '请先登录'})
+    return u
+  }
+
+  /* 这个账号现在在哪些设备上登着 */
+  if (p === '/api/auth/sessions') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const u = await need()
+    if (!u) return
+    const sessions = await listSessions(u.id, bearerToken(req, url))
+    return sendJson(res, 200, {sessions})
+  }
+
+  /* 踢掉某一台（只能踢自己的） */
+  if (p === '/api/auth/sessions/revoke' && method === 'POST') {
+    const u = await need()
+    if (!u) return
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const id = Number(body.id)
+    if (!Number.isFinite(id)) return sendJson(res, 400, {error: '缺 id'})
+    const ok = await revokeSession(u.id, id)
+    if (!ok)
+      return sendJson(res, 404, {error: '没找到这条会话（可能已经下线）'})
+    return sendJson(res, 200, {ok: true})
+  }
+
+  /* 除本机以外全部下线 */
+  if (p === '/api/auth/sessions/revoke-others' && method === 'POST') {
+    const u = await need()
+    if (!u) return
+    const n = await revokeOtherSessions(u.id, bearerToken(req, url))
+    return sendJson(res, 200, {ok: true, revoked: n})
+  }
+
+  /* 两步验证状态（「个人信息」页显示用） */
+  if (p === '/api/auth/totp' && method === 'GET') {
+    const u = await need()
+    if (!u) return
+    return sendJson(res, 200, await getTotpState(u.id))
+  }
+
+  /* 开始绑定：给一份新密钥 + 二维码（先不动正式配置，等输码确认） */
+  if (p === '/api/auth/totp/setup' && method === 'POST') {
+    const u = await need()
+    if (!u) return
+    if (!u.isAdmin) return sendJson(res, 403, {error: '两步验证只对管理员开放'})
+    const secret = generateSecret()
+    await setTotpPending(u.id, secret)
+    const otpauth = otpauthUrl({
+      secret,
+      label: u.username,
+      issuer: '开单分析'
+    })
+    const qr = await QRCode.toString(otpauth, {
+      type: 'svg',
+      margin: 1,
+      width: 208,
+      color: {dark: '#0d1117', light: '#ffffff'}
+    })
+    return sendJson(res, 200, {secret, otpauth, qr})
+  }
+
+  /* 输一次 6 位码确认 —— 对了才真正开启，并把恢复码交出去（只显示这一次） */
+  if (p === '/api/auth/totp/enable' && method === 'POST') {
+    const u = await need()
+    if (!u) return
+    if (!u.isAdmin) return sendJson(res, 403, {error: '两步验证只对管理员开放'})
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const pending = await readTotpPending(u.id)
+    if (!pending)
+      return sendJson(res, 400, {error: '请先生成二维码（刷新页面重来一次）'})
+    const step = verifyTotp(pending, str(body.code))
+    if (step === null)
+      return sendJson(res, 400, {
+        error: '口令不对 —— 核对一下手机时间是否自动校准，或等下一组再试'
+      })
+    const codes = generateRecoveryCodes(8)
+    await enableTotp(u.id, pending, codes.map(hashRecovery))
+    /*
+     * ⚠️ **不要**把这一步用掉的步号写进 `totp_last_step`。
+     * 开启只是个配置动作，不是登录；写了的话，用户「刚开完就用同一个码登录」
+     * 会被防重放挡掉（实测过），得傻等 30 秒。
+     */
+    return sendJson(res, 200, {ok: true, recoveryCodes: codes})
+  }
+
+  /* 关掉：要密码 + 一个有效口令（防别人拿到你手机就关掉） */
+  if (p === '/api/auth/totp/disable' && method === 'POST') {
+    const u = await need()
+    if (!u) return
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    if (!(await verifyUserPassword(u.id, str(body.password))))
+      return sendJson(res, 400, {error: '密码不对'})
+    const acc = await accountForTotp(u.id)
+    if (acc?.secret) {
+      const code = str(body.code).trim()
+      const step = /^\d{6}$/.test(code) ? verifyTotp(acc.secret, code) : null
+      const rec =
+        step === null && code
+          ? await consumeRecoveryCode(u.id, hashRecovery(code))
+          : false
+      if (step === null && !rec)
+        return sendJson(res, 400, {error: '动态口令不对'})
+    }
+    await disableTotp(u.id)
+    return sendJson(res, 200, {ok: true})
+  }
+
+  sendJson(res, 404, {error: 'Not Found'})
 }
 
 /* ------------------------------------------------------------------ */
@@ -1474,6 +2255,25 @@ async function route(
     return
   }
 
+  /* ---- 认证（公开接口） ---- */
+  if (p.startsWith('/api/auth/')) {
+    await handleAuth(req, res, url, p)
+    return
+  }
+
+  /*
+   * 除了上面 `isPublicApi()` 里那几个（行情 / 币种 / 图标 / 下载…），
+   * 其余都要登录 —— 分析、存档、知识库、标签、用量、账户、服务器监测
+   * 都是「用户自己的东西」。
+   */
+  const user = await currentUser(req, url)
+  if (!isPublicApi(p) && !user) {
+    sendJson(res, 401, {error: '请先登录'})
+    return
+  }
+  /** 受保护分支用这个（能走到那儿说明已经登录了） */
+  const me = user as User
+
   if (p === '/api/health') {
     const db = await checkDb()
     const rules = await loadRules()
@@ -1494,23 +2294,44 @@ async function route(
     return
   }
 
+  /*
+   * 服务器 / 进程 / 数据库的实时状态。
+   * 给「我的 → 管理 → 服务器」那半用（前端按秒轮询，自己在图上攒曲线）。
+   * 只读、不落库；数据库不通也不会报错，而是把 `db.ok=false` 带回来。
+   *
+   * ⚠️ **要管理员**：用户 2026-10-04「服务器挪到管理界面」之后，这页只对管理员可见；
+   * 接口跟着收紧 —— 里面有主机名、负载、磁盘、监听端口（`ports`），
+   * 不该让普通账号拿到。
+   */
+  if (p === '/api/server-status') {
+    if (!me.isAdmin) return sendJson(res, 403, {error: '需要管理员权限'})
+    // `?minutes=` 决定曲线给多长（默认 30 分钟，封顶 120 —— 后端最多留 2 小时）
+    const raw = Number(url.searchParams.get('minutes') ?? 30)
+    const minutes = Number.isFinite(raw) ? Math.min(120, Math.max(1, raw)) : 30
+    const status = await collectServerStatus()
+    sendJson(res, 200, {...status, history: recentSamples(minutes)})
+    return
+  }
+
   if (p === '/api/config') {
     const rules = await loadRules()
     const env = process.env
-    // 知识库只报一个总数（已经不再分「该做 / 不该做」）
+    // 知识库只报一个总数（已经不再分「该做 / 不该做」）—— 只数**这个用户自己的**
     const rows = await query<{n: string}>(
-      'SELECT count(*)::text AS n FROM knowledge'
+      'SELECT count(*)::text AS n FROM knowledge WHERE user_id = $1',
+      [me.id]
     ).catch(() => [] as {n: string}[])
     const knowledge = {total: Number(rows[0]?.n ?? 0)}
-    const head = await usageHeadline().catch(() => ({
+    const head = await usageHeadline(me.id).catch(() => ({
       todayCalls: 0,
       todayCostUsd: 0,
       allCalls: 0,
       allCostUsd: 0
     }))
-    const cfg = loadConfig()
+    // 每个用户自己的 DeepSeek 配置（没填就回落 .env 那份）
+    const cfg = loadConfig({llm: (await resolveUserLlm(me.id)).llm})
     sendJson(res, 200, {
-      hasApiKey: Boolean(env.LLM_API_KEY),
+      hasApiKey: Boolean(cfg.llm.apiKey),
       exchange: env.EXCHANGE ?? 'binance',
       marketType: env.MARKET_TYPE ?? 'swap',
       timeframes: cfg.timeframes.join(','),
@@ -1518,6 +2339,7 @@ async function route(
       lookback: {days: cfg.lookbackDays},
       model: cfg.llm.model,
       provider: 'deepseek',
+      user: {id: me.id, username: me.username},
       rules: {
         sources: rules.sources,
         hash: rules.hash,
@@ -1552,11 +2374,14 @@ async function route(
     try {
       const [summary, headline] = await Promise.all([
         usageSummary({
+          userId: me.id,
           days: Number(days ?? 30),
           recent: Number(recent ?? 10),
-          kind: url.searchParams.get('kind')
+          kind: url.searchParams.get('kind'),
+          // 只看某把密钥的用量（模型配置页里点某一把）
+          keyId: Number(url.searchParams.get('keyId')) || null
         }),
-        usageHeadline()
+        usageHeadline(me.id)
       ])
       sendJson(res, 200, {
         ...summary,
@@ -1582,8 +2407,10 @@ async function route(
   if (p === '/api/usage/calls') {
     try {
       const page = await usageCalls({
+        userId: me.id,
         days: Number(url.searchParams.get('days') ?? 30),
         kind: url.searchParams.get('kind'),
+        keyId: Number(url.searchParams.get('keyId')) || null,
         limit: Number(url.searchParams.get('limit') ?? 50),
         offset: Number(url.searchParams.get('offset') ?? 0)
       })
@@ -1596,7 +2423,7 @@ async function route(
 
   /* ---- 账户：可用模型 + 余额（`?refresh=1` 绕过 60 秒缓存）---- */
   if (p === '/api/account') {
-    const config = loadConfig()
+    const config = loadConfig({llm: (await resolveUserLlm(me.id)).llm})
     const refresh = url.searchParams.get('refresh') === '1'
     const [models, balance] = await Promise.all([
       fetchModels(config),
@@ -1613,7 +2440,255 @@ async function route(
     return
   }
 
-  /* ---- 切换模型：写回 .env，立刻生效 ---- */
+  /*
+   * 「我的 → 模型配置」：**多把密钥**（2026-10-04）。
+   *
+   * 用户原话：「可以绑定多个 key 和模型，可以给命名，默认给一个，
+   * 只有新增编辑时才弹窗，用量移到此界面，统计数据分开显示和 key 绑定」。
+   *
+   * 真 Key **不出网**：只回掩码（`sk-a****3456`），前端也用掩码判断「没改」。
+   */
+  if (p === '/api/llm-keys' || p.startsWith('/api/llm-keys/')) {
+    const bodyOf = async () => {
+      const b = await readJsonBody(req).catch(() => null)
+      if (!b) throw new Error('请求体不是合法 JSON')
+      return b
+    }
+
+    // 列表（没有密钥时会自动建一把「默认」，见 db/llm-keys.ts）
+    if (p === '/api/llm-keys' && method === 'GET') {
+      const resolved = await resolveUserLlm(me.id)
+      const [keys, models, stats] = await Promise.all([
+        listLlmKeys(me.id),
+        fetchModels(loadConfig({llm: resolved.llm})).catch(() => null),
+        usageByKey(me.id)
+      ])
+      const byId = new Map(stats.map(s => [s.keyId, s]))
+      return sendJson(res, 200, {
+        keys: keys.map(k => ({
+          id: k.id,
+          name: k.name,
+          /** 掩码；真 Key 只在管理员那页给 */
+          apiKey: maskKey(k.apiKey),
+          apiKeySet: Boolean(k.apiKey),
+          baseUrl: k.baseUrl,
+          model: k.model,
+          reasoningEffort: k.reasoningEffort,
+          isDefault: k.isDefault,
+          createdAt: k.createdAt,
+          updatedAt: k.updatedAt,
+          /** 这把 key 的用量（分开统计，跟 key 绑定） */
+          stats: byId.get(k.id) ?? {calls: 0, costUsd: 0}
+        })),
+        models,
+        /** 当前实际生效的那把（默认） */
+        defaultId: resolved.keyId
+      })
+    }
+
+    // 新增
+    if (p === '/api/llm-keys' && method === 'POST') {
+      try {
+        const body = await bodyOf()
+        const key = await createLlmKey(me.id, {
+          name: str(body.name),
+          apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+          baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
+          model: typeof body.model === 'string' ? body.model : undefined,
+          reasoningEffort:
+            typeof body.reasoningEffort === 'string'
+              ? body.reasoningEffort
+              : undefined
+        })
+        return sendJson(res, 201, {ok: true, id: key.id})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    const m = p.match(/^\/api\/llm-keys\/(\d+)(\/default)?$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+
+    // 设为默认
+    if (m[2] === '/default') {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      const ok = await setDefaultLlmKey(me.id, id)
+      return sendJson(
+        res,
+        ok ? 200 : 404,
+        ok ? {ok: true} : {error: '密钥不存在'}
+      )
+    }
+
+    if (method === 'PUT' || method === 'PATCH') {
+      try {
+        const body = await bodyOf()
+        const saved = await updateLlmKey(me.id, id, {
+          name: typeof body.name === 'string' ? body.name : undefined,
+          apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+          baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
+          model: typeof body.model === 'string' ? body.model : undefined,
+          reasoningEffort:
+            typeof body.reasoningEffort === 'string'
+              ? body.reasoningEffort
+              : undefined
+        })
+        return sendJson(
+          res,
+          saved ? 200 : 404,
+          saved ? {ok: true, id: saved.id} : {error: '密钥不存在'}
+        )
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    if (method === 'DELETE') {
+      const ok = await deleteLlmKey(me.id, id)
+      return sendJson(
+        res,
+        ok ? 200 : 404,
+        ok ? {ok: true} : {error: '密钥不存在'}
+      )
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /*
+   * 老接口（单条配置）—— 留着给已经在手机上的旧版 App 用，
+   * 内部映射到**默认那把**密钥。新前端用 /api/llm-keys。
+   */
+  if (p === '/api/llm-config') {
+    const resolved = await resolveUserLlm(me.id)
+    const own = await getDefaultLlmKey(me.id)
+    const effective = loadConfig({llm: resolved.llm}).llm
+    if (method === 'GET') {
+      const models = await fetchModels(loadConfig({llm: resolved.llm})).catch(
+        () => null
+      )
+      return sendJson(res, 200, {
+        apiKey: maskKey(own?.apiKey ?? ''),
+        apiKeySet: Boolean(own?.apiKey),
+        baseUrl: own?.baseUrl ?? '',
+        model: own?.model ?? '',
+        reasoningEffort: own?.reasoningEffort ?? '',
+        effective: {
+          baseUrl: effective.baseUrl,
+          model: effective.model,
+          hasApiKey: Boolean(effective.apiKey),
+          reasoningEffort: effective.reasoningEffort
+        },
+        models
+      })
+    }
+    if (method === 'PUT' || method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      try {
+        await saveUserLlm(me.id, {
+          apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+          baseUrl: typeof body.baseUrl === 'string' ? body.baseUrl : undefined,
+          model: typeof body.model === 'string' ? body.model : undefined,
+          reasoningEffort:
+            typeof body.reasoningEffort === 'string'
+              ? body.reasoningEffort
+              : undefined
+        })
+        return sendJson(res, 200, {ok: true})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /* ---- 管理员：账号管理（新建用户 / 改密码 / 查看各自的 DS 配置） ---- */
+  if (p === '/api/admin/users' || p.startsWith('/api/admin/users/')) {
+    if (!me.isAdmin) return sendJson(res, 403, {error: '需要管理员权限'})
+
+    // 列表：所有人 + 各自的密钥 + 数据条数
+    if (p === '/api/admin/users' && method === 'GET') {
+      const users = await listUsersForAdmin()
+      return sendJson(res, 200, {
+        users: users.map(u => ({
+          id: u.id,
+          username: u.username,
+          isAdmin: u.isAdmin,
+          createdAt: u.createdAt,
+          stats: u.stats,
+          // 管理员要「查看 ds 的 api 数据」—— 明文和掩码都给，
+          // 前端默认显示掩码，点「显示」才展开
+          llmKeys: u.llmKeys.map(k => ({
+            id: k.id,
+            name: k.name,
+            apiKey: k.apiKey,
+            apiKeyMasked: maskKey(k.apiKey),
+            apiKeySet: Boolean(k.apiKey),
+            baseUrl: k.baseUrl,
+            model: k.model,
+            reasoningEffort: k.reasoningEffort,
+            isDefault: k.isDefault,
+            updatedAt: k.updatedAt
+          }))
+        }))
+      })
+    }
+
+    // 新建用户
+    if (p === '/api/admin/users' && method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      try {
+        const created = await createUser({
+          username: str(body.username),
+          password: str(body.password),
+          isAdmin: body.isAdmin === true
+        })
+        return sendJson(res, 201, {ok: true, user: created})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    const m = p.match(/^\/api\/admin\/users\/(\d+)(\/password)?$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+
+    // 改某个人的密码
+    if (m[2] === '/password') {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      try {
+        const ok = await setUserPassword(id, body.password)
+        return sendJson(
+          res,
+          ok ? 200 : 404,
+          ok ? {ok: true} : {error: '用户不存在'}
+        )
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    // 删号（⚠️ 会级联删掉这个人的分析 / 知识库 / 用量）
+    if (method === 'DELETE') {
+      if (id === me.id) return sendJson(res, 400, {error: '不能删掉自己'})
+      const ok = await deleteUser(id)
+      return sendJson(
+        res,
+        ok ? 200 : 404,
+        ok ? {ok: true} : {error: '用户不存在'}
+      )
+    }
+
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /* ---- 切换模型：写进**这个用户自己的**配置（不再动服务器 .env） ---- */
   if (p === '/api/account/model') {
     if (method !== 'POST')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
@@ -1623,7 +2698,7 @@ async function route(
     } catch (e) {
       return sendJson(res, 400, {error: (e as Error).message})
     }
-    const config = loadConfig()
+    const config = loadConfig({llm: (await resolveUserLlm(me.id)).llm})
     const model = str(body.model).trim()
 
     if (!model) return sendJson(res, 400, {error: '缺少 model'})
@@ -1639,14 +2714,13 @@ async function route(
       })
     }
 
-    const saved = writeEnvVar('LLM_MODEL', model)
-    const next = loadConfig()
+    await saveUserLlm(me.id, {model})
+    const next = loadConfig({llm: (await resolveUserLlm(me.id)).llm})
     sendJson(res, 200, {
       ok: true,
       model: next.llm.model,
-      /** 没写进 .env 的话，重启就丢了 */
-      persisted: saved,
-      warning: saved ? null : '没写进 .env（文件可能不可写），重启后会还原。'
+      persisted: true,
+      warning: null
     })
     return
   }
@@ -1699,14 +2773,14 @@ async function route(
   if (p === '/api/analyze') {
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    await handleAnalyze(url, res)
+    await handleAnalyze(url, res, me)
     return
   }
 
   if (p === '/api/analyze/stream') {
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    await handleAnalyzeStream(url, req, res)
+    await handleAnalyzeStream(url, req, res, me)
     return
   }
 
@@ -1715,6 +2789,7 @@ async function route(
     try {
       const [list, stats] = await Promise.all([
         listAnalyses({
+          userId: me.id,
           symbol: url.searchParams.get('symbol') ?? undefined,
           grade: url.searchParams.get('grade') ?? undefined,
           verdict: url.searchParams.get('verdict') ?? undefined,
@@ -1723,7 +2798,7 @@ async function route(
           limit: Number(url.searchParams.get('limit') ?? 30),
           offset: Number(url.searchParams.get('offset') ?? 0)
         }),
-        analysisStats(Number(url.searchParams.get('days') ?? 365))
+        analysisStats(Number(url.searchParams.get('days') ?? 365), me.id)
       ])
       sendJson(res, 200, {...list, stats, rate: usdToCny(1)})
     } catch (e) {
@@ -1738,7 +2813,7 @@ async function route(
     const id = Number(m[1])
 
     if (method === 'DELETE') {
-      const ok = await deleteAnalysis(id)
+      const ok = await deleteAnalysis(id, me.id)
       return sendJson(
         res,
         ok ? 200 : 404,
@@ -1747,26 +2822,26 @@ async function route(
     }
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    const row = await getAnalysis(id).catch(() => null)
+    const row = await getAnalysis(id, me.id).catch(() => null)
     if (!row) return sendJson(res, 404, {error: '记录不存在'})
     return sendJson(res, 200, {analysis: row})
   }
 
   /* ---- 知识库 ---- */
   if (p === '/api/knowledge') {
-    if (method === 'GET') return handleListCases(url, res)
-    if (method === 'POST') return handleCollectCase(req, res)
+    if (method === 'GET') return handleListCases(url, res, me)
+    if (method === 'POST') return handleCollectCase(req, res, me)
     return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
   if (p === '/api/knowledge/tags') {
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleListTags(res)
+    return handleListTags(res, me)
   }
   /* ---- 标签模板（我自己维护，AI 只能从这里挑） ---- */
   if (p === '/api/tag-templates') {
-    if (method === 'GET') return handleListTags(res)
-    if (method === 'POST') return handleAddTagTemplate(req, res)
+    if (method === 'GET') return handleListTags(res, me)
+    if (method === 'POST') return handleAddTagTemplate(req, res, me)
     return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
   if (p.startsWith('/api/tag-templates/')) {
@@ -1776,17 +2851,17 @@ async function route(
     if (mm[2] === '/move') {
       if (method !== 'POST')
         return sendJson(res, 405, {error: 'Method Not Allowed'})
-      return handleMoveTagTemplate(id, req, res)
+      return handleMoveTagTemplate(id, req, res, me)
     }
-    if (method === 'PUT') return handleUpdateTagTemplate(id, req, res)
-    if (method === 'DELETE') return handleDeleteTagTemplate(id, res)
+    if (method === 'PUT') return handleUpdateTagTemplate(id, req, res, me)
+    if (method === 'DELETE') return handleDeleteTagTemplate(id, res, me)
     return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
   // 带进度地收录一个案例（SSE）—— EventSource 只能发 GET，参数走 query
   if (p === '/api/knowledge/stream') {
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleCollectStream(url, req, res)
+    return handleCollectStream(url, req, res, me)
   }
   if (p.startsWith('/api/knowledge/')) {
     const m = p.match(/^\/api\/knowledge\/(\d+)(\/reedit)?$/)
@@ -1795,18 +2870,18 @@ async function route(
     if (m[2] === '/reedit') {
       if (method !== 'POST')
         return sendJson(res, 405, {error: 'Method Not Allowed'})
-      return handleReeditCase(id, req, res)
+      return handleReeditCase(id, req, res, me)
     }
     if (method === 'DELETE') {
-      const ok = await deleteCase(id)
+      const ok = await deleteCase(id, me.id)
       return sendJson(
         res,
         ok ? 200 : 404,
         ok ? {ok: true} : {error: '案例不存在'}
       )
     }
-    if (method === 'PATCH') return handleUpdateCase(id, req, res)
-    return handleGetCase(id, res)
+    if (method === 'PATCH') return handleUpdateCase(id, req, res, me)
+    return handleGetCase(id, res, me)
   }
 
   // 「下载」页的数据：磁盘上的 APK + `downloads/releases.json` 里的介绍
@@ -1822,6 +2897,18 @@ const server = http.createServer((req, res) => {
     req.url ?? '/',
     `http://${req.headers.host ?? 'localhost'}`
   )
+  applyCors(req, res)
+  /*
+   * CORS 预检：浏览器跨域发 `POST + Authorization`（或 JSON body）前会先问一发
+   * OPTIONS。以前没有这个分支，OPTIONS 会掉进业务路由 —— 对
+   * `/api/analyze`、`/api/auth/login` 这种「方法不对就 405」的接口，预检直接失败
+   * （手机 App 首当其冲）。预检不带业务逻辑，回 204 + 上面的 CORS 头即可。
+   */
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204)
+    res.end()
+    return
+  }
   route(req, res, url).catch(e => fail(res, url.pathname, e))
 })
 
@@ -1842,8 +2929,47 @@ async function resolveFrontend(): Promise<'vite' | 'dist'> {
 }
 
 async function main(): Promise<void> {
+  /** 管理员账号的情况（下面 listen 日志里要提示） */
+  let adminNote = ''
   try {
     await ensureSchema()
+    /*
+     * 检查有没有管理员账号（2026-10-04 起不开放注册，账号由管理员创建）。
+     * ⚠️ **不建号、不内置密码** —— 管理员账号（用户名 + 密码哈希）
+     * 随**本地数据库同步**一起上来。
+     */
+    const a = await ensureAdmin()
+    if (a.promoted) {
+      adminNote = `「${ADMIN_USERNAME}」已提升为管理员`
+    } else if (!a.hasAdmin) {
+      adminNote =
+        '⚠️ 还没有管理员账号 —— 把本地数据库同步上来（代码不再内置默认密码）'
+    }
+    /*
+     * 把 `.env` 里那份大模型配置搬进管理员账号（只搬一次，搬完 .env 就能删了）。
+     * 用户 2026-10-04：「去掉 apikey，原有的配置移到管理员的账户」。
+     */
+    if (await seedAdminLlmFromEnv()) {
+      adminNote +=
+        (adminNote ? '；' : '') + '已把 .env 里的大模型配置搬到管理员账号'
+    }
+    /*
+     * 老的单条 `user_llm` → 多把密钥里的「默认」那把
+     * （只搬一次，搬完把老表清空，免得用户删光密钥后被老数据复活）。
+     */
+    const migrated = await migrateLegacyLlm()
+    if (migrated) {
+      console.log(`  密钥    已把 ${migrated} 个账号的老配置搬成「默认」密钥`)
+    }
+    /*
+     * 多密钥之前的用量流水没有 llm_key_id（那列是后加的）→
+     * 密钥卡上写「调用 0」，下面用量统计却写「206 次」看着像算错了。
+     * 把「只有一把密钥」的账号的老账认到那把上（判定见函数注释）。
+     */
+    const claimed = await backfillUsageKeys()
+    if (claimed) {
+      console.log(`  用量    已把 ${claimed} 条老流水认到那把唯一的密钥上`)
+    }
   } catch (e) {
     console.error('\n⚠️  数据库不可用 —— 先去启动它，否则网页用不了。\n')
     console.error(dbHelpMessage(e))
@@ -1865,6 +2991,97 @@ async function main(): Promise<void> {
   kickContracts()
   setInterval(kickContracts, CONTRACTS_MAX_AGE_MS).unref()
 
+  /*
+   * 历史流水只留最近 N 天（默认 90 = 3 个月）。
+   * 用户 2026-10-04：「历史统计数据保存 3 个月的」。
+   *
+   * ⚠️ 只删 `analyses` / `llm_usage` 两张**流水表** ——
+   *    `knowledge`（自己一条条攒的经验案例）和提示词**绝不碰**。
+   *    想全留着：`.env` 里写 `KEEP_DAYS=0`。
+   *
+   * 跟币种表一个套路：不 await（别拖住启动），失败只告警。
+   */
+  const pruneOld = () => {
+    const days = loadConfig().keepDays
+    void pruneOldData(days)
+      .then(r => {
+        if (r.analyses || r.usage) {
+          console.log(
+            `  清理流水  保留 ${r.keepDays} 天：删掉分析 ${r.analyses} 条、用量 ${r.usage} 条`
+          )
+        }
+      })
+      .catch(e => console.warn(`  清理流水  ⚠️  ${(e as Error).message}`))
+  }
+  pruneOld()
+  // 一天一次就够（别用 CONTRACTS_MAX_AGE_MS，那是币种表的刷新周期）
+  setInterval(pruneOld, 24 * 60 * 60 * 1000).unref()
+
+  /*
+   * 服务器监测的采样：每 5 秒一次，进程内滚动保留 2 小时。
+   * 这样前端切「15 分钟 / 1 小时」时**立刻**就有历史曲线，不用自己攒。
+   */
+  startSampling()
+
+  /*
+   * 清掉过期的登录会话（启动一次 + 每天一次就够）。
+   * 用户系统 2026-10-04 加的。
+   */
+  const kickSessions = () => {
+    void cleanupSessions()
+      .then(n => {
+        if (n) console.log(`  会话    清掉 ${n} 条过期登录`)
+      })
+      .catch(() => undefined)
+  }
+  kickSessions()
+  setInterval(kickSessions, 24 * 60 * 60 * 1000).unref()
+
+  /*
+   * 交易所预热：把 `getExchange()` 里那次 `loadMarkets()` 在启动时就打掉。
+   *
+   * ⚠️ 解决的就是「**第一发 2.7s**」：实测同一个新进程里
+   *    第一发 1940ms（拋下 loadMarkets）· 第二发 333ms（交易所已热），
+   *    差值 ~1.6s 就是它（上游下载 exchangeInfo 实测 485ms + ccxt 解析 528 个合约）。
+   *    每个进程只付一次，但**每次部署 / 重启都由第一个用户付**。
+   *
+   * 不 await（联网慢不拖启动）；失败只告警 —— 真正取数时 `getExchange` 会再试。
+   */
+  const kickExchange = () => {
+    const config = loadConfig()
+    void warmExchange({
+      exchangeId: config.exchange,
+      marketType: config.marketType,
+      apiBase: config.apiBase
+    })
+      .then(() => {
+        console.log('  交易所  实例已预热（loadMarkets 完成）')
+        /*
+         * 交易所热了之后，再把常用几个币的 K 线先取好。
+         * 顺序不能反 —— 现在 `getExchange` 不用再等 `loadMarkets`。
+         */
+        void warmCandlesCache()
+          .then(async r => {
+            console.log(
+              `  K 线    常点币已预热 ${r.ok}/${r.total}（${WARM_TIMEFRAMES.join(
+                '/'
+              )}，点币种跳图不等交易所）`
+            )
+            const t = await warmTickerCache(r.bases)
+            console.log(
+              `  行情条  已预热 ${t.ok}/${t.total}（点币种顶部行情不等交易所）`
+            )
+          })
+          .catch(() => {
+            /* 内部已经逐个 try 过了，这里只是兜底 */
+          })
+      })
+      .catch(e =>
+        console.warn(`  交易所  ⚠️ 预热失败：${(e as Error).message}`)
+      )
+  }
+  kickExchange()
+
   server.listen(PORT, () => {
     console.log('')
     console.log('  ✅ 开单分析 Web 界面已启动')
@@ -1880,6 +3097,7 @@ async function main(): Promise<void> {
     console.log(
       `  提示词  ${rules.sources.join('、') || '（数据库里没有启用的文档）'}`
     )
+    if (adminNote) console.log(`  账号    ${adminNote}`)
     for (const w of rules.warnings) console.log(`  ⚠️  ${w}`)
     console.log('')
     console.log('  按 Ctrl+C 停止。')

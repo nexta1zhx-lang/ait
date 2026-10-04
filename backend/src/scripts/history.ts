@@ -13,6 +13,7 @@
  * 所以这里不再有 计划 / 止损止盈 / 仓位 / 护栏 / 清单 / 结算与 R 倍数。
  */
 import {analysisStats, getAnalysis, listAnalyses} from '../db/analyses'
+import {defaultUserId} from '../db/users'
 import {dbHelpMessage, ensureSchema} from '../db/client'
 import {formatCny as cny, formatUsd as usd} from '../llm/pricing'
 
@@ -79,6 +80,7 @@ async function showList(o: {
   offset: number
 }) {
   const {rows, total} = await listAnalyses({
+    userId: await defaultUserId().catch(() => null),
     grade: o.grade,
     symbol: o.symbol,
     actionableOnly: o.go,
@@ -123,7 +125,7 @@ async function showList(o: {
 }
 
 async function showDetail(id: number) {
-  const a = await getAnalysis(id)
+  const a = await getAnalysis(id, await defaultUserId().catch(() => null))
   if (!a) {
     console.error(`❌ 没有 id=${id} 的记录`)
     process.exitCode = 1
@@ -163,7 +165,7 @@ async function showDetail(id: number) {
 }
 
 async function showStats(days: number) {
-  const s = await analysisStats(days)
+  const s = await analysisStats(days, await defaultUserId().catch(() => null))
 
   console.log('')
   console.log(`=== 标签分布（最近 ${days} 天）===`)

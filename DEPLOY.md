@@ -97,8 +97,9 @@ sudo bash deploy.sh
 
 1. 内存 < 1.9G 就加 2GB swap（这台机器 909MB，**必须加**，否则 Postgres / Node 容易被 OOM 杀）
 2. 没装 Docker 就装
-3. `.env` 不存在就从 `.env.example` 生成；缺 `LLM_API_KEY` 就**交互式问你**（不回显）；
+3. `.env` 不存在就从 `.env.example` 生成；
    `PGPASSWORD` 还是默认值就**换成随机密码**
+   （大模型 Key 不再放进 `.env` —— 首次启动会自动把旧 `.env` 里的那份搬到管理员账号）
 4. 用官方镜像**校验 `Caddyfile` 语法**（语法错的话 https 打不开，日志要翻半天才看出来）
 5. `up -d --build` 起三个容器
 6. 自检 `http://127.0.0.1:8787/api/health` —— **HTTP 状态一直是 200，要看里面的 `ok` 字段**
@@ -106,14 +107,21 @@ sudo bash deploy.sh
 
 `.env` 里要关心的几项：
 
-| 变量            | 说明                                                     |
-| --------------- | -------------------------------------------------------- |
-| `LLM_API_KEY`   | 必填，DeepSeek 的 Key                                    |
-| `PGPASSWORD`    | 别用默认的 `ca_local_dev`，`.env` 与 db 容器共用同一个值 |
-| `LLM_MODEL`     | `deepseek-flash`（默认，便宜）或 `deepseek-v4-pro`       |
-| `LLM_REASONING` | 保持 `none` —— 关掉隐藏思维链，快 5 倍、省 1/3 钱        |
-| `USD_CNY`       | 展示用汇率                                               |
-| `API_BASE`      | **留空**。只有交易所默认域名不可达时才覆盖               |
+| 变量         | 说明                                                     |
+| ------------ | -------------------------------------------------------- |
+| `PGPASSWORD` | 别用默认的 `ca_local_dev`，`.env` 与 db 容器共用同一个值 |
+| `USD_CNY`    | 展示用汇率                                               |
+| `API_BASE`   | **留空**。只有交易所默认域名不可达时才覆盖               |
+
+> 🔑 **大模型配置不在 `.env` 里**（2026-10-04 起）：Key / 接口地址 / 模型 / 思考力度
+> 按用户存数据库，在网页「我的 → 模型配置」里填。
+> 首次启动会把服务器旧 `.env` 里的 `LLM_API_KEY` 那几行**自动搬到管理员账号**，
+> 之后那几行删掉也不影响。
+>
+> 👤 **管理员账号**：代码里**不再内置默认密码**（原先的 `admin` / `123456`
+> 已删除 —— 仓库是公开的，写在源码里等于把后台钥匙挂在门上）。
+> 管理员账号（用户名 + 密码哈希）随**本地数据库同步**一起上来，
+> 见下面「迁移数据」—— 部署流程里不需要任何「初始密码」。
 
 不用写 `PGHOST` / `PGPORT` 指向线上 —— compose 里已经用 `environment` 覆盖成 `db`。
 
@@ -179,6 +187,56 @@ curl -s localhost:8787/api/health      # rules.sources 应有 1 份以上
 - 最少迁 `tag_templates`（标签模板，不然提示词里的标签池是空的）。
   案例库 `knowledge`（顺带 `knowledge_tags`）、历史 `analyses` / `llm_usage` 可选。
 - `ai_docs` / `ai_doc_versions` 已经没用了，迁不迁都行。
+
+> ☝️ 上面这条 `--data-only` 是给**全新空库首次导入**用的。库里已经有数据时重跑，
+> 会在主键上撞重复（`duplicate key value violates unique constraint`）——
+> 那种情况看下面「4b」。
+
+### 4b. 重新同步数据库（本地 → 服务器，**整份覆盖**）
+
+「本地那份才是准的，整份推上去」的走法。**管理员账号就在这份 dump 的 `users` 表里**，
+所以代码里不需要任何初始密码 —— 登录用的就是你本机那个密码。
+
+> ⚠️ 这是**覆盖式**：服务器上现有数据（线上跑出来的预测历史、知识库、用量）
+> 会被本地这份**完全替换**，不可撤销。第 ③ 步开头会先把服务器现值备份一份，能回滚。
+
+```bash
+# ① 本机：导出
+cd /Users/nexta1/Documents/预测
+docker exec ca-postgres pg_dump -U ca -d crypto_advisor -Fc > /tmp/ca.dump
+ls -lh /tmp/ca.dump
+
+# ② 传上去
+scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.dump \
+  ubuntu@57.181.38.200:/tmp/
+
+# ③ 服务器：先备份「现在这份」，再整份替换
+ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200
+cd /opt/crypto-advisor
+sudo docker compose -f docker-compose.prod.yml stop app
+sudo docker exec ca-postgres pg_dump -U ca -d crypto_advisor -Fc \
+  > ~/server-db-before-$(date +%F-%H%M).dump        # ← 回滚用，先留着
+sudo docker compose -f docker-compose.prod.yml exec -T db \
+  psql -U ca -d postgres -c 'DROP DATABASE IF EXISTS crypto_advisor'
+sudo docker compose -f docker-compose.prod.yml exec -T db \
+  psql -U ca -d postgres -c 'CREATE DATABASE crypto_advisor OWNER ca'
+sudo docker cp /tmp/ca.dump ca-postgres:/tmp/ca.dump
+sudo docker compose -f docker-compose.prod.yml exec -T db \
+  pg_restore -U ca -d crypto_advisor --no-owner --disable-triggers /tmp/ca.dump
+sudo docker compose -f docker-compose.prod.yml start app
+curl -s localhost:8787/api/health
+```
+
+关键点：
+
+- **必须 `DROP/CREATE DATABASE`，不能只 `--data-only`**：库里已有数据时 `--data-only`
+  会撞主键重复。整份覆盖只能重建库。
+- 全量 `pg_restore`（**不带** `--data-only`）连表结构一起还原；
+  启动时 `ensureSchema()` 是幂等的，会把 dump 之后新增的表/列补上。
+- **回滚**：
+  `sudo docker exec -i ca-postgres pg_restore -U ca -d crypto_advisor --clean --if-exists --no-owner ~/server-db-before-*.dump`
+- ⚠️ 本机 SSH 被代理劫持时（`dig bitcoooin.cn` 回 **`198.18.x.x`**）第 ②③ 步会连不上，
+  先在代理里**关掉 TUN**（或给 `57.181.38.200` 加直连规则）。
 
 ### 5. 验收
 

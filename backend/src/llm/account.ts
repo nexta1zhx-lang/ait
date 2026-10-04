@@ -79,7 +79,7 @@ export async function fetchBalance(
   })
 
   if (!config.llm.apiKey) {
-    balanceCache = {at: now, value: fail('没有配置 LLM_API_KEY')}
+    balanceCache = {at: now, value: fail('没有配置 API Key')}
     return balanceCache.value
   }
 

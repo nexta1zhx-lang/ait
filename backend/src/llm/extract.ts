@@ -193,7 +193,9 @@ export async function extractCase(
   raw: string
 }> {
   if (!config.llm.apiKey)
-    throw new Error('未配置 LLM_API_KEY：提炼案例需要调用大模型。')
+    throw new Error(
+      '还没配置 API Key —— 去「我的 → 模型配置」填一个 DeepSeek 的 Key 再提炼。'
+    )
 
   const client = new OpenAI({
     apiKey: config.llm.apiKey,

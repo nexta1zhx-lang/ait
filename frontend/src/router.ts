@@ -2,8 +2,6 @@ import {createRouter, createWebHashHistory, createWebHistory} from 'vue-router'
 import {isNativeShell} from './platform'
 import AnalyzeView from './views/AnalyzeView.vue'
 import ContractsView from './views/ContractsView.vue'
-import HistoryView from './views/HistoryView.vue'
-import UsageView from './views/UsageView.vue'
 import DownloadView from './views/DownloadView.vue'
 
 export const routes = [
@@ -24,23 +22,42 @@ export const routes = [
     component: AnalyzeView,
     meta: {title: '开单分析', nav: '开单分析'}
   },
+  /*
+   * 「我的」= 历史 + 用量 + 服务器监测（用户 2026-10-04：历史 tab 改成我的，
+   * 用量放进去合并，再加一页服务器监测）。子页用 `?p=history|usage|status`。
+   *
+   * ⚠️ 子页用 `p` 而不是 `tab` —— `HistoryView` 自己占着 `?tab=kb`。
+   */
   {
-    path: '/history',
-    name: 'history',
-    component: HistoryView,
-    meta: {title: '历史', nav: '历史'}
+    path: '/me',
+    name: 'me',
+    /*
+     * 懒加载：这一页带着 echarts（~580KB），不该让首屏替它买单。
+     * 默认落地页是「合约」，不进来就不会载。
+     */
+    component: () => import('./views/MeView.vue'),
+    meta: {title: '我的', nav: '我的'}
   },
   /*
-   * 「历史知识库」2026-10-04 已合并进「历史」页（用户：「预测历史和历史知识库
-   * 合并，改叫历史」）。老书签走这里 —— 带上 `tab=kb` 直接落到知识库那半。
+   * 老书签 / 老链接（含 `/history?id=106` 这种详情链接）→ 「我的」对应那段，
+   * query 原样带过去（`id` 会被 HistoryView 读到并直接弹详情）。
    */
-  {path: '/knowledge', redirect: {path: '/history', query: {tab: 'kb'}}},
+  {
+    path: '/history',
+    redirect: to => ({
+      path: '/me',
+      // ⚠️ 老链接有两种：`/history?id=106`（详情）和 `/history?tab=kb`（知识库）
+      query: {...to.query, p: to.query.tab === 'kb' ? 'kb' : 'records'}
+    })
+  },
   {
     path: '/usage',
-    name: 'usage',
-    component: UsageView,
-    meta: {title: '用量与花费', nav: '用量'}
-  },
+    redirect: to => ({path: '/me', query: {...to.query, p: 'usage'}})
+  } /*
+   * 「历史知识库」2026-10-04 已并进「历史」那一半，老链接带上 `tab=kb`
+   * 直接落到知识库那半（`p` 用来定位到「我的 → 历史」）。
+   */,
+  {path: '/knowledge', redirect: {path: '/me', query: {p: 'kb'}}},
   {
     path: '/download',
     name: 'download',

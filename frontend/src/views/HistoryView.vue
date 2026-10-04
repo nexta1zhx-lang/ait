@@ -41,19 +41,18 @@ import {contracts} from '../store'
 const route = useRoute()
 const router = useRouter()
 
-/* ---------------- 页内分段：预测历史 / 知识库 ---------------- */
+/* ---------------- 显示哪一半 ---------------- */
 
 /**
- * 2026-10-04 用户要求「预测历史和历史知识库合并，改叫历史」：
- * 两项做成页内分段，路由只留 `/history`（老链接 `/knowledge` 会重定向到
- * `/history?tab=kb` 直接落到知识库那半）。
+ * `records` = 预测历史，`kb` = 知识库。
+ *
+ * 用户 2026-10-04：「历史去掉，预测历史和知识库直接一级」——
+ * 这里**不再自己分段**（原来那个 `.tab-row.page-tabs` 已删），
+ * 由父组件 `MeView` 的一级 tab 通过 `?p=` 决定。
+ *
+ * 内部仍用 `v-show` 而不是 `v-if`：来回切的时候筛选条件 / 翻页 / 滚动位置都留着。
  */
-const PAGES = [
-  {value: 'records' as const, label: '预测历史'},
-  {value: 'kb' as const, label: '知识库'}
-]
-
-const pane = ref<'records' | 'kb'>(route.query.tab === 'kb' ? 'kb' : 'records')
+const {pane} = defineProps<{pane: 'records' | 'kb'}>()
 
 /** 「知识库」那半：标签模板改完要让它重新拉一遍标签 */
 const panel = ref<InstanceType<typeof KnowledgePanel> | null>(null)
@@ -323,14 +322,6 @@ onMounted(() => {
 
 <template>
   <div class="hist">
-    <!--
-      页内分段：预测历史 / 知识库（用户 2026-10-04：「两个合一个，改叫历史」）。
-      放在最上面并且**不跟筛选栏同流** —— 筛选只作用于「预测历史」那半。
-    -->
-    <div class="tab-row page-tabs">
-      <SegTabs v-model="pane" :options="PAGES" />
-    </div>
-
     <!--
       「预测历史」那半。外壳 `.pane-records` 是 `display: contents`（见 style.css）——
       它自己不出盒子，里面的筛选栏 / `.hist-split` 仍然是 `.hist` 的直接子项，

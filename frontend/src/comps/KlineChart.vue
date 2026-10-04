@@ -2,7 +2,9 @@
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import * as LWC from 'lightweight-charts'
 import {fetchCandles, klineStream, type Candle, type LevelSR} from '../api'
-import {CHART_BARS} from '../analyze'
+import {CHART_BARS, KLINE_BARS} from '../analyze'
+import {loadCandles} from '../candles'
+import {emptyLevels, nearestLevels, type Levels} from '../levels'
 import {setLivePrice} from '../ticker'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
@@ -209,8 +211,12 @@ function historyBars(): number {
  */
 function barsToLoad(): number {
   if (centered.value) return (CENTER_BARS + CENTER_MARGIN) * 2 + 1
-  // 至少够铺满默认那一屏（再多给一点，缩放时不用立刻又去拉）
-  return Math.max(DEFAULT_BARS, CHART_BARS + 50)
+  /*
+   * 至少够铺满默认那一屏（再多给一点，缩放时不用立刻又去拉）。
+   * ⚠️ 必须用 `KLINE_BARS`：`candles.ts` 的预取按**同一个数**拼 key，
+   *    这里换个算法，提前取好的那份就对不上了（服务端缓存 key 里也带 limit）。
+   */
+  return KLINE_BARS
 }
 
 const pickerOpen = ref(false)
@@ -246,12 +252,21 @@ const VISIBLE = ref<Record<string, boolean>>({
   sup: false
 })
 
-const LEGEND = [
-  {key: 'volume', label: '成交量', dot: 'vol'},
-  {key: 'ema42', label: 'EMA42', dot: 'ema'},
-  {key: 'res', label: '压力(4H)', dot: 'res'},
-  {key: 'sup', label: '支撑(4H)', dot: 'sup'}
-]
+const LEGEND = computed(() => [
+  {
+    key: 'volume',
+    label: '成交量',
+    dot: 'vol',
+    tip: '成交量 ｜ 点一下显示 / 隐藏'
+  },
+  {key: 'ema42', label: 'EMA42', dot: 'ema', tip: 'EMA42 ｜ 点一下显示 / 隐藏'},
+  /*
+   * 压力 / 支撑**不再是固定的「4 小时」** —— 这两个数按当前可见窗口算（见 `levels.ts`），
+   * 所以标签里不能写死周期了；具体是多少、来自哪一根，写在提示里。
+   */
+  {key: 'res', label: '压力', dot: 'res', tip: levelTip('res')},
+  {key: 'sup', label: '支撑', dot: 'sup', tip: levelTip('sup')}
+])
 
 const chartEl = ref<HTMLElement | null>(null)
 const levelHost = ref<HTMLElement | null>(null)
@@ -276,10 +291,20 @@ let candles: Candle[] = []
 let candleIndex = new Map<number, number>()
 let volMa: number[] = []
 let emaValues: number[] = []
-let overlay: {sr: LevelSR | null; refPrice: number} = {
-  sr: null,
+let overlay: {refPrice: number} = {
   refPrice: NaN
 }
+
+/**
+ * 图上这两条线现在的价位。
+ *
+ * 2026-10-04 起**不再来自后端**（以前是固定的「最近 4 根 1h」最高/最低，
+ * 看 5 分图时跟屏幕上的 K 线没关系），改成按**当前可见窗口**现算 ——
+ * 口径在 `../levels`，缩放 / 平移之后会重算。
+ */
+const levels = ref<Levels>(emptyLevels())
+/** 数据换了就 ++ —— 让「图例提示」那个 computed 跟着重算（`candles` 不是响应式的） */
+const dataSeq = ref(0)
 
 /** 正在往前补历史（防重入） */
 let loadingOlder = false
@@ -477,6 +502,11 @@ function ensureChart(): boolean {
     positionLabels()
     syncWindowRefs()
     /*
+     * 压力 / 支撑也是「按可见这段算」的 → 拖动、缩放之后跟着重算。
+     * 回调在拖拽时会连着来，所以走 rAF 合并成一帧一次。
+     */
+    scheduleLevels()
+    /*
      * 记下「当前这个币正在看的那一段」——
      * 真正落盘不在这里（拖一下一下写 localStorage 太磨人），
      * 而是在换币 / 切走 / 关页时由 `saveNow()` 存进对应币种。
@@ -535,11 +565,66 @@ function levelList(): {p: number; color: string; title: string}[] {
     list.push({p: n, color, title})
   }
 
-  // 最近 4 小时的压力 / 支撑（没有就不画）
-  push(overlay.sr?.resistance, '#ffa726', '压力', v.res)
-  push(overlay.sr?.support, '#26c6da', '支撑', v.sup)
+  // 图上的压力 / 支撑：**按当前可见窗口现算**的摆动高低点（见 `../levels`）
+  push(levels.value.resistance, '#ffa726', '压力', v.res)
+  push(levels.value.support, '#26c6da', '支撑', v.sup)
 
   return list
+}
+
+/** 图例提示：把「这个价位是多少、来自哪一根、怎么来的」写出来 */
+function levelTip(kind: 'res' | 'sup'): string {
+  void dataSeq.value // 数据换了要重算
+  const lv = levels.value
+  const price = kind === 'res' ? lv.resistance : lv.support
+  const i = kind === 'res' ? lv.resIndex : lv.supIndex
+  const src = kind === 'res' ? lv.resSource : lv.supSource
+  const what = kind === 'res' ? '压力' : '支撑'
+  const side = kind === 'res' ? '高' : '低'
+  const tail = ' ｜ 点一下显示 / 隐藏'
+  if (price === null)
+    return `${what}：这一段里${side === '高' ? '上方' : '下方'}没有可用的位置${tail}`
+  const bar = candles[i]
+  const from = bar ? `${bjTime(bar.timestamp)} ` : ''
+  // 是拐点还是「没拐点可用时的退路」，说清楚 —— 不装成拐点
+  const how =
+    src === 'swing' ? `${from}那根的摆动${side}点` : `这一段图上的最${side}点`
+  return `${what} ${fmt(price)} · ${how}（按图上可见这段自动算）${tail}`
+}
+
+/**
+ * 重算图上的压力 / 支撑，并按新值重画那两条价格线。
+ *
+ * 口径（`../levels`）：**只看当前可见窗口** → 找摆动高低点 →
+ * 现价上方最近的一个当压力、下方最近的一个当支撑；找不到就不画。
+ */
+function computeLevels(): void {
+  if (!refs) return
+  const ts = refs.chart.timeScale()
+  const r = ts.width() > 0 ? ts.getVisibleLogicalRange() : null
+  /*
+   * 拿不到可信的可见区间（图还没铺过、或窄屏切到别的 tab 时宽度为 0）
+   * 就退回「图上加载的全部」—— 总比抱着上一次的旧线不放要好。
+   */
+  levels.value = candles.length
+    ? nearestLevels(candles, r ? r.from : 0, r ? r.to : candles.length - 1)
+    : emptyLevels()
+  // 报给外层：结论区那把「上沿 / 现价 / 下沿」的尺子要用它
+  emit('levels', {
+    resistance: levels.value.resistance,
+    support: levels.value.support
+  })
+  renderOverlays()
+}
+
+/** 缩放 / 平移时一帧只算一次（回调会连着来） */
+let levelsRaf = 0
+function scheduleLevels(): void {
+  if (levelsRaf) return
+  levelsRaf = requestAnimationFrame(() => {
+    levelsRaf = 0
+    computeLevels()
+  })
 }
 
 /** 根据显隐状态重绘均线、成交量、价格线与右侧百分比 */
@@ -840,13 +925,11 @@ function reportShown(): void {
  * `keepView = true` 时（往前补历史）不重设视图，而是把时间轴整体右移
  * 「新塞进来的根数」，这样用户看的那一段不会跳。
  */
-function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
+function draw(data: Candle[], keepView = false) {
   if (!ensureChart() || !refs) return
   const view = keepView ? refs.chart.timeScale().getVisibleLogicalRange() : null
   candles = data
-  overlay.sr = sr
-  // 报给外层：结论区那把「上沿 / 现价 / 下沿」的尺子要用它
-  emit('levels', sr)
+  dataSeq.value++
 
   if (!data.length) {
     refs.candle.setData([])
@@ -856,6 +939,9 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
     emaValues = []
     candleIndex = new Map()
     overlay.refPrice = NaN
+    // 没数据就别留着上一个币那两条线
+    levels.value = emptyLevels()
+    emit('levels', null)
     renderOverlays()
     drawSelection()
     return
@@ -914,7 +1000,11 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
   )
 
   overlay.refPrice = closes[closes.length - 1]
-  renderOverlays()
+  /*
+   * 压力 / 支撑：拿新数据 + 此刻的可见区间先算一遍（换币后那两条线得马上是新币的，
+   * 不能停在上一个币的价位上）。视图真正铺好之后，下面 `scheduleLevels()` 还会再算一次。
+   */
+  computeLevels()
   showInfoAt(candles.length - 1)
 
   // 先把「用户自己动过」的标志清掉：不然 fitContent 把左边缘带到 0 时
@@ -965,6 +1055,12 @@ function draw(data: Candle[], sr: LevelSR | null, keepView = false) {
   drawSelection()
   // 顺手把「现在看多少根」报给配置面板（区间没变也要报，否则切币后数字会停在旧的那个币）
   reportShown()
+  /*
+   * 再算一次压力 / 支撑：视图是在上面那几支里才真正铺好的
+   *（`applyView()` / 居中那支都是**隔一帧**才设可见区间）。
+   * 走 rAF → 排在它们后面执行，拿到的就是铺好之后的区间。
+   */
+  scheduleLevels()
   emit('loaded', data)
 }
 
@@ -978,6 +1074,7 @@ async function load() {
    * 蜡烛全变）就是硬闪一下 —— 用户说的「切换币种 k 线会有闪动」。
    */
   const startedAt = performance.now()
+  let cached = false
   reloading = true
   fading.value = true
   try {
@@ -991,7 +1088,13 @@ async function load() {
     } else if (testMode.value) {
       range = {from: untilMs.value - tfMs() * DEFAULT_BARS, to: untilMs.value}
     }
-    const d = await fetchCandles(symbol, props.timeframe, barsToLoad(), range)
+    /*
+     * 走 `candles.ts`：合约列表里划过/按过的币，这段 K 线**已经提前取好了**
+     * （`cached: true`）—— 那就不必等网络，直接画。
+     */
+    const r = await loadCandles(symbol, props.timeframe, barsToLoad(), range)
+    const d = r.payload
+    cached = r.cached
     // 半路又切了一次（连点几个币）→ 这次的结果作废，让最后那次画
     if (seq !== loadSeq) return
     // 测试模式：接口只保证 ts ≤ to，那根**还没收盘**的得自己剔掉
@@ -999,14 +1102,22 @@ async function load() {
       testMode.value && lastClosedMs.value > 0
         ? (d.candles ?? []).filter(c => c.timestamp <= lastClosedMs.value)
         : (d.candles ?? [])
-    draw(bars, d.sr ?? null)
+    draw(bars)
+    /*
+     * 数据本来就在手上 → 立刻亮回来，连那 140ms 的淡入都不等。
+     * 「点币种 → 跳过去 K 线已经画好了」靠的就是这一句：淡出和画图之间
+     * 没有任何等待，浏览器通常一帧都没来得及把暗着的那一版画出来。
+     */
+    if (cached) fading.value = false
   } catch (e) {
     if (seq === loadSeq) emit('error', (e as Error).message)
   } finally {
     if (seq === loadSeq) {
       reloading = false
       // 先把新数据画进 canvas，再等淡出够时长（太快的请求也能看出「换过了」）
-      const wait = Math.max(0, FADE_MIN_MS - (performance.now() - startedAt))
+      const wait = cached
+        ? 0
+        : Math.max(0, FADE_MIN_MS - (performance.now() - startedAt))
       setTimeout(() => {
         if (seq === loadSeq) fading.value = false
       }, wait)
@@ -1043,7 +1154,7 @@ async function loadOlder(): Promise<void> {
     if (older.length < group / 2) reachedStart = true
     prependCount = older.length
     // keepView：别 fitContent，把视图钉在用户正看的那一段
-    draw([...older, ...candles], overlay.sr, true)
+    draw([...older, ...candles], true)
   } catch {
     /* 网络/交易所抽风就先算了，下次拖动再试 */
   } finally {
@@ -1821,7 +1932,7 @@ onBeforeUnmount(() => {
           :key="l.key"
           :data-toggle="l.key"
           :class="{off: !VISIBLE[l.key]}"
-          :title="`点击显示 / 隐藏`"
+          :title="l.tip"
           @click="toggleLegend(l.key)"
         >
           <i class="dot" :class="l.dot" />{{ l.label }}

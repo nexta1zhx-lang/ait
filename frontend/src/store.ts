@@ -3,7 +3,6 @@ import {
   fetchAccount,
   fetchConfig,
   fetchContracts,
-  switchModel,
   type AccountResult,
   type AppConfig,
   type Contract
@@ -17,7 +16,6 @@ export const account = ref<AccountResult | null>(null)
 export const contracts = ref<Contract[]>([])
 export const configError = ref('')
 export const ready = ref(false)
-export const switchingModel = ref(false)
 
 let loading: Promise<void> | null = null
 
@@ -53,26 +51,17 @@ export async function refreshConfig(): Promise<void> {
   account.value = await fetchAccount().catch(() => account.value)
 }
 
-/** 切换模型：写回 .env，下一次判断就用新的 */
-export async function changeModel(model: string): Promise<string | null> {
-  if (!model || model === config.value?.model) return null
-  switchingModel.value = true
-  try {
-    const r = await switchModel(model)
-    if (config.value) config.value = {...config.value, model: r.model}
-    if (account.value) {
-      account.value = {
-        ...account.value,
-        model: r.model,
-        models: {...account.value.models, current: r.model}
-      }
-    }
-    return r.warning ?? null
-  } catch (e) {
-    return (e as Error).message
-  } finally {
-    switchingModel.value = false
-  }
+/**
+ * 退出登录时清掉上一份数据。
+ * 不清的话下一个登录的人会先看到上一个人的条数 / 花费（虽然马上会被刷掉）。
+ */
+export function resetStore(): void {
+  loading = null
+  config.value = null
+  account.value = null
+  contracts.value = []
+  configError.value = ''
+  ready.value = false
 }
 
 /** 启动时该提醒的事（没配 Key / 规则没读到 / 加载失败） */
@@ -83,7 +72,7 @@ export const notices = computed(() => {
   if (!c) return out
   if (!c.hasApiKey) {
     out.push(
-      '未检测到 LLM_API_KEY，默认走「模拟判断」。在 .env 填入 Key 后才是真实 AI 判断。'
+      '还没有配置大模型 API Key —— 去「我的 → 模型配置」填一个才能分析。'
     )
   }
   if (!c.rules?.sources?.length) {
@@ -91,22 +80,6 @@ export const notices = computed(() => {
   }
   return out
 })
-
-/** 可切换的模型列表（拿不到接口列表时用内置的） */
-export const modelOptions = computed(() => {
-  const list = account.value?.models.available ?? []
-  if (list.length) return list
-  const cur = config.value?.model
-  return cur
-    ? [{id: cur, priced: true, price: {inputHit: 0, inputMiss: 0, output: 0}}]
-    : []
-})
-
-/** 当前模型的单价（美元 / 1M token，高峰价） */
-export const currentPrice = computed(
-  () =>
-    modelOptions.value.find(m => m.id === config.value?.model)?.price ?? null
-)
 
 /* ---------------- 模型余额 ---------------- */
 

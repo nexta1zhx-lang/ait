@@ -1,6 +1,9 @@
 /**
  * 全部表结构（幂等 DDL）。
  *
+ *   users            用户（用户名 + scrypt 密码）
+ *   sessions         登录会话（token）
+ *   user_llm         每个用户自己的 DeepSeek 配置（空 = 用服务器 .env 那份）
  *   ai_docs          ⚠️ **已废弃（2026-10-04）**：原来放 AI 的提示词文档，
  *                    现在提示词写死在代码里（`llm/prompts.ts`），程序不再读写它。
  *                    表和数据都留着（没删），万一要退回数据库那套还能捞回来。
@@ -20,6 +23,65 @@
  * 每次分析读「启用的文档」拼成 system prompt，并按 hash 存进 rules_versions。
  */
 export const SCHEMA_SQL = `
+-- ---------------------------------------------------------------- 用户
+-- 用户名 + 密码（scrypt）。密码不存明文。
+-- 2026-10-04：**不开放注册**，账号一律由管理员在「我的 → 管理」里创建。
+-- 代码里**不再内置默认密码**（原先播种的 admin / 123456 已删除）；
+-- 管理员账号随**本地数据库同步**上来，启动时只检查、不建号（见 db/users.ts 的 ensureAdmin）。
+CREATE TABLE IF NOT EXISTS users (
+  id            BIGSERIAL   PRIMARY KEY,
+  username      TEXT        NOT NULL,
+  password_hash TEXT        NOT NULL,
+  is_admin      BOOLEAN     NOT NULL DEFAULT false,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 用户名不区分大小写地唯一
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_idx ON users (lower(username));
+-- 老库补列（幂等）
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false;
+
+-- 两步验证（TOTP，2026-10-04，只给管理员，见 util/totp.ts）。
+--   totp_secret   已启用的密钥（base32）
+--   totp_pending  扫了码但还没输码确认的密钥（确认后才搬到 totp_secret）
+--   totp_recovery 恢复码的 sha256 列表（**不存明文**）
+--   totp_last_step 最近一次用掉的时间步，防止同一个 6 位码被重放
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret   TEXT   NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_pending  TEXT   NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled  BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_recovery JSONB  NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT NOT NULL DEFAULT 0;
+
+-- 登录会话：前端存 token，请求带 Authorization: Bearer <token>
+-- （SSE 带不了请求头，所以也接受 ?token=，见 server.ts 的 currentUser）。
+CREATE TABLE IF NOT EXISTS sessions (
+  token      TEXT        PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
+CREATE INDEX IF NOT EXISTS sessions_exp_idx  ON sessions (expires_at);
+
+-- 「多端登录」要看有哪些设备在线、单独踢掉某一台（2026-10-04）。
+-- id 只是个**不敏感**的标识（给前端指哪一台用，不能拿来认证）；
+-- token 仍然是主键，认证只认它。
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS id BIGSERIAL;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE UNIQUE INDEX IF NOT EXISTS sessions_id_idx ON sessions (id);
+
+-- 每个用户自己的大模型配置（DeepSeek）。
+-- 空串 = 没设置 → 回落到服务器 .env 里那份。
+CREATE TABLE IF NOT EXISTS user_llm (
+  user_id          BIGINT      PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  api_key          TEXT        NOT NULL DEFAULT '',
+  base_url         TEXT        NOT NULL DEFAULT '',
+  model            TEXT        NOT NULL DEFAULT '',
+  reasoning_effort TEXT        NOT NULL DEFAULT '',
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ---------------------------------------------------------------- AI 文档
 CREATE TABLE IF NOT EXISTS ai_docs (
   id         BIGSERIAL   PRIMARY KEY,
@@ -239,14 +301,15 @@ CREATE INDEX IF NOT EXISTS knowledge_symbol_idx  ON knowledge (symbol);
 CREATE INDEX IF NOT EXISTS knowledge_label_idx   ON knowledge (label, grade);
 
 -- ---------------------------------------------------------- 标签模板
--- 案例标签只能从这份清单里挑；清单由我自己在网页上维护（空表时播种默认 10 个）
+-- 案例标签只能从这份清单里挑；清单由我自己在网页上维护。
+-- ⚠️ 2026-10-04 起**按用户隔离**：唯一索引是 (user_id, name)，见文件末尾。
 CREATE TABLE IF NOT EXISTS tag_templates (
   id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      REFERENCES users (id) ON DELETE CASCADE,
   name       TEXT        NOT NULL,
   sort       INTEGER     NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS tag_templates_name_idx ON tag_templates (name);
 
 -- ──────────────────────────────────────────────────────────── 新列（幂等）
 -- 这段行情是什么：up 拉升 / down 下跌 / range 横盘。
@@ -276,6 +339,55 @@ CREATE TABLE IF NOT EXISTS contract_store (
   contracts   JSONB       NOT NULL DEFAULT '[]'::jsonb,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ──────────────────────────────────────── 按用户隔离（2026-10-04，幂等）
+-- 四个「用户自己的数据」表都加 user_id：
+--   analyses（预测历史）/ knowledge（知识库）/ tag_templates（标签模板）/ llm_usage（用量）
+-- 老的、还没归属的行 user_id 是 NULL；**第一个注册的账号**会把它们认领走
+-- （见 db/users.ts 的 claimLegacyData）。
+ALTER TABLE analyses      ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
+ALTER TABLE knowledge     ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
+ALTER TABLE tag_templates ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
+ALTER TABLE llm_usage     ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
+
+CREATE INDEX IF NOT EXISTS analyses_user_idx  ON analyses (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS knowledge_user_idx ON knowledge (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS llm_usage_user_idx ON llm_usage (user_id, created_at DESC);
+
+-- 标签模板的唯一性从「全局」改成「每个用户一套」：
+-- 老库那个 name 全局唯一索引必须先拆掉，否则两个用户不能有同名标签。
+DROP INDEX IF EXISTS tag_templates_name_idx;
+CREATE UNIQUE INDEX IF NOT EXISTS tag_templates_user_name_idx
+  ON tag_templates (user_id, name);
+CREATE INDEX IF NOT EXISTS tag_templates_user_idx ON tag_templates (user_id, sort, id);
+
+-- ──────────────────────────────── 大模型密钥（多把，2026-10-04）
+-- 一个用户可以有**多把** Key（各自带名字 / 模型 / 接口地址），其中一把是
+-- 「默认」，分析就用默认那把。原来的单条 user_llm 已废弃（数据由
+-- db/llm-keys.ts 的 migrateLegacyLlm() 搬过来，搬完老表清空）。
+CREATE TABLE IF NOT EXISTS user_llm_keys (
+  id               BIGSERIAL   PRIMARY KEY,
+  user_id          BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- 自己起的名字（如「主力」「备用」「便宜那档」）
+  name             TEXT        NOT NULL DEFAULT '',
+  api_key          TEXT        NOT NULL DEFAULT '',
+  base_url         TEXT        NOT NULL DEFAULT '',
+  model            TEXT        NOT NULL DEFAULT '',
+  reasoning_effort TEXT        NOT NULL DEFAULT '',
+  is_default       BOOLEAN     NOT NULL DEFAULT false,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS user_llm_keys_user_idx ON user_llm_keys (user_id, id);
+-- 一个用户最多只能有一把默认（部分唯一索引）
+CREATE UNIQUE INDEX IF NOT EXISTS user_llm_keys_default_idx
+  ON user_llm_keys (user_id) WHERE is_default;
+
+-- 用量记到「哪把密钥」上 —— 统计要按 key 分开看
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS llm_key_id BIGINT
+  REFERENCES user_llm_keys (id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS llm_usage_key_idx
+  ON llm_usage (llm_key_id, created_at DESC);
 `
 
 /**

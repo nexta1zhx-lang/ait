@@ -9,6 +9,7 @@
  */
 import {checkDb, dbHelpMessage, ensureSchema} from '../db/client'
 import {collectCase} from '../knowledge-service'
+import {defaultUserId} from '../db/users'
 import {Timeframe} from '../types'
 
 function arg(name: string): string | undefined {
@@ -83,6 +84,7 @@ async function main(): Promise<void> {
   console.log('• 拉行情 + 算大周期压力支撑 ...')
 
   const r = await collectCase({
+    userId: await defaultUserId().catch(() => null),
     symbol,
     timeframe: tf,
     note,

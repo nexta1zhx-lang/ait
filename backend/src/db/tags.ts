@@ -36,9 +36,12 @@ const map = (r: Raw): TagTemplate => ({
 })
 
 /** 全部模板，按我排的顺序 */
-export async function listTagTemplates(): Promise<TagTemplate[]> {
+export async function listTagTemplates(
+  userId: number | null
+): Promise<TagTemplate[]> {
   const rows = await query<Raw>(
-    'SELECT id, name, sort FROM tag_templates ORDER BY sort, id'
+    'SELECT id, name, sort FROM tag_templates WHERE user_id = $1 ORDER BY sort, id',
+    [userId]
   )
   return rows.map(map)
 }
@@ -48,8 +51,10 @@ export async function listTagTemplates(): Promise<TagTemplate[]> {
  *
  * 空就是空 —— 不做任何“兜底默认”。
  */
-export async function loadTagTemplates(): Promise<string[]> {
-  return (await listTagTemplates()).map(r => r.name)
+export async function loadTagTemplates(
+  userId: number | null
+): Promise<string[]> {
+  return (await listTagTemplates(userId)).map(r => r.name)
 }
 
 function clean(name: unknown): string {
@@ -59,45 +64,52 @@ function clean(name: unknown): string {
   return s
 }
 
-export async function addTagTemplate(name: unknown): Promise<TagTemplate> {
+export async function addTagTemplate(
+  userId: number | null,
+  name: unknown
+): Promise<TagTemplate> {
   const v = clean(name)
   const exists = await query<{id: string}>(
-    'SELECT id FROM tag_templates WHERE name = $1',
-    [v]
+    'SELECT id FROM tag_templates WHERE user_id = $1 AND name = $2',
+    [userId, v]
   )
   if (exists.length) throw new Error(`「${v}」已经在模板里了`)
 
   const row = await query<Raw>(
-    `INSERT INTO tag_templates (name, sort)
-     VALUES ($1, COALESCE((SELECT max(sort) + 1 FROM tag_templates), 0))
+    `INSERT INTO tag_templates (user_id, name, sort)
+     VALUES ($1, $2, COALESCE((SELECT max(sort) + 1 FROM tag_templates WHERE user_id = $1), 0))
      RETURNING id, name, sort`,
-    [v]
+    [userId, v]
   )
   return map(row[0])
 }
 
 export async function renameTagTemplate(
+  userId: number | null,
   id: number,
   name: unknown
 ): Promise<TagTemplate | null> {
   const v = clean(name)
   const dup = await query<{id: string}>(
-    'SELECT id FROM tag_templates WHERE name = $1 AND id <> $2',
-    [v, id]
+    'SELECT id FROM tag_templates WHERE user_id = $1 AND name = $2 AND id <> $3',
+    [userId, v, id]
   )
   if (dup.length) throw new Error(`「${v}」已经在模板里了`)
 
   const rows = await query<Raw>(
-    'UPDATE tag_templates SET name = $2 WHERE id = $1 RETURNING id, name, sort',
-    [id, v]
+    'UPDATE tag_templates SET name = $3 WHERE id = $2 AND user_id = $1 RETURNING id, name, sort',
+    [userId, id, v]
   )
   return rows.length ? map(rows[0]) : null
 }
 
-export async function deleteTagTemplate(id: number): Promise<boolean> {
+export async function deleteTagTemplate(
+  userId: number | null,
+  id: number
+): Promise<boolean> {
   const rows = await query<{id: string}>(
-    'DELETE FROM tag_templates WHERE id = $1 RETURNING id',
-    [id]
+    'DELETE FROM tag_templates WHERE id = $1 AND user_id = $2 RETURNING id',
+    [id, userId]
   )
   return rows.length > 0
 }
@@ -109,10 +121,11 @@ export async function deleteTagTemplate(id: number): Promise<boolean> {
  * 播种时可能有并列值，交换法在任何情况下都能正确换位。
  */
 export async function moveTagTemplate(
+  userId: number | null,
   id: number,
   dir: 'up' | 'down'
 ): Promise<boolean> {
-  const all = await listTagTemplates()
+  const all = await listTagTemplates(userId)
   const i = all.findIndex(t => t.id === id)
   if (i === -1) return false
   const j = dir === 'up' ? i - 1 : i + 1
@@ -124,7 +137,13 @@ export async function moveTagTemplate(
   const sa =
     a.sort === b.sort ? (dir === 'up' ? b.sort - 1 : b.sort + 1) : b.sort
   const sb = a.sort === b.sort ? b.sort : a.sort
-  await query('UPDATE tag_templates SET sort = $2 WHERE id = $1', [a.id, sa])
-  await query('UPDATE tag_templates SET sort = $2 WHERE id = $1', [b.id, sb])
+  await query(
+    'UPDATE tag_templates SET sort = $3 WHERE id = $2 AND user_id = $1',
+    [userId, a.id, sa]
+  )
+  await query(
+    'UPDATE tag_templates SET sort = $3 WHERE id = $2 AND user_id = $1',
+    [userId, b.id, sb]
+  )
   return true
 }

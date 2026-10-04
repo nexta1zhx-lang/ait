@@ -51,6 +51,7 @@ import {
   loading,
   pickSymbol,
   pointPicking,
+  prefetchSymbol,
   rangeDrawing,
   result,
   run,
@@ -66,6 +67,7 @@ import {
 } from '../analyze'
 import {contracts, refreshConfig} from '../store'
 import {stopTicker, watchTicker} from '../ticker'
+import {runBtnPos, setRunBtnPos} from '../settings'
 import {
   VERDICT_TEXT,
   bjShort,
@@ -80,6 +82,9 @@ import {
 // 结论、分析过程、报错都在 ../analyze 的模块作用域里，
 // 切到别的页面再回来不会丢；这里只负责首次进页面把历史拉一次。
 onMounted(() => void loadHistory(symbol.value))
+// 那颗闪电的位置要等 DOM 出来才量得到（KeepAlive 切回来也可能要重贴）
+onMounted(() => void nextTick(syncRunPos))
+onActivated(() => void nextTick(syncRunPos))
 
 /*
  * 顶部行情条 / 底部涨幅：跟着币种走，进来就拉、换币立刻重拉。
@@ -112,13 +117,145 @@ const runLabel = computed(() =>
   loading.value ? '分析中…' : testMode.value ? '按这段行情判断' : '分析'
 )
 
+/* ---------------- 窄屏：那颗「分析」闪电能拖着走，位置记住 ---------------- */
+
+/**
+ * 用户 2026-10-04：「移动端闪电图标位置可以自由移动固定 保存位置」。
+ *
+ * 实现要点：窄屏下它是 `position: fixed`（见 style.css），位置由下面这个 `runStyle` 给。
+ *
+ * ⚠️ `runPos` 为 `null` 时**不给 left/top** —— fixed 元素在 left/top 为 auto 时
+ * 恰好停在「它本来在文档流里的位置」，所以：
+ *  · **没拖过的人看到的和以前一模一样**（不用量坐标、不用拿占位元素顶着，窗口变化还会自己跟着走）；
+ *  · 只有拖过之后才写死 left/top，并落进 localStorage。
+ */
+const runEl = ref<HTMLButtonElement | null>(null)
+/** 流里那个占位块（按钮 fixed 之后靠它撑住原位，币种行才不会塔） */
+const runSlot = ref<HTMLElement | null>(null)
+/** 一进页面就用上次存的位置；没存过就等 `syncRunPos()` 量一下占位块 */
+const runPos = ref<{x: number; y: number} | null>(runBtnPos.value)
+const runDragging = ref(false)
+
+/** 按下那一下的客户区坐标 + 按钮当时的左上角 */
+let runDown = {x: 0, y: 0, left: 0, top: 0}
+/** 这一次按住有没有走成「拖」（用来区分点击：拖完松手不该又开始分析） */
+let runMoved = false
+/** 手指是不是还按着 */
+let runPressing = false
+
+/** 超过这个距离才算「拖动」，小抖动按「点一下」处理 */
+const RUN_DRAG_MIN = 4
+/** 离屏幕边缘留的余量 */
+const RUN_EDGE = 6
+
+/** 别让它被拖到屏幕外面去 */
+function clampRunPos(x: number, y: number): {x: number; y: number} {
+  const el = runEl.value
+  const w = el?.offsetWidth || 30
+  const h = el?.offsetHeight || 28
+  const maxX = Math.max(RUN_EDGE, window.innerWidth - w - RUN_EDGE)
+  const maxY = Math.max(RUN_EDGE, window.innerHeight - h - RUN_EDGE)
+  return {
+    x: Math.min(Math.max(RUN_EDGE, x), maxX),
+    y: Math.min(Math.max(RUN_EDGE, y), maxY)
+  }
+}
+
+/**
+ * 定位。
+ *
+ * ⚠️ 不能指望「`position: fixed` 且不给 left/top 就会停在原位」—— 实测在 flex 行里
+ * 它会落到**行首**（x=8，正好压在币种下拉上）。所以位置一律由这里给：
+ * 没拖过时由 `syncRunPos()` 量那个占位块得到（= 以前那个位置）。
+ */
+const runStyle = computed(() => {
+  if (!isMobile.value || !runPos.value) return undefined
+  return {left: `${runPos.value.x}px`, top: `${runPos.value.y}px`}
+})
+
+/**
+ * 把按钮对齐到「它该在的地方」：
+ *  · 拖过 → 用存下来的那个（顺手夹回可视区）
+ *  · 没拖过 → 量占位块的位置（跟以前一模一样，而且窗口变化会自己跟上）
+ *
+ * 调用于：挂载 / KeepAlive 激活 / 宽窄切换 / 窗口 resize。
+ */
+function syncRunPos(): void {
+  if (!isMobile.value) return
+  const kept = runBtnPos.value
+  if (kept) {
+    runPos.value = clampRunPos(kept.x, kept.y)
+    return
+  }
+  const slot = runSlot.value
+  if (!slot) return
+  const r = slot.getBoundingClientRect()
+  // 这会儿不在布局里（切到别的 tab 了），别把位置写成 0
+  if (!r.width && !r.height) return
+  runPos.value = {x: r.left, y: r.top}
+}
+
+function onRunDown(e: PointerEvent): void {
+  if (!isMobile.value) return
+  const el = runEl.value
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  runDown = {x: e.clientX, y: e.clientY, left: r.left, top: r.top}
+  runMoved = false
+  runPressing = true
+  try {
+    // ⚠️ 要 try/catch：合成事件或指针已失效时会抛 NotFoundError（用 `?.` 挡不住）
+    el.setPointerCapture(e.pointerId)
+  } catch {
+    /* 抓不住也能拖，只是移出按钮后可能收不到事件 */
+  }
+}
+
+function onRunMove(e: PointerEvent): void {
+  if (!runPressing) return
+  const dx = e.clientX - runDown.x
+  const dy = e.clientY - runDown.y
+  // 还没越过阈值：先当它是「按着」，别急着动
+  if (!runMoved && Math.hypot(dx, dy) < RUN_DRAG_MIN) return
+  runMoved = true
+  runDragging.value = true
+  runPos.value = clampRunPos(runDown.left + dx, runDown.top + dy)
+}
+
+function onRunUp(e: PointerEvent): void {
+  if (!runPressing) return
+  runPressing = false
+  try {
+    runEl.value?.releasePointerCapture(e.pointerId)
+  } catch {
+    /* 同上，没抓着就无所谓 */
+  }
+  if (!runDragging.value) return
+  runDragging.value = false
+  // 落哪儿存哪儿
+  if (runPos.value) setRunBtnPos(runPos.value)
+}
+
+/** 点一下 = 跑分析；但「刚拖完」的那一下不算，不然拖完就自己开跑了 */
+function onRunTap(): void {
+  if (runMoved) {
+    runMoved = false
+    return
+  }
+  onRun()
+}
+
 /**
  * ⚠️ 用 `resize` + `innerWidth` 判断，别用 `matchMedia` 的 change ——
  * 那个事件在部分环境（实测内置浏览器）根本不触发，拖宽了「K 线」还赖在 tab 行里。
  */
 function onViewport(): void {
   const m = window.innerWidth <= MOBILE_MAX
-  if (m === isMobile.value) return
+  if (m === isMobile.value) {
+    // 宽窄没变，只是尺寸变了：拖过的夹回可视区，没拖过的重新贴到占位块
+    syncRunPos()
+    return
+  }
   isMobile.value = m
   /*
    * 宽窄切换时把「对方不存在的那一格」收回来：
@@ -236,6 +373,8 @@ const onChartError = (msg: string) => {
  * 图是单独一格，选完直接跳过去看图 —— 不然在手机上点完像没反应。
  */
 function onPickMarket(base: string): void {
+  // 兜底：正常早就被「全量预热」暖好了，这里命中即返回
+  prefetchSymbol(base)
   pickSymbol(base)
   if (isMobile.value) leftTab.value = 'chart'
 }
@@ -417,7 +556,9 @@ const recParts = computed(() => splitRec(judge.value?.recommendation))
 /*
  * 价格位置图（用户 2026-10-04：「纯文字太单调懒得看，能否图示预测」）。
  *
- * 图上的 4H 压力/支撑 由 `KlineChart` 报上来（`@levels`），拿不到就退回 24h 高低 ——
+ * 图上的压力 / 支撑由 `KlineChart` 报上来（`@levels`）——
+ * 那两个数 2026-10-04 起是**按图上可见窗口 + 摆动拐点**现算的（见 `../levels`），
+ * 不再是固定的「4 小时」；拿不到就退回 24h 高低 ——
  * 总之要画出一道「上沿 / 现价 / 下沿」的尺子，让人一眼看出现价卡在哪。
  */
 const sr = ref<LevelSR | null>(null)
@@ -926,17 +1067,29 @@ const heatRows = computed(() => {
                   @submit="onRun"
                 />
                 <!--
+                  占位块：那颗闪电是 `position: fixed` 的（要能拖），
+                  得在这儿留出同样大的一格，币种行才不会因为它「脱离文档流」而变形。
+                -->
+                <span ref="runSlot" class="tk-run-slot" aria-hidden="true" />
+                <!--
                   窄屏：「分析」就**贴在币种旁边**（用户 2026-10-03：「ai 分析改为分析
                   靠在币种旁边」），后来又要「**分析改为闪电图标**」。
                   所以窄屏这颗就是一颗闪电，文案走 title / aria-label（`runLabel`）。
                   放 `#symbol` 里而不是 `#actions` —— 后者整组带 `margin-left: auto`，会被推到最右边。
                 -->
                 <button
+                  ref="runEl"
                   class="btn-run tk-run"
+                  :class="{dragging: runDragging, placed: !!runPos}"
+                  :style="runStyle"
                   :disabled="loading"
                   :title="runLabel"
                   :aria-label="runLabel"
-                  @click="onRun"
+                  @click="onRunTap"
+                  @pointerdown="onRunDown"
+                  @pointermove="onRunMove"
+                  @pointerup="onRunUp"
+                  @pointercancel="onRunUp"
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />

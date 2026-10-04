@@ -4173,14 +4173,24 @@ button.badge.balance:hover:not(:disabled) {
     padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   }
 
-  /* ---- 不再「一屏塞下」：手机上就是普通长文档 ---- */
+  /* ---- 一屏塞下：顶部 tab 固定，内容区自己滚 ---- */
+  /*
+   * 用户 2026-10-04：「除了顶部 tab，其余内容都是单页滚动，在内容区滚动」。
+   *
+   * ⚠️ 这里**原来写的是 `height: auto`**（注释还留着「手机上就是普通长文档」）——
+   *    那是给当时当长文档用的「我的」页定的。现在 `/me` 要「顶部 tab 固定 +
+   *    下面内容区自己滚」，窄屏也必须是一屏，所以恢复 `100vh`。
+   *    该滚的地方照样滚：`.me-pane` 自己带 `overflow-y: auto`。
+   *
+   * ⚠️ 只有 `/analyze`、`/contracts`、`/me` 会挂 `fixed-viewport`，其它页不受影响。
+   */
   body.fixed-viewport {
-    overflow: auto;
+    overflow: hidden;
   }
   body.fixed-viewport #app {
-    height: auto;
-    min-height: 100vh;
-    overflow: visible;
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
   }
   body.fixed-viewport .analyze,
   body.fixed-viewport .split {
@@ -4431,28 +4441,12 @@ button.badge.balance:hover:not(:disabled) {
     padding-right: 14px;
   }
   /*
-   * 手机端往下翻就把搜索框收起来（用户：「移动端下滑搜索框自动收起」）——
-   * 一只手翻榜单时那一行白占地方；往上滑回来、或者滑回顶部就自动露出来。
-   *
-   * 收的方式用 `max-height` 而不是 `display:none`：这样有过渡、不会“跳”一下。
-   * ⚠️ `.mkt` 自己有 `gap: 8px`，收起来时得一起归零，不然还剩一条 8px 的缝。
-   * 桌面端不写这段（宽屏上那一行不贵，鼠标滚轮也不需要这个）。
+   * ⚠️ 这里原来有一条「下滑收起搜索框」（`.mkt-bar { max-height: 56px; transition }` +
+   * `.mkt.compact .mkt-bar { max-height: 0 }`）—— 2026-10-04 删了。
+   * 它每翻一下就做一次 `max-height` 布局 + 动画，滚动时掉帧
+   * （用户：「搜索框固定吧，滚动会导致帧率变低的感觉卡顿」）。
+   * 搜索框现在常驻显示，不再随滚动收放。
    */
-  .mkt-bar {
-    max-height: 56px;
-    overflow: hidden;
-    transition:
-      max-height 0.2s ease,
-      opacity 0.2s ease;
-  }
-  .mkt.compact {
-    gap: 0;
-  }
-  .mkt.compact .mkt-bar {
-    max-height: 0;
-    opacity: 0;
-    pointer-events: none;
-  }
   .split.m-market .mkt-table th:first-child,
   .split.m-market .mkt-table td:first-child {
     padding-left: 14px;
@@ -4557,6 +4551,46 @@ button.badge.balance:hover:not(:disabled) {
     border-color: transparent;
     color: var(--accent-ink);
     font-size: 12px;
+    /*
+     * 可以拖着走（用户 2026-10-04：「移动端闪电图标位置可以自由移动固定 保存位置」）。
+     *
+     * ⚠️ `position: fixed` + **不给 left/top** 时，浏览器把它摆在「本来在文档流里的位置」
+     * —— 所以没拖过的人看到的跟以前一模一样；拖过之后 JS 才写死 left/top 并记到
+     * localStorage（见 AnalyzeView 的 `runStyle` / `runBtnPos`）。
+     *
+     * `touch-action: none` 是必须的：否则拖它的时候页面会跟着滚。
+     * z-index 45 —— 盖得住底部导航（40），但压不住下拉列表（50）和各种弹层。
+     */
+    position: fixed;
+    z-index: 45;
+    touch-action: none;
+    cursor: grab;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    /*
+     * 位置是 JS 量出来才给的（见 `syncRunPos`），就位前先别显示 ——
+     * 否则 fixed 元素会先在行首闪一下（实测 x=8，压在币种下拉上）。
+     */
+    visibility: hidden;
+  }
+  .tk-head .tk-run.placed {
+    visibility: visible;
+  }
+  /* 占位块：跟闪电同样大，就顶在它原来的位置上 */
+  .tk-head .tk-run-slot {
+    display: inline-block;
+    width: 30px;
+    height: 28px;
+    flex: 0 0 auto;
+  }
+  /*
+   * 拖动中：手型 + 抬起来一点。
+   * ⚠️ 只过渡阴影/亮度，**千万别给 left/top 加过渡** —— 那会拖得「粘手」。
+   * 也不用 transform: scale（会改 getBoundingClientRect，跟夹边界打架）。
+   */
+  .tk-head .tk-run.dragging {
+    cursor: grabbing;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.6);
+    filter: brightness(1.12);
   }
   .tk-head .tk-run svg {
     width: 15px;
@@ -4959,6 +4993,56 @@ button.badge.balance:hover:not(:disabled) {
 
 .page-tabs .seg {
   flex: 0 0 auto;
+}
+
+/*
+ * 手机上这两格（预测历史 / 知识库）用**背景块** ——
+ * 用户 2026-10-04：「预测和知识库改为背景 tab」。
+ *
+ * 跟它上面那排一级 tab（`MeView` 的 `.me-tabs`，横线式）区分开，
+ * 层级一眼能看出来。
+ *
+ * ⚠️⚠️ **必须写在这条之前那个窄屏 `@media`（`.tab-row .seg …`）的后面** ——
+ *   同特异性靠「后写的赢」，而 `@media` **不加特异性**。
+ *   写到前面会静默失效（本文件已经栽过两次：`PromptsView` 的 `.preview`、
+ *   `KnowledgePanel` 的 `.kb-card`）。
+ */
+@media (max-width: 900px) {
+  .page-tabs .seg {
+    width: auto;
+    gap: 0;
+    padding: 3px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    overflow: hidden;
+  }
+  .page-tabs .seg button {
+    /*
+     * 宽度**自适应内容**（两个字/四个字各自多宽就多宽）——
+     * 用户 2026-10-04：「二级 tab 内容换行了宽度改自适应」。
+     * 原来是 `flex: 1 1 0` 平分，而 `.page-tabs .seg` 是 `flex: 0 0 auto`
+     * （跟内容一样宽），两者一叠就把每格压到 78px、「预测历史」四个字撑不下 → 换行。
+     */
+    flex: 0 0 auto;
+    padding: 6px 16px;
+    border: 0;
+    border-radius: 0;
+    text-align: center;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .page-tabs .seg button + button {
+    margin-left: 0;
+  }
+  .page-tabs .seg button.active {
+    background: var(--blue-soft);
+    color: var(--blue);
+  }
+  /* 已经是背景块了，不要再冒一条短线出来 */
+  .page-tabs .seg button.active::after {
+    content: none;
+  }
 }
 
 /*

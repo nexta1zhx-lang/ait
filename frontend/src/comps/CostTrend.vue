@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import {computed, ref} from 'vue'
-import {cny, tok, usd} from '../format'
+/**
+ * 按天花费柱状图（echarts）。
+ *
+ * 原来是手绘 SVG（用户 2026-10-04：「统计图改为 echarts，触碰暗色主题」）。
+ * props 没变，`UsageView` 不用动。
+ */
+import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
+import {cny, usd} from '../format'
 import type {UsageBucket} from '../api'
-// 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
-import {monoStack} from '../fonts'
-
-/** 按天花费柱状图（纯 SVG，不引图表库） */
-
-/** 横轴那排日期是数字，跟全站其它数字用同一款等宽 */
-const mono = monoStack()
+import {C, darkTooltip, echarts, type ECharts} from '../chart-theme'
 
 const props = defineProps<{
   days: UsageBucket[]
@@ -20,146 +20,130 @@ const bars = computed(() =>
   [...props.days].sort((a, b) => a.key.localeCompare(b.key))
 )
 
-const W = 900
-const H = 180
-const PAD_L = 8
-const PAD_R = 8
-const PAD_T = 12
-const PAD_B = 26
+const el = ref<HTMLElement | null>(null)
+const chart = shallowRef<ECharts | null>(null)
+let ro: ResizeObserver | null = null
 
-const maxCost = computed(() =>
-  Math.max(...bars.value.map(b => b.costUsd), 0.000001)
+/**
+ * ⚠️ 容器刚「从隐藏变可见」时，echarts 可能已经拿 100×100 兜底过了，
+ * 而且它**不会自己纠正**（实测容器明明 328px，canvas 死卡在 100px）。
+ */
+function fitSize(): void {
+  const c = chart.value
+  const box = el.value
+  if (!c || !box) return
+  const w = box.clientWidth
+  const h = box.clientHeight
+  if (w > 0 && h > 0 && (c.getWidth() !== w || c.getHeight() !== h)) {
+    c.resize({width: w, height: h})
+  }
+}
+
+function render(): void {
+  if (!chart.value) return
+  fitSize()
+  const xs = bars.value.map(b => b.key.slice(5))
+  chart.value.setOption(
+    {
+      animationDuration: 220,
+      grid: {left: 54, right: 12, top: 14, bottom: 24},
+      tooltip: {
+        ...darkTooltip,
+        trigger: 'axis',
+        axisPointer: {
+          type: 'shadow',
+          shadowStyle: {color: 'rgba(255,255,255,.04)'}
+        },
+        formatter: (ps: {dataIndex?: number}[]) => {
+          const i = ps?.[0]?.dataIndex
+          const b = i === undefined ? null : bars.value[i]
+          if (!b) return ''
+          return `${b.key}<br/>${usd(b.costUsd)}<br/>${cny(b.costUsd * props.rate)}`
+        }
+      },
+      xAxis: {
+        type: 'category',
+        data: xs,
+        // 只留 5 个刻度，否则日期会挤成一团
+        axisLabel: {
+          color: C.text,
+          fontSize: 10,
+          interval: Math.max(1, Math.ceil(xs.length / 5)) - 1
+        },
+        axisLine: {lineStyle: {color: C.grid}},
+        axisTick: {show: false}
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: {
+          color: C.text,
+          fontSize: 10,
+          formatter: (v: number) => usd(v)
+        },
+        splitLine: {lineStyle: {color: C.grid, type: 'dashed'}}
+      },
+      series: [
+        {
+          type: 'bar',
+          data: bars.value.map(b => b.costUsd),
+          barMaxWidth: 34,
+          itemStyle: {color: C.blue, borderRadius: [3, 3, 0, 0]},
+          emphasis: {itemStyle: {color: C.ok}}
+        }
+      ]
+    },
+    true
+  )
+}
+
+onMounted(() => {
+  if (!el.value) return
+  chart.value = echarts.init(el.value)
+  render()
+  ro = new ResizeObserver(() => fitSize())
+  ro.observe(el.value)
+})
+
+watch(
+  () => [props.days, props.rate],
+  () => render(),
+  {deep: true}
 )
-const slot = computed(() =>
-  bars.value.length ? (W - PAD_L - PAD_R) / bars.value.length : 0
-)
-const barW = computed(() => Math.max(2, Math.min(38, slot.value * 0.62)))
 
-const hovered = ref<number | null>(null)
-
-const x = (i: number) => PAD_L + slot.value * i + (slot.value - barW.value) / 2
-const h = (cost: number) => ((H - PAD_T - PAD_B) * cost) / maxCost.value
-const y = (cost: number) => H - PAD_B - h(cost)
-
-/** 只显示 5 个刻度，避免挤 */
-const labelEvery = computed(() => Math.max(1, Math.ceil(bars.value.length / 5)))
-
-const active = computed(() =>
-  hovered.value === null ? null : bars.value[hovered.value]
-)
-
-const gridLines = computed(() =>
-  [0, 0.5, 1].map(f => ({
-    y: PAD_T + (H - PAD_T - PAD_B) * (1 - f),
-    label: usd(maxCost.value * f)
-  }))
-)
+onBeforeUnmount(() => {
+  ro?.disconnect()
+  chart.value?.dispose()
+})
 </script>
 
 <template>
-  <div>
-    <div v-if="!bars.length" class="empty">这段时间没有调用记录</div>
-
-    <template v-else>
-      <div style="position: relative">
-        <svg
-          :viewBox="`0 0 ${W} ${H}`"
-          preserveAspectRatio="none"
-          style="width: 100%; height: 180px; display: block"
-        >
-          <line
-            v-for="g in gridLines"
-            :key="g.label"
-            :x1="0"
-            :x2="W"
-            :y1="g.y"
-            :y2="g.y"
-            stroke="var(--border)"
-            stroke-width="1"
-            stroke-dasharray="3 5"
-            vector-effect="non-scaling-stroke"
-            opacity="0.7"
-          />
-          <rect
-            v-for="(b, i) in bars"
-            :key="b.key"
-            :x="x(i)"
-            :y="y(b.costUsd)"
-            :width="barW"
-            :height="Math.max(1, h(b.costUsd))"
-            :fill="hovered === i ? 'var(--ok)' : 'var(--blue)'"
-            :opacity="hovered === i ? 1 : 0.75"
-            style="cursor: pointer"
-            @mouseenter="hovered = i"
-            @mouseleave="hovered = null"
-          />
-        </svg>
-
-        <div style="position: relative; height: 16px; margin-top: -12px">
-          <span
-            v-for="(b, i) in bars"
-            :key="b.key"
-            class="dim"
-            :style="{
-              position: 'absolute',
-              left: ((x(i) + barW / 2) / W) * 100 + '%',
-              transform: 'translateX(-50%)',
-              fontSize: '10px',
-              fontFamily: mono,
-              fontVariantNumeric: 'tabular-nums'
-            }"
-          >
-            <template v-if="i % labelEvery === 0">{{
-              b.key.slice(5)
-            }}</template>
-          </span>
-        </div>
-
-        <div
-          v-if="active"
-          :style="{
-            position: 'absolute',
-            top: 0,
-            left: ((x(hovered as number) + barW / 2) / W) * 100 + '%',
-            transform: 'translateX(-50%)'
-          }"
-          class="panel"
-        >
-          <div class="dim" style="font-size: 11px">{{ active.key }}</div>
-          <div class="heat-row" style="font-size: 11px">
-            <span class="k">花费</span
-            ><span class="v">{{ cny(active.costUsd * rate) }}</span>
-          </div>
-          <div class="heat-row" style="font-size: 11px">
-            <span class="k">原价</span
-            ><span class="v">{{ usd(active.costUsd) }}</span>
-          </div>
-          <div class="heat-row" style="font-size: 11px">
-            <span class="k">次数</span><span class="v">{{ active.calls }}</span>
-          </div>
-          <div class="heat-row" style="font-size: 11px">
-            <span class="k">输入</span
-            ><span class="v">{{ tok(active.promptTokens) }}</span>
-          </div>
-          <div class="heat-row" style="font-size: 11px">
-            <span class="k">输出</span
-            ><span class="v">{{ tok(active.completionTokens) }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div
-        class="dim"
-        style="
-          display: flex;
-          justify-content: space-between;
-          font-size: 11px;
-          margin-top: 6px;
-        "
-      >
-        <span>柱子 = 每天花费（人民币）</span>
-        <span>最高 {{ cny(maxCost * rate) }} · 共 {{ bars.length }} 天</span>
-      </div>
-    </template>
+  <div class="trend-wrap">
+    <!--
+      ⚠️ 容器必须**始终可见** —— 藏起来（v-show/v-if）时宽度是 0，
+      echarts 会拿 100×100 兜底且不再自己纠正（实测 canvas 死卡在 100px）。
+    -->
+    <div ref="el" class="trend" />
+    <p v-if="!bars.length" class="trend-none">这段时间没有调用记录</p>
   </div>
 </template>
+
+<style scoped>
+.trend-wrap {
+  position: relative;
+  min-width: 0;
+}
+.trend {
+  width: 100%;
+  height: 180px;
+}
+.trend-none {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+</style>

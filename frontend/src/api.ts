@@ -1,6 +1,183 @@
 /** 所有后端接口的类型与调用 */
 
+import {ref} from 'vue'
 import {isNativeShell} from './platform'
+
+/* ---------------- 登录态 ---------------- */
+
+/**
+ * 登录 token。
+ *
+ * 放在**模块作用域**（不是组件里），所有请求共用；写进 localStorage，
+ * 刷新页面不用重新登录。请求带 `Authorization: Bearer <token>`，
+ * SSE 带不了请求头，所以拼成 `?token=`（后端两种都认）。
+ */
+const TOKEN_KEY = 'ca_token'
+
+export const authToken = ref<string>(
+  typeof localStorage === 'undefined'
+    ? ''
+    : (localStorage.getItem(TOKEN_KEY) ?? '')
+)
+
+export function setAuthToken(token: string): void {
+  authToken.value = token
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token)
+    else localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    /* 隐私模式 / WebView 里可能不让写，忽略 */
+  }
+}
+
+/** 往路径上拼 token（SSE 用） */
+function withToken(path: string): string {
+  const t = authToken.value
+  if (!t) return path
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(t)}`
+}
+
+export interface AuthUser {
+  id: number
+  username: string
+  /** 管理员才能看到「我的 → 管理」 */
+  isAdmin: boolean
+}
+
+export const authMe = () => get<{user: AuthUser}>('/api/auth/me')
+
+/**
+ * 登录第一关的结果。
+ * 开了两步验证的账号**不会**直接给 token，而是回 `{needTotp, ticket}`，
+ * 要拿 ticket 去过 `/api/auth/totp/verify` 才算登录完成。
+ */
+export type LoginResult =
+  | {token: string; expiresAt: string; user: AuthUser}
+  | {needTotp: true; username: string; ticket: string}
+
+export const authLogin = (username: string, password: string) =>
+  post<LoginResult>('/api/auth/login', {username, password})
+
+/** 登录第二关：6 位动态口令，或一个恢复码（用一次就作废） */
+export const authTotpVerify = (ticket: string, code: string) =>
+  post<{
+    token: string
+    expiresAt: string
+    user: AuthUser
+    recoveryUsed?: boolean
+  }>('/api/auth/totp/verify', {ticket, code})
+
+/* ---------------- 登录设备（多端登录） ---------------- */
+
+/** 「登录设备」里的一台 */
+export interface DeviceSession {
+  id: number
+  /** 已解析好的名字，如「iPhone · Safari」 */
+  device: string
+  userAgent: string
+  ip: string
+  createdAt: string
+  lastSeenAt: string
+  /** 就是当前这台 */
+  current: boolean
+}
+
+export const fetchSessions = () =>
+  get<{sessions: DeviceSession[]}>('/api/auth/sessions')
+
+/** 踢掉某一台（只能踢自己的） */
+export const revokeSession = (id: number) =>
+  post<{ok: boolean}>('/api/auth/sessions/revoke', {id})
+
+/** 除本机以外全部下线 */
+export const revokeOtherSessions = () =>
+  post<{ok: boolean; revoked: number}>('/api/auth/sessions/revoke-others', {})
+
+/* ---------------- 两步验证（TOTP，只给管理员） ---------------- */
+
+export interface TotpState {
+  enabled: boolean
+  /** 扫了码但还没输码确认 */
+  pending: boolean
+  /** 还能用的恢复码个数 */
+  recoveryLeft: number
+}
+
+export const fetchTotpState = () => get<TotpState>('/api/auth/totp')
+
+/** 开始绑定：拿密钥 + 二维码（还没生效，等 enable 确认） */
+export const setupTotp = () =>
+  post<{secret: string; otpauth: string; qr: string}>(
+    '/api/auth/totp/setup',
+    {}
+  )
+
+/** 输一次 6 位码确认开启；返回的恢复码**只显示这一次** */
+export const enableTotp = (code: string) =>
+  post<{ok: boolean; recoveryCodes: string[]}>('/api/auth/totp/enable', {
+    code
+  })
+
+/** 关掉（要密码 + 一个有效口令） */
+export const disableTotp = (password: string, code: string) =>
+  post<{ok: boolean}>('/api/auth/totp/disable', {password, code})
+
+export const authRegister = (username: string, password: string) =>
+  post<{token: string; expiresAt: string; user: AuthUser}>(
+    '/api/auth/register',
+    {username, password}
+  )
+
+export const authLogout = () =>
+  post<{ok: boolean}>('/api/auth/logout', {}).catch(() => ({ok: false}))
+
+/** 改密码（成功后所有会话失效，要重新登录） */
+export const authChangePassword = (oldPassword: string, newPassword: string) =>
+  post<{ok: boolean}>('/api/auth/password', {oldPassword, newPassword})
+
+/* ---------------- 管理员：账号管理 ---------------- */
+
+/** 某个用户的某把密钥（管理员视角，`apiKey` 是明文） */
+export interface AdminUserLlmKey {
+  id: number
+  name: string
+  apiKey: string
+  /** 掩码（`sk-a****3456`），默认显示这个 */
+  apiKeyMasked: string
+  apiKeySet: boolean
+  baseUrl: string
+  model: string
+  reasoningEffort: string
+  isDefault: boolean
+  updatedAt: string
+}
+
+export interface AdminUser {
+  id: number
+  username: string
+  isAdmin: boolean
+  createdAt: string
+  /** 这个用户有多少条分析 / 知识库 */
+  stats: {analyses: number; knowledge: number}
+  /** 他自己的所有密钥（可能不止一把） */
+  llmKeys: AdminUserLlmKey[]
+}
+
+export const fetchAdminUsers = () =>
+  get<{users: AdminUser[]}>('/api/admin/users')
+
+export const createAdminUser = (body: {
+  username: string
+  password: string
+  isAdmin?: boolean
+}) => post<{ok: boolean; user: AuthUser}>('/api/admin/users', body)
+
+export const setAdminUserPassword = (id: number, password: string) =>
+  post<{ok: boolean}>(`/api/admin/users/${id}/password`, {password})
+
+/** ⚠️ 删号会级联删掉这个人的分析 / 知识库 / 用量 */
+export const deleteAdminUser = (id: number) =>
+  del<{ok: boolean}>(`/api/admin/users/${id}`)
 
 /* ---------------- 通用 ---------------- */
 
@@ -22,11 +199,15 @@ export const API_BASE =
 /** 把 `/api/xxx` 拼成能用的地址（Web 上原样返回，所以 Web 侧零影响） */
 export const apiUrl = (path: string): string => `${API_BASE}${path}`
 
-/** 开一条 SSE。**必须走绝对地址**，否则原生壳里连不上 */
-const openSse = (path: string): EventSource => new EventSource(apiUrl(path))
+/** 开一条 SSE。**必须走绝对地址**，否则原生壳里连不上；顺手带上登录 token */
+const openSse = (path: string): EventSource =>
+  new EventSource(apiUrl(withToken(path)))
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiUrl(url), init)
+  // 带上登录态（公开接口带了也无害）
+  const headers = new Headers(init?.headers)
+  if (authToken.value) headers.set('Authorization', `Bearer ${authToken.value}`)
+  const res = await fetch(apiUrl(url), {...init, headers})
   let data: unknown = null
   try {
     data = await res.json()
@@ -37,6 +218,8 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
     const msg =
       (data as {error?: string} | null)?.error ??
       `请求失败（HTTP ${res.status}）`
+    // 401 = 登录过期：把本地 token 清掉，App 会退回登录页
+    if (res.status === 401) setAuthToken('')
     throw new Error(msg)
   }
   return data as T
@@ -150,6 +333,8 @@ export interface AppConfig {
   lookback: {days: number; min: number; max: number}
   model: string
   provider: string
+  /** 当前登录用户（用户系统 2026-10-04） */
+  user?: {id: number; username: string; isAdmin: boolean}
   rules: RulesInfo
   knowledge: {total: number}
   usage: UsageHeadline
@@ -166,7 +351,7 @@ export const fetchConfig = () => get<AppConfig>('/api/config')
 export const fetchAccount = (refresh = false) =>
   get<AccountResult>(`/api/account${refresh ? '?refresh=1' : ''}`)
 
-/** 切换模型（写回 .env） */
+/** 切换模型（写进**当前用户自己的**配置） */
 export const switchModel = (model: string) =>
   post<{
     ok: boolean
@@ -174,6 +359,70 @@ export const switchModel = (model: string) =>
     persisted: boolean
     warning: string | null
   }>('/api/account/model', {model})
+
+/* ---------------- 大模型密钥（多把） ---------------- */
+
+/** 一把密钥的用量（跟 key 绑定，分开统计） */
+export interface LlmKeyStats {
+  calls: number
+  costUsd: number
+}
+
+export interface LlmKey {
+  id: number
+  /** 自己起的名字，如「主力」「备用」 */
+  name: string
+  /** 脱敏后的 Key（`sk-a****3456`）；真 Key 只在管理员那页给 */
+  apiKey: string
+  apiKeySet: boolean
+  baseUrl: string
+  model: string
+  reasoningEffort: string
+  isDefault: boolean
+  createdAt: string
+  updatedAt: string
+  /** 这把 key 花了多少、调了多少次 */
+  stats: LlmKeyStats
+}
+
+export interface LlmKeysResult {
+  keys: LlmKey[]
+  models: {
+    current: string
+    available: ModelOption[]
+    fromApi: boolean
+    error: string | null
+  } | null
+  /** 当前实际生效的那把（分析就用它） */
+  defaultId: number | null
+}
+
+export interface LlmKeyInput {
+  name?: string
+  /** 留空 / 传掩码 = 不改 */
+  apiKey?: string
+  baseUrl?: string
+  model?: string
+  reasoningEffort?: string
+}
+
+export const fetchLlmKeys = () => get<LlmKeysResult>('/api/llm-keys')
+
+export const createLlmKey = (body: LlmKeyInput) =>
+  post<{ok: boolean; id: number}>('/api/llm-keys', body)
+
+export const updateLlmKey = (id: number, body: LlmKeyInput) =>
+  put<{ok: boolean; id: number}>(`/api/llm-keys/${id}`, body)
+
+export const deleteLlmKey = (id: number) =>
+  del<{ok: boolean}>(`/api/llm-keys/${id}`)
+
+export const setDefaultLlmKey = (id: number) =>
+  post<{ok: boolean}>(`/api/llm-keys/${id}/default`, {})
+
+/** 改自己的用户名（「个人信息」页） */
+export const authRename = (username: string) =>
+  post<{ok: boolean; user: AuthUser}>('/api/auth/profile', {username})
 
 export const fetchContracts = () =>
   get<{contracts: Contract[]; error?: string}>('/api/contracts')
@@ -650,7 +899,12 @@ export interface CollectResult {
     /** 喂给 AI 的行情文字一共多少字 */
     promptChars: number
     /** 复盘时一并喂进去的 4H / 日线压力支撑 */
-    sr: {timeframe: string; bars: number; resistance: number; support: number}[]
+    sr: {
+      timeframe: string
+      bars: number
+      resistance: number
+      support: number
+    }[]
     /** 喂给模型的输入原文 */
     prompt: string
     /** 模型原样返回的内容 */
@@ -842,6 +1096,8 @@ export interface UsageRow {
   attempts: number
   latencyMs: number | null
   createdAt: string
+  /** 用的哪把密钥（名字；没绑定 / 已删就是 null） */
+  keyName: string | null
 }
 
 export interface Money {
@@ -857,6 +1113,8 @@ export interface UsageSummary {
   byDay: UsageBucket[]
   byKind: UsageBucket[]
   byModel: UsageBucket[]
+  /** 按**密钥**分开的统计（`key` 就是 llm_key_id） */
+  byKey: UsageBucket[]
   recent: UsageRow[]
   today: Money
   allTime: Money
@@ -872,11 +1130,14 @@ export interface UsageCallPage {
 export interface UsageQuery {
   days: number
   kind: '' | 'judge' | 'extract'
+  /** 只看某把密钥（llm_key_id）；不传 / 0 = 全部 */
+  keyId?: number | null
 }
 
 function usageQs(q: UsageQuery, extra: Record<string, string | number> = {}) {
   const p = new URLSearchParams({days: String(q.days)})
   if (q.kind) p.set('kind', q.kind)
+  if (q.keyId) p.set('keyId', String(q.keyId))
   for (const [k, v] of Object.entries(extra)) p.set(k, String(v))
   return p.toString()
 }
@@ -1103,3 +1364,97 @@ export const fetchDownloads = () => get<DownloadsResult>('/api/downloads')
  * 会打到 WebView 自己身上，所以必须补上 `API_BASE`。
  */
 export const downloadUrl = (url: string): string => apiUrl(url)
+
+/* ---------------- 服务器状态（「我的 → 服务器」） ---------------- */
+
+/** 曲线上的一个点（后端每 5 秒采一个，进程内滚动保留 2 小时） */
+export interface ServerSample {
+  t: number
+  cpu: number
+  mem: number
+  rss: number
+  heap: number
+}
+
+/**
+ * 服务器 / 进程 / 数据库的实时快照。
+ *
+ * ⚠️ 跟后端 `backend/src/system.ts` 的 `ServerStatus` 是**同一份结构**，
+ *    改一边要同步改另一边。
+ */
+/**
+ * 一组外围服务的监测结果（docker 容器 / 监听端口）。
+ *
+ * ⚠️ 跟后端 `system.ts` 的 `ServiceGroup` 对应。
+ * **拿不到就是 `ok:false` + `error`** —— 页面要照实说「取不到」，
+ * 不能当成「都正常」。
+ */
+export interface ServiceGroup {
+  ok: boolean
+  error?: string
+  items: {name: string; detail: string; status: string; up: boolean}[]
+}
+
+export interface ServerStatus {
+  now: number
+  host: {
+    platform: string
+    arch: string
+    release: string
+    hostname: string
+    cpuModel: string
+    cpuCount: number
+    /** 1 / 5 / 15 分钟平均负载 */
+    load: [number, number, number]
+    uptimeSec: number
+    memTotalB: number
+    /**
+     * 还能用的内存（后端按平台算的口径，**不是** `freemem()`）——
+     * 用 `memTotalB - memAvailB` 才是「用了多少」。
+     */
+    memAvailB: number
+    memUsedPct: number
+    /** 内存口径来源：`vm_stat` / `MemAvailable` / `freemem` */
+    memSource: string
+    diskTotalB: number | null
+    diskFreeB: number | null
+    diskUsedPct: number | null
+  }
+  proc: {
+    pid: number
+    nodeVersion: string
+    uptimeSec: number
+    /** 进程 CPU 使用率（%），按两次采样的差值算 —— 第一个点可以忽略 */
+    cpuPct: number
+    rssB: number
+    heapUsedB: number
+    heapTotalB: number
+    externalB: number
+  }
+  db: {
+    ok: boolean
+    version: string | null
+    error?: string
+    sizeB: number | null
+    connections: number | null
+    maxConnections: number | null
+    /** 行数；-1 = 这张表不存在 */
+    tables: {name: string; rows: number}[]
+  }
+  /** 外围服务：docker 容器 + 监听端口 */
+  services: {
+    docker: ServiceGroup
+    ports: ServiceGroup
+  }
+  tookMs: number
+  /** 采样历史（长度由 `minutes` 决定）—— 曲线画的就是它 */
+  history: ServerSample[]
+}
+
+/**
+ * 采一次服务器状态。
+ *
+ * `minutes` 决定 `history` 回多长（后端封顶 120 分钟）。
+ */
+export const fetchServerStatus = (minutes = 30) =>
+  get<ServerStatus>(`/api/server-status?minutes=${minutes}`)

@@ -6,6 +6,7 @@ import {judge} from '../llm/client'
 import {loadRules} from '../rules'
 import {loadTagTemplates} from '../db/tags'
 import {listTags} from '../db/knowledge'
+import {defaultUserId} from '../db/users'
 
 async function main() {
   const c = loadConfig()
@@ -64,8 +65,8 @@ async function main() {
   let tags: string[] = []
   try {
     const [templates, used] = await Promise.all([
-      loadTagTemplates(),
-      listTags()
+      loadTagTemplates(await defaultUserId().catch(() => null)),
+      listTags(await defaultUserId().catch(() => null))
     ])
     tags = [...new Set([...templates, ...used.map(u => u.tag)])]
   } catch {

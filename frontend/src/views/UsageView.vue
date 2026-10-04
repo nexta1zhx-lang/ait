@@ -15,6 +15,16 @@ import {
 import {ago, bjTime, cny, int, ms, pct, tok, usd} from '../format'
 import AccountBar from '../comps/AccountBar.vue'
 
+/**
+ * 用量统计。原来是一个独立页签，2026-10-04 用户要求
+ * 「用量移到此界面（模型配置）」→ 现在嵌在 `LlmConfigView` 里。
+ *
+ * `keyId` 是"只看哪把密钥"（父组件传进来）—— 统计可以跟密钥绑定分开看。
+ */
+const props = withDefaults(defineProps<{keyId?: number | null}>(), {
+  keyId: null
+})
+
 /* ---------------- 筛选 ---------------- */
 
 const RANGES = [
@@ -45,7 +55,11 @@ const loading = ref(true)
 const error = ref('')
 const updatedAt = ref<number | null>(null)
 
-const query = computed(() => ({days: days.value, kind: kind.value}))
+const query = computed(() => ({
+  days: days.value,
+  kind: kind.value,
+  keyId: props.keyId
+}))
 
 const rate = computed(() => summary.value?.rate ?? 7.1)
 const rmb = (usdValue: unknown) => cny((Number(usdValue) || 0) * rate.value)
@@ -84,7 +98,7 @@ async function loadPage() {
 }
 
 onMounted(load)
-watch([days, kind], () => {
+watch([days, kind, () => props.keyId], () => {
   offset.value = 0
   load()
 })
@@ -224,6 +238,8 @@ const callCols: Column<UsageRow>[] = [
   {key: 'createdAt', label: '时间', strong: true},
   {key: 'kind', label: '用途'},
   {key: 'model', label: '模型'},
+  // 这一列是后来加的：用量跟**哪把密钥**绑定（没绑定 / 已删就是 —）
+  {key: 'keyName', label: '密钥', value: r => r.keyName ?? '—'},
   {key: 'symbol', label: '币种 / 周期'},
   {
     key: 'promptTokens',

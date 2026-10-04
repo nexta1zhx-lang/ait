@@ -1,4 +1,5 @@
 import {loadConfig} from './config'
+import {resolveUserLlm} from './db/llm-keys'
 import {describeSeries} from './analysis/describe'
 import {fetchCandles, fetchCandlesRange, fetchSRAt} from './data/market'
 import {
@@ -41,6 +42,8 @@ const SR_INPUT: {timeframe: Timeframe; bars: number}[] = [
 ]
 
 export interface CollectInput {
+  /** 归属用户（用户系统，2026-10-04）；null = 没归属 */
+  userId: number | null
   symbol: string
   timeframe: Timeframe
   /** @deprecated 已经不再分「该做 / 不该做」 */
@@ -137,7 +140,9 @@ export interface CollectResult {
  * 记的是「形状 + 经验」。
  */
 export async function collectCase(input: CollectInput): Promise<CollectResult> {
-  const config = loadConfig()
+  // 用默认那把密钥（多密钥，2026-10-04）
+  const resolved = await resolveUserLlm(input.userId)
+  const config = loadConfig({llm: resolved.llm})
   const {steps, start, markFailed} = stepRecorder(input.onStep)
 
   const tfMs = TF_MS[input.timeframe]
@@ -259,7 +264,7 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
   /* ---- 4. 调模型提炼 ---- */
   const endExtract = start('extract', `调用 ${config.llm.model} 提炼经验`)
   // 标签模板和提炼提示词都在数据库里、我自己维护，每次现取
-  const templates = await loadTagTemplates()
+  const templates = await loadTagTemplates(input.userId)
   const extractRules = await loadExtractRules()
   let extracted, model, usage, attempts, latencyMs, prompt, raw
   try {
@@ -303,6 +308,8 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
   /* ---- 5. 记账 + 存档 ---- */
   const endSave = start('save', '记账并存进知识库')
   const billed = await recordUsage({
+    userId: input.userId,
+    llmKeyId: resolved.keyId,
     kind: 'extract',
     model,
     symbol: input.symbol.toUpperCase(),
@@ -325,6 +332,7 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
   let caseId: number | null = null
   if (!input.dryRun) {
     caseId = await createCase({
+      userId: input.userId,
       symbol: input.symbol.toUpperCase(),
       ccxtSymbol: null,
       exchange: config.exchange,
@@ -473,6 +481,8 @@ export type {KnowledgeRow}
 /* ------------------------------------------------------------------ */
 
 export interface ReeditInput {
+  /** 归属用户（用户系统） */
+  userId: number | null
   /** 改掉备注再提炼（不传就用库里原来的） */
   note?: string
   /** 一步步往外报进度 */
@@ -487,13 +497,14 @@ export interface ReeditInput {
  */
 export async function reeditCase(
   id: number,
-  input: ReeditInput = {}
+  input: ReeditInput
 ): Promise<CollectResult> {
-  const config = loadConfig()
+  const resolved = await resolveUserLlm(input.userId)
+  const config = loadConfig({llm: resolved.llm})
   const {steps, start, markFailed} = stepRecorder(input.onStep)
 
   const endLoad = start('load', `读案例 #${id} 存下的 K 线`)
-  const row = await getCase(id)
+  const row = await getCase(id, input.userId)
   if (!row) {
     markFailed('load', `案例 #${id} 不存在`)
     throw new Error(`案例 #${id} 不存在`)
@@ -529,7 +540,7 @@ export async function reeditCase(
   endDescribe(`${stats.bars} 根 → ${segments.length} 小段`)
 
   const endExtract = start('extract', `调用 ${config.llm.model} 重新提炼`)
-  const templates = await loadTagTemplates()
+  const templates = await loadTagTemplates(input.userId)
   const extractRules = await loadExtractRules()
   let extracted, model, usage, attempts, latencyMs, prompt, raw
   try {
@@ -567,6 +578,8 @@ export async function reeditCase(
 
   const endSave = start('save', '写回案例')
   const billed = await recordUsage({
+    userId: input.userId,
+    llmKeyId: resolved.keyId,
     kind: 'extract',
     model,
     symbol: row.symbol,
@@ -586,7 +599,7 @@ export async function reeditCase(
     volTrend: stats.volTrend === null ? null : round2(stats.volTrend)
   }
 
-  await updateCase(id, {
+  await updateCase(id, input.userId, {
     note,
     moveType: extracted.moveType,
     tags,

@@ -11,10 +11,11 @@ import {oneLineCost} from './llm/pricing'
 import {listTags} from './db/knowledge'
 import {loadTagTemplates} from './db/tags'
 import {recordUsage} from './db/usage'
+import {defaultUserId} from './db/users'
+import {resolveUserLlm, saveUserLlm} from './db/llm-keys'
 import {saveAnalysis, saveRulesVersion} from './db/analyses'
 import {render} from './output/render'
 import {ask, askHidden, isInteractive} from './util/prompt'
-import {saveKeyToEnv} from './util/llmkey'
 import {MarketType, Timeframe} from './types'
 
 const program = new Command()
@@ -43,13 +44,21 @@ program
         ['5m', '15m', '1h', '4h', '1d'].includes(tfRaw) ? tfRaw : '1h'
       ) as Timeframe
 
+      // 命令行没有登录态 —— 用第一个账号（建过号就归他名下）
+      const userId = await defaultUserId().catch(() => null)
+      // 用那把**默认**密钥；用量记到它名下
+      const resolved = await resolveUserLlm(userId)
+      /** 本次实际归属的密钥（临时 --api-key 就不归到任何一把） */
+      let usedKeyId = resolved.keyId
+
       const config = loadConfig({
         exchange: opts.exchange ? String(opts.exchange) : undefined,
         timeframes: [timeframe],
         apiBase: opts.apiBase ? String(opts.apiBase) : undefined,
         marketType: opts.market
           ? (String(opts.market) as MarketType)
-          : undefined
+          : undefined,
+        llm: resolved.llm
       })
       const rules = await loadRules()
       log(
@@ -57,24 +66,36 @@ program
       )
       for (const w of rules.warnings) log(`  ⚠️  ${w}`)
 
-      // 解析 API Key：命令行 > .env > 交互式输入
-      if (opts.apiKey) config.llm.apiKey = String(opts.apiKey)
+      // 解析 API Key：命令行 > 账号里配的（「我的 → 模型配置」）> 交互式输入
+      if (opts.apiKey) {
+        config.llm.apiKey = String(opts.apiKey)
+        usedKeyId = null // 临时给的，不算在任何一把密钥头上
+      }
       if (!config.llm.apiKey) {
         if (!isInteractive()) {
           throw new Error(
-            '未设置 LLM_API_KEY。请在 .env 填写，或用 --api-key 传入。'
+            '这个账号还没配 API Key：在网页「我的 → 模型配置」里填，或用 --api-key 传入。'
           )
         }
         log('')
-        log(`• 未检测到 LLM_API_KEY（接口: ${config.llm.baseUrl}）`)
+        log(`• 未检测到 API Key（接口: ${config.llm.baseUrl}）`)
         log('  请粘贴你的 API Key 后回车（输入过程不回显）；按 Ctrl+C 可取消。')
         const key = await askHidden('API Key: ')
         if (!key) throw new Error('未提供 API Key，已退出。')
         config.llm.apiKey = key
-        const save = await ask('是否保存到 .env 以便下次自动使用？(y/N) ')
-        if (/^y(es)?$/i.test(save)) {
-          if (saveKeyToEnv(key)) log('• 已保存到 .env')
-          else log('• 保存到 .env 失败，本次仍会使用该 Key。')
+        usedKeyId = null
+        // 存进**这个账号的默认那把密钥**（不再写 .env —— 配置已经按用户存库了）
+        if (userId != null) {
+          const save = await ask('是否保存到账号里以便下次自动使用？(y/N) ')
+          if (/^y(es)?$/i.test(save)) {
+            try {
+              await saveUserLlm(userId, {apiKey: key})
+              usedKeyId = resolved.keyId
+              log('• 已保存到账号密钥（网页「我的 → 模型配置」里能看到）')
+            } catch (e) {
+              log(`• 保存失败：${(e as Error).message}（本次仍会使用该 Key）`)
+            }
+          }
         }
       }
 
@@ -105,8 +126,8 @@ program
       let tags: string[] = []
       try {
         const [templates, used] = await Promise.all([
-          loadTagTemplates(),
-          listTags()
+          loadTagTemplates(userId),
+          listTags(userId)
         ])
         tags = [...new Set([...templates, ...used.map(u => u.tag)])]
       } catch {
@@ -122,6 +143,8 @@ program
       })
       // 记账：这次判断烧了多少 token、多少钱
       const billed = await recordUsage({
+        userId,
+        llmKeyId: usedKeyId,
         kind: 'judge',
         model: meta.model,
         symbol: symbol.split('/')[0],
@@ -141,6 +164,7 @@ program
           sources: rules.sources
         })
         analysisId = await saveAnalysis({
+          userId,
           symbol: symbol.split('/')[0],
           ccxtSymbol: snapshot.symbol,
           exchange: config.exchange,

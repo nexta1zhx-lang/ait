@@ -24,6 +24,8 @@ import type {TokenUsage} from '../llm/pricing'
  */
 
 export interface SaveAnalysisInput {
+  /** 这条记录属于谁（用户系统，2026-10-04）；null = 没归属（CLI 还没建号时） */
+  userId: number | null
   symbol: string
   ccxtSymbol: string | null
   exchange: string
@@ -163,7 +165,8 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
        model, rules_hash, knowledge_refs, llm_usage_id,
        prompt_tokens, completion_tokens, cost_usd, latency_ms, attempts,
        chart_timeframe,
-       result, guardrails, expectancy, snapshot, meta, tags
+       result, guardrails, expectancy, snapshot, meta, tags,
+       user_id
      ) VALUES (
        $1, $2, $3, $4, $5, $6,
        $7, $8, $9, $10, $11, $12,
@@ -172,7 +175,7 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
        $25, $26, $27, $28, $29, $30,
        $31, $32, $33, $34, $35, $36,
        $37, $38, $39, $40, $41, $42,
-       $43, $44, $45
+       $43, $44, $45, $46
      ) RETURNING id`,
     [
       input.symbol,
@@ -234,7 +237,9 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
       }),
       JSON.stringify(input.meta),
       // tags（新列）—— 跟知识库共用同一份标签池
-      JSON.stringify(j.tags ?? [])
+      JSON.stringify(j.tags ?? []),
+      // user_id —— 预测历史按用户隔离
+      input.userId
     ]
   )
 
@@ -290,6 +295,8 @@ function mapRow(r: RawRow): AnalysisRow {
 }
 
 export interface ListAnalysesOptions {
+  /** 只看谁的数据（用户隔离）；null = 没归属的记录 */
+  userId: number | null
   /** 只看某个币种 */
   symbol?: string
   /** 只看某个档位（A / A-W / S / V / B / unclear）—— 老记录才有 */
@@ -312,6 +319,8 @@ function listWhere(o: ListAnalysesOptions): {where: string; params: unknown[]} {
     parts.push(sql.replace('?', `$${params.length}`))
   }
 
+  // 用户隔离 —— 永远是第一个条件
+  add('user_id = ?', o.userId)
   if (o.symbol) add('symbol = ?', o.symbol.toUpperCase())
   if (o.grade) add('grade = ?', o.grade)
   if (o.verdict) add('verdict = ?', o.verdict)
@@ -324,7 +333,7 @@ function listWhere(o: ListAnalysesOptions): {where: string; params: unknown[]} {
 }
 
 export async function listAnalyses(
-  o: ListAnalysesOptions = {}
+  o: ListAnalysesOptions
 ): Promise<{rows: AnalysisRow[]; total: number}> {
   const {where, params} = listWhere(o)
   const limit = Math.max(1, Math.min(200, Math.round(o.limit ?? 30)))
@@ -346,7 +355,10 @@ export async function listAnalyses(
   return {rows: rows.map(mapRow), total: Number(total[0]?.n ?? 0)}
 }
 
-export async function getAnalysis(id: number): Promise<AnalysisDetail | null> {
+export async function getAnalysis(
+  id: number,
+  userId: number | null
+): Promise<AnalysisDetail | null> {
   const r = await queryOne<
     RawRow & {
       ccxt_symbol: string | null
@@ -371,8 +383,8 @@ export async function getAnalysis(id: number): Promise<AnalysisDetail | null> {
             rv.body    AS rv_body
        FROM analyses a
        LEFT JOIN rules_versions rv ON rv.hash = a.rules_hash
-      WHERE a.id = $1`,
-    [id]
+      WHERE a.id = $1 AND a.user_id = $2`,
+    [id, userId]
   )
   if (!r) return null
 
@@ -403,10 +415,14 @@ export async function getAnalysis(id: number): Promise<AnalysisDetail | null> {
 /* 删除                                                                */
 /* ------------------------------------------------------------------ */
 
-export async function deleteAnalysis(id: number): Promise<boolean> {
-  const rows = await query('DELETE FROM analyses WHERE id = $1 RETURNING id', [
-    id
-  ])
+export async function deleteAnalysis(
+  id: number,
+  userId: number | null
+): Promise<boolean> {
+  const rows = await query(
+    'DELETE FROM analyses WHERE id = $1 AND user_id = $2 RETURNING id',
+    [id, userId]
+  )
   return rows.length > 0
 }
 
@@ -442,7 +458,10 @@ export interface AnalysisStats {
 }
 
 /** 标签分布：每个形状标签出现了多少次、平均概率多少 */
-export async function analysisStats(days = 365): Promise<AnalysisStats> {
+export async function analysisStats(
+  days = 365,
+  userId: number | null
+): Promise<AnalysisStats> {
   const d = Math.max(1, Math.min(3650, Math.round(days)))
   const since = `now() - interval '${d} days'`
 
@@ -450,7 +469,8 @@ export async function analysisStats(days = 365): Promise<AnalysisStats> {
     query<{n: string; cost: string}>(
       `SELECT count(*)::text AS n,
               COALESCE(sum(cost_usd), 0)::text AS cost
-         FROM analyses WHERE created_at >= ${since}`
+         FROM analyses WHERE user_id = $1 AND created_at >= ${since}`,
+      [userId]
     ),
     query<{name: string; calls: string; avg_p: string | null}>(
       // 只统计 `[{name,probability}]` 这种新结构；老记录的字符串标签直接排掉
@@ -458,29 +478,33 @@ export async function analysisStats(days = 365): Promise<AnalysisStats> {
               count(*)::text AS calls,
               round(avg((t->>'probability')::numeric))::text AS avg_p
          FROM analyses a, jsonb_array_elements(a.tags) t
-        WHERE a.created_at >= ${since}
+        WHERE a.user_id = $1
+          AND a.created_at >= ${since}
           AND jsonb_typeof(t) = 'object'
           AND (t->>'name') IS NOT NULL
           AND (t->>'probability') IS NOT NULL
         GROUP BY 1
         ORDER BY count(*) DESC, 1
-        LIMIT 20`
+        LIMIT 20`,
+      [userId]
     ),
     query<{symbol: string; calls: string}>(
       `SELECT symbol, count(*)::text AS calls
          FROM analyses
-        WHERE created_at >= ${since}
+        WHERE user_id = $1 AND created_at >= ${since}
         GROUP BY 1
         ORDER BY count(*) DESC
-        LIMIT 30`
+        LIMIT 30`,
+      [userId]
     ),
     query<{verdict: string; calls: string}>(
       `SELECT COALESCE(verdict, 'unknown') AS verdict,
               count(*)::text AS calls
          FROM analyses
-        WHERE created_at >= ${since}
+        WHERE user_id = $1 AND created_at >= ${since}
         GROUP BY 1
-        ORDER BY count(*) DESC`
+        ORDER BY count(*) DESC`,
+      [userId]
     )
   ])
 

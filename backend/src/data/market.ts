@@ -68,8 +68,16 @@ async function withRetry<T>(
     } catch (e) {
       last = e
       if (i < times) {
-        // 300ms / 900ms —— 够短，不影响体感；够长，躲过瞬时抖动
-        await new Promise(r => setTimeout(r, 300 * i * i))
+        /*
+         * 200ms / 400ms —— 够短，几乎不影响体感；够长，躲过瞬时抖动。
+         *
+         * ⚠️ 原来是 `300 * i * i`（300ms / 1200ms），太保守了：这是**瞬时的
+         *    TLS 连接失败**（请求根本没到币安），不是被限流。实测一次取数
+         *    （非 1h 周期要打两趟）里抖两次，退避就吃掉 1.5s，
+         *    整条请求变成 2.4s 的尖峰（2026-10-04 实测定位）。
+         *    现在最坏 ≈ 0.4+0.2+0.4+0.4+0.5 ≈ 1.9s，而且这种情况本来就少见。
+         */
+        await new Promise(r => setTimeout(r, 200 * i))
       }
     }
   }
@@ -89,15 +97,20 @@ export interface RecentSR {
 }
 
 /**
- * 计算最近 N 小时的压力 / 支撑（传入 1H K 线，取最近 N 根）。
+ * 计算「最后 `hours` 根」的高低点当压力 / 支撑。
+ *
+ * ⚠️ 2026-10-04 起**图上的那两条线不用它了** —— 前端改成按「当前可见窗口 +
+ *    摆动高低点」现算（`frontend/src/levels.ts`）。这里只留给老版本 App 兜底，
+ *    所以调用方传的就是**手上已经有的那串 K 线**（以前非 1h 周期会专门去取
+ *    8 根 1h，现在不再为它多打一趟交易所）。
  * 数据不足或区间无效时返回 null（调用方据此选择“不画”）。
  */
 export function computeRecentSR(
-  candles1h: Candle[],
+  candles: Candle[],
   hours = 4
 ): RecentSR | null {
-  if (!Array.isArray(candles1h) || candles1h.length < 2) return null
-  const win = candles1h.slice(-hours)
+  if (!Array.isArray(candles) || candles.length < 2) return null
+  const win = candles.slice(-hours)
   if (win.length < 2) return null
   let hi = -Infinity
   let lo = Infinity
@@ -331,6 +344,38 @@ async function getExchange(
   return exchange
 }
 
+/**
+ * 预热：把「每个进程只付一次」的成本提前到启动时。
+ *
+ * ⚠️ 实测结论（2026-10-04，用户问「第一发 2.7s 为什么这么久」）：
+ *    · `loadMarkets()` 约 **430ms**（上游 exchangeInfo 实测 485ms + ccxt 解析 528 个合约）
+ *      —— 每个进程只付一次，但**每次部署/重启都由第一个用户付** → 这里打掉
+ *    · 那一发 2.7s **不是它、也不是币安抖动重试**（实测那次失败数为 0），
+ *      而是 **开发模式特有的**：同一个进程里挂着 Vite 开发中间件，
+ *      第一个请求进来时它在做懒初始化，把事件循环占住 ~1.9s。
+ *      对照实测（同一个新进程，同样只打一发 K 线）：
+ *        `npm run web`（带 Vite）        第 1 发 **2015ms** · 第 2 发 157ms
+ *        `FRONTEND=dist`（不带 Vite）    第 1 发  **179ms** · 第 2 发 165ms
+ *      ⇒ **线上没有 Vite，压根没这个问题**；本地开发看到的第一发慢不用追。
+ *        （要验证后端真实速度，用 `FRONTEND=dist NODE_ENV=production npm run web`）
+ *
+ * 失败都不算错：真正取数时会重来一遍，这里只留告警。
+ */
+export async function warmExchange(opts: {
+  exchangeId: string
+  marketType?: MarketType
+  apiBase?: string
+}): Promise<void> {
+  const marketType = opts.marketType ?? 'swap'
+  const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
+  /*
+   * 真拉一次 K 线（用 BTC —— 所有合约里必然存在的那个，别的币可能下架）。
+   * 这一发不在意结果，只为把「取数」这条路也走热；成本就一次请求。
+   */
+  const symbol = resolveSymbol(exchange, 'BTC/USDT', marketType)
+  await exchange.fetchOHLCV(symbol, '1h', undefined, 250)
+}
+
 export interface FetchCandlesOptions {
   exchangeId: string
   symbol: string
@@ -341,7 +386,6 @@ export interface FetchCandlesOptions {
   /** 起始时间（毫秒）。给了就从这里开始取 */
   since?: number
 }
-
 /** 单独拉取某周期的 K 线（图表切换周期用，不跑指标与 LLM） */
 export async function fetchCandles(
   opts: FetchCandlesOptions

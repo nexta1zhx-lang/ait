@@ -77,7 +77,9 @@ export async function judge(
   const {config} = input
 
   if (!config.llm.apiKey)
-    throw new Error('未配置 LLM_API_KEY：在 .env 里填上 DeepSeek 的 Key 再试。')
+    throw new Error(
+      '还没配置 API Key —— 去「我的 → 模型配置」填一个 DeepSeek 的 Key 再试。'
+    )
 
   const client = new OpenAI({
     apiKey: config.llm.apiKey,

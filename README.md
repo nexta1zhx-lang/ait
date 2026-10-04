@@ -55,9 +55,12 @@ npm run dev -- BTC/USDT -t 4h -d 30     # 换周期 / 换天数
 | `npm run learn` / `npm run swing`                                  | 辅助脚本                                                           |
 | `npm run sync:contracts`                                           | 拉交易所合约表                                                     |
 
-环境变量放 `.env`（`LLM_API_KEY` 必填；`EXCHANGE` / `MARKET_TYPE` / `LLM_MODEL` 可选）。
-网页右上角切换模型会写回 `.env`，重启也保留；旁边那个「余额 ¥x.xx」是模型账户还剩多少钱
-（`GET /api/account` → DeepSeek `/user/balance`，后端带 60 秒缓存，**点一下才是真刷新**）。
+环境变量放 `.env`（只剩交易所 / 数据库 / 汇率这些；`EXCHANGE` / `MARKET_TYPE` / `API_BASE` 可选）。
+**大模型配置（Key / 模型 / 接口地址 / 思考力度）不放 `.env`** —— 按用户存在数据库里，
+在网页「我的 → 模型配置」里填；管理员能在「我的 → 管理」看每个人的配置。
+网页右上角切换模型现在写的是**你自己的**配置，重启也保留；旁边那个「余额 ¥x.xx」
+是模型账户还剩多少钱（`GET /api/account` → DeepSeek `/user/balance`，后端带 60 秒缓存，
+**点一下才是真刷新**）。
 
 ---
 

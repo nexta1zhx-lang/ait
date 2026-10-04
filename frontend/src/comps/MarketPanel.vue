@@ -11,7 +11,9 @@
  * 数据怎么来（**实时推送**，不再自己轮询）：
  *   1. 挂载时 `GET /api/markets` 拉一次**全表**当底稿
  *   2. 之后只吃 SSE `/api/tickers/stream` 的增量（后端从币安 `!ticker@arr` 中转，
- *      每秒一批、每批只含刚变过的两三百个币），按 `pair` 盖到那行上
+ *      每秒一批、每批只含刚变过的两三百个币），按 `pair` 盖到那行上；
+ *      ⚠️ 刷入走**帧率合并**（`pending` 缓冲 + `requestAnimationFrame`），
+ *      一帧内到达的多批只重算一次
  *   3. 兜底：SSE 静默超 15 秒（后端上游也挂了）才临时开 REST 轮询；
  *      每 5 分钟重新拉一次全表，把新上的币检进来
  *
@@ -100,6 +102,18 @@ const keyword = ref('')
 const byPair = new Map<string, MarketRow>()
 /** 增量版本号（`byPair` 里的对象是非响应式的，靠它触发重算） */
 const version = ref(0)
+
+/**
+ * 帧率合并的缓冲：`pair` → 这一帧里**最后一条**增量。
+ *
+ * 数据本来就是一秒一批，但重连补推 / REST 兜底交错时可能一帧里来好几批 ——
+ * 每条都 `version++` 会让同一帧渲染多次。攒在这里，`requestAnimationFrame` 里统一刷。
+ * 同一个币在缓冲里只留最后一条（中间价差用户肉眼分辨不出，丢掉无损）。
+ */
+const pending = new Map<string, TickerPatch>()
+/** 已排队的刷新（0 = 没有） */
+let flushRaf = 0
+
 const loading = ref(false)
 const error = ref('')
 
@@ -126,25 +140,12 @@ function measureScrollbar(): void {
   if (w !== sbw.value) sbw.value = w
 }
 
-/**
- * 手机端下滑时把搜索框收起来（用户：「移动端下滑搜索框自动收起」）。
- *
- * 只看**方向**：往下滑过几像素就收，往上滑、或者滑回顶部就放 ——
- * 不看绝对位置（“滚到 200px 以下就藏”那种，往上滑时还得先滑到底才肯出来，很难用）。
- * 加个 6px 的容差：手指停住时的抖动不该让它来回抽。
- *
- * 样式只在窄屏生效（见 `style.css` 的 `@media (max-width: 900px)`），
- * 所以这里的 `compact` 在桌面端不会造成任何变化。
+/*
+ * ⚠️ 原来的「手机端下滑自动收起搜索框」（`compact` + `onListScroll`）2026-10-04 已删。
+ * 它按滚动方向反复切换 `compact` → 每一下都改 `max-height`，触发布局 + 动画，
+ * 滚动时明显掉帧（用户：「搜索框固定吧，滚动会导致帧率变低的感觉卡顿」）。
+ * 现在搜索框**常驻** —— 它本来就在滚动容器 `.mkt-body` 之外，不随列表滚走。
  */
-const compact = ref(false)
-let lastTop = 0
-
-function onListScroll(e: Event): void {
-  const y = (e.target as HTMLElement).scrollTop
-  if (y <= 8 || y < lastTop - 6) compact.value = false
-  else if (y > lastTop + 6) compact.value = true
-  lastTop = y
-}
 
 let unsubscribe: (() => void) | null = null
 /** SSE 静默时的 REST 兜底轮询 */
@@ -174,11 +175,13 @@ async function loadSnapshot(): Promise<void> {
   }
 }
 
-/** 一批增量：只认表里已有的币（非永续 / 非 USDT 的自然被挡在外面） */
-function applyBatch(updates: TickerPatch[]): void {
+/** 把缓冲里的增量一次刷进表，然后触发一次重算（一帧最多一次） */
+function flushPending(): void {
+  flushRaf = 0
+  if (!pending.size) return
   let hit = 0
-  for (const u of updates) {
-    const row = byPair.get(u.pair.toUpperCase())
+  for (const [pair, u] of pending) {
+    const row = byPair.get(pair)
     if (!row) continue
     row.last = u.last
     row.change24hPct = u.change24hPct
@@ -188,9 +191,28 @@ function applyBatch(updates: TickerPatch[]): void {
     row.quoteVolume24h = u.quoteVolume24h
     hit++
   }
+  pending.clear()
+  if (hit) version.value++
+}
+
+/**
+ * 一批增量：只认表里已有的币（非永续 / 非 USDT 的自然被挡在外面）。
+ *
+ * ⚠️ **不在这一帧就刷** —— 先按 `pair` 缓冲，攒到下一帧由 `flushPending()` 统一刷。
+ * 这样同一帧里到达的多批只会触发一次 `version++`（一次 computed 重算 + 一次 vdom diff）。
+ */
+function applyBatch(updates: TickerPatch[]): void {
+  let hit = 0
+  for (const u of updates) {
+    const pair = u.pair.toUpperCase()
+    // 不是表里的币（非永续 / 非 USDT）直接丢，别占缓冲
+    if (!byPair.has(pair)) continue
+    pending.set(pair, u)
+    hit++
+  }
   if (!hit) return
   lastEventAt = Date.now()
-  version.value++
+  if (!flushRaf) flushRaf = requestAnimationFrame(flushPending)
 }
 
 /** 推送断了就 REST 顶一会儿（没断就把兜底关掉） */
@@ -222,6 +244,10 @@ function start(): void {
 }
 
 function stop(): void {
+  // 排队的刷新和缓冲都作废：回来时 `sync()` 会重新拉整表，不差这几条
+  if (flushRaf) cancelAnimationFrame(flushRaf)
+  flushRaf = 0
+  pending.clear()
   unsubscribe?.()
   unsubscribe = null
   if (aliveTimer) clearInterval(aliveTimer)
@@ -275,7 +301,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopped = true
-  stop()
+  stop() // 里面会取消排队的刷新 / 清掉缓冲
   bodyRO?.disconnect()
   bodyRO = null
   document.removeEventListener('visibilitychange', sync)
@@ -299,19 +325,28 @@ function letterColor(base: string): string {
 
 /* ---------------- 排序 / 筛选 ---------------- */
 
-const shown = computed<MarketRow[]>(() => {
+/**
+ * 过了「行情过滤」的（**不含搜索**）。
+ *
+ * ⚠️ 下面 `shown` 必须 `[...filtered.value]` 再排 —— 不能就地 `sort` 这个 computed
+ * 的返回值，那是它自己的缓存数组，就地排会把这个 computed 改脏。
+ */
+const filtered = computed<MarketRow[]>(() => {
   void version.value // 增量改的是 Map 里的对象（非响应式），靠这个版本号触发重算
-  const q = keyword.value.trim().toUpperCase()
   /*
    * 配置里的「行情过滤」：24h 成交额低于阀值的合约直接不列（搜也不给）。
    * 阈值是「百万 USDT」× 1e6；`0` = 不过滤。没成交额（null）的当 0，照样会被滤掉。
    */
   const floor = marketMinVolUsd.value
-  let list = [...byPair.values()]
-  if (floor > 0) list = list.filter(r => (r.quoteVolume24h ?? 0) >= floor)
+  const list = [...byPair.values()]
+  return floor > 0 ? list.filter(r => (r.quoteVolume24h ?? 0) >= floor) : list
+})
+
+const shown = computed<MarketRow[]>(() => {
+  const q = keyword.value.trim().toUpperCase()
   if (q) {
     // 搜索时不切榜单：按成交额排，找币最顺
-    return list
+    return filtered.value
       .filter(r => r.base.includes(q))
       .sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
   }
@@ -319,7 +354,7 @@ const shown = computed<MarketRow[]>(() => {
   // 两列都是**全量排序**（不再按涨/跌筛掉一半）：涨跌幅升序就是「跌得最狠的在前」
   const field = (r: MarketRow) =>
     (sortKey.value === 'volume' ? r.quoteVolume24h : r.change24hPct) ?? 0
-  return list.sort((a, b) => {
+  return [...filtered.value].sort((a, b) => {
     const d = field(b) - field(a)
     return desc ? d : -d
   })
@@ -327,6 +362,20 @@ const shown = computed<MarketRow[]>(() => {
 
 const total = computed(() => shown.value.length)
 const visible = computed(() => shown.value.slice(0, MAX_ROWS))
+
+/*
+ * ⚠️ 2026-10-04：**「空闲时把一批币的 K 线提前取好」整块删掉了**
+ *（原来这里有 `warmTargets` / `warmKey` / 一个 5 秒节流的 watch，向父组件 emit `warm`）。
+ *
+ * 那是「后端还没有 K 线缓存」年代的做法。现在后端有常驻缓存
+ *（`backend/src/data/kline-store.ts`）并在**启动时**把「成交额前 60 ∪ 异动」
+ * 预热带好（`server.ts` 的 `warmCandlesCache`），前端再暖一遍只是**重复劳动**：
+ * 服务器每个 2ms 命中，但 60 个币 × 250 根 ≈ **1.5MB 白传给浏览器** ——
+ * 一进 `/contracts` 一个都还没点，先下 1.5MB。
+ * 用户 2026-10-04：「前端为什么要请求这么多 candles」。
+ *
+ * 现在只有「**真点了某一行**」才发一次请求（`@pick` → `prefetchSymbol`）。
+ */
 
 /* 总数要报给父组件（它拿去做标题右侧的「共 N 个合约」） */
 watch(total, n => emit('count', n), {immediate: true})
@@ -358,7 +407,7 @@ const toneOf = (v: number | null): string =>
 </script>
 
 <template>
-  <div class="mkt" :class="{compact}">
+  <div class="mkt">
     <!-- 搜索：榜单按钮（成交额 / 涨幅 / 跌幅）已按用户要求删掉，排序全在表头上 -->
     <div class="mkt-bar">
       <input
@@ -476,7 +525,7 @@ const toneOf = (v: number | null): string =>
         </table>
       </div>
 
-      <div ref="bodyEl" class="mkt-body" @scroll="onListScroll">
+      <div ref="bodyEl" class="mkt-body">
         <table class="table fixed">
           <colgroup>
             <!-- 和表头那组**必须一模一样**，否则表头跟表身对不上 -->

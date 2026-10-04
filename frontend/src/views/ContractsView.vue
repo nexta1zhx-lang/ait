@@ -15,7 +15,7 @@ defineOptions({name: 'ContractsView'})
 import {onActivated, onDeactivated, ref} from 'vue'
 import {useRouter} from 'vue-router'
 import MarketPanel from '../comps/MarketPanel.vue'
-import {pickSymbol, symbol} from '../analyze'
+import {pickSymbol, prefetchSymbol, symbol} from '../analyze'
 import {useScrollMemory} from '../scroll'
 
 const router = useRouter()
@@ -49,6 +49,8 @@ onDeactivated(() => {
  * 「合约页只搬合约行情列表，K 线留在开单分析里」）。
  */
 function onPickMarket(base: string): void {
+  // 兔底：正常早就被「全量预热」暖好了，这里命中即返回
+  prefetchSymbol(base)
   pickSymbol(base)
   void router.push('/analyze')
 }

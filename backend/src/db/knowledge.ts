@@ -205,6 +205,8 @@ function map(r: Raw): KnowledgeRow {
 }
 
 export interface CreateCaseInput {
+  /** 归属用户（用户系统，2026-10-04）；null = 没归属 */
+  userId: number | null
   symbol: string
   ccxtSymbol: string | null
   exchange: string
@@ -230,8 +232,8 @@ export async function createCase(input: CreateCaseInput): Promise<number> {
     `INSERT INTO knowledge (
        symbol, ccxt_symbol, exchange, timeframe, label, move_type, tags,
        title, why, note, lesson, features, window_start, window_end,
-       candles, rally_meta, snapshot
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+       candles, rally_meta, snapshot, user_id
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
      RETURNING id`,
     [
       input.symbol,
@@ -250,13 +252,17 @@ export async function createCase(input: CreateCaseInput): Promise<number> {
       new Date(input.windowEnd),
       JSON.stringify(packCandles(input.candles)),
       JSON.stringify(input.stats),
-      JSON.stringify(input.snapshot)
+      JSON.stringify(input.snapshot),
+      // user_id —— 知识库按用户隔离
+      input.userId
     ]
   )
   return Number(row?.id)
 }
 
 export interface ListCasesOptions {
+  /** 只看谁的知识库（用户隔离）；null = 没归属的记录 */
+  userId: number | null
   label?: CaseLabel | 'all'
   /** 'none' = 还没判走势类型的 */
   moveType?: MoveType | 'all' | 'none'
@@ -272,10 +278,13 @@ export interface ListCasesOptions {
 
 /** 列表（默认不返回 K 线，省流量） */
 export async function listCases(
-  opts: ListCasesOptions = {}
+  opts: ListCasesOptions
 ): Promise<KnowledgeBrief[]> {
   const where: string[] = []
   const vals: unknown[] = []
+  // 用户隔离 —— 永远是第一个条件
+  vals.push(opts.userId)
+  where.push(`user_id = $${vals.length}`)
   if (opts.label && opts.label !== 'all') {
     vals.push(opts.label)
     where.push(`label = $${vals.length}`)
@@ -323,14 +332,17 @@ export async function listCases(
 }
 
 /** 所有标签 + 各用了多少次（筛选栏的 chip 用） */
-export async function listTags(): Promise<{tag: string; n: number}[]> {
+export async function listTags(
+  userId: number | null
+): Promise<{tag: string; n: number}[]> {
   const rows = await query<{tag: string; n: string}>(
     `SELECT t.tag, count(*)::text AS n
        FROM knowledge k, jsonb_array_elements_text(k.tags) AS t(tag)
-      WHERE jsonb_typeof(k.tags) = 'array'
+      WHERE k.user_id = $1 AND jsonb_typeof(k.tags) = 'array'
       GROUP BY t.tag
       ORDER BY count(*) DESC, t.tag ASC
-      LIMIT 100`
+      LIMIT 100`,
+    [userId]
   )
   return rows.map(r => ({tag: r.tag, n: Number(r.n)}))
 }
@@ -349,6 +361,7 @@ export interface UpdateCaseInput {
 /** 只改文案类的字段，K 线不动 */
 export async function updateCase(
   id: number,
+  userId: number | null,
   patch: UpdateCaseInput
 ): Promise<boolean> {
   const sets: string[] = []
@@ -368,25 +381,33 @@ export async function updateCase(
     put('features', JSON.stringify(patch.features))
   if (!sets.length) return false
   vals.push(id)
+  vals.push(userId)
   const rows = await query<{id: string}>(
-    `UPDATE knowledge SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING id`,
+    `UPDATE knowledge SET ${sets.join(', ')}
+      WHERE id = $${vals.length - 1} AND user_id = $${vals.length} RETURNING id`,
     vals
   )
   return rows.length > 0
 }
 
-export async function getCase(id: number): Promise<KnowledgeRow | null> {
+export async function getCase(
+  id: number,
+  userId: number | null
+): Promise<KnowledgeRow | null> {
   const row = await queryOne<Raw>(
-    `SELECT ${COLS} FROM knowledge WHERE id = $1`,
-    [id]
+    `SELECT ${COLS} FROM knowledge WHERE id = $1 AND user_id = $2`,
+    [id, userId]
   )
   return row ? map(row) : null
 }
 
-export async function deleteCase(id: number): Promise<boolean> {
+export async function deleteCase(
+  id: number,
+  userId: number | null
+): Promise<boolean> {
   const rows = await query<{id: string}>(
-    'DELETE FROM knowledge WHERE id = $1 RETURNING id',
-    [id]
+    'DELETE FROM knowledge WHERE id = $1 AND user_id = $2 RETURNING id',
+    [id, userId]
   )
   return rows.length > 0
 }
