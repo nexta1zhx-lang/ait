@@ -20,9 +20,11 @@
  */
 import {WebSocket} from 'ws'
 import {createExchange, type ExchangeCredentials} from './data/exchange-account'
-import {fetchExchangeOverview} from './data/exchange-overview'
-import {saveSnapshot, upsertFill} from './db/exchange-store'
-import {query} from './db/client'
+import {fetchExchangeOverview, type ExchangeOverview} from './data/exchange-overview'
+import {saveSnapshot, upsertFill, type FillInput} from './db/exchange-store'
+import {query, queryOne} from './db/client'
+
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
 /** 采样间隔：5 分钟（曲线用；同时兼作 REST 兜底对账） */
 const SAMPLE_MS = 5 * 60 * 1000
@@ -30,6 +32,17 @@ const SAMPLE_MS = 5 * 60 * 1000
 const KEEPALIVE_MS = 25 * 60 * 1000
 /** ACCOUNT_UPDATE 触发的快照最短间隔（秒）—— 一秒来几条事件时别全写库 */
 const WS_SNAPSHOT_GAP_SEC = 20
+/** 重连补成交：最多盯几个交易对（每个一次 fetchMyTrades，权重 5） */
+const BACKFILL_MAX_SYMBOLS = 8
+/** 重连补成交：单页条数 / 最多翻几页（翻满就记日志，不无限翻） */
+const BACKFILL_PAGE = 500
+const BACKFILL_MAX_PAGES = 4
+/**
+ * 新绑的账户首次回补多久的成交。
+ * ⚠️ 币安 `/fapi/v1/userTrades` **只给最近 7 天**（不传 startTime/endTime 时），
+ *    所以别顶着 7 天边界写，留一小时的余量。
+ */
+const BACKFILL_FIRST_MS = 7 * 24 * 3600 * 1000 - 3600 * 1000
 
 interface KeyRow {
   id: number
@@ -71,6 +84,64 @@ function streamUrl(listenKey: string, sandbox: boolean): string {
 }
 
 /* ==================================================================
+ * 事件广播（给 `GET /api/exchange/stream` 那条 SSE 用）
+ * ================================================================== */
+
+/** 推给前端的事件（`snapshot` 的载荷形状**对齐** `/api/exchange/overview`） */
+export type ExchangeEvent =
+  | {type: 'snapshot'; source: string; overview: ExchangeOverview}
+  | {
+      type: 'fill'
+      fill: {
+        symbol: string
+        side: string
+        price: number
+        amount: number
+        fee: number
+        realized: number
+        ts: string
+      }
+    }
+  | {type: 'backfill'; added: number}
+
+/** key_id → 订阅者 */
+const listenerSets = new Map<number, Set<(ev: ExchangeEvent) => void>>()
+
+function emit(keyId: number, ev: ExchangeEvent): void {
+  const set = listenerSets.get(keyId)
+  if (!set?.size) return
+  for (const fn of set) {
+    try {
+      fn(ev)
+    } catch {
+      /* 一个订阅者出错别连累别人（比如 SSE 往一个已断的响应里写） */
+    }
+  }
+}
+
+/**
+ * 订阅某套 key 的实时事件。返回退订函数。
+ * ⚠️ SSE 那边**一定要在 `close` 里调它**：连接断了还留在集合里，就会一直往
+ *    一个死响应里写（响应对象被 GC 之前还不报错，纯漏）。
+ */
+export function subscribeExchange(
+  keyId: number,
+  fn: (ev: ExchangeEvent) => void
+): () => void {
+  let set = listenerSets.get(keyId)
+  if (!set) {
+    set = new Set()
+    listenerSets.set(keyId, set)
+  }
+  const bucket = set
+  bucket.add(fn)
+  return () => {
+    bucket.delete(fn)
+    if (!bucket.size) listenerSets.delete(keyId)
+  }
+}
+
+/* ==================================================================
  * 一条 key = 一条流
  * ================================================================== */
 
@@ -84,6 +155,8 @@ class KeyStream {
   private retryTimer: NodeJS.Timeout | null = null
   /** 连上过没有（用来判断是不是「重连」） */
   private everConnected = false
+  /** 最近一次取到的完整快照（补成交时靠它的持仓推交易对） */
+  private lastOverview: ExchangeOverview | null = null
 
   constructor(private readonly row: KeyRow) {}
 
@@ -91,19 +164,30 @@ class KeyStream {
     return `[exch:${this.row.id}]`
   }
 
-  /** 起流（含建 listenKey）。失败会自己退避重试，不抛给调用方。 */
-  async start(): Promise<void> {
+  /**
+   * 起流。`fresh = true` 才去建**新** listenKey，普通断线重连**复用旧的**。
+   *
+   * ⚠️ 别每次重连都 POST 一个新 listenKey：那个接口 **1 次 / 5 分钟**，
+   *    而且一个账户最多留 60 个 key，建新的会把最老的挤掉 —— 可能顺手把用户
+   *    自己那个量化程序的流踢下线。listenKey 能活 60 分钟、我们 25 分钟续一次，
+   *    所以单纯断了的话直接拿旧的连回去就行。
+   */
+  async start(fresh = false): Promise<void> {
     this.stopped = false
     try {
       this.ex = createExchange(credsOf(this.row))
       await this.ex.loadMarkets()
-      this.listenKey = String(
-        (await this.ex.fapiPrivatePostListenKey())?.listenKey ?? ''
-      )
-      if (!this.listenKey) throw new Error('没拿到 listenKey')
-      console.log(`${this.tag} listenKey 就绪（${this.listenKey.length} 位）`)
+      if (fresh || !this.listenKey) {
+        this.listenKey = String(
+          (await this.ex.fapiPrivatePostListenKey())?.listenKey ?? ''
+        )
+        if (!this.listenKey) throw new Error('没拿到 listenKey')
+        console.log(`${this.tag} listenKey 就绪（${this.listenKey.length} 位）`)
+      }
       this.open()
-      this.keepTimer = setInterval(() => void this.keepAlive(), KEEPALIVE_MS)
+      if (!this.keepTimer) {
+        this.keepTimer = setInterval(() => void this.keepAlive(), KEEPALIVE_MS)
+      }
     } catch (e) {
       console.warn(
         `${this.tag} 起流失败：${(e as Error).message.slice(0, 160)}`
@@ -121,19 +205,132 @@ class KeyStream {
       this.retry = 0
       console.log(`${this.tag} WS 已连（用户数据流${isReconnect ? '·重连' : ''}）`)
       /*
-       * ⚠️ 连上（尤其是**重连**）之后必须 REST 对账一次 ——
-       * 断线那段时间的事件是丢的，账目会漂。
+       * ⚠️ 连上（尤其是**重连**）之后必须 REST 对账 ——
+       * 断线那段时间的事件是丢的，账目会漂：快照要重拉、成交要补。
        */
-      void this.snapshot(isReconnect ? 'ws' : 'boot', WS_SNAPSHOT_GAP_SEC)
+      void this.reconcile(isReconnect ? 'ws' : 'boot')
     })
     ws.on('message', (d: Buffer) => void this.onMessage(String(d)))
     ws.on('error', (e: Error) =>
       console.warn(`${this.tag} WS 错误：${e.message.slice(0, 140)}`)
     )
-    ws.on('close', () => {
+    ws.on('close', (code: number, reason: Buffer) => {
       if (this.stopped) return
-      console.warn(`${this.tag} WS 断开`)
+      /*
+       * 一定要把 close 码打出来 —— 1006 = 网络/被踢（看不出原因），
+       * 400x = 币安主动拒（比如 listenKey 已经失效，要重建一个）。
+       */
+      const why = reason?.length ? ` ${String(reason).slice(0, 60)}` : ''
+      console.warn(`${this.tag} WS 断开（${code}${why}）`)
       this.retryLater()
+    })
+  }
+
+  /**
+   * 连上 / 重连之后的对账：**先补快照，再补成交**。
+   * ⚠️ 顺序不能反 —— 补成交要靠 `lastOverview` 里的持仓推交易对（可能刚开的仓，
+   *    一笔成交都还没记过），所以得先把快照取回来。
+   */
+  private async reconcile(source: 'boot' | 'ws'): Promise<void> {
+    await this.snapshot(source, WS_SNAPSHOT_GAP_SEC)
+    await this.backfillFills()
+  }
+
+  /**
+   * 用 REST **补断线期间漏掉的成交**（WS 断线期间的 `ORDER_TRADE_UPDATE` 是真丢了）。
+   *
+   * 交易对从两处凑：① 账本里最近 30 天交易过的币；② 当前有持仓的币。上限 8 个。
+   * 起点 = 账本里最后一笔成交的时间（**往回多要 5 分钟**防边界漏单，重复的交给
+   * `unique(key_id, trade_id)` 挡）；账本空的（新绑账户）就回补 7 天。
+   */
+  private async backfillFills(): Promise<void> {
+    try {
+      const syms = await this.symbolsToBackfill()
+      if (!syms.length) return
+      const since = await this.lastFillTs()
+      let added = 0
+      for (const raw of syms) {
+        const unified = this.ex?.market?.(raw)?.symbol ?? raw
+        let cursor = since
+        for (let page = 0; page < BACKFILL_MAX_PAGES; page++) {
+          const trades = await this.ex.fetchMyTrades(
+            unified,
+            cursor,
+            BACKFILL_PAGE
+          )
+          if (!Array.isArray(trades) || !trades.length) break
+          for (const t of trades) if (await this.saveTrade(t)) added++
+          if (trades.length < BACKFILL_PAGE) break
+          const lastTs = Number(trades[trades.length - 1]?.timestamp ?? 0)
+          if (!(lastTs > cursor)) break
+          // 下一页从最后一笔之后开始（重叠的那笔靠唯一键去重）
+          cursor = lastTs + 1
+        }
+        // 限速：userTrades 权重 5，合约总权重 2400/分钟 —— 慢一点无所谓
+        await sleep(250)
+      }
+      if (added) {
+        console.log(`${this.tag} REST 补成交 ${added} 笔`)
+        emit(this.row.id, {type: 'backfill', added})
+      }
+    } catch (e) {
+      console.warn(`${this.tag} 补成交失败：${(e as Error).message.slice(0, 140)}`)
+    }
+  }
+
+  /** 要补哪些交易对（**交易所原始符号**，如 `BTCUSDT`；最多 8 个） */
+  private async symbolsToBackfill(): Promise<string[]> {
+    const rows = await query<{symbol: string}>(
+      `SELECT symbol
+         FROM exchange_fills
+        WHERE key_id = $1 AND ts > now() - interval '30 days'
+        GROUP BY symbol
+        ORDER BY max(ts) DESC
+        LIMIT $2`,
+      [this.row.id, BACKFILL_MAX_SYMBOLS]
+    )
+    const set = new Set(rows.map(r => r.symbol).filter(Boolean))
+    // 持仓存的是 ccxt 统一符号（BTC/USDT:USDT）→ 换成交易所原始符号
+    for (const p of this.lastOverview?.futures.positions ?? []) {
+      const raw = this.ex?.market?.(p.symbol)?.id ?? p.symbol
+      if (raw) set.add(String(raw))
+    }
+    return [...set].slice(0, BACKFILL_MAX_SYMBOLS)
+  }
+
+  /** 账本里最后一笔成交的时间（往回多要 5 分钟，防边界漏单） */
+  private async lastFillTs(): Promise<number> {
+    const row = await queryOne<{t: string | null}>(
+      `SELECT max(ts) AS t FROM exchange_fills WHERE key_id = $1`,
+      [this.row.id]
+    )
+    const t = row?.t ? new Date(row.t).getTime() : Date.now() - BACKFILL_FIRST_MS
+    return Math.max(0, t - 5 * 60 * 1000)
+  }
+
+  /**
+   * 一笔 REST 查回来的成交 → 账本。
+   * ⚠️ `symbol` 一律存**交易所原始符号**（WS 事件里的 `s` 就是这种，如 `BTCUSDT`）——
+   *    否则同一笔成交会以两种写法进库，前端按币分组时就散了。
+   */
+  private async saveTrade(t: any): Promise<boolean> {
+    const raw = String(
+      t?.info?.symbol ?? this.ex?.market?.(t?.symbol)?.id ?? t?.symbol ?? ''
+    )
+    const tradeId = String(t?.id ?? t?.info?.id ?? '')
+    if (!raw || !tradeId) return false
+    return upsertFill(this.row.user_id, this.row.id, {
+      orderId: String(t?.order ?? t?.info?.orderId ?? ''),
+      tradeId,
+      symbol: raw,
+      side: String(t?.info?.side ?? t?.side ?? '').toLowerCase(),
+      price: Number(t?.price ?? 0),
+      amount: Number(t?.amount ?? 0),
+      fee: Math.abs(Number(t?.fee?.cost ?? t?.info?.commission ?? 0)),
+      feeCcy: String(t?.fee?.currency ?? t?.info?.commissionAsset ?? ''),
+      realized: Number(t?.info?.realizedPnl ?? 0),
+      ts: new Date(Number(t?.timestamp ?? Date.now())),
+      raw: t?.info ?? t
     })
   }
 
@@ -157,7 +354,7 @@ class KeyStream {
     }
     if (e === 'listenKeyExpired') {
       console.warn(`${this.tag} listenKey 过期，重建`)
-      this.restart()
+      this.restart(true)
     }
   }
 
@@ -172,25 +369,39 @@ class KeyStream {
     const lastQty = Number(o?.l ?? 0)
     if (!tradeId || tradeId === '0' || !(lastQty > 0)) return
 
+    const fill: FillInput = {
+      orderId: String(o?.i ?? ''),
+      tradeId,
+      symbol: String(o?.s ?? ''),
+      side: String(o?.S ?? '').toLowerCase(),
+      price: Number(o?.L ?? 0),
+      amount: lastQty,
+      fee: Math.abs(Number(o?.n ?? 0)),
+      feeCcy: String(o?.N ?? ''),
+      realized: Number(o?.rp ?? 0),
+      ts: new Date(Number(o?.T ?? Date.now())),
+      raw: o
+    }
+
     try {
-      const isNew = await upsertFill(this.row.user_id, this.row.id, {
-        orderId: String(o?.i ?? ''),
-        tradeId,
-        symbol: String(o?.s ?? ''),
-        side: String(o?.S ?? '').toLowerCase(),
-        price: Number(o?.L ?? 0),
-        amount: lastQty,
-        fee: Math.abs(Number(o?.n ?? 0)),
-        feeCcy: String(o?.N ?? ''),
-        realized: Number(o?.rp ?? 0),
-        ts: new Date(Number(o?.T ?? Date.now())),
-        raw: o
-      })
+      const isNew = await upsertFill(this.row.user_id, this.row.id, fill)
       if (isNew) {
         console.log(
           `${this.tag} 成交 ${o?.s} ${o?.S} ${lastQty}@${o?.L}` +
             (Number(o?.rp) ? ` 已实现 ${o.rp}` : '')
         )
+        emit(this.row.id, {
+          type: 'fill',
+          fill: {
+            symbol: fill.symbol,
+            side: fill.side,
+            price: fill.price,
+            amount: fill.amount,
+            fee: fill.fee,
+            realized: fill.realized,
+            ts: fill.ts.toISOString()
+          }
+        })
       }
     } catch (err) {
       console.warn(`${this.tag} 写成交失败：${(err as Error).message.slice(0, 140)}`)
@@ -202,19 +413,30 @@ class KeyStream {
    * ⚠️ **失败就只记日志、不写库** —— 绝不能把「拉不到」写成一条 0 的快照，
    *    那会在资产曲线上戳出一个假的「跌到 0」。
    */
-  async snapshot(source: 'boot' | 'ws' | 'poll' | 'shutdown', minGapSec = 0): Promise<void> {
+  async snapshot(
+    source: 'boot' | 'ws' | 'poll' | 'shutdown',
+    minGapSec = 0
+  ): Promise<ExchangeOverview | null> {
     try {
       const ov = await fetchExchangeOverview(credsOf(this.row))
       const wrote = await saveSnapshot(this.row.user_id, this.row.id, ov, {
         source,
         minGapSec
       })
+      this.lastOverview = ov
       if (wrote) {
         const net = ov.futures.margin + (ov.c2c?.totalUsdt ?? 0)
         console.log(`${this.tag} 快照已写（${source}）净资产 ${net}`)
       }
+      /*
+       * ⚠️ **被节流拦下也要推**：数据是真拿到了（只是不值得再写一行库），
+       * 前端要看的是此刻的钱，不是库里那一行。
+       */
+      emit(this.row.id, {type: 'snapshot', source, overview: ov})
+      return ov
     } catch (e) {
       console.warn(`${this.tag} 取数失败：${(e as Error).message.slice(0, 140)}`)
+      return null
     }
   }
 
@@ -228,11 +450,11 @@ class KeyStream {
       console.warn(
         `${this.tag} 续期失败（${(e as Error).message.slice(0, 100)}），重建流`
       )
-      this.restart()
+      this.restart(true)
     }
   }
 
-  /** 断了之后**指数退避**重连（1s → 2 → 4 … 最多 60s） */
+  /** 断了之后**指数退避**重连（1s → 2 → 4 … 最多 60s）。listenKey 能复用就复用。 */
   private retryLater(): void {
     if (this.stopped) return
     this.retry++
@@ -241,11 +463,11 @@ class KeyStream {
     this.retryTimer = setTimeout(() => void this.restart(), wait)
   }
 
-  private restart(): void {
+  private restart(fresh = false): void {
     if (this.stopped) return
     this.cleanup()
     this.stopped = false
-    void this.start()
+    void this.start(fresh)
   }
 
   private cleanup(): void {
@@ -284,6 +506,8 @@ class KeyStream {
 
 const streams = new Map<number, KeyStream>()
 let sampler: NodeJS.Timeout | null = null
+/** 退出流程只跑一次 —— 连按两次 Ctrl+C（或 SIGINT + SIGTERM 一起来）别写两条锚点 */
+let stopping = false
 
 /**
  * 启动：给每条合约 key 写一条**启动锚点**快照，然后起流。
@@ -300,9 +524,9 @@ export function startExchangeStreams(): void {
         streams.set(row.id, s)
         // 锚点：进程启动这一刻先落一条（曲线两端都要有点，见 docs）
         await s.snapshot('boot')
-        await s.start()
+        await s.start(true)
         // ⚠️ 错开握手：币安 WS 连接限 300 次/5 分钟/IP ⇒ 限速 1 条/秒
-        await new Promise(r => setTimeout(r, 1000))
+        await sleep(1000)
       }
     } catch (e) {
       console.warn('  交易所资产  启动失败：', (e as Error).message.slice(0, 160))
@@ -325,6 +549,8 @@ export function startSnapshotSampler(): void {
 
 /** 进程退出：写**关闭锚点** + 断流删 listenKey */
 export async function stopExchangeStreams(): Promise<void> {
+  if (stopping) return
+  stopping = true
   if (sampler) clearInterval(sampler)
   sampler = null
   for (const s of streams.values()) {
@@ -332,4 +558,27 @@ export async function stopExchangeStreams(): Promise<void> {
     await s.stop()
   }
   streams.clear()
+}
+
+/** 调试用：现在盯了几条流 / 有几个 SSE 订阅者 */
+export function exchangeStreamStatus(): {keys: number; listeners: number} {
+  let listeners = 0
+  for (const set of listenerSets.values()) listeners += set.size
+  return {keys: streams.size, listeners}
+}
+
+/**
+ * 把一条**外部取到的**快照推给订阅者。
+ *
+ * 为什么需要：`POST /api/exchange/refresh`（用户点 ⟳）是直接「取数 + 落库」，
+ * 不经过 `KeyStream`，所以它自己不会 emit。不补这一下，用户点了刷新之后
+ * **他自己另一个页面 / 另一个 tab 要等 5 分钟采样才看到新数**（只有那个请求的
+ * 响应是新的）。
+ */
+export function publishSnapshot(
+  keyId: number,
+  overview: ExchangeOverview,
+  source = 'manual'
+): void {
+  emit(keyId, {type: 'snapshot', source, overview})
 }

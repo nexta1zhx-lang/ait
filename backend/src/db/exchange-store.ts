@@ -170,7 +170,8 @@ export async function upsertFill(
   return rows.length > 0
 }
 
-/** 读最新一条（接口「秒开」靠它；不打交易所） */export async function latestSnapshot(
+/** 读最新一条（接口「秒开」靠它；不打交易所） */
+export async function latestSnapshot(
   userId: number,
   keyId: number
 ): Promise<LatestSnapshot | null> {

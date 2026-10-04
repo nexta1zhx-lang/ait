@@ -286,12 +286,31 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 
 | 里程碑 | 内容 | 产出 |
 |---|---|---|
-| **M0** | 用真 key 跑 30 秒临时脚本，确认 ccxt 的币安 ws 用户数据流能出事件、字段够用 | 一句话结论：走 WS 还是退回轮询 |
-| M1 | `schema.ts` 两张表 + `data/exchange-overview.ts`（REST 取数）+ `overview`/`refresh` 接口 | 真实数字能出来（界面先不动） |
-| M2 | `exchange-stream.ts`（WS 常驻 + 重连 + 15 分钟对账）+ SSE 接口 | 数字开始秒跳 |
-| M3 | 成交/盈亏落库 + 读库接口 + 前端接真数据 | 去掉 mock |
+| **M0** ✅ | 用真 key 跑 30 秒临时脚本，确认 ccxt 的币安 ws 用户数据流能出事件、字段够用 | 一句话结论：走 WS 还是退回轮询 |
+| **M1** ✅ | `schema.ts` 两张表 + `data/exchange-overview.ts`（REST 取数）+ `overview`/`refresh` 接口 | 真实数字能出来（界面先不动） |
+| **M2** ✅ | `exchange-stream.ts`（WS 常驻 + 重连复用 listenKey + 重连补成交）+ 5 分钟采样兼对账 + SSE `/api/exchange/stream` | 数字开始秒跳 |
+| M3 | 成交/盈亏**读**接口 + 前端接真数据（`交易所账户` tab 换掉 mock） | 去掉 mock |
 | M4 | 资产曲线（快照序列 → 图）—— **用户定：这轮先不做**，但快照从现在就开始攒 | 后补 |
 | M5 | 删 mock / 预览页 / 老 `/api/exchange/account` | 收尾 |
+
+### M2 实测记录（2026-10-05，本地跑通）
+
+启动日志四步：`快照已写（boot）` → `listenKey 就绪（64 位）` → `WS 已连（用户数据流）`；
+库里 `exchange_snapshots` 四条路径都落了行（`boot` / `ws` / `poll` / `shutdown`）。
+SSE 用真 token 验过：`open` → `snapshot`（底稿，带真实 `ageSec`）→ 点 ⟳ 后收到
+`source=manual`、`ageSec=0` 的**实时推送**；不带 token → 401。
+
+⚠️ 三个实测踩到并已修的坑：
+
+1. **重连别重建 listenKey** —— `POST /fapi/v1/listenKey` 是 **1 次 / 5 分钟**，且一个
+   账户最多留 60 个 key，建新的会把最老的挤掉（可能顺手踢掉用户自己的量化程序）。
+   断线直接拿**旧 key** 连回去（它能活 60 分钟，我们 25 分钟续一次）。
+2. **退出要幂等** —— 连按两次 Ctrl+C 真写出了两条 `shutdown` 锚点（库里验证过）。
+3. **`POST /refresh` 不经过 `KeyStream`**，所以它自己不会 emit —— 必须显式
+   `publishSnapshot()`，否则同一用户别的页面要等 5 分钟采样才看到新数。
+
+⚠️ 仍未验证：`saveTrade()` 的字段映射（`info.symbol` / `fee.currency` /
+`info.realizedPnl`）—— 该账户**合约和现货都没有一笔成交**，等有真实成交才能确认。
 
 ---
 

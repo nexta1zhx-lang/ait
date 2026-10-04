@@ -104,7 +104,9 @@ import {latestSnapshot, saveSnapshot} from './db/exchange-store'
 import {
   startExchangeStreams,
   startSnapshotSampler,
-  stopExchangeStreams
+  stopExchangeStreams,
+  subscribeExchange,
+  publishSnapshot
 } from './exchange-stream'
 import {
   backfillUsageKeys,
@@ -1488,6 +1490,113 @@ async function handleTickerStream(
   const unsubscribe = subscribeTickers(patches =>
     send('ticker', {updates: patches})
   )
+  /* 心跳必须是具名事件，理由同上 */
+  const beat = setInterval(() => send('heartbeat', {}), 20_000)
+
+  let closed = false
+  const done = () => {
+    if (closed) return
+    closed = true
+    clearInterval(beat)
+    unsubscribe()
+  }
+  req.on('close', done)
+  res.on('close', done)
+}
+
+/**
+ * 交易所资产的实时推送（SSE）—— M2 第二件事（方案见 `docs/EXCHANGE.md`）。
+ *
+ * 事件：
+ *   `open`      握手（keyId / 交易所 / 名字 / 市场类型）
+ *   `snapshot`  最新快照。**载荷与 `GET /api/exchange/overview` 逐字对齐**，
+ *               连上先补一条当底稿（前端不用再 GET 一次就能渲染），之后
+ *               WS 事件 / 5 分钟采样 / 用户点刷新 都会推。
+ *   `fill`      新成交（WS 实时）
+ *   `backfill`  REST 补成交的汇总（前端收到重拉一次成交列表）
+ *   `reject`    这套账户不参与统计（现货 / 没填 Key）—— ⚠️ **前端收到必须
+ *               `es.close()`**，否则 EventSource 会自动重连，变成一个死循环。
+ *   `heartbeat` 20 秒一次（**必须是具名事件**，理由见 `handleKlineStream`）
+ *
+ * ⚠️ 事件按 `key_id` 广播（`subscribeExchange`），key 是**校验过属于当前用户**的，
+ *    所以不会串到别人账上。
+ */
+async function handleExchangeStream(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  userId: number,
+  keyId: number,
+  account: ReturnType<typeof publicExchangeKey>,
+  reject: string | null
+): Promise<void> {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...CORS
+  })
+
+  const send = (event: string, data: unknown) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+  /* 只取展示要用的四个字段 —— 掩码、id 这些不往流里发 */
+  const boardAccount = {
+    exchange: account.exchange,
+    name: account.name,
+    marketType: account.marketType,
+    sandbox: account.sandbox
+  }
+
+  if (reject) {
+    send('open', {account})
+    send('reject', {account, noSnapshot: true, reason: reject})
+    res.end()
+    return
+  }
+  send('open', {account})
+
+  // 底稿：库里最近一条（毫秒级，不打交易所）；读失败不致命，后面还有实时事件
+  try {
+    const snap = await latestSnapshot(userId, keyId)
+    send(
+      'snapshot',
+      snap
+        ? {
+            account,
+            noSnapshot: false,
+            overview: {...snap.overview, account: boardAccount},
+            source: snap.source,
+            ageSec: snap.ageSec,
+            stale: snap.stale,
+            err: snap.err
+          }
+        : {
+            account,
+            noSnapshot: true,
+            reason: '还没采过这个账户（点一下刷新）'
+          }
+    )
+  } catch (e) {
+    console.warn('[exchange/stream] 底稿读取失败：', (e as Error).message)
+  }
+
+  const unsubscribe = subscribeExchange(keyId, ev => {
+    if (ev.type === 'snapshot') {
+      send('snapshot', {
+        account,
+        noSnapshot: false,
+        overview: {...ev.overview, account: boardAccount},
+        source: ev.source,
+        ageSec: 0,
+        stale: false,
+        err: null
+      })
+      return
+    }
+    if (ev.type === 'fill') return send('fill', ev.fill)
+    return send('backfill', {added: ev.added})
+  })
   /* 心跳必须是具名事件，理由同上 */
   const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
@@ -2923,6 +3032,11 @@ async function route(
         sandbox: key.sandbox
       })
       await saveSnapshot(me.id, key.id, ov, {source: 'manual'})
+      /*
+       * 推给订阅者：别人（或自己另一个 tab）正开着 `/api/exchange/stream` 时
+       * 立刻看到新数，不用干等 5 分钟采样。
+       */
+      publishSnapshot(key.id, ov, 'manual')
       return sendJson(res, 200, {
         account,
         noSnapshot: false,
@@ -2940,6 +3054,38 @@ async function route(
     } catch (e) {
       return fail(res, 'exchange/refresh', e)
     }
+  }
+
+  /*
+   * 交易所资产 · 实时推送（SSE，M2）—— 事件语义见 `handleExchangeStream`。
+   * 认证走 `?token=`（EventSource 发不了请求头），见 `bearerToken`。
+   */
+  if (p === '/api/exchange/stream' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    /*
+     * 不参与统计的两种情况**用 SSE 事件拒绕**，不回 JSON：
+     * EventSource 拿到非 SSE 响应只会静默重连，前端连原因都看不到，
+     * 只能干看着它每 3 秒重试一次。
+     */
+    let reject: string | null = null
+    if (key.marketType !== 'swap') {
+      reject = '这套账户是现货，不参与统计（只算 USDT 合约 + C2C）'
+    } else if (!key.apiKey || !key.secret) {
+      reject = '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）'
+    }
+    await handleExchangeStream(
+      req,
+      res,
+      me.id,
+      key.id,
+      publicExchangeKey(key),
+      reject
+    )
+    return
   }
 
   /*
