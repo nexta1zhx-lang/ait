@@ -1,6 +1,6 @@
 {
   "name": "crypto-entry-advisor",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "description": "币圈开单分析：拉行情 → 把 K 线读成文字 → 大模型预测最大概率的走法 + 形状标签概率",
   "bin": {
