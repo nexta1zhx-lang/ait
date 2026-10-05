@@ -49,6 +49,7 @@ import {
   type TradePositionRow
 } from '../api'
 import {fmt, usd} from '../format'
+import {isForeground, onForegroundChange} from '../live'
 import {testOrder} from '../settings'
 import {contracts} from '../store'
 import {freshLivePrice, ticker} from '../ticker'
@@ -134,6 +135,10 @@ function say(text: string, tone: 'ok' | 'bad' = 'bad'): void {
 
 onBeforeUnmount(() => {
   if (toastTimer) clearTimeout(toastTimer)
+  if (posTimer) clearInterval(posTimer)
+  posTimer = null
+  stopForeground?.()
+  stopForeground = null
 })
 
 /**
@@ -512,6 +517,8 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
  */
 const positions = ref<TradePositionRow[]>([])
 const posLoading = ref(false)
+/** 有没有一发持仓请求在路上（去重用，见 `loadPositions`） */
+let posFetching = false
 /** 读失败的原因：**列表里那一行小字**（不弹 toast —— 切过来看见空列表总得知道为什么） */
 const posErr = ref('')
 
@@ -530,7 +537,21 @@ function sideText(p: TradePositionRow): string {
 
 /** 未实现盈亏：正负号 + 金额（跟别处一个写法） */
 function pnlText(v: number): string {
-  return `${v >= 0 ? '+' : '−'}${fmt(Math.abs(v), 2)}`
+  return `${v >= 0 ? '+' : '−'}${usd(Math.abs(v))}`
+}
+
+/**
+ * 单行里塞不下的那些（开仓数量 / 开仓价）——按住这一行就看见。
+ * 手机上没有 hover，但长按会弹 `title`（iOS / Android WebView 都支持）。
+ */
+function posTitle(p: TradePositionRow): string {
+  return (
+    `${baseOf(p.symbol)} ${sideText(p)} ${p.leverage}x\n` +
+    `开仓数量 ${posQty(p)}\n` +
+    `开仓价 ${fmt(p.entryPrice)}\n` +
+    `仓位价值 ${usd(p.notional)}\n` +
+    `未实现盈亏 ${pnlText(p.unrealized)}`
+  )
 }
 
 /* ---------------- 减仓（用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」） ---------------- */
@@ -575,9 +596,18 @@ async function confirmReduce(pct: number): Promise<void> {
   }
 }
 
-async function loadPositions(): Promise<void> {
-  if (posLoading.value) return
-  posLoading.value = true
+/**
+ * 拉一次持仓列表。
+ *
+ * `silent = true` 是**后台自动刷**用的：不翻 `posLoading`，免得列表每 15 秒
+ * 闪一下「正在读持仓…」（列表已经有内容了，卡一下反而像是坏了）。
+ * 请求去重还是靠 `posFetching`：自动刷和「切 tab 触发的拉」撞在一起时，
+ * 后到的那个直接跳过，别把交易所连着打两遍。
+ */
+async function loadPositions(silent = false): Promise<void> {
+  if (posFetching) return
+  posFetching = true
+  if (!silent) posLoading.value = true
   posErr.value = ''
   try {
     const r = await fetchTradePositions(keyId.value)
@@ -591,9 +621,43 @@ async function loadPositions(): Promise<void> {
     positions.value = []
     posErr.value = (e as Error).message
   } finally {
+    posFetching = false
     posLoading.value = false
   }
 }
+
+/**
+ * 持仓列表**自动刷**（用户 2026-10-05：「刷新持仓按钮去掉」）——
+ * 按钮去掉之后这一格得自己保持新鲜：每 `POS_REFRESH_MS` 拉一次。
+ *
+ * 什么时候不刷：
+ *   · 不在「仓位」那一格（开单页不看持仓，没必要打交易所）
+ *   · 这一页不是当前页 / App 切到后台（`isForeground()`）—— 省流量，也避免
+ *     在后台被交易所限频
+ * 定时器在 `onBeforeUnmount` 里收掉，切 tab / 切前后台时重新对齐。
+ */
+const POS_REFRESH_MS = 15_000
+let posTimer: ReturnType<typeof setInterval> | null = null
+
+function posPollWanted(): boolean {
+  return tab.value === 'position' && props.active && isForeground()
+}
+
+function syncPosTimer(): void {
+  const want = posPollWanted()
+  if (!want) {
+    if (posTimer) clearInterval(posTimer)
+    posTimer = null
+    return
+  }
+  if (posTimer) return
+  posTimer = setInterval(() => {
+    if (posPollWanted()) void loadPositions(true)
+  }, POS_REFRESH_MS)
+}
+
+/** 前后台翻转：回前台立刻补一次（不等到下一个 15 秒），并重排定时器 */
+let stopForeground: (() => void) | null = null
 
 /**
  * 平掉**这一条**持仓。
@@ -693,15 +757,25 @@ watch(
   () => props.active,
   on => {
     if (on) void load()
+    /* 不在这一页了就别让持仓轮询继续打交易所 */
+    if (!on && posTimer) {
+      clearInterval(posTimer)
+      posTimer = null
+    }
+    syncPosTimer()
   }
 )
 
 /*
  * 切到「仓位」那一格才去拉持仓列表 —— `positionRisk` 不带 symbol 是**全量**查询，
  * 没必要在开单页就替它付这一笔。
+ *
+ * ⚠️ 顺带把**自动刷新的定时器**对齐：只在「仓位」这一格开着（见 `syncPosTimer`）——
+ *    用户 2026-10-05 把「刷新持仓」那颗按钮去掉了，列表得自己保持新鲜。
  */
 watch(tab, t => {
   if (t === 'position') void loadPositions()
+  syncPosTimer()
 })
 
 /* 关掉「市价」= 要填价格开限价单：价格空着就先填上标记价 */
@@ -730,6 +804,15 @@ onMounted(async () => {
   /* 先把 Key 列表拿来（`tradeKey` 靠它算），不然第一发会打到默认那套上去 */
   await loadTradeKeys()
   if (props.active) void load()
+  /*
+   * 前后台翻转：回前台**立刻补一次**持仓（不干等下一个 15 秒），并把轮询定时器
+   * 按当前前后台状态重排 —— 切后台时停掉，别在后台一直打交易所。
+   */
+  stopForeground = onForegroundChange(on => {
+    if (on && tab.value === 'position' && props.active) void loadPositions(true)
+    syncPosTimer()
+  })
+  syncPosTimer()
 })
 </script>
 
@@ -986,22 +1069,38 @@ onMounted(async () => {
     <div class="ord-page" :class="{off: tab !== 'position'}">
       <!--
         持仓列表（用户 2026-10-05：「平仓是针对每一个仓位的，没有补仓」）：
-        账户里**所有币**的持仓，一行一条，各自带一颗「平仓」。
-        ⚠️ 列表**高度封顶、超出自己滚** —— 下单区整体高度得稳住
-           （用户：「下单区域高度固定」）。
+        账户里**所有币**的持仓，**一行一条**，各自带「减仓 / 平仓」。
+
+        ⚠️ 列表**高度封顶、超出自己滚，但滚动条不画出来** —— 下单区整体高度是钉死的
+           （用户：「下单区域高度固定」），这么窄的格子里再占掉 6px 滚动条不划算，
+           手指一划就能滚（用户 2026-10-05：「滚动条不显示」）。
+        ⚠️ **没有「刷新持仓」按钮**了（用户 2026-10-05：「刷新持仓按钮去掉」）——
+           列表在这一格开着的时候**自己 15 秒刷一次**（见脚本 `syncPosTimer`），
+           想立刻看到结果就切走再切回来（`watch(tab)` 也会拉一次）。
       -->
       <ul v-if="positions.length" class="ord-pos">
-        <li v-for="p in positions" :key="p.symbol + p.side">
+        <li
+          v-for="p in positions"
+          :key="p.symbol + p.side"
+          :title="posTitle(p)"
+        >
           <!--
-            第一行（用户 2026-10-05：「简略显示 方向后面的小字改为 仓位价值」）：
-              币种简写 · 方向 · **仓位价值**（原来是数量当小字）· 右侧未实现盈亏
+            单行（用户 2026-10-05：「列表单行显示…币种 方向 杠杆标签 仓位价值
+            未实现盈利 按钮」）：
+              币种 · 方向 · 杠杆 · 仓位价值 …… 未实现盈亏 · 减仓 / 平仓
+            开仓数量 / 开仓价单行塞不下（窄屏会截断），挪进 `title` —— 要核对
+            数量时手指按住这一行就看见了。
           -->
-          <div class="op-l1">
+          <div class="op-row">
             <b class="op-sym">{{ baseOf(p.symbol) }}</b>
             <span
               class="op-side"
               :class="p.side === 'long' ? 'side-long' : 'side-short'"
               >{{ sideText(p) }}</span
+            >
+            <!-- 杠杆：一枚小标签（用户：「杠杆标签」），一眼跟数值/盈亏分开 -->
+            <span class="op-lev" :title="`${baseOf(p.symbol)} 这个交易对用的杠杆`"
+              >{{ p.leverage }}x</span
             >
             <span class="op-val" :title="`仓位价值：${usd(p.notional)}`"
               >{{ usd(p.notional) }}</span
@@ -1012,19 +1111,9 @@ onMounted(async () => {
               :class="p.unrealized >= 0 ? 'pnl-up' : 'pnl-down'"
               >{{ pnlText(p.unrealized) }}</b
             >
-          </div>
-          <!--
-            第二行（用户 2026-10-05：「仓位 tab 显示开仓数量」）：开仓数量 + 开仓价，
-            右侧两颗按钮：减仓（弹窗选百分比）/ 平仓。
-          -->
-          <div class="op-l2">
-            <span class="op-qty">{{ posQty(p) }}</span>
-            <span class="op-entry">开 {{ fmt(p.entryPrice) }}</span>
-            <span class="op-lev" :title="`这个交易对的杠杆`">{{ p.leverage }}x</span>
-            <span class="spacer" />
             <button
               type="button"
-              class="ghost tiny op-reduce"
+              class="op-act op-reduce"
               :disabled="busy || levBusy"
               :title="`减仓（只平掉一部分）`"
               @click="openReduce(p)"
@@ -1033,7 +1122,7 @@ onMounted(async () => {
             </button>
             <button
               type="button"
-              class="ghost tiny op-close"
+              class="op-act op-close"
               :disabled="busy || levBusy"
               :title="
                 `平掉 ${baseOf(p.symbol)} 这一条持仓（` +
@@ -1053,24 +1142,15 @@ onMounted(async () => {
         {{ posLoading ? '正在读持仓…' : posErr || '现在没有持仓' }}
       </p>
 
-      <div class="ord-actions">
+      <!-- 这一格只剩「余额没读到时重试」这一颗了；没有就不占行高 -->
+      <div v-if="!ready && !loading" class="ord-actions">
         <button
-          v-if="!ready && !loading"
           type="button"
           class="ghost tiny ord-retry"
           title="重新读一次余额和杠杆"
           @click="load"
         >
           重试
-        </button>
-        <button
-          type="button"
-          class="ghost tiny op-reload"
-          :disabled="posLoading"
-          title="重新读一次持仓列表"
-          @click="loadPositions"
-        >
-          {{ posLoading ? '读取中…' : '刷新持仓' }}
         </button>
       </div>
     </div>

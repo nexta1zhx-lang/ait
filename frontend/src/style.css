@@ -4243,10 +4243,13 @@ body.fixed-viewport .split {
 }
 
 /*
- * 「仓位」那一格的持仓列表：一行一条，行尾一颗「平仓」。
+ * 「仓位」那一格的持仓列表：**一行一条**，行尾两颗简约按钮（减仓 / 平仓）。
  *
  * ⚠️ 高度封顶 + 自己滚 —— 下单区整体高度是钉死的（用户 2026-10-05：
  *    「下单区域高度固定」），持仓多也不能把面板撑高、把上面的 K 线顶上去。
+ * ⚠️ 滚动条**不画出来**（用户 2026-10-05：「滚动条不显示」）：这一格就 300 出头宽，
+ *    再让滚动条吃掉 6px 不划算；手指一划照样滚（惯性滚动照旧）。
+ *    全站那条细滚动条见上面 `::-webkit-scrollbar`，这里单独盖掉。
  * 多 / 空的颜色跟全站一致（多 = 绿、空 = 红）。
  */
 /*
@@ -4260,25 +4263,32 @@ body.fixed-viewport .split {
   margin: 0 0 8px;
   padding: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
+  scrollbar-width: none;
+}
+
+.ord-pos::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .ord-pos li {
   display: block;
-  padding: 6px 0;
+  padding: 5px 0;
   border-top: 1px solid var(--border);
   font-size: 11px;
   white-space: nowrap;
 }
 
 /*
- * 一条持仓**两行**（用户 2026-10-05）：
- *   ① 币种 · 方向 · 仓位价值 …… 未实现盈亏（顶到行尾）
- *   ② 开仓数量 · 开仓价 · 杠杆 …… 减仓 / 平仓
- * 两行都是 flex + `nowrap`，`overflow: hidden` 兜住窄屏（宁可截断也不换行撑高）。
+ * 一条持仓 = **一行**（用户 2026-10-05：「列表单行显示」）：
+ *   币种 · 方向 · 杠杆 · 仓位价值 ……（顶到右边）未实现盈亏 · 减仓 / 平仓
+ *
+ * `nowrap` + `overflow: hidden` 兜住窄屏：宁可把「仓位价值」截断，也不换行
+ * ——一换行高度就随内容变，这条列表就不再是一行一条了。
  */
-.ord-pos .op-l1,
-.ord-pos .op-l2 {
+.ord-pos .op-row {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -4286,13 +4296,8 @@ body.fixed-viewport .split {
   overflow: hidden;
 }
 
-.ord-pos .op-l2 {
-  margin-top: 3px;
-}
-
 /* 把后面那组推到行尾（`.spacer` 只在组件里，这里自己写一份） */
-.ord-pos .op-l1 > .spacer,
-.ord-pos .op-l2 > .spacer {
+.ord-pos .op-row > .spacer {
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -4312,7 +4317,19 @@ body.fixed-viewport .split {
   font-weight: var(--fw-bold);
 }
 
-/* 仓位价值（方向后面那串小字，原来是数量，用户 2026-10-05 让换成它） */
+/* 杠杆小标签（用户 2026-10-05：「杠杆标签」）：加个底、四条边，跟数字分得开 */
+.ord-pos .op-lev {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 仓位价值：唯一允许被压缩的一项（窄屏先截它，别的都是短字段） */
 .ord-pos .op-val {
   flex: 0 1 auto;
   min-width: 0;
@@ -4321,14 +4338,6 @@ body.fixed-viewport .split {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
-}
-
-/* 杠杆：灰色小字，跟着第二行 */
-.ord-pos .op-lev {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
 }
 
 .ord-pos .side-long,
@@ -4341,37 +4350,45 @@ body.fixed-viewport .split {
   color: var(--bad);
 }
 
-.ord-pos .op-qty,
-.ord-pos .op-entry {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  text-overflow: ellipsis;
-}
-
-/* 盈亏顶到第一行行尾（前面那个 `.spacer` 干的活） */
+/* 盈亏顶到这一行的右侧（前面那个 `.spacer` 干的活） */
 .ord-pos .op-pnl {
   flex: 0 0 auto;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
 
-/* 减仓：中性色（黄色留给「平仓」那颗，别两个都吓人） */
-.ord-pos .op-reduce {
+/*
+ * 行尾两颗**简约**按钮（用户 2026-10-05：「按钮简约模式」）：
+ * 没底、没边、不占宽度，就是两个词 —— 高度跟这一行对齐，不去撑行高。
+ * 颜色还是分开的：减仓是中性色，平仓黄一点（它们是两个不同量级的动作）。
+ */
+.ord-pos .op-act {
   flex: 0 0 auto;
-  padding: 3px 9px;
+  padding: 4px 6px;
+  border: 0;
+  background: none;
   font-size: 11px;
+  font-weight: var(--fw-mid);
+  line-height: 1.3;
+}
+
+.ord-pos .op-reduce {
   color: var(--muted);
 }
 
 .ord-pos .op-close {
-  flex: 0 0 auto;
-  padding: 3px 9px;
-  font-size: 11px;
   color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+/* 悬停：触屏不应用（简约按钮没有边框可以变色，只用文字颜色提示） */
+@media (hover: hover) {
+  .ord-pos .op-reduce:hover:not(:disabled) {
+    color: var(--text);
+  }
+
+  .ord-pos .op-close:hover:not(:disabled) {
+    color: color-mix(in srgb, var(--warn) 70%, #fff);
+  }
 }
 
 /* 没持仓 / 读失败：一句话摆在列表原位（高度由 `.ord-body` 兜住） */
