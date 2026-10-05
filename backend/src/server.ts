@@ -1626,7 +1626,9 @@ async function handleExchangeStream(
  *
  * 为什么不让浏览器直连图标站：图标源在国内不一定连得上，但**我们的域名一定连得上**
  * （跟 K 线 WS 中转一个道理）；顺带在内存里缓存起来，几百个币也就几百 KB，
- * 浏览器那边 `max-age` 七天。找不到就 404，前端退回首字母的圆形占位。
+ * 浏览器那边 `max-age` 七天。
+ * ⚠️ 找不到**不再回 404**，而是现画一张首字母圆回 200 —— 为什么，见下面
+ *    `letterIcon` 那一大段说明（用户 2026-10-05：「合约行情页面报错」）。
  *
  * ★ 2026-10-03 换过一次源。用户问「图标怎么不全」——实测把 528 个合约跑了一遍：
  *
@@ -1654,16 +1656,58 @@ const ICON_SOURCES: ((k: string) => string)[] = [
 ]
 
 const iconCache = new Map<string, {buf: Buffer; type: string} | null>()
+/** 缓存上限：正常就 528 个币，超了说明有人在乱刷 key，直接清空重来 */
+const ICON_CACHE_MAX = 2000
 
-/**
- * 没有这个币的图标：回 404 但**带缓存头**。
+/*
+ * ──────────────── 没有图标时：服务端自己画一张「首字母圆」 ────────────────
  *
- * 图标集里没有的小币（新上的一堆）会走到这儿，前端退回首字母圆；
- * 不带缓存头的话，每次开页面都要为那十来个币再问一遍（浏览器控制台一片 404）。
+ * ⚠️⚠️ 用户 2026-10-05：「合约行情页面报错」—— 拿来的是一屏控制台红字：
+ *
+ *     MarketPanel.vue:172  GET /api/icon/ain?v=2 404 (Not Found)
+ *     MarketPanel.vue:172  GET /api/icon/us?v=2   404 (Not Found)
+ *     MarketPanel.vue:172  GET /api/icon/%E9%BE%99%E8%99%BE?v=2 400 (Bad Request)
+ *
+ * 原因：前端是 `<img src="/api/icon/xxx">`，而**浏览器对任何加载失败的 `<img>`
+ * 都会在控制台打一行红字**（404 也一样）。实测 528 个合约里有 122 个图标源都没有
+ *（新上币、中文名的、BTCDOM 这种指数）—— 一屏 120 行里就有十来个，所以控制台常年刷红。
+ *
+ * 这行红字**消不掉**：改 CSS `background-image` 确实不报错，但那样就分不清「有图标」
+ * 和「没图标」了（首字母会从图标底下透出来）；改成 JS `fetch` 一样会报
+ *（fetch 拿到 404 同样打红字）。唯一能让控制台干净的办法就是**别回错误码**。
+ *
+ * 所以把前端原来那张首字母占位**搬到服务端画**：
+ *  · 颜色算法跟前端 `MarketPanel.letterColor()` **逐字一致**：
+ *    `h = (h*31 + charCode) % 360`、`hsl(h 52% 38%)`，种子用**原始大小写**的币种名
+ *  · 字母大小按 `.ico-letter` 量：26px 的圆里 14px 字 ⇒ 100 的 viewBox 里 54，
+ *    字重 700、白色、居中 —— 换过来基本看不出区别
+ *  · 前端那条 `.ico-letter` 老路**留着**（真遇到网络错误时兜底）
  */
-function sendNoIcon(res: http.ServerResponse): void {
-  res.writeHead(404, {'Cache-Control': 'public, max-age=86400', ...CORS})
-  res.end()
+
+/** 首字母圆的色相 —— ⚠️ 跟前端的 `letterColor()` 是同一份算法，改要两边一起改 */
+function letterHue(seed: string): number {
+  let h = 0
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360
+  return h
+}
+
+/** SVG 文本要转义（币种名里出现 `&` / `<` 也不会把文档搞坏） */
+function xmlEsc(s: string): string {
+  return s.replace(/[&<>]/g, c =>
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'
+  )
+}
+
+/** 画一张「首字母圆」（没有图标时的兜底，说明见上面那段） */
+function letterIcon(seed: string): {buf: Buffer; type: string} {
+  const ch = seed.slice(0, 1).toUpperCase()
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">' +
+    `<circle cx="50" cy="50" r="50" fill="hsl(${letterHue(seed)},52%,38%)"/>` +
+    '<text x="50" y="50" dy="0.35em" text-anchor="middle" fill="#fff" font-size="54" font-weight="700" ' +
+    `font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Noto Sans SC,sans-serif">${xmlEsc(ch)}</text>` +
+    '</svg>'
+  return {buf: Buffer.from(svg, 'utf8'), type: 'image/svg+xml'}
 }
 
 /** 逐个源试一遍，拿到就返回；全都拿不到返回 null */
@@ -1701,34 +1745,75 @@ async function handleIcon(
   sym: string,
   res: http.ServerResponse
 ): Promise<void> {
-  const key = sym.trim().toLowerCase()
-  if (!/^[a-z0-9]{1,20}$/.test(key)) {
-    sendJson(res, 400, {error: '币种不合法'})
-    return
+  /*
+   * ⚠️ 路由传进来的是 **`url.pathname`（没解码）** —— 实测 `/api/icon/%41in`
+   *    拿到的是字面量 `%41in`（见 `const p = url.pathname`）。中文名合约
+   *    （龙虾 / 牛来 / 哈基米…）不先解码就是一堆 `%E9…`，首字母圆会画成一个「%」。
+   */
+  let raw = sym
+  try {
+    raw = decodeURIComponent(sym)
+  } catch {
+    // 坏的百分号转义（`%zz`）会抛，按原样用
   }
+  raw = raw.trim()
+  const key = raw.toLowerCase()
+
+  /*
+   * 只有「像图标键」的才值得去问那三套图标源：纯 ASCII 字母/数字（可带 `-`）。
+   *
+   * ⚠️ 币安真有中文名的合约（实测 5 个：哈基米 / 币安人生 / 我踏马来了 / 牛来 / 龙虾），
+   *    那些图库里**必然没有**，没必要为它们打三次上游；
+   *    顺带也挡住了把 `/` `.` `?` 塞进来拼上游 URL 的可能。
+   *
+   * ⚠️⚠️ 但这**不是「客户端请求错了」** —— 原来这里回的是
+   *    `400 {error:'币种不合法'}`，于是这 5 个币在用户控制台里变成 5 行 400
+   *（看着像我们代码有 bug）。现在一律走「没有图标」那条路。
+   */
+  const probeable = /^[a-z0-9][a-z0-9-]{0,23}$/.test(key)
+
   let hit = iconCache.get(key)
   if (hit === undefined) {
-    /*
-     * 候选键：先用原样，再去掉开头的数字。
-     * `1000PEPE` / `1000SHIB` 这种，图标站多数只认 `pepe` / `shib`。
-     */
-    const stripped = key.replace(/^\d+/, '')
-    const keys = stripped && stripped !== key ? [key, stripped] : [key]
-    hit = await fetchIcon(keys)
+    if (!probeable) {
+      hit = null
+    } else {
+      /*
+       * 候选键：先用原样，再去掉开头的数字。
+       * `1000PEPE` / `1000SHIB` 这种，图标站多数只认 `pepe` / `shib`。
+       */
+      const stripped = key.replace(/^\d+/, '')
+      const keys = stripped && stripped !== key ? [key, stripped] : [key]
+      hit = await fetchIcon(keys)
+    }
     // 找不到也记一笔（null），别每次开页面都为同一个币把三个源都问一遍
     iconCache.set(key, hit)
+    if (iconCache.size > ICON_CACHE_MAX) iconCache.clear()
   }
-  if (!hit) {
-    sendNoIcon(res)
+
+  if (hit) {
+    res.writeHead(200, {
+      'Content-Type': hit.type,
+      'Content-Length': hit.buf.length,
+      'Cache-Control': 'public, max-age=604800',
+      ...CORS
+    })
+    res.end(hit.buf)
     return
   }
+
+  /*
+   * 没有真图标 → 现画一张首字母圆（**200，不是 404**，为什么见 `letterIcon` 那段）。
+   * ⚠️ 缓存只给 **1 天**（不是图标那 7 天）：以后补了图标源 / 这币上了图库，
+   *    一天后浏览器就自己来取新的了。
+   */
+  const avatar = letterIcon(raw || '?')
   res.writeHead(200, {
-    'Content-Type': hit.type,
-    'Content-Length': hit.buf.length,
-    'Cache-Control': 'public, max-age=604800',
+    'Content-Type': avatar.type,
+    'Content-Length': avatar.buf.length,
+    'Cache-Control': 'public, max-age=86400',
     ...CORS
   })
-  res.end(hit.buf)
+  res.end(avatar.buf)
 }
 
 /**
@@ -2966,12 +3051,15 @@ async function route(
         return sendJson(res, 200, {
           account,
           noSnapshot: false,
-          overview: {...snap.overview, account: {
-            exchange: account.exchange,
-            name: account.name,
-            marketType: account.marketType,
-            sandbox: account.sandbox
-          }},
+          overview: {
+            ...snap.overview,
+            account: {
+              exchange: account.exchange,
+              name: account.name,
+              marketType: account.marketType,
+              sandbox: account.sandbox
+            }
+          },
           source: snap.source,
           ageSec: snap.ageSec,
           stale: snap.stale,
@@ -3001,12 +3089,15 @@ async function route(
       return sendJson(res, 200, {
         account,
         noSnapshot: false,
-        overview: {...ov, account: {
-          exchange: account.exchange,
-          name: account.name,
-          marketType: account.marketType,
-          sandbox: account.sandbox
-        }},
+        overview: {
+          ...ov,
+          account: {
+            exchange: account.exchange,
+            name: account.name,
+            marketType: account.marketType,
+            sandbox: account.sandbox
+          }
+        },
         source: 'manual',
         ageSec: 0,
         stale: false,
@@ -3117,7 +3208,7 @@ async function route(
       const spanHours = hours ?? (await firstSnapshotHours(me.id, key.id))
       const bucket = Math.max(
         300,
-        Math.ceil(((spanHours * 3600) / 360) / 300) * 300
+        Math.ceil((spanHours * 3600) / 360 / 300) * 300
       )
       const points = await listCurve(me.id, key.id, hours, bucket)
       return sendJson(res, 200, {points, range, bucketSec: bucket})

@@ -705,7 +705,12 @@ export interface FuturesPosition {
 /** 一份快照 —— 后端落库后读回来的那份（见 `docs/EXCHANGE.md`） */
 export interface ExchangeOverview {
   /** 这套 Key 的展示信息（脱敏；真凭据只在服务端） */
-  account: {exchange: string; name: string; sandbox: boolean; marketType: string}
+  account: {
+    exchange: string
+    name: string
+    sandbox: boolean
+    marketType: string
+  }
   /** 采集时间（ISO）—— 界面拿它算「几分钟前」 */
   takenAt: string
   futures: {
@@ -1040,14 +1045,22 @@ export function tickerStream(
  * 币种图标（后端代理几套公开图标集 + 按顺序兜底，顺带缓存）。
  *
  * 走我们自己的域名：图标源在国内不一定连得上，自己的域名一定连得上。
- * 拿不到会 404，组件那边退回首字母的圆形占位。
  *
- * ⚠️ `?v=2` 是**刻意加的缓存破解**：后端 2026-10-03 换过图标源
- * （老的 spothq 那套只覆盖 16%，新币基本全缺），而旧的 404 响应在浏览器里
- * 缓存了 **一天**（`max-age=86400`）。不加这个参数，已经打开过页面的用户
- * 这一天里看到的还是首字母占位。换源/改图标逻辑时**把这个数字 +1**。
+ * ⚠️ **拿不到图标时后端回的是 200 + 一张它现画的首字母圆**（2026-10-05 改的），
+ *    不是 404 —— 因为浏览器对 `<img>` 的 404 会在控制台打一行红字，
+ *    528 个合约里 122 个没图标，一屏十几行红字（用户：「合约行情页面报错」）。
+ *    Edge 那段说明在 `backend/src/server.ts` 的 `letterIcon`。
+ *    组件那边 `.ico-letter` 那条退路还留着，只管真的网络错误。
+ *
+ * ⚠️ `?v=N` 是**刻意加的缓存破解**：
+ *    · 2（2026-10-03）：后端换过图标源（老的 spothq 那套只覆盖 16%），
+ *      而旧的 404 响应在浏览器里缓存了**一天**，不加参数已打开过页面的用户
+ *      那一天里看到的还是首字母占位。
+ *    · 3（2026-10-05）：「没图标」从 404 改成 200 + 首字母圆。
+ *      不提版本的话，之前缓过 404 的浏览器会接着用那份 404（仍然报错 + 仍然走前端的占位）。
+ *    换源 / 改图标逻辑时**把这个数字 +1**。
  */
-export const ICON_VERSION = 2
+export const ICON_VERSION = 3
 
 export const iconUrl = (base: string): string =>
   apiUrl(
