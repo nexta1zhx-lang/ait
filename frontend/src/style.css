@@ -3420,6 +3420,15 @@ body.fixed-viewport .split {
   color: inherit;
   font-size: 9px;
   line-height: 1;
+  /*
+   * ⚠️⚠️ 必须**抬到触摸区上面**（用户 2026-10-06：「点击叉号没反应」）：
+   *      `.olb.draggable::after` 那个「往外撑 9px 的触摸区」是绝对定位的伪元素，
+   *      会盖在 ✕ 上 —— `elementFromPoint()` 在 ✕ 正中间量到的是**标签自己**，
+   *      手指点下去根本落不到这颗按钮上（合成事件直接派给按钮，验不出来）。
+   *      定位 + z-index 之后它才既画在上面、也优先被命中。
+   */
+  position: relative;
+  z-index: 1;
 }
 
 .ord-labels .olb.show-x .olb-x {
@@ -4628,9 +4637,9 @@ body.fixed-viewport .split {
 }
 
 /* ------------------------------------------------------------------
- * 「确认」弹层（`StopSheet.vue`，用户 2026-10-06）：
- *   标题就叫「确认」、**两列**（触发价 | 平仓比例快捷）+ 底部滑轨 + 三格读数，
- *   不要括号 / 小字解释。
+ * 止盈 / 止损确认弹层（`StopSheet.vue`，用户 2026-10-06）：
+ *   标题就是这一单的性质（止盈 / 止损）、**上下两行**（触发价 / 平仓比例滑轨）
+ *   + 三格读数，不要百分比快选、不要括号 / 小字解释。
  * ------------------------------------------------------------------ */
 .sheet-confirm {
   /* 手机上默认占屏幕的 80%（用户：「移动端默认 80%」） */
@@ -4648,14 +4657,15 @@ body.fixed-viewport .split {
   line-height: 1;
 }
 
-.cf-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+/* 上下两行：一行触发价、一行平仓比例（都铺满，不用并排两列） */
+.cf-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 4px 0 10px;
 }
 
-.cf-cell {
+.cf-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -4663,52 +4673,34 @@ body.fixed-viewport .split {
 }
 
 .cf-lb {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   font-size: 11px;
   color: var(--muted);
 }
 
-.cf-price {
-  display: flex;
+/* 「平仓比例」那一行右边的当前值 */
+.cf-lb b {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
 }
 
-.cf-price input {
+.cf-input {
   width: 100%;
-  padding: 8px 9px;
+  padding: 9px 10px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--panel-2);
   color: var(--text);
   font-family: var(--mono);
-  font-size: 13px;
-  text-align: right;
+  font-size: 14px;
 }
 
-.cf-price input:focus {
+.cf-input:focus {
   outline: none;
   border-color: var(--accent-line);
-}
-
-/* 平仓比例快选：2×2 格子 */
-.cf-presets {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.cf-presets button {
-  padding: 6px 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--panel-2);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: var(--fw-mid);
-}
-
-.cf-presets button.on {
-  border-color: var(--accent-line);
-  background: var(--blue-soft);
-  color: var(--blue);
 }
 
 /* 三格读数：不带任何解释文字 */

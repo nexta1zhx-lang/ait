@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
- * 「确认」弹层 —— 拖动仓位线 / 挂单线松手后弹的这一张
+ * 止盈 / 止损确认弹层 —— 拖动仓位线 / 挂单线松手后弹的这一张
  * （用户 2026-10-06：「按住仓位线上下拖 → 松手弹确认单（止盈 / 止损 + 数量百分比），
- * 确认后才发单」，随后又定：**叫「确认」**、一个弹层、两列、底部滑轨、
- * 去掉价格的加减号、**不要括号和小字解释**、移动端默认 80%、PC 限最大宽度）。
+ * 确认后才发单」，随后又定：**标题写成止盈 / 止损**、上下两行铺开、
+ * **去掉百分比快选**、一个弹层、底部滑轨、去掉价格的加减号、
+ * **不要括号和小字解释**、移动端默认 80%、PC 限最大宽度）。
  *
  * ★ 沿用 `TransferSheet.vue` 那套 `.sheet` / `.tr-*` / `.ord-*` 样式。
  *
@@ -39,8 +40,8 @@ const emit = defineEmits<{
   (e: 'confirm', v: {kind: 'profit' | 'stop'; price: number; pct: number}): void
 }>()
 
-/** 每 25% 一个快捷档 */
-const PRESETS = [25, 50, 75, 100]
+/** 滑轨上画几道刻度（25% 一档）；**不再**做百分比快捷按钮（用户 2026-10-06：「快选取消」） */
+const TICKS = [25, 50, 75, 100]
 
 const price = ref(0)
 const pct = ref(100)
@@ -88,16 +89,6 @@ function fmtPrice(v: number): string {
   return v.toFixed(d)
 }
 
-/** 一步 = 一个 tick（按价格量级推一个够小的） */
-const step = computed(
-  () => 1 / 10 ** Math.min(12, Math.max(2, 6 - Math.floor(Math.log10(Math.max(1e-12, price.value)))))
-)
-
-function nudge(dir: 1 | -1): void {
-  const p = price.value + dir * step.value
-  if (p > 0) price.value = p
-}
-
 function onPrice(v: unknown): void {
   const n = Number(v)
   if (Number.isFinite(n) && n > 0) price.value = n
@@ -107,61 +98,52 @@ function onPrice(v: unknown): void {
 <template>
   <Teleport to="body">
     <div v-if="open" class="sheet-mask" @click="emit('close')" />
-    <section v-if="open" class="sheet sheet-confirm" role="dialog" aria-label="确认">
+    <section
+      v-if="open"
+      class="sheet sheet-confirm"
+      role="dialog"
+      :aria-label="kindText"
+    >
       <header class="sheet-head">
-        <b>确认</b>
+        <!-- 标题就是这一单的性质（用户 2026-10-06：「标题为止盈/止损 都要有」） -->
+        <b>{{ kindText }}</b>
         <button type="button" class="sheet-x" title="关闭" @click="emit('close')">
           ✕
         </button>
       </header>
 
-      <!-- 两列：左 = 触发价，右 = 平仓比例快捷 -->
-      <div class="cf-grid">
-        <div class="cf-cell">
+      <!-- 上下两行：上 = 触发价，下 = 平仓比例（快选已去掉，只留滑轨） -->
+      <div class="cf-rows">
+        <label class="cf-row">
           <span class="cf-lb">触发价</span>
-          <span class="cf-price">
+          <input
+            class="cf-input"
+            :value="fmtPrice(price)"
+            type="text"
+            inputmode="decimal"
+            aria-label="触发价"
+            @change="onPrice(($event.target as HTMLInputElement).value)"
+          />
+        </label>
+
+        <div class="cf-row cf-row-bar">
+          <span class="cf-lb">平仓比例<b>{{ pct }}%</b></span>
+          <span class="ord-bar">
             <input
-              :value="fmtPrice(price)"
-              type="text"
-              inputmode="decimal"
-              aria-label="触发价"
-              @change="onPrice(($event.target as HTMLInputElement).value)"
+              v-model.number="pct"
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              :style="{'--fill': pct + '%'}"
+              :title="`平掉 ${pct}%`"
             />
+            <span class="ord-ticks" aria-hidden="true">
+              <i v-for="n in TICKS" :key="n" :style="{left: n + '%'}" />
+            </span>
           </span>
-        </div>
-        <div class="cf-cell">
-          <span class="cf-lb">平仓比例</span>
-          <div class="cf-presets">
-            <button
-              v-for="p in PRESETS"
-              :key="p"
-              type="button"
-              :class="{on: pct === p}"
-              @click="pct = p"
-            >
-              {{ p }}%
-            </button>
-          </div>
         </div>
       </div>
-
-      <label class="ord-field ord-slider">
-        <span>{{ pct }}%</span>
-        <span class="ord-bar">
-          <input
-            v-model.number="pct"
-            type="range"
-            min="1"
-            max="100"
-            step="1"
-            :style="{'--fill': pct + '%'}"
-            :title="`平掉 ${pct}%`"
-          />
-          <span class="ord-ticks" aria-hidden="true">
-            <i v-for="n in PRESETS" :key="n" :style="{left: n + '%'}" />
-          </span>
-        </span>
-      </label>
 
       <!-- 读数：三格，不带任何解释文字 -->
       <div class="cf-stats">

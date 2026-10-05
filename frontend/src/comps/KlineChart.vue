@@ -33,7 +33,8 @@ import {
   overlayOrders,
   overlayPositions,
   overlaySymbol,
-  refreshTradeOverlay
+  refreshTradeOverlay,
+  sweepOrphanOrders
 } from '../trade-overlay'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
@@ -534,6 +535,10 @@ function ensureChart(): boolean {
   })
 
   refs = {chart, candle, volume, ema42}
+
+  /* 标签跟线一起动（见 `labelSyncTick`）：从图建好那刻起每帧盯一下指纹 */
+  labelSyncKey = ''
+  if (!labelSyncRaf) labelSyncRaf = requestAnimationFrame(labelSyncTick)
 
   // 视图变化：右侧百分比标签重新定位 + 让信息栏/参考价跟着可见窗口走
   chart.timeScale().subscribeVisibleLogicalRangeChange((range: any) => {
@@ -1133,14 +1138,20 @@ function toggleCancelX(item: (typeof ordLabels)[number]): void {
   if (!item.cancelId) return
   const el = item.el
   if (cancelShownEl === el) {
-    el.classList.remove('show-x')
-    cancelShownEl = null
+    hideCancelX()
     return
   }
   cancelShownEl?.classList.remove('show-x')
   el.classList.add('show-x')
   cancelShownEl = el
   buzzLight()
+}
+
+/** 把那颗「✕」收起来（点标签自己 / 点图上别处） */
+function hideCancelX(): void {
+  if (!cancelShownEl) return
+  cancelShownEl.classList.remove('show-x')
+  cancelShownEl = null
 }
 
 /** 轻轻震一下（跟别处一个路子，不支持就算了） */
@@ -1195,6 +1206,15 @@ function renderOrdLabels(lines: OrderLine[]): void {
         x.className = 'olb-x'
         x.textContent = '✕'
         x.title = '撤掉这张挂单'
+        /*
+         * ⚠️ 这一下必须**就地拦下**（用户 2026-10-06：「点击叉号没反应」）：
+         *    冒到标签上的 `pointerdown` 会开始一次「拖动」，手指一抬 `ordLabelUp`
+         *    发现「没挪动」→ 当成「再点一下标签」，把 ✕ 又收了起来（`display:none`）——
+         *    于是 `click` 永远到不了这颗按钮上。表现就是「点叉号什么也不发生」。
+         */
+        for (const t of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+          x.addEventListener(t, e => e.stopPropagation())
+        }
         x.addEventListener('click', e => {
           e.stopPropagation()
           void cancelOrderAsk(l.cancelId!, overlaySymbol.value, l.p)
@@ -1246,6 +1266,29 @@ function positionOrdLabels(): void {
     item.el.style.display = ''
     item.el.style.top = y + 'px'
   }
+}
+
+/**
+ * 让标签跟线**一起动**（用户 2026-10-06：「这个 k 线插件为什么线和标签不是一块移动的」）。
+ *
+ * 线是 canvas 画的：价格轴一被拖动（或自动缩放变了一下），LWC 自己重画，线就到新位置了；
+ * 标签是普通 DOM，得有人告诉它「这个价现在在哪个 y」。现成的回调只有两个 ——
+ * 「可见区间变了」和「十字线动了」—— 而**拖右侧价格轴这两样都不发**
+ * （指针压根不在画布上），于是线走了、标签还杵在原地。
+ *
+ * 这里每帧比一下**指纹**（y=0 处的价 + 画布宽高）：一变就重摆一次。一次就两三个
+ * 便宜的取值，比挂一堆回调稳（缩放动画、自动缩放、换周期铺数据都不会漏）。
+ */
+let labelSyncRaf = 0
+let labelSyncKey = ''
+function labelSyncTick(): void {
+  labelSyncRaf = requestAnimationFrame(labelSyncTick)
+  if (!refs) return
+  const pane = refs.chart.paneSize()
+  const key = `${refs.candle.coordinateToPrice(0)}|${pane?.width ?? 0}|${pane?.height ?? 0}`
+  if (key === labelSyncKey) return
+  labelSyncKey = key
+  positionLabels()
 }
 
 /* ---------------- 拖动：仓位线 → 挂止盈 / 止损；挂单线 → 改单 ----------------
@@ -1505,6 +1548,37 @@ const OVERLAY_MS = 15_000
 let overlayTimer: ReturnType<typeof setInterval> | null = null
 let stopOverlayForeground: (() => void) | null = null
 
+/*
+ * 「没仓位的残留平仓单」每分钟盘一次账户（用户 2026-10-06：仓位平了、单还挂着）。
+ *
+ * 跟 K 线那 15 秒一轮分开：那一轮只清**当前这个币**（手上刚好有数据，不多打接口），
+ * 别的币得等切过去才轮到；这一轮一次把账户清干净。
+ */
+const ORPHAN_MS = 60_000
+let orphanTimer: ReturnType<typeof setInterval> | null = null
+
+/** 盘一遍残留平仓单，撤到了就说一声（没撤到就不打扰） */
+async function sweepOrphans(): Promise<void> {
+  const r = await sweepOrphanOrders(tradeKey.value?.id)
+  if (r.cancelled > 0) {
+    const names = r.symbols.map(baseToName).join('、')
+    emit('note', `🧹 已清掉 ${r.cancelled} 张无仓位挂单：${names}`, 'ok')
+    void pullOverlay()
+  }
+}
+
+function syncOrphanTimer(): void {
+  if (!overlayWanted()) {
+    if (orphanTimer) clearInterval(orphanTimer)
+    orphanTimer = null
+    return
+  }
+  if (orphanTimer) return
+  orphanTimer = setInterval(() => {
+    if (overlayWanted()) void sweepOrphans()
+  }, ORPHAN_MS)
+}
+
 function overlayWanted(): boolean {
   return !!props.active && overlayEnabled() && isForeground()
 }
@@ -1536,6 +1610,7 @@ watch(
     if (!overlayEnabled()) clearTradeOverlay()
     renderOrderLines()
     syncOverlayTimer()
+    syncOrphanTimer()
     void pullOverlay()
   }
 )
@@ -1947,6 +2022,8 @@ function showAtPointer(clientX: number, clientY: number): void {
 function onChartPointerDown(e: PointerEvent): void {
   /* 跟原来的 `markPanned` 一样：自己动过图就算「在看更早的行情」 */
   userPanned = true
+  /* 手指落到图上 = 不看标签了，那颗「✕」收起来（跟点标签自己一下一个效果） */
+  hideCancelX()
   tapFrom =
     e.pointerType === 'touch'
       ? {x: e.clientX, y: e.clientY, at: Date.now()}
@@ -1954,6 +2031,16 @@ function onChartPointerDown(e: PointerEvent): void {
 }
 
 function onChartPointerMove(e: PointerEvent): void {
+  /*
+   * 手指 / 鼠标在图上一动就把标签摆一次（用户 2026-10-06：「线和标签不是一块移动的」）。
+   *
+   * 拖右侧价格轴时线会跟着动、而这期间 LWC 的两个回调一个都不发（指针不在画布上、
+   * 可见区间也没变）⇒ 标签就杵在原地。指针事件是**我们自己**挂在容器上的，
+   * 轴那一条也在容器里，所以这里补一次最稳；每帧一次的那个兜底见 `labelSyncTick`
+   * （它在手势之外的变化上生效，比如自动缩放、铺新数据）。
+   * ⚠️ 开销跟已有的「十字线一动就摆」（`subscribeCrosshairMove`）一个量级，不是新负担。
+   */
+  positionLabels()
   if (!tapFrom) return
   if (
     Math.abs(e.clientX - tapFrom.x) > TAP_SLOP ||
@@ -2917,14 +3004,25 @@ watch(() => props.active, startStream)
 onMounted(() => {
   void pullOverlay()
   syncOverlayTimer()
+  /* 进页面先把账户盘一遍（上次在别处平掉的仓位，残单就是这时候清掉的） */
+  void sweepOrphans()
+  syncOrphanTimer()
   stopOverlayForeground = onForegroundChange(on => {
-    if (on) void pullOverlay()
+    if (on) {
+      void pullOverlay()
+      void sweepOrphans()
+    }
     syncOverlayTimer()
+    syncOrphanTimer()
   })
 })
 watch(() => props.active, on => {
-  if (on) void pullOverlay()
+  if (on) {
+    void pullOverlay()
+    void sweepOrphans()
+  }
   syncOverlayTimer()
+  syncOrphanTimer()
 })
 watch(() => props.symbol, load)
 watch(() => props.timeframe, load)
@@ -2947,9 +3045,15 @@ onBeforeUnmount(() => {
   stopStream = null
   if (levelsEmitTimer) clearTimeout(levelsEmitTimer)
   levelsEmitTimer = null
+  /* 每帧盯标签位置的那个也要停（不然它一直在跑、还在往死对象上取值） */
+  if (labelSyncRaf) cancelAnimationFrame(labelSyncRaf)
+  labelSyncRaf = 0
+  labelSyncKey = ''
   /* 订单信息那套（定时器 + 前后台监听）也要收掉，不然切页之后还在打交易所 */
   if (overlayTimer) clearInterval(overlayTimer)
   overlayTimer = null
+  if (orphanTimer) clearInterval(orphanTimer)
+  orphanTimer = null
   stopOverlayForeground?.()
   stopOverlayForeground = null
   try {

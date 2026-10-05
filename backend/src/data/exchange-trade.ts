@@ -907,10 +907,18 @@ export async function listOpenOrders(
    *    `GET /fapi/v1/openAlgoOrders`，所以这里**两套都要拉、合起来**。
    *    条件单那一路失败（权限 / 接口没有）就当没有，别把普通挂单也带崩。
    */
+  /*
+   * ⚠️ **不带 symbol** 查全账户时，必须显式告诉 ccxt `subType: 'linear'`
+   *    （2026-10-06 实测出来的坑）：没有 market 可以依的时候 ccxt 猜不出这是
+   *    U 本位合约，`isLinear()` 判不出来 ⇒ 条件单那一路**悄悄走到别的分支**、
+   *    回一个空数组 —— 看着像「账户里一条条件单都没有」，其实 4 张就挂在那儿
+   *    （同一时刻带 symbol 查就查得到）。带上 symbol 时不用传（market 里自带）。
+   */
+  const sub = symbol ? {} : {subType: 'linear'}
   const [normal, algo] = await Promise.all([
-    ex.fetchOpenOrders(symbol).catch(() => [] as any[]),
+    ex.fetchOpenOrders(symbol, undefined, undefined, {...sub}).catch(() => [] as any[]),
     ex
-      .fetchOpenOrders(symbol, undefined, undefined, {conditional: true})
+      .fetchOpenOrders(symbol, undefined, undefined, {conditional: true, ...sub})
       .catch(() => [] as any[])
   ])
   const raw: any[] = [...((normal as any[]) ?? []), ...((algo as any[]) ?? [])]
@@ -1199,4 +1207,69 @@ async function cancelAnyOrder(
       throw e
     }
   }
+}
+
+/** `cancelOrphanOrders` 的结果（界面上就一行提示，所以给的都是能直接看的数） */
+export interface OrphanCleanupResult {
+  /** 账户里现在有几条持仓 */
+  positions: number
+  /** 看了几张平仓单（`reduceOnly`） */
+  checked: number
+  /** 真撤掉的 */
+  cancelled: {symbol: string; orderId: string; amount: number}[]
+  /** 撤失败的（单独报，不连累别的） */
+  failed: {symbol: string; orderId: string; error: string}[]
+}
+
+/**
+ * 撤掉「这条仓位已经没了，单却还挂着」的残留平仓单。
+ *
+ * 用户 2026-10-06：「没有仓位所有挂单都应该取消才对，为什么还显示在图上」。
+ * 实测币安**不会**替我们撤：1000FLOKI 的仓位已经 0 张，三张 STOP / TAKE_PROFIT
+ * （各 380 张、`reduceOnly`）照样挂着，那它们就会一直画在 K 线上，触发时也只会
+ * 变成一张废单。所以这里主动清掉。
+ *
+ * ⚠️ **只碰 `reduceOnly` 的单**：挂着的**开仓**限价单（等着进场的）没有仓位是正常的，
+ *    顺手撤了才是事故。
+ * ⚠️ 持仓读不到（接口失败 / 没权限）时**直接抛错、什么都不做** —— 那种「读不到」
+ *    一旦被当成「没仓位」，就是清仓级别的误伤。
+ *
+ * `symbol` 给了就只看这个交易对（前端每 15 秒刷 K 线数据时顺手清当前这个币）；
+ * 不给就是整个合约账户（每分钟的那次大盘点）。
+ */
+export async function cancelOrphanOrders(
+  c: ExchangeCredentials,
+  symbol?: string
+): Promise<OrphanCleanupResult> {
+  assertTradable(c)
+  const ex = createExchange(c)
+  /* ⚠️ 顺序不能换：先确认拿到持仓（失败就抛），再去读挂单 */
+  const positions = await listPositions(c)
+  const orders = await listOpenOrders(c, symbol)
+  const want = symbol ? String(symbol).toUpperCase() : ''
+
+  /** 「这条单平的是哪条持仓」：双向模式听币安的，单向模式按方向反推（卖出平多） */
+  const closes = (o: OpenOrderRow): 'long' | 'short' =>
+    o.posSide === 'LONG' ? 'long' : o.posSide === 'SHORT' ? 'short' : o.side === 'sell' ? 'long' : 'short'
+  const live = new Set(positions.map(p => `${p.symbol}|${p.side}`))
+
+  const out: OrphanCleanupResult = {
+    positions: positions.length,
+    checked: 0,
+    cancelled: [],
+    failed: []
+  }
+  for (const o of orders) {
+    if (!o.reduceOnly) continue
+    if (want && o.symbol !== want) continue
+    out.checked++
+    if (live.has(`${o.symbol}|${closes(o)}`)) continue
+    try {
+      await cancelAnyOrder(ex, o.symbol, o.id)
+      out.cancelled.push({symbol: o.symbol, orderId: o.id, amount: o.amount})
+    } catch (e) {
+      out.failed.push({symbol: o.symbol, orderId: o.id, error: humanize(e)})
+    }
+  }
+  return out
 }

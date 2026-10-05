@@ -22,6 +22,7 @@
  */
 import {ref} from 'vue'
 import {
+  cleanupOrphanOrders,
   fetchTradeHistory,
   fetchTradeOpenOrders,
   fetchTradePositions,
@@ -196,4 +197,77 @@ export async function refreshTradeOverlay(
     pendingAsk = null
     if (again) void refreshTradeOverlay(again.base, again.keyId)
   }
+
+  /*
+   * 顺手看一眼：这个币**已经没仓位了，平仓单却还挂着**吗（用户 2026-10-06：
+   * 「没有仓位所有挂单都应该取消才对，为什么还显示在图上」）。
+   *
+   * 就地清掉 —— 手上正好有这个币的持仓和挂单，不用再多打一次接口。
+   * ⚠️ 只有「持仓这一路拿到过」才敢这么判（`wantPos`）：读不到持仓时
+   *    「一条都没有」跟「没读出来」长得一模一样，误判就是误撤。
+   */
+  if (wantPos && wantOrd && my === seq && overlaySymbol.value === symbol) {
+    const live = new Set(overlayPositions.value.map(p => p.side))
+    const hasOrphan = overlayOrders.value.some(o => o.reduceOnly && !live.has(closesSide(o)))
+    if (hasOrphan) {
+      const swept = await cleanOrphans(symbol, keyId)
+      /* 撤掉了就立刻重画一次（不然那几条线要等到下一轮 15 秒才消失） */
+      if (swept.cancelled) void refreshTradeOverlay(base, keyId)
+    }
+  }
+}
+
+/** 这条平仓单平的是哪条持仓：双向模式听币安的，单向模式按「卖出平多」反推 */
+function closesSide(o: TradeOpenOrder): 'long' | 'short' {
+  if (o.posSide === 'LONG') return 'long'
+  if (o.posSide === 'SHORT') return 'short'
+  return o.side === 'sell' ? 'long' : 'short'
+}
+
+/** 账户级盘点 / 分币清理：同一时刻只跑一个（15 秒那轮和每分钟那轮可能撞上） */
+let sweeping = false
+
+/** 清一次残留平仓单，返回「撤了几张、哪几个币」——界面上一行提示用 */
+export interface OrphanSweep {
+  /** 真撤掉了几张 */
+  cancelled: number
+  /** 撤的是哪几个币（去重，界面上只报币种） */
+  symbols: string[]
+  /** 没撤成功的原因（有就说明「看着还在」） */
+  error: string | null
+}
+
+/**
+ * 清掉残留平仓单（`symbol` 不给 = 盘点整个合约账户）。
+ *
+ * ⚠️ **真撤单**，跟「测试下单」开关无关；安全边界在后端 `cancelOrphanOrders`
+ *    （只碰 `reduceOnly`；持仓读不到就整体不动）。
+ */
+async function cleanOrphans(symbol?: string, keyId?: number): Promise<OrphanSweep> {
+  if (sweeping) return {cancelled: 0, symbols: [], error: null}
+  sweeping = true
+  try {
+    const r = await cleanupOrphanOrders(symbol, keyId)
+    if (!r.ok) return {cancelled: 0, symbols: [], error: r.error || '清理挂单失败'}
+    const list = r.cancelled ?? []
+    return {
+      cancelled: list.length,
+      symbols: [...new Set(list.map(x => x.symbol))],
+      error: r.failed?.length ? r.failed[0]!.error : null
+    }
+  } catch (e) {
+    return {cancelled: 0, symbols: [], error: (e as Error).message}
+  } finally {
+    sweeping = false
+  }
+}
+
+/**
+ * 整个账户扫一遍「没仓位的残留平仓单」（进 K 线页时来一次，之后每分钟一次）。
+ *
+ * 为什么要有这一路：上面那次是**跟着 K 线这个币**走的（只在看着某个币时清它），
+ * 别的币（比如刚平掉的那条）得等切到它的图才轮到；这一路一次把账户清干净。
+ */
+export async function sweepOrphanOrders(keyId?: number): Promise<OrphanSweep> {
+  return cleanOrphans(undefined, keyId)
 }

@@ -104,6 +104,7 @@ import {
   humanize
 } from './data/exchange-account'
 import {
+  cancelOrphanOrders,
   cancelTradeOrder,
   closePositions,
   collectTradeInfo,
@@ -3501,6 +3502,42 @@ async function route(
         },
         str(body.symbol, 'BTCUSDT'),
         str(body.orderId, '')
+      )
+      return sendJson(res, 200, {ok: true, ...r, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 清掉「仓位已经没了、单却还挂着」的残留平仓单（用户 2026-10-06：
+   * 「没有仓位所有挂单都应该取消才对，为什么还显示在图上」）。
+   *
+   * `?symbol=` 给了就只清这一个交易对（K 线页每 15 秒刷数据时顺手清当前这个币），
+   * 不给就盘点整个账户（进页面时 + 每分钟一次）。
+   *
+   * ⚠️ 这里**不认**「测试下单」开关：撤的就是交易所上真挂着的单。
+   *    安全边界在 `cancelOrphanOrders` 里 —— 只碰 `reduceOnly`，且持仓读不到就整体不动。
+   */
+  if (p === '/api/exchange/trade/cleanup-orders' && method === 'POST') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const r = await cancelOrphanOrders(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        str(url.searchParams.get('symbol'), '') || undefined
       )
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {

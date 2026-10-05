@@ -1144,6 +1144,27 @@ export const cancelTradeOrder = (symbol: string, orderId: string, id?: number) =
     {symbol, orderId}
   )
 
+/**
+ * 清掉「仓位已经没了、单却还挂着」的残留平仓单（**真动作**）。
+ *
+ * `symbol` 传币安原始符号就只清这一个币，不传就盘点整个合约账户。
+ * 只撤 `reduceOnly` 的单（开仓单不碰），持仓读不到时整个不动 —— 见后端
+ * `cancelOrphanOrders`。
+ */
+export const cleanupOrphanOrders = (symbol?: string, id?: number) =>
+  post<{
+    ok: boolean
+    positions?: number
+    checked?: number
+    cancelled?: {symbol: string; orderId: string; amount: number}[]
+    failed?: {symbol: string; orderId: string; error: string}[]
+    error: string | null
+  }>(
+    `/api/exchange/trade/cleanup-orders${id ? `?id=${id}` : ''}` +
+      (symbol ? `${id ? '&' : '?'}symbol=${encodeURIComponent(symbol)}` : ''),
+    {}
+  )
+
 /** 美元 → 人民币汇率（「交易所账户」USDT / CNY 切换用，跟用量页同一个源） */
 export const fetchRate = () => get<{usdCny: number}>('/api/rate')
 
