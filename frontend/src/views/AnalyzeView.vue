@@ -1030,6 +1030,7 @@ const heatRows = computed(() => {
           @levels="sr = $event"
           @clear:select="clearChartRange"
           @error="onChartError"
+          @note="(t, tone) => (toast = {text: t, tone})"
         >
           <!-- 顶部：行情条（币种下拉就摆在它左边，跟交易所一个位置） -->
           <template #top>

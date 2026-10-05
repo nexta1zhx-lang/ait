@@ -111,6 +111,7 @@ import {
   listPositions,
   listUserTrades,
   placeOrder,
+  placeStopOrder,
   setSymbolLeverage
 } from './data/exchange-trade'
 import {fetchExchangeOverview} from './data/exchange-overview'
@@ -3421,6 +3422,51 @@ async function route(
         limit
       )
       return sendJson(res, 200, {ok: true, trades, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 止盈 / 止损单（用户 2026-10-06：K 线上按住仓位线上下拖 → 松手弹确认单 → 挂这张）。
+   *
+   * ⚠️ 跟下单一样 `test !== false` 才是测试单：漏传一律当**测试单**（只校验）。
+   * ⚠️ `orderId` 有值 = **改单**（先撤旧的再挂新的）；测试单模式**不会**撤单。
+   */
+  if (p === '/api/exchange/trade/stop-order' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const r = await placeStopOrder(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        key.id,
+        {
+          symbol: str(body.symbol, 'BTCUSDT'),
+          side: str(body.side, 'sell') === 'buy' ? 'buy' : 'sell',
+          kind: str(body.kind, 'stop') === 'profit' ? 'profit' : 'stop',
+          stopPrice: Number(body.stopPrice),
+          quantity: Number(body.quantity),
+          posSide: body.posSide === undefined ? undefined : str(body.posSide, 'BOTH'),
+          orderId: body.orderId === undefined ? undefined : str(body.orderId, ''),
+          /* 同下单：`test !== false` 才是测试单，漏传一律当测试单 */
+          test: body.test !== false
+        }
+      )
+      return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
     }

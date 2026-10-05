@@ -1048,6 +1048,13 @@ export interface CloseOrderParams extends PlacedOrder {
   from: 'long' | 'short'
 }
 
+/** 止盈 / 止损单（K 线上拖出来的那张）：参数 + 改单撤掉的旧单号 + 测试单说明 */
+export interface PlacedStopOrder extends PlacedOrder {
+  canceled?: string
+  /** 测试单模式下说明「哪一部分币安没给测」（条件单没有 test 接口） */
+  note?: string
+}
+
 export const placeOrder = (
   input: OrderInput,
   id?: number,
@@ -1056,6 +1063,29 @@ export const placeOrder = (
   post<{ok: boolean; test?: boolean; order?: PlacedOrder; error: string | null}>(
     `/api/exchange/trade/order${id ? `?id=${id}` : ''}`,
     {...input, test}
+  )
+
+/**
+ * 挂一张**止盈 / 止损**单（用户 2026-10-06：K 线上按住仓位线上下拖 → 确认单 → 发这张）。
+ *
+ * `key.orderId` 有值 = **改单**（后端先撤旧的再挂新的；测试单模式不会撤）。
+ */
+export const placeStopOrder = (
+  key: {
+    symbol: string
+    side: 'buy' | 'sell'
+    kind: 'profit' | 'stop'
+    stopPrice: number
+    quantity: number
+    posSide?: string
+    orderId?: string
+  },
+  id?: number,
+  test = true
+) =>
+  post<{ok: boolean; test?: boolean; error: string | null} & Partial<PlacedStopOrder>>(
+    `/api/exchange/trade/stop-order${id ? `?id=${id}` : ''}`,
+    {...key, test}
   )
 
 /**

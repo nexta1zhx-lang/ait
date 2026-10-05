@@ -611,9 +611,12 @@ export interface OrderInput {
 export interface OrderParams {
   symbol: string
   side: 'BUY' | 'SELL'
-  type: 'MARKET' | 'LIMIT'
+  /** `TAKE_PROFIT_MARKET` / `STOP_MARKET` 是止盈 / 止损那类**条件单**（见 `placeStopOrder`） */
+  type: 'MARKET' | 'LIMIT' | 'TAKE_PROFIT_MARKET' | 'STOP_MARKET'
   quantity: number
   price?: number
+  /** 条件单的触发价（市价单 / 限价单不带） */
+  stopPrice?: number
   timeInForce?: string
   positionSide?: 'LONG' | 'SHORT'
   reduceOnly?: boolean
@@ -978,4 +981,157 @@ export async function listUserTrades(
   /* 旧的排前面（画点按时间顺序） */
   out.sort((a, b) => a.time - b.time)
   return out
+}
+
+/* ------------------------------------------------------------------ */
+/* 止盈 / 止损（拖 K 线上那条仓位线拖出来的，2026-10-06）              */
+/* ------------------------------------------------------------------ */
+
+export interface StopOrderInput {
+  /** 币安原始符号 */
+  symbol: string
+  /** **平仓方向**：多单拖出来的是 `sell`、空单是 `buy` */
+  side: 'buy' | 'sell'
+  /** `profit` = 止盈（`TAKE_PROFIT_MARKET`）/ `stop` = 止损（`STOP_MARKET`） */
+  kind: 'profit' | 'stop'
+  /** 触发价（拖到哪就挂在哪） */
+  stopPrice: number
+  /** 平掉多少（基础币，按合约步长向下取整） */
+  quantity: number
+  /** 双向持仓模式下要告诉币安「这是哪条仓位的单」（`LONG` / `SHORT`） */
+  posSide?: string
+  /**
+   * 有值 = **改单**：先把这一张撤了再挂新的。
+   *
+   * ⚠️ 币安没有「改触发价」的接口，它自己 App 里的「修改」也是**撤 + 重挂**。
+   * ⚠️ **测试单模式下不撤单** —— 不然「只校验」就变成真把人家的单撤了，
+   *    那是真金白银的动作，测试模式绝对不能干。
+   */
+  orderId?: string
+  /** `true`（或不传）= 走测试接口只校验；`false` = 真挂上去 */
+  test?: boolean
+}
+
+/** 挂出去的条件单（`PlacedOrder` + 改单撤掉的旧单号 + 测试单的说明） */
+export interface PlacedStopOrder extends PlacedOrder {
+  /** 改单时撤掉的旧单号（测试单模式 / 没改单时没有） */
+  canceled?: string
+  /** 测试单模式下说明「哪一部分币安没给测」（条件单没有 test 接口） */
+  note?: string
+}
+
+/**
+ * 挂一张**止盈 / 止损**单。
+ *
+ * 用户 2026-10-06：「按住仓位线上下拖 → 松手弹确认单（止盈 / 止损 + 数量百分比），
+ * 确认后才发单」。类型只用 `TAKE_PROFIT_MARKET` / `STOP_MARKET`（触发后走市价）：
+ * 拖出来的是**一个价格**（触发价），没有第二个价能给限价单用。
+ *
+ * 减仓那两件事跟 `placeOrder` 同一套规矩：
+ *   · 双向持仓模式 → 带 `positionSide`（**不能**带 `reduceOnly`，币安会回 -1106）
+ *   · 单向持仓模式 → 带 `reduceOnly: true`
+ */
+export async function placeStopOrder(
+  c: ExchangeCredentials,
+  keyId: number | string,
+  input: StopOrderInput
+): Promise<PlacedStopOrder> {
+  assertTradable(c)
+  const rawPrice = Number(input.stopPrice)
+  if (!Number.isFinite(rawPrice) || rawPrice <= 0) throw new Error('触发价不对')
+  const rawQty = Number(input.quantity)
+  if (!Number.isFinite(rawQty) || rawQty <= 0) throw new Error('数量要先填好')
+
+  const ex = createExchange(c)
+  const spec = await specFor(c, input.symbol)
+  const symbol = spec.symbol
+
+  /* 触发价按 tick 收一下（拖出来的可能是任意小数） */
+  const stopPrice = floorToStep(rawPrice, spec.tickSize)
+  if (stopPrice <= 0) throw new Error('触发价太小了')
+  const quantity = floorToStep(rawQty, spec.stepSize)
+  if (quantity <= 0) throw new Error('数量太小：按这个合约的精度取整之后是 0')
+  if (spec.minQty && quantity < spec.minQty)
+    throw new Error(`数量太小：这个合约最少要下 ${spec.minQty} ${spec.base}`)
+
+  const dual = await isDualSide(ex, keyId)
+  const type = input.kind === 'profit' ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET'
+  const test = input.test !== false
+
+  /*
+   * ⚠️⚠️ 条件单**不能**发到 `/fapi/v1/order`（无论 test 还是真单）：
+   *   币安回 `-4120 Order type not supported for this endpoint.
+   *   Please use the Algo Order API endpoints instead.`
+   *   ⇒ 它们现在走 `/fapi/v1/algoOrder`（`algoType=CONDITIONAL`），
+   *     ccxt 4.5 已经替我们分好路了：`createOrder(..., {stopLossPrice / takeProfitPrice})`
+   *     会自动带上 `triggerPrice` + `algoType` 打到 algo 那个口子上。
+   *
+   * ⚠️ 而 algo 那个口子**没有 test 版本**（ccxt 的分支里 `test` 参数被直接忽略）——
+   *    也就是说「测试单」在这儿**没法让币安把整张条件单校验一遍**。
+   *    为了绝不在测试模式下真挂单，测试模式改成：
+   *      ① 本地把数量 / 触发价的精度先收一遍
+   *      ② 拿同样的数量 / 方向发一张 **MARKET reduceOnly 测试单** ——
+   *         币安会照常校验签名 / 权限 / 数量 / 持仓方向 / 保证金，
+   *         只是「触发价」那部分交易所不给测（这一点会在返回的 `note` 里说明）
+   */
+  if (test) {
+    const probe: OrderParams = {
+      symbol,
+      side: input.side === 'buy' ? 'BUY' : 'SELL',
+      type: 'MARKET',
+      quantity,
+      ...(dual
+        ? {positionSide: (input.posSide === 'SHORT' ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT'}
+        : {reduceOnly: true})
+    }
+    const placed = await submitOrder(ex, probe, true)
+    return {
+      ...probe,
+      symbol,
+      stopPrice,
+      test: true,
+      type,
+      ...placed,
+      note:
+        '测试单：币安校验了数量 / 方向 / 权限 / 保证金；' +
+        '条件单的「触发价」交易所没有测试接口，所以这张单**没有真挂上去**'
+    }
+  }
+
+  let canceled: string | undefined
+  if (input.orderId) {
+    await ex.cancelOrder(input.orderId, symbol)
+    canceled = input.orderId
+  }
+
+  const params: Record<string, unknown> = {
+    ...(input.kind === 'profit'
+      ? {takeProfitPrice: stopPrice}
+      : {stopLossPrice: stopPrice}),
+    ...(dual
+      ? {positionSide: input.posSide === 'SHORT' ? 'SHORT' : 'LONG'}
+      : {reduceOnly: true})
+  }
+  const r: any = await ex.createOrder(
+    symbol,
+    'market',
+    input.side === 'buy' ? 'buy' : 'sell',
+    quantity,
+    undefined,
+    params
+  )
+  return {
+    symbol,
+    side: input.side === 'buy' ? 'BUY' : 'SELL',
+    type,
+    quantity,
+    stopPrice,
+    ...(dual
+      ? {positionSide: input.posSide === 'SHORT' ? 'SHORT' : 'LONG'}
+      : {reduceOnly: true}),
+    test: false,
+    orderId: r?.id === undefined ? undefined : String(r.id),
+    status: r?.status === undefined ? undefined : String(r.status),
+    canceled
+  }
 }

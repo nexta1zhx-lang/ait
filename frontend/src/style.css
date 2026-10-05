@@ -3383,6 +3383,28 @@ body.fixed-viewport .split {
   white-space: nowrap;
 }
 
+/*
+ * 能拖的那几枚（仓位 / 挂单，用户 2026-10-06：「按住…可上下拖动」）。
+ * ⚠️ 手指按住时别选字 / 别弹系统菜单；`touch-action: none` 是关键 ——
+ *    不写的话手机上这一下会被当成「滚动页面」，`pointermove` 根本不来。
+ * ⚠️ `::after` 把触摸区往外撑 9px：标签本身才 14px 高，手指按不住，
+ *    但看上去还是那么细一条。
+ */
+.ord-labels span.draggable {
+  pointer-events: auto;
+  cursor: ns-resize;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.ord-labels span.draggable::after {
+  content: '';
+  position: absolute;
+  inset: -9px -8px;
+}
+
 /* 左上角信息栏（币安风格，悬停时更新） */
 .chart-info {
   position: absolute;
@@ -4531,8 +4553,43 @@ body.fixed-viewport .split {
   opacity: 0.85;
 }
 
-/* 排序弹层里那四行：一行一条，选中那条高亮 */
-.ord-sort-list {
+/*
+ * 「止盈 / 止损」确认单（`StopSheet.vue`）里那一行价格：− 输入框 ＋
+ * （拖动只能拖个大概，差一格 tick 的时候用这两颗按钮微调）。
+ */
+.os-price {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.os-price input {
+  width: 132px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: right;
+}
+
+.os-price input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
+/* 预计收益：赚绿亏红（跟全站一套） */
+.os-pnl.up {
+  color: var(--ok);
+}
+
+.os-pnl.down {
+  color: var(--bad);
+}
+
+/* 排序弹层里那四行：一行一条，选中那条高亮 */.ord-sort-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
