@@ -181,11 +181,16 @@ const tabs = computed(() => {
 /* ---------------- 窄屏：左右滑动切换一级 tab ---------------- */
 
 /**
- * 手势区 = **左边那栏** `.col`（tab 行 + 内容）。
+ * 手势区 = **整个 `.split`**（左栏 tab 行 + 内容，含窄屏「K 线」那格的右栏）。
  *
- * ⚠️ 不能挂到 `.split` 上：右边那栏是 K 线（`aside.col.side`），
- *    图上横划是**拖动图表看历史行情**，挂到 `.split` 会把那个手势抢走。
- *    （现在 K 线只在右栏、不在 `.col` 里，所以这一条天然成立。）
+ * ⚠️ 以前挂在左边 `.col` 上，那是错的：切到窄屏「K 线」时图在右栏 `.col.side` 里，
+ *    `.col` 只剩 tab 行那 **40px**，屏幕从上扫到下都落不进手势区 —— 所以当时干脆
+ *    把「K 线」那一格**整格关掉**了滑动。用户 2026-10-05：
+ *    「应该是除了 k 线图 其余位置都能滑动切换」。
+ *
+ * 现在挂到 `.split`（含右栏），只把**图表本体**（`KlineChart` 的 `.chart-wrap`，
+ * 上面标了 `data-no-swipe`）排除掉 —— 图上横划是拖动图表看历史行情，
+ * 其余位置（tab 行 / 行情条 / 周期行 / 图下工具行 / 下单模块）都能滑动切 tab。
  *
  * 用户 2026-10-04：「一级 tab（底下一小段线那种）可滑动切换」。
  * 调参与避让规则都在 `../swipe-tabs`，这里只负责接线。
@@ -198,19 +203,8 @@ const {onTouchStart, onTouchMove, onTouchEnd} = useSwipeTabs<LeftTab>({
   set: v => {
     leftTab.value = v
   },
-  /*
-   * ⚠️ **「K 线」那一格不响应滑动**
-   *
-   * 用户 2026-10-05：「k 线页面滑动不切换」。
-   * 实测那一格的几何：左栏 `.col` 只剩 **40px**（就是 tab 行本身，y=10..50），
-   * K 线栏 `aside` 从 y=60 铺到屏幕底（726px）—— 屏幕中线从上扫到下，
-   * 没有一处落在手势区里，也就是说「划图」本来就走不到这儿来。
-   * 能误切的只有紧贴在图上沿那条 40px 的 tab 行，而那正是手指往上
-   * 够图表头部（行情条 / 周期行）时最容易扫到的地方 —— 所以整格关掉。
-   *
-   * 代价：在 K 线页只能**点** tab 行切换；离开 K 线后滑动照旧。
-   */
-  enabled: () => isMobile.value && leftTab.value !== CHART_TAB.value
+  // 只有窄屏铺开手势；桌面端一点不受影响（跟 CSS 的 ≤900px 对齐）
+  enabled: () => isMobile.value
 })
 
 /**
@@ -246,14 +240,14 @@ onBeforeUnmount(() => {
 const marketCount = ref(0)
 
 /*
- * ⚠️ 这里原来有一套「窄屏左右滑动切换一级 tab」（`swipeRef` / `onSwipeStart/Move/End`
- * / `stepTab` / `ownsHorizontal`），2026-10-04 **整套删掉**（用户：「移动端滑动切换
- * tab 逻辑删掉」）。
+ * 历史：这套滑动 2026-10-03 做过（`d23c376`），在 `9cae7c1` 那次大快照里被整块
+ * 覆盖掉，之后抽成 `../swipe-tabs` 独立模块加回来（不易再被顺带覆盖）。
  *
- * 删之前实测过它确实是坏的：监听挂在 `.col` 这个盒子上，而 `.col` 的高度等于当前
- * tab 内容的高度 —— 切到「K 线」时图在隔壁的 `.col.side` 里，`.col` 只剩 40px
- * （就那行 tab 按钮），「实时分析」也只有 144px。所以绝大多数地方划了没反应。
- * 与其修，不如不要（用户的选择）。
+ * ⚠️ 它当年的病根是「监听挂在 `.col` 上」——`.col` 高度等于当前 tab 内容高度，
+ * 切到「K 线」时图在隔壁的 `.col.side` 里，`.col` 只剩 tab 行那 40px，划了没反应。
+ * 现在手势区挂在整个 `.split`、只排除图表本体（`data-no-swipe`），这个坑已经填了
+ * （见上面 `useSwipeTabs` 那段）。
+ */
 
 /* ---------- 历史列表：能放几行就放几行，列表自己不出滚动条 ---------- */
 const histBox = ref<HTMLElement | null>(null)
@@ -622,6 +616,7 @@ const heatRows = computed(() => {
 
     <!-- ============ 左右布局（手机端「K 线」也是这里的一格） ============ -->
     <div
+      ref="swipeRef"
       class="split"
       :class="[
         leftTab === 'chart'
@@ -635,20 +630,17 @@ const heatRows = computed(() => {
         // 切 tab 的滑入方向（见上面 paneAnim）：'pane-l' | 'pane-r' | ''
         paneAnim ? 'pane-' + paneAnim : ''
       ]"
+      @touchstart.passive="onTouchStart"
+      @touchmove.passive="onTouchMove"
+      @touchend.passive="onTouchEnd"
+      @touchcancel.passive="onTouchEnd"
     >
       <!--
         ── 左：一级 tab + 内容 ──
         ⚠️ 这一栏**必须常驻**：切到手机上那格「K 线」时，tab 行就在这里面，
         整栏藏了就没地方切回去了。所以只把内容清空（见下面的分支）。
       -->
-      <div
-        ref="swipeRef"
-        class="col"
-        @touchstart.passive="onTouchStart"
-        @touchmove.passive="onTouchMove"
-        @touchend.passive="onTouchEnd"
-        @touchcancel.passive="onTouchEnd"
-      >
+      <div class="col">
         <div class="tab-row">
           <SegTabs v-model="leftTab" :options="tabs" />
           <!--

@@ -5,14 +5,28 @@
  * 用户原话：「在 k 线页面底部新增下单模块，多空 / 滑动条 / 余额 / 杠杆；
  * 下单模式就两种，默认市价和限价」。之后又定了几条样式：
  *   · **报错一律走提示（toast），不占内容区**（顶部中间、3.5 秒自动关）
- *   · 杠杆挪到「市价 / 限价」旁边当**小标签**，点开弹层选（默认 10x，最高 20x）
+ *   · 杠杆挪到顶部那一排当**小标签**，点开弹层选（默认 10x，最高 20x）
  *   · 仓位按 **USDT** 算 / 显示
  *   · 仓位滑动条**每 25% 一个节点**，带阻尼 + 过节点震一下
- *   · 做多 / 做空合成**一个按钮**，方向用旁边的开关切
+ *   · 做多做空**各一颗按钮**（按哪颗就是哪个方向）
  *
- * ★ 下单走的是币安的**测试接口**（`/fapi/v1/order/test`，用户 2026-10-05 定的）：
- *   只校验参数 / 权限 / 保证金，**不进撮合、不真开仓** —— 所以模块里写着「测试单」。
- *   以后要放开真下单，是后端换接口名的事，这里把「测试单」那几个字一起去掉即可。
+ * ★ 2026-10-05 又改了一版（用户）：
+ *   · 顶部两格从「市价 / 限价」换成 **「开单」/「仓位」**；
+ *     市价降级成开单页里的一个开关 —— **开着 = 市价单（价格框禁用不能改）**，
+ *     关掉 = 可以填价格，填的就是限价单。
+ *   · 「仓位」那格：**列出账户里所有币的持仓**（一个可滚动列表），
+ *     每条自带一颗「平仓」；顶栏的「一键平仓」一颗全平。
+ *   · **「补仓」整块删掉**（用户：「没有补仓」）。
+ *
+ * ★ 2026-10-05 第三版（用户）：
+ *   · 顶栏**删掉账户昵称和「测试单」那句标签**，整行只剩「开单/仓位 · 杠杆 · 一键平仓」；
+ *     「一键平仓」挪到**最右**，点之前 `window.confirm` 二次确认。
+ *   · 账户名 + 可用余额挪到**价格那一行的右侧**：账户是个小标签（`.ktag`），
+ *     余额跟在后面 —— 顶栏不再横着拉那么长。
+ *   · 「测试单」从页面标签变成「配置 → **测试下单**」里的一个开关
+ *     （`settings.ts` 的 `testOrder`，默认**开**）。关掉就是**真下单 / 真平仓**
+ *     （`/fapi/v1/order`，会真扣保证金）—— 所以真单在用时顶栏挂一枚红色「真单」章，
+ *     而且这个章**只在真单时出现**，测试模式下页面上一个「测试」字都没有。
  *
  * 余额 / 杠杆都是**绑定那套合约 Key** 的真实数据（`/api/exchange/trade`）：
  *   · 可用余额 → `fapi/v2/balance`
@@ -26,14 +40,19 @@
  */
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
+  closeTradePositions,
   fetchTradeInfo,
-  placeTestOrder,
+  fetchTradePositions,
+  placeOrder,
   setTradeLeverage,
-  type TradeInfoResult
+  type TradeInfoResult,
+  type TradePositionRow
 } from '../api'
 import {fmt} from '../format'
+import {testOrder} from '../settings'
 import {contracts} from '../store'
 import {freshLivePrice, ticker} from '../ticker'
+import {loadTradeKeys, tradeKey} from '../trade-account'
 
 const props = defineProps<{
   /** 当前币种（基础币，如 BTC） */
@@ -41,6 +60,12 @@ const props = defineProps<{
   /** 这一页是不是当前页 —— 切走再回来要重新读一次余额 */
   active: boolean
 }>()
+
+/**
+ * 用哪套交易所 Key —— 「配置」弹层里切（用户 2026-10-05：「配置中可切换用户」）。
+ * `undefined` = 后端按默认那套处理。
+ */
+const keyId = computed(() => tradeKey.value?.id)
 
 /** 币安原始符号（BTCUSDT）：合约表里查不到就按 `币种 + USDT` 兜底 */
 const exSymbol = computed(
@@ -62,8 +87,20 @@ const levBusy = ref(false)
  */
 const levConfirmed = ref(false)
 
-/** 市价（默认）/ 限价 */
-const mode = ref<'market' | 'limit'>('market')
+/**
+ * 顶部两格：「开单」/「仓位」。
+ *
+ * 用户 2026-10-05：「下单区域限价去掉不需要，改成开单和仓位」——
+ * 原来那两颗「市价 / 限价」换成了这两格；市价/限价降级成开单页里的一个开关。
+ */
+const tab = ref<'open' | 'position'>('open')
+/**
+ * 市价开关（开单页）：**开着 = 市价单**，左边价格框禁用不能改；
+ * **关掉 = 可填价格**，那就是限价单。
+ *
+ * 用户 2026-10-05：「市价开启左侧价格不让调，关闭可以填价格就是开限价单」。
+ */
+const marketOn = ref(true)
 /**
  * 方向：做多 / 做空。
  * 用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」—— 所以它不再是「开关状态」，
@@ -179,9 +216,9 @@ const priceNum = computed(() => {
   return Number.isFinite(v) && v > 0 ? v : 0
 })
 
-/** 算数量用的参考价：限价单用自己的委托价，市价单用标记价 */
+/** 算数量用的参考价：限价单（市价开关关掉）用自己的委托价，市价单用标记价 */
 const refPrice = computed(() =>
-  mode.value === 'limit' ? priceNum.value : markRef.value
+  marketOn.value ? markRef.value : priceNum.value
 )
 
 /* ---------------- 仓位滑动条：25% 一个节点 + 阻尼 + 震动 ---------------- */
@@ -260,7 +297,7 @@ const blocker = computed(() => {
   if (info.value.balanceError) return info.value.balanceError
   if (available.value <= 0) return '合约账户没有可用余额（先划转一点保证金）'
   if (pct.value <= 0) return PCT_HINT
-  if (mode.value === 'limit' && !(priceNum.value > 0)) return '限价单要先填价格'
+  if (!marketOn.value && !(priceNum.value > 0)) return '限价单要先填价格'
   if (!(refPrice.value > 0)) return '还没拿到价格，稍等一下'
   const minA = Number(info.value.minAmount ?? 0)
   if (minA && quantity.value < minA)
@@ -322,7 +359,7 @@ async function load(): Promise<void> {
   const my = ++seq
   loading.value = true
   try {
-    const r = await fetchTradeInfo(sym)
+    const r = await fetchTradeInfo(sym, keyId.value)
     if (my !== seq) return
     info.value = r
     /*
@@ -358,7 +395,7 @@ async function pickLeverage(v: number): Promise<void> {
   }
   levBusy.value = true
   try {
-    const r = await setTradeLeverage(exSymbol.value, want)
+    const r = await setTradeLeverage(exSymbol.value, want, keyId.value)
     if (r.ok) {
       lev.value = Math.floor(Number(r.leverage ?? want))
       levConfirmed.value = true
@@ -379,7 +416,11 @@ async function pickLeverage(v: number): Promise<void> {
 async function ensureLeverage(): Promise<boolean> {
   if (levConfirmed.value) return true
   try {
-    const r = await setTradeLeverage(exSymbol.value, Math.floor(lev.value))
+    const r = await setTradeLeverage(
+      exSymbol.value,
+      Math.floor(lev.value),
+      keyId.value
+    )
     if (r.ok) {
       levConfirmed.value = true
       return true
@@ -415,22 +456,29 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
       buzz([20, 60, 20])
       return
     }
-    const r = await placeTestOrder({
-      symbol: exSymbol.value,
-      side: side.value,
-      type: mode.value,
-      quantity: quantity.value,
-      // 市价单也带上参考价：后端拿它做「最小名义价值」的体检（不发给交易所）
-      price: refPrice.value
-    })
+    const r = await placeOrder(
+      {
+        symbol: exSymbol.value,
+        side: side.value,
+        type: marketOn.value ? 'market' : 'limit',
+        quantity: quantity.value,
+        // 市价单也带上参考价：后端拿它做「最小名义价值」的体检（不发给交易所）
+        price: refPrice.value
+      },
+      keyId.value,
+      testOrder.value
+    )
     if (r.ok && r.order) {
       const o = r.order
       const dir = o.side === 'BUY' ? '做多' : '做空'
       const px = o.type === 'LIMIT' ? `限价 ${fmt(o.price)}` : '市价'
+      const body = `${dir} ${o.quantity} ${base.value} · ${px}`
       buzz(12)
       say(
-        `✅ 测试单通过校验：${dir} ${o.quantity} ${base.value} · ${px}` +
-          '（没进撮合、没真开仓）',
+        o.test
+          ? `✅ 测试单通过校验：${body}（没进撮合、没真开仓）`
+          : `✅ 已下单：${body}` +
+              (o.orderId ? ` · 单号 ${o.orderId}` : ''),
         'ok'
       )
     } else {
@@ -443,6 +491,140 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
   } finally {
     busy.value = false
     busySide.value = null
+  }
+}
+
+/* ---------------- 「仓位」那一格：列出所有持仓，**逐个**平仓 ---------------- */
+
+/**
+ * 账户里**所有**持仓（跨交易对）。
+ *
+ * 用户 2026-10-05：「仓位 平仓是针对每一个仓位的，没有补仓」
+ * —— 所以这一格是一个**列表**，每一行自带一颗「平仓」，不再有「补仓」。
+ * 列表单独走 `GET /api/exchange/trade/positions`（切到这一格才拉）。
+ */
+const positions = ref<TradePositionRow[]>([])
+const posLoading = ref(false)
+/** 读失败的原因：**列表里那一行小字**（不弹 toast —— 切过来看见空列表总得知道为什么） */
+const posErr = ref('')
+
+/** 列表里那一条的「币」：BTCUSDT → BTC */
+function baseOf(symbol: string): string {
+  return String(symbol).toUpperCase().replace(/USDT$/, '') || symbol
+}
+
+function posQty(p: TradePositionRow): string {
+  return `${p.amount.toFixed(Math.min(12, amountPrecision.value))} ${baseOf(p.symbol)}`
+}
+
+function sideText(p: TradePositionRow): string {
+  return p.side === 'long' ? '多' : '空'
+}
+
+/** 未实现盈亏：正负号 + 金额（跟别处一个写法） */
+function pnlText(v: number): string {
+  return `${v >= 0 ? '+' : '−'}${fmt(Math.abs(v), 2)}`
+}
+
+async function loadPositions(): Promise<void> {
+  if (posLoading.value) return
+  posLoading.value = true
+  posErr.value = ''
+  try {
+    const r = await fetchTradePositions(keyId.value)
+    if (!r.ok) {
+      positions.value = []
+      posErr.value = r.error || '读不到持仓'
+      return
+    }
+    positions.value = r.positions ?? []
+  } catch (e) {
+    positions.value = []
+    posErr.value = (e as Error).message
+  } finally {
+    posLoading.value = false
+  }
+}
+
+/**
+ * 平掉**这一条**持仓。
+ *
+ * 数量由后端按真实持仓算（不填数，免得手滑）；`side` 一起带上 ——
+ * 双向持仓模式下同一个币有两条（多 / 空），不带方向会平错那条。
+ *
+ * ⚠️ 是否真平由「配置 → 测试下单」决定（`testOrder`）：关掉就是**真平仓**。
+ */
+async function closeOne(p: TradePositionRow): Promise<void> {
+  if (busy.value || levBusy.value) return
+  busy.value = true
+  try {
+    const r = await closeTradePositions(
+      {symbol: p.symbol, side: p.side},
+      keyId.value,
+      testOrder.value
+    )
+    if (r.ok) {
+      const n = (r.orders ?? []).length
+      buzz(12)
+      say(
+        r.test
+          ? `✅ 测试平仓单通过校验：${baseOf(p.symbol)} ${sideText(p)} ` +
+              `${posQty(p)}（没进撮合、没真平仓）`
+          : `✅ 已提交平仓：${baseOf(p.symbol)} ${sideText(p)} ${posQty(p)}` +
+              (n ? `（${n} 笔）` : ''),
+        'ok'
+      )
+      void loadPositions()
+    } else {
+      buzz([20, 60, 20])
+      say(r.error || '平仓失败')
+    }
+  } catch (e) {
+    buzz([20, 60, 20])
+    say((e as Error).message)
+  } finally {
+    busy.value = false
+  }
+}
+
+/**
+ * 一键平仓：不指定交易对 → 后端把**有持仓的全平一遍**。
+ *
+ * ⚠️ **必须二次确认**（用户 2026-10-05）：这是整账户级别的动作，一次误触就全没了。
+ *    真单模式下措辞也要跟着变 —— 不能让人以为还是「只校验」。
+ */
+async function closeAll(): Promise<void> {
+  if (busy.value || levBusy.value) return
+  const ok = window.confirm(
+    testOrder.value
+      ? '一键平仓（测试单）：把账户里有持仓的**全部**平一遍。\n\n' +
+          '测试单只发到币安测试接口，不进撮合、不会真平。\n\n继续吗？'
+      : '⚠️ 一键平仓（真单）：把账户里有持仓的**全部**平掉，会真的成交、真的没仓位了。\n\n' +
+          '确定吗？'
+  )
+  if (!ok) return
+  busy.value = true
+  try {
+    const r = await closeTradePositions(undefined, keyId.value, testOrder.value)
+    if (r.ok) {
+      const n = (r.orders ?? []).length
+      buzz(12)
+      say(
+        r.test
+          ? `✅ 一键平仓测试单通过校验：${n} 笔（没进撮合、没真平仓）`
+          : `✅ 已提交一键平仓：${n} 笔`,
+        'ok'
+      )
+      void loadPositions()
+    } else {
+      buzz([20, 60, 20])
+      say(r.error || '一键平仓失败')
+    }
+  } catch (e) {
+    buzz([20, 60, 20])
+    say((e as Error).message)
+  } finally {
+    busy.value = false
   }
 }
 
@@ -465,12 +647,39 @@ watch(
   }
 )
 
-/* 切到限价：价格空着就先填上标记价 */
-watch(mode, m => {
-  if (m === 'limit' && !(priceNum.value > 0)) prefillPrice()
+/*
+ * 切到「仓位」那一格才去拉持仓列表 —— `positionRisk` 不带 symbol 是**全量**查询，
+ * 没必要在开单页就替它付这一笔。
+ */
+watch(tab, t => {
+  if (t === 'position') void loadPositions()
 })
 
-onMounted(() => {
+/* 关掉「市价」= 要填价格开限价单：价格空着就先填上标记价 */
+watch(marketOn, on => {
+  if (!on && !(priceNum.value > 0)) prefillPrice()
+})
+
+/*
+ * 换了「下单账户」（配置弹层里切的）：余额 / 杠杆 / 持仓全是那套 Key 的，
+ * 整块作废重读 —— 不重读的话界面上还挂着上一个账户的数。
+ */
+watch(
+  () => tradeKey.value?.id,
+  (nv, ov) => {
+    if (nv === ov) return
+    seq++
+    info.value = null
+    pct.value = 0
+    positions.value = []
+    void load()
+    if (tab.value === 'position') void loadPositions()
+  }
+)
+
+onMounted(async () => {
+  /* 先把 Key 列表拿来（`tradeKey` 靠它算），不然第一发会打到默认那套上去 */
+  await loadTradeKeys()
   if (props.active) void load()
 })
 </script>
@@ -478,26 +687,27 @@ onMounted(() => {
 <template>
   <div class="ord">
     <div class="ord-head">
-      <b class="ord-title">下单</b>
-      <span class="tag" title="只提交到币安的测试接口，不进撮合、不真开仓">
-        测试单
-      </span>
+      <!--
+        两格：开单 / 仓位（用户 2026-10-05）。
+        原来是「市价 / 限价」，限价那格不要了 —— 市价降级成开单页里的一个开关
+        （见下面价格那一行的 `.ord-market`）。
+      -->
       <div class="seg ord-mode">
         <button
           type="button"
-          :class="{active: mode === 'market'}"
-          title="市价：按对手价立刻成交"
-          @click="mode = 'market'"
+          :class="{active: tab === 'open'}"
+          title="开单：市价 / 限价下单"
+          @click="tab = 'open'"
         >
-          市价
+          开单
         </button>
         <button
           type="button"
-          :class="{active: mode === 'limit'}"
-          title="限价：挂在指定价格上等成交"
-          @click="mode = 'limit'"
+          :class="{active: tab === 'position'}"
+          title="仓位：看当前持仓，逐个平仓"
+          @click="tab = 'position'"
         >
-          限价
+          仓位
         </button>
       </div>
       <!-- 杠杆：小标签，点开弹层选（用户 2026-10-05：默认 10 倍、最高 20 倍） -->
@@ -510,130 +720,262 @@ onMounted(() => {
       >
         {{ lev }}x
       </button>
-      <button
-        v-if="!ready && !loading"
-        type="button"
-        class="ghost tiny ord-retry"
-        title="重新读一次余额和杠杆"
-        @click="load"
-      >
-        重试
-      </button>
       <!--
-        「重试」不放在这一行 —— 它只在读不到余额时出现，放在行里会让整个行情头
-        多占一行（用户 2026-10-05：「下单区域高度固定」）。挪到下面跟下单按钮同一行，
-        那一行本来就够高，露不露都不改高度。
+        ⚠️ 真单章：**只在「配置 → 测试下单」关掉时出现**。
+        测试模式下这一行一个「测试」字都没有（用户 2026-10-05：「删除…测试字样」），
+        但真单是会把钱亏掉的模式，页面上必须有个一直看得见的标记 ——
+        宁可多这一枚章，也不能让人在真单模式下以为还是测试。
       -->
-      <span class="ord-avail">        可用 <b>{{ availableText }}</b> USDT
+      <span
+        v-if="!testOrder"
+        class="ord-live"
+        title="当前是真单模式（配置 → 测试下单 已关闭）：下单和平仓都会真的成交"
+      >
+        真单
       </span>
+      <!--
+        一键平仓：**最右**（用户 2026-10-05：「一键平仓最右侧，需要二次确认」）——
+        不指定交易对，后端把**有持仓的全平一遍**；`closeAll()` 里先 confirm。
+      -->
+      <button
+        type="button"
+        class="ghost tiny ord-close-all"
+        :disabled="busy || levBusy"
+        :title="
+          testOrder
+            ? '一键平仓：账户里有持仓的全部平掉（测试单，只校验、不真平）'
+            : '一键平仓：账户里有持仓的全部平掉（真单）'
+        "
+        @click="closeAll"
+      >
+        一键平仓
+      </button>
     </div>
-
-    <label class="ord-field ord-price">
-      <span>价格</span>
-      <!--
-        市价模式下**不显示**那个参考价（留占位符「市价」）：
-        输入框是禁用的，里面却顶着一个数，看着像「这一单会按这个价成交」。
-        限价模式才把 `priceInput` 摆出来 —— 切回市价时值留着，切回来不用重填。
-      -->
-      <input
-        :value="mode === 'limit' ? priceInput : ''"
-        inputmode="decimal"
-        :disabled="mode === 'market'"
-        :placeholder="mode === 'market' ? '市价' : '限价'"
-        @input="onPriceInput"
-      />
-      <!--
-        「现价」只在限价模式露面。
-        ⚠️ 它以前挤在「价格 + 数量」并排那一格里，手机上根本放不下（用户 2026-10-05）
-        —— 现在「数量」挪到杆子下面了，这一行整行都是价格的，按钮自然有位置。
-      -->
-      <button
-        v-if="mode === 'limit'"
-        type="button"
-        class="ghost tiny ord-fill"
-        title="用最新成交价填进去"
-        @click="useLast"
-      >
-        现价
-      </button>
-    </label>
-    <!-- 仓位：按 USDT 算（用户 2026-10-05）—— 每 25% 一个节点，带阻尼 + 震动 -->
-    <label class="ord-field ord-slider ord-pos">
-      <span>仓位</span>
-      <!--
-        ⚠️ 刻度是**自己画的**（`.ord-ticks`），没用 `<datalist>` ——
-        datalist 的刻度在 Chrome 上画在轨道里、样式改不动，还不一定显示；
-        自己画才能跟「方形滑块」这套简约外观配套，位置也能算准（见 CSS）。
-      -->
-      <span class="ord-bar">
-        <input
-          :value="pct"
-          type="range"
-          min="0"
-          max="100"
-          step="1"
-          :disabled="!ready"
-          :style="{'--fill': pct + '%'}"
-          :title="`可用余额的 ${pct}%（每 25% 一个节点）`"
-          @input="onPctInput"
-        />
-        <span class="ord-ticks" aria-hidden="true">
-          <i v-for="n in NODES" :key="n" :style="{left: n + '%'}" />
-        </span>
-      </span>
-    </label>
 
     <!--
-      杆子底下的**开仓计算**（用户 2026-10-05：「杆子底部放百分比」「开多少 / 数量放底下」）：
-        仓位% · 保证金(USDT) · 数量(币) · 名义价值(USDT)
-      固定两列 × 两行 —— 高度**不随数值变**（用户：「下单区域高度固定」），
-      报错一律走顶部提示，所以这一块永远只放数字、不会撑高。
+      两页**叠在同一个格子里**（`.ord-page` 都是 `grid-area: 1/1`）——
+      身子高度永远等于高的那一页（开单），切页高度不变，上面的 K 线不会跳
+      （用户 2026-10-05 反复强调：「下单区域高度固定」）。
+      不用的那一页只是 `visibility: hidden`：它**还占着高度**，这正是要的效果。
     -->
-    <div class="ord-read">
-      <span class="ord-r"><em>仓位</em><b>{{ pct }}%</b></span>
-      <span class="ord-r"><em>保证金</em><b>{{ marginText }} USDT</b></span>
-      <span class="ord-r"><em>数量</em><b>{{ quantityText }} {{ base }}</b></span>
-      <span class="ord-r"
-        ><em>名义价值</em><b>{{ notionalText }} USDT</b></span
-      >
+    <div class="ord-body">
+    <!-- ============ 开单 ============ -->
+    <div class="ord-page" :class="{off: tab !== 'open'}">
+      <!--
+        价格那一行：左边是「价格 + 市价开关 + 输入框（限价时多一颗现价）」，
+        **右边顶到行尾**放「账户标签 + 可用余额」
+        （用户 2026-10-05：「价格那行输入价格太长了，缩短右侧放账户和余额可用 账户用标签的形式」）。
+        ⚠️ 右边那两样**放在 `<label>` 外面**：label 里点哪儿都会去聚焦价格框，
+           放里面的话点一下账户标签就弹键盘。
+      -->
+      <div class="ord-price-row">
+        <label class="ord-field ord-price">
+          <span>价格</span>
+          <!--
+            市价开关（用户 2026-10-05：「市价开启左侧价格不让调，关闭可以填价格就是开限价单」）：
+            开着 = 市价单，右边价格框禁用、改不了；关掉 = 可以填价格，填的就是限价单。
+            `.prevent` 是为了别让外层 `<label>` 把这次点击当成「去聚焦输入框」。
+          -->
+          <button
+            type="button"
+            class="ord-market"
+            :class="{on: marketOn}"
+            :aria-label="marketOn ? '市价' : '限价'"
+            :title="
+              marketOn
+                ? '市价：按对手价立刻成交（点一下关掉就能填价格开限价单）'
+                : '限价：挂在指定价格上等成交（点一下切回市价）'
+            "
+            @click.prevent="marketOn = !marketOn"
+          >
+            {{ marketOn ? '市价' : '限价' }}
+          </button>
+          <!--
+            市价模式下**不显示**那个参考价（留占位符「市价」）：
+            输入框是禁用的，里面却顶着一个数，看着像「这一单会按这个价成交」。
+            限价模式才把 `priceInput` 摆出来 —— 切回市价时值留着，切回来不用重填。
+          -->
+          <input
+            :value="marketOn ? '' : priceInput"
+            inputmode="decimal"
+            :disabled="marketOn"
+            :placeholder="marketOn ? '市价' : '限价'"
+            @input="onPriceInput"
+          />
+          <!--
+            「现价」只在限价模式露面。
+            ⚠️ 它以前挤在「价格 + 数量」并排那一格里，手机上根本放不下（用户 2026-10-05）
+            —— 现在「数量」挪到杆子下面了，这一行整行都是价格的，按钮自然有位置。
+          -->
+          <button
+            v-if="!marketOn"
+            type="button"
+            class="ghost tiny ord-fill"
+            title="用最新成交价填进去"
+            @click="useLast"
+          >
+            现价
+          </button>
+        </label>
+        <!-- 右侧一组：账户标签 + 可用余额，`margin-left: auto` 顶到行尾 -->
+        <span class="ord-right">
+          <!-- 账户标签：切账户在「配置 → 下单账户」里，这里只显示是哪套 -->
+          <span
+            v-if="tradeKey"
+            class="ktag ord-acct"
+            :title="`下单账户：${tradeKey.name}`"
+          >
+            {{ tradeKey.name }}
+          </span>
+          <!-- 可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast） -->
+          <span class="ord-avail">可用 <b>{{ availableText }}</b> USDT</span>
+        </span>
+      </div>
+      <!-- 仓位：按 USDT 算（用户 2026-10-05）—— 每 25% 一个节点，带阻尼 + 震动 -->
+      <label class="ord-field ord-slider ord-pos">
+        <span>仓位</span>
+        <!--
+          ⚠️ 刻度是**自己画的**（`.ord-ticks`），没用 `<datalist>` ——
+          datalist 的刻度在 Chrome 上画在轨道里、样式改不动，还不一定显示；
+          自己画才能跟「方形滑块」这套简约外观配套，位置也能算准（见 CSS）。
+        -->
+        <span class="ord-bar">
+          <input
+            :value="pct"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            :disabled="!ready"
+            :style="{'--fill': pct + '%'}"
+            :title="`可用余额的 ${pct}%（每 25% 一个节点）`"
+            @input="onPctInput"
+          />
+          <span class="ord-ticks" aria-hidden="true">
+            <i v-for="n in NODES" :key="n" :style="{left: n + '%'}" />
+          </span>
+        </span>
+      </label>
+
+      <!--
+        杆子底下的**开仓计算**（用户 2026-10-05：「杆子底部放百分比」「开多少 / 数量放底下」）：
+          仓位% · 保证金(USDT) · 数量(币) · 名义价值(USDT)
+        固定两列 × 两行 —— 高度**不随数值变**（用户：「下单区域高度固定」），
+        报错一律走顶部提示，所以这一块永远只放数字、不会撑高。
+      -->
+      <div class="ord-read">
+        <span class="ord-r"><em>仓位</em><b>{{ pct }}%</b></span>
+        <span class="ord-r"><em>保证金</em><b>{{ marginText }} USDT</b></span>
+        <span class="ord-r"><em>数量</em><b>{{ quantityText }} {{ base }}</b></span>
+        <span class="ord-r"
+          ><em>名义价值</em><b>{{ notionalText }} USDT</b></span
+        >
+      </div>
+
+      <!-- 右下角那一行：两颗下单按钮（做多 / 做空），都在右边 -->
+      <div class="ord-actions">
+        <!-- 读不到余额时才有：重新拉一次（放在这一行，不占头部额外高度） -->
+        <button
+          v-if="!ready && !loading"
+          type="button"
+          class="ghost tiny ord-retry"
+          title="重新读一次余额和杠杆"
+          @click="load"
+        >
+          重试
+        </button>
+        <!--
+          直接两颗按钮（用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」）——
+          原来那颗「方向开关」得先把方向拨对、再点下单，两下才下得去，
+          而且不点下单看不出会往哪个方向走。现在**按哪颗就是哪个方向**。
+          ⚠️ 文案里不带币种：两颗并排，币名重复两遍反而挤（币种在头顶行情条上）。
+        -->
+        <button
+          type="button"
+          class="ord-submit long"
+          :disabled="busy || levBusy"
+          title="做多（买入开仓）"
+          @click="submit('long')"
+        >
+          {{ busySide === 'long' ? '提交中…' : '做多' }}
+        </button>
+        <button
+          type="button"
+          class="ord-submit short"
+          :disabled="busy || levBusy"
+          title="做空（卖出开仓）"
+          @click="submit('short')"
+        >
+          {{ busySide === 'short' ? '提交中…' : '做空' }}
+        </button>
+      </div>
     </div>
 
-    <!-- 右下角那一行：两颗下单按钮（做多 / 做空），都在右边 -->
-    <div class="ord-actions">
-      <!-- 读不到余额时才有：重新拉一次（放在这一行，不占头部额外高度） -->
-      <button
-        v-if="!ready && !loading"
-        type="button"
-        class="ghost tiny ord-retry"
-        title="重新读一次余额和杠杆"
-        @click="load"
-      >
-        重试
-      </button>
+    <!-- ============ 仓位 ============ -->
+    <div class="ord-page" :class="{off: tab !== 'position'}">
       <!--
-        直接两颗按钮（用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」）——
-        原来那颗「方向开关」得先把方向拨对、再点下单，两下才下得去，
-        而且不点下单看不出会往哪个方向走。现在**按哪颗就是哪个方向**。
-        ⚠️ 文案里不带币种：两颗并排，币名重复两遍反而挤（币种在头顶行情条上）。
+        持仓列表（用户 2026-10-05：「平仓是针对每一个仓位的，没有补仓」）：
+        账户里**所有币**的持仓，一行一条，各自带一颗「平仓」。
+        ⚠️ 列表**高度封顶、超出自己滚** —— 下单区整体高度得稳住
+           （用户：「下单区域高度固定」）。
       -->
-      <button
-        type="button"
-        class="ord-submit long"
-        :disabled="busy || levBusy"
-        title="做多（买入开仓）"
-        @click="submit('long')"
-      >
-        {{ busySide === 'long' ? '提交中…' : '做多' }}
-      </button>
-      <button
-        type="button"
-        class="ord-submit short"
-        :disabled="busy || levBusy"
-        title="做空（卖出开仓）"
-        @click="submit('short')"
-      >
-        {{ busySide === 'short' ? '提交中…' : '做空' }}
-      </button>
+      <ul v-if="positions.length" class="ord-pos">
+        <li v-for="p in positions" :key="p.symbol + p.side">
+          <b class="op-sym">{{ baseOf(p.symbol) }}</b>
+          <span
+            class="op-side"
+            :class="p.side === 'long' ? 'side-long' : 'side-short'"
+            >{{ sideText(p) }}</span
+          >
+          <span class="op-qty">{{ posQty(p) }}</span>
+          <span class="op-entry">开 {{ fmt(p.entryPrice) }}</span>
+          <b
+            class="op-pnl"
+            :class="p.unrealized >= 0 ? 'pnl-up' : 'pnl-down'"
+            >{{ pnlText(p.unrealized) }}</b
+          >
+          <button
+            type="button"
+            class="ghost tiny op-close"
+            :disabled="busy || levBusy"
+            :title="
+              `平掉 ${baseOf(p.symbol)} 这一条持仓（` +
+              (testOrder ? '测试单，只校验、不真平' : '真单') +
+              '）'
+            "
+            @click="closeOne(p)"
+          >
+            平仓
+          </button>
+        </li>
+      </ul>
+
+      <!-- 空列表 / 读失败：把原因摆在原地，别让人以为界面坏了 -->
+      <p v-else class="ord-empty">
+        {{ posLoading ? '正在读持仓…' : posErr || '现在没有持仓' }}
+      </p>
+
+      <div class="ord-actions">
+        <button
+          v-if="!ready && !loading"
+          type="button"
+          class="ghost tiny ord-retry"
+          title="重新读一次余额和杠杆"
+          @click="load"
+        >
+          重试
+        </button>
+        <button
+          type="button"
+          class="ghost tiny op-reload"
+          :disabled="posLoading"
+          title="重新读一次持仓列表"
+          @click="loadPositions"
+        >
+          {{ posLoading ? '读取中…' : '刷新持仓' }}
+        </button>
+      </div>
+    </div>
     </div>
 
     <!-- 杠杆选值：从底部弹出来 -->

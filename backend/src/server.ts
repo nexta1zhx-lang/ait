@@ -104,9 +104,11 @@ import {
   humanize
 } from './data/exchange-account'
 import {
+  closePositions,
   collectTradeInfo,
   humanizeTrade,
-  placeTestOrder,
+  listPositions,
+  placeOrder,
   setSymbolLeverage
 } from './data/exchange-trade'
 import {fetchExchangeOverview} from './data/exchange-overview'
@@ -3181,12 +3183,25 @@ async function route(
   }
 
   /*
-   * 合约下单（2026-10-05）—— K 线页底部那个下单模块用的三条接口。
+   * 美元 → 人民币汇率（很轻，不打任何外部接口）。
    *
-   * ⚠️ `POST /api/exchange/trade/order` 走的**是币安的测试接口**
-   *    （`/fapi/v1/order/test`，用户 2026-10-05 定的）：只校验参数 / 权限 / 保证金，
-   *    **不进撮合、不真开仓**。要放开真下单就是改 `placeTestOrder` 里那个接口名，
-   *    但界面 / 文档上「测试单」的说法必须一起改 —— 别让人以为一直是测试的。
+   * 「交易所账户」那个 USDT / CNY 快捷切换用的：汇率跟用量页 / 历史页**同一个源**
+   * （`llm/pricing.ts` 的 `usdToCny`，读 `USD_CNY` 环境变量，默认 7.1），
+   * 免得同一个站里两处换算出两个数。
+   */
+  if (p === '/api/rate' && method === 'GET') {
+    return sendJson(res, 200, {usdCny: usdToCny(1)})
+  }
+
+  /*
+   * 合约下单（2026-10-05）—— K 线页底部那个下单模块用的几条接口。
+   *
+   * ⚠️ 下单 / 平仓有**两种模式**，由请求体里的 `test` 决定（用户 2026-10-05 追加）：
+   *    · `test !== false`（**默认**）→ 币安的测试接口 `/fapi/v1/order/test`：
+   *      只校验参数 / 权限 / 保证金，**不进撮合、不真开仓**。
+   *    · `test === false` → `/fapi/v1/order` —— **真下单 / 真平仓**（会真扣保证金）。
+   *      前端那个开关在「配置 → 测试下单」里。
+   * ⚠️ 所以**别把 `test` 默认成 false**：漏传必须落在安全那一侧（见 `placeOrder`）。
    */
 
   /* 面板初始化：可用余额 + 当前/最大杠杆 + 数量价格精度（都打交易所，单项失败不拖垮整体） */
@@ -3278,7 +3293,12 @@ async function route(
     const type = str(body.type, 'market') === 'limit' ? 'limit' : 'market'
     const side = str(body.side, 'long') === 'short' ? 'short' : 'long'
     try {
-      const params = await placeTestOrder(
+      /*
+       * ⚠️ `test !== false` —— 只有前端**明确**传 `false` 才真下单。
+       *    漏传 / 传了别的值一律当测试单。
+       */
+      const test = body.test !== false
+      const order = await placeOrder(
         {
           exchange: key.exchange,
           apiKey: key.apiKey,
@@ -3293,10 +3313,81 @@ async function route(
           side,
           type,
           quantity: Number(body.quantity),
-          price: body.price === undefined ? undefined : Number(body.price)
+          price: body.price === undefined ? undefined : Number(body.price),
+          reduceOnly: body.reduceOnly === true,
+          test
         }
       )
-      return sendJson(res, 200, {ok: true, test: true, order: params, error: null})
+      return sendJson(res, 200, {ok: true, test, order, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 所有持仓（面板「仓位」那一格列的列表）。
+   * ⚠️ 跟 `/api/exchange/trade` 分开：那个是「这一个交易对」的面板初始化数据，
+   *    这个要跨交易对、而且面板每次切到「仓位」都得是新的。
+   */
+  if (p === '/api/exchange/trade/positions' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const positions = await listPositions({
+        exchange: key.exchange,
+        apiKey: key.apiKey,
+        secret: key.secret,
+        password: key.password,
+        marketType: key.marketType,
+        sandbox: key.sandbox
+      })
+      return sendJson(res, 200, {ok: true, positions, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 平仓（**测试单**，跟下单同一个接口）。K 线页下单模块里「仓位 → 平仓」用的。
+   *
+   * · `symbol` 给了就只平这个交易对；带上 `side` 就只平那一条（面板上每一行一颗）
+   * · **都不给 = 一键平仓**：把有持仓的全平一遍（顶栏那颗）
+   */
+  if (p === '/api/exchange/trade/close' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    const sideRaw = str(body.side, '')
+    const side =
+      sideRaw === 'long' || sideRaw === 'short' ? sideRaw : undefined
+    try {
+      /* 同下单：`test !== false` 才是测试单，漏传一律当测试单 */
+      const test = body.test !== false
+      const r = await closePositions(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        key.id,
+        body.symbol ? {symbol: str(body.symbol, 'BTCUSDT'), side} : undefined,
+        test
+      )
+      return sendJson(res, 200, {ok: true, test, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
     }

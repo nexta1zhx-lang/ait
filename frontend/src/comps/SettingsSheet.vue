@@ -2,10 +2,12 @@
 /**
  * 配置（底部弹出）。
  *
- * 入口在 K 线头部「AI 分析 / ＋」那一行最右边那颗按钮上。
- * 现在只剩一条：
+ * 入口在 K 线头部「AI 分析 / ＋」那一行最右边那颗按钮上。三条：
  *   · 行情过滤 —— 24h 成交额 ≥ N 百万 USDT 的合约才在行情列表里显示
  *     （用户 2026-10-03：「行情过滤 可以配置 24h 成交多少 m，大于这个数合约行情才显示」）。
+ *   · 下单账户 —— K 线页底部下单模块用哪套交易所 Key（用户 2026-10-05）。
+ *   · 测试下单 —— **开关**（用户 2026-10-05「测试单在配置中开启」）：
+ *     以前「测试单」是写死在开单页上的一句标签，现在挪到这儿，开单页不再提。
  *
  * ⚠️ 2026-10-04 删掉了两条（用户：「k 线保持样式缩放逻辑全部删掉」）：
  *    「保持 K 线缩放样式」开关 + 「显示多少根 K 线」读数。
@@ -13,14 +15,30 @@
  *
  * 值都在 `settings.ts`（落 localStorage），这里只负责画和改。
  */
-import {computed} from 'vue'
-import {marketMinVolM} from '../settings'
+import {computed, watch} from 'vue'
+import {marketMinVolM, testOrder} from '../settings'
+import {
+  loadTradeKeys,
+  pickTradeKey,
+  tradeKey,
+  tradeKeys,
+  tradeKeysErr
+} from '../trade-account'
 
-defineProps<{
+const props = defineProps<{
   open: boolean
 }>()
 
 const emit = defineEmits<{(e: 'close'): void}>()
+
+/* 打开时拉一次 Key 列表（30 秒内不重复拉） */
+watch(
+  () => props.open,
+  on => {
+    if (on) void loadTradeKeys()
+  },
+  {immediate: true}
+)
 
 /**
  * 行情过滤的输入框。
@@ -36,6 +54,24 @@ const minVolM = computed({
 
 /** 常用档位（手机上点一下就行，不用弹键盘） */
 const PRESETS = [0, 1, 5, 10, 50]
+
+/**
+ * 切「测试下单」。
+ * ⚠️ **关掉的时候必须确认** —— 开关的另一侧是真钱（真开仓 / 真平仓）；
+ *    开回来（回到只校验）是往安全那侧走，不用问。
+ */
+function toggleTest(): void {
+  if (!testOrder.value) {
+    testOrder.value = true
+    return
+  }
+  const ok = window.confirm(
+    '关掉「测试下单」之后，下单和平仓都会发到币安的真实接口：\n\n' +
+      '· 会真开仓、真扣保证金\n' +
+      '· 平仓会真的把持仓平掉\n\n确定要关掉吗？'
+  )
+  if (ok) testOrder.value = false
+}
 </script>
 
 <template>
@@ -81,6 +117,69 @@ const PRESETS = [0, 1, 5, 10, 50]
             </button>
           </div>
         </div>
+      </div>
+
+      <!--
+        下单账户（用户 2026-10-05：「配置中可切换用户」）——
+        K 线页底部那个下单模块用哪套交易所 Key，在这儿切。
+      -->
+      <div class="sheet-row col">
+        <div class="sheet-text">
+          <b>下单账户</b>
+          <p>
+            K 线页底部的<b>下单模块</b>用这一套 Key（余额 / 杠杆 / 持仓都看它）。
+            要改 Key 本身去「我的 → 个人信息 → 交易所」。
+          </p>
+        </div>
+        <div class="tk-picks">
+          <button
+            v-for="k in tradeKeys"
+            :key="k.id"
+            type="button"
+            class="ghost tiny"
+            :class="{on: tradeKey?.id === k.id}"
+            :title="`${k.name} · ${k.marketType === 'swap' ? '合约' : '现货'}`"
+            @click="pickTradeKey(k.id)"
+          >
+            {{ k.name }}
+          </button>
+          <span v-if="!tradeKeys.length" class="dim tiny">{{
+            tradeKeysErr || '还没配置交易所 Key'
+          }}</span>
+        </div>
+      </div>
+
+      <!--
+        测试下单（用户 2026-10-05：「测试单在配置中开启」）——
+        以前「测试单」是写死在开单页上的一句标签，现在是这儿的一个开关。
+      -->
+      <div class="sheet-row">
+        <div class="sheet-text">
+          <b>测试下单</b>
+          <p v-if="testOrder">
+            开着：只发到币安<b>测试接口</b>，校验参数 / 权限 / 保证金，
+            <b>不进撮合、不真开仓、不真平仓</b>。
+          </p>
+          <p v-else>
+            ⚠️ 已关闭：下单 / 平仓都是<b>真单</b>，会真扣保证金、真的平掉持仓。
+          </p>
+        </div>
+        <!--
+          ⚠️ 打开/关掉都让用户二次确认 —— 这个开关的另一侧是真钱，
+            误触一下就从「只校验」变成「真开仓」。
+        -->
+        <button
+          type="button"
+          class="switch"
+          :class="{on: testOrder}"
+          role="switch"
+          :aria-checked="testOrder"
+          :aria-label="testOrder ? '测试下单已开启' : '测试下单已关闭'"
+          title="点一下切换（会先确认）"
+          @click="toggleTest"
+        >
+          <span />
+        </button>
       </div>
 
       <p class="sheet-foot">改完立刻生效，自动记在这台设备上。</p>

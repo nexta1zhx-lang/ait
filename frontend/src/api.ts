@@ -638,6 +638,8 @@ export const fetchExchangeCurve = (id?: number, range = '1d') =>
  * ⚠️ 数据来自**成交账本的 `realized`**，不是交易所的 income 接口（M3 起）。
  */
 export interface ExchangeIncomeRow {
+  /** 哪套 Key 的（只有「全部」那一格会带） */
+  keyName?: string
   symbol: string
   income: number
   time: string | null
@@ -700,6 +702,11 @@ export interface FuturesPosition {
   unrealizedPnl: number
   /** ROE %（相对保证金） */
   percentage: number | null
+  /**
+   * 这条数据是哪套 Key 的 —— **只有「全部」那一格会带上**（前端合并时补的），
+   * 单套账户时不带。用来在列表里标出来源（用户 2026-10-05：「其余针对 key 数据加标签」）。
+   */
+  keyName?: string
 }
 
 /** 一份快照 —— 后端落库后读回来的那份（见 `docs/EXCHANGE.md`） */
@@ -750,6 +757,8 @@ export interface ExchangeOpenOrder {
   price: number
   amount: number
   datetime: string | null
+  /** 哪套 Key 的（只有「全部」那一格会带，见 `FuturesPosition.keyName`） */
+  keyName?: string
 }
 
 /**
@@ -768,6 +777,8 @@ export interface ExchangeTrade {
   /** 这一笔的已实现盈亏（「盈亏」tab 就是把它按币加起来） */
   realized: number
   datetime: string | null
+  /** 哪套 Key 的（只有「全部」那一格会带，见 `FuturesPosition.keyName`） */
+  keyName?: string
 }
 
 /**
@@ -859,9 +870,10 @@ export function exchangeStream(
 /* ---------------- 合约下单（K 线页底部那个模块，2026-10-05） ---------------- */
 
 /**
- * ★ 下单走的是币安的**测试接口**（`/fapi/v1/order/test`，用户 2026-10-05 定的）：
- *   只校验参数 / 权限 / 保证金，**不进撮合、不真开仓**。
- *   要放开真下单，是后端把接口名换掉的事，前端只需把界面上「测试单」的说法一起去掉。
+ * ★ 下单有**两种模式**，由 `test` 决定（用户 2026-10-05 追加）：
+ *   · `test !== false`（默认）→ 币安测试接口 `/fapi/v1/order/test`：只校验，不真开仓
+ *   · `test === false` → `/fapi/v1/order`：**真下单 / 真平仓**（会真扣保证金）
+ *   开关在「配置 → 测试下单」里（`settings.ts` 的 `testOrder`）。
  */
 
 /** 合约账户余额（`/fapi/v2/balance`） */
@@ -870,6 +882,28 @@ export interface TradeBalance {
   available: number
   wallet: number
   unrealized: number
+}
+
+/** 一条持仓 + 它的交易对（「仓位」那一格列出来的那种） */
+export interface TradePositionRow extends TradePosition {
+  /** 币安原始符号（BTCUSDT） */
+  symbol: string
+}
+
+/** 当前持仓（`positionRisk` 里那一行） */
+export interface TradePosition {
+  side: 'long' | 'short'
+  /** 持仓量（基础币，绝对值） */
+  amount: number
+  /** 开仓均价 */
+  entryPrice: number
+  markPrice: number
+  /** 未实现盈亏（USDT） */
+  unrealized: number
+  /** 名义价值（USDT） */
+  notional: number
+  /** 这个交易对的杠杆 */
+  leverage: number
 }
 
 /**
@@ -890,6 +924,8 @@ export interface TradeInfoResult {
   leverage?: number | null
   /** 交易所允许的最大杠杆（读不到是 null） */
   maxLeverage?: number | null
+  /** 当前持仓（没持仓 / 读不到是 null） */
+  position?: TradePosition | null
   /** 数量小数位（0.001 的步长 → 3） */
   amountPrecision?: number
   pricePrecision?: number
@@ -919,7 +955,7 @@ export const setTradeLeverage = (symbol: string, leverage: number, id?: number) 
     {symbol, leverage}
   )
 
-export interface TestOrderInput {
+export interface OrderInput {
   /** 币安原始符号，如 BTCUSDT */
   symbol: string
   /** long = 买入 / short = 卖出 */
@@ -928,10 +964,17 @@ export interface TestOrderInput {
   quantity: number
   /** 限价单 = 委托价；市价单 = 算数量用的参考价（只做最小名义价值的体检） */
   price?: number
+  /** 只减仓（平仓用） */
+  reduceOnly?: boolean
+  /**
+   * `true`（或不传）= 测试单，只校验不真开仓；
+   * `false` = **真下单**（配置里「测试下单」关掉时才会传）。
+   */
+  test?: boolean
 }
 
-/** 后端复述回来的「实际发出去的参数」——测试单成功时交易所只回一个空对象 */
-export interface TestOrderParams {
+/** 后端复述回来的「实际发出去的参数」 */
+export interface OrderParams {
   symbol: string
   side: 'BUY' | 'SELL'
   type: 'MARKET' | 'LIMIT'
@@ -939,16 +982,61 @@ export interface TestOrderParams {
   price?: number
   timeInForce?: string
   positionSide?: 'LONG' | 'SHORT'
+  reduceOnly?: boolean
 }
 
-export const placeTestOrder = (input: TestOrderInput, id?: number) =>
+/** 一张已经发出去的单：参数 + 走的哪种模式 + 交易所回的号（测试单没有） */
+export interface PlacedOrder extends OrderParams {
+  /** `true` = 测试单；`false` = **真单** */
+  test: boolean
+  orderId?: string
+  status?: string
+}
+
+/** 平仓单：比普通单多一个「平的是哪个方向」 */
+export interface CloseOrderParams extends PlacedOrder {
+  from: 'long' | 'short'
+}
+
+export const placeOrder = (
+  input: OrderInput,
+  id?: number,
+  test = true
+) =>
+  post<{ok: boolean; test?: boolean; order?: PlacedOrder; error: string | null}>(
+    `/api/exchange/trade/order${id ? `?id=${id}` : ''}`,
+    {...input, test}
+  )
+
+/**
+ * 平仓。
+ *
+ * · 不传 `target` → **一键平仓**（账户里所有持仓全平）
+ * · 只给 `symbol` → 平这个交易对
+ * · `symbol + side` → 只平那一条（面板上每一行那颗「平仓」；双向持仓时一个币有两条）
+ *
+ * `test = false` 时是**真平仓**。
+ */
+export const closeTradePositions = (
+  target?: {symbol?: string; side?: 'long' | 'short'},
+  id?: number,
+  test = true
+) =>
   post<{
     ok: boolean
-    /** 永远是 true：现在只走测试接口 */
     test?: boolean
-    order?: TestOrderParams
+    orders?: CloseOrderParams[]
     error: string | null
-  }>(`/api/exchange/trade/order${id ? `?id=${id}` : ''}`, input)
+  }>(`/api/exchange/trade/close${id ? `?id=${id}` : ''}`, {...(target ?? {}), test})
+
+/** 账户里**所有**持仓（面板「仓位」那一格列的列表） */
+export const fetchTradePositions = (id?: number) =>
+  get<{ok: boolean; positions?: TradePositionRow[]; error: string | null}>(
+    `/api/exchange/trade/positions${id ? `?id=${id}` : ''}`
+  )
+
+/** 美元 → 人民币汇率（「交易所账户」USDT / CNY 切换用，跟用量页同一个源） */
+export const fetchRate = () => get<{usdCny: number}>('/api/rate')
 
 /** 改自己的用户名（「个人信息」页） */
 export const authRename = (username: string) =>

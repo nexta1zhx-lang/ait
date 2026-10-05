@@ -23,6 +23,10 @@ const OLD_KEY = 'ca-settings-v1'
 interface Stored {
   /** 行情过滤：24h 成交额低于这个数（**百万 USDT**）的合约不显示。0 = 不过滤 */
   marketMinVolM?: number
+  /** 「交易所账户」按哪种货币看：美元（默认）/ 人民币 */
+  exchangeCurrency?: 'usd' | 'cny'
+  /** 下单走测试单（默认**开**）。`false` = 真下单 —— 见 `testOrder` */
+  testOrder?: boolean
 }
 
 function read(): Stored {
@@ -31,7 +35,11 @@ function read(): Stored {
     if (raw) {
       const v = JSON.parse(raw) as Stored & Record<string, unknown>
       // 只取认得的字段 —— 删掉的 `keepChartZoom` / `chartBars` / `runBtnPos` 别跟着写回去
-      return {marketMinVolM: v.marketMinVolM}
+      return {
+        marketMinVolM: v.marketMinVolM,
+        exchangeCurrency: v.exchangeCurrency === 'cny' ? 'cny' : 'usd',
+        testOrder: v.testOrder !== false
+      }
     }
     // 老键里已经没有认得的东西了（旧配置全部废弃）
     void localStorage.getItem(OLD_KEY)
@@ -57,6 +65,28 @@ export const marketMinVolM = ref(Math.max(0, saved.marketMinVolM ?? 0))
 export const marketMinVolUsd = computed(() => marketMinVolM.value * 1e6)
 
 /**
+ * 「交易所账户」那一页用哪种货币看：`usd`（默认，$）/ `cny`（¥）。
+ *
+ * 用户 2026-10-05：「账户添加人民币汇率切换快捷 usdt cny」。
+ * 汇率跟用量页 / 历史页同源（`GET /api/rate` → `USD_CNY`，默认 7.1）。
+ */
+export const exchangeCurrency = ref<'usd' | 'cny'>(
+  saved.exchangeCurrency === 'cny' ? 'cny' : 'usd'
+)
+
+/**
+ * 下单是不是走**测试单**（用户 2026-10-05：「测试单在配置中开启」）。
+ *
+ * · `true`（**默认**）→ 币安 `/fapi/v1/order/test`：只校验签名 / 参数 / 权限 / 保证金，
+ *   **不进撮合、不真开仓**。
+ * · `false` → `/fapi/v1/order`：**真下单 / 真平仓**，会真扣保证金。
+ *
+ * ⚠️ 默认值必须是 `true`（`read()` 里也是 `v.testOrder !== false`）——
+ *    这个开关的另一侧是真钱，没存过配置的人必须落在测试单上。
+ */
+export const testOrder = ref(saved.testOrder !== false)
+
+/**
  * 手机端那颗「分析」闪电 —— **已经不再存位置了**。
  *
  * 2026-10-04 做成了「可以自由移动 + 记到 localStorage」；
@@ -65,12 +95,16 @@ export const marketMinVolUsd = computed(() => marketMinVolM.value * 1e6)
  */
 
 watch(
-  marketMinVolM,
+  [marketMinVolM, exchangeCurrency, testOrder],
   () => {
     try {
       localStorage.setItem(
         KEY,
-        JSON.stringify({marketMinVolM: marketMinVolM.value})
+        JSON.stringify({
+          marketMinVolM: marketMinVolM.value,
+          exchangeCurrency: exchangeCurrency.value,
+          testOrder: testOrder.value
+        })
       )
     } catch {
       // 写不了就算了，不影响用

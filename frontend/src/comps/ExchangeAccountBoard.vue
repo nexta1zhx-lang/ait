@@ -28,6 +28,7 @@ import {
   type ExchangeTrade
 } from '../api'
 import {bjTime, fixed, fmt} from '../format'
+import {exchangeCurrency} from '../settings'
 import SegTabs from './SegTabs.vue'
 
 /**
@@ -52,18 +53,26 @@ const props = defineProps<{
   /** 正在刷新快照（⟳ 转圈 + 禁点） */
   refreshing?: boolean
   /**
-   * 绑定的账户（**多套 key 时顶部变下拉切换**）。
+   * 「没有数据」的原因（现货 / 还没采过 / 这些账户都没数据）。
+   * ⚠️ 有值时把底部的转圈换成这句话 —— 不然「取不到数据」会一直转下去。
+   */
+  reason?: string
+  /**
+   * 顶部那排账户 tab 的选项：`全部` + 每套 Key 的名字（**只有一套时外层就不传 tab**，
+   * 退化成原来那个名字标签）。
    * ⚠️ 纯展示：切换只往上 emit，重新取数由外层负责。
    */
-  accounts?: {id: number; name: string}[]
-  /** 当前选中的账户 id（配合 `update:modelValue`） */
-  modelValue?: number | null
+  accounts?: {value: string; label: string}[]
+  /** 当前选中的那一格（`'all'` 或 key id 的字符串形式） */
+  modelValue?: string
   /** 净资产曲线（“快照序列 → 图”，可能还没攒够点） */
   curve?: CurvePoint[]
   /** 当前跨度：1d / 7d / 30d（受控） */
   curveRange?: string
   /** 后端用的桶宽（秒）—— 算「断档」要靠它 */
   curveBucketSec?: number
+  /** 美元 → 人民币汇率（USDT / CNY 切换用；拿不到就退回 7.1） */
+  rate?: number
 }>()
 
 const emit = defineEmits<{
@@ -72,11 +81,14 @@ const emit = defineEmits<{
   (e: 'update:curveRange', range: string): void
 }>()
 
-/** 下拉选中的值从 DOM 出来是字符串，这里转回数字再往上抛 */
-function onPick(v: string): void {
-  const id = Number(v)
-  if (Number.isFinite(id)) emit('update:modelValue', id)
-}
+/** tab 选中的那一格（`'all'` / key id 字符串）：只读 prop，切换往上 emit */
+const picked = computed({
+  get: () => props.modelValue ?? '',
+  set: (v: string) => emit('update:modelValue', v)
+})
+/** 只有一套 key 时不渲染 tab，退化成原来那个名字标签 */
+const showAcctTabs = computed(() => (props.accounts?.length ?? 0) > 1)
+const acctLabel = computed(() => props.accounts?.[0]?.label ?? '')
 
 const acct = computed(() => props.data?.account ?? null)
 const fx = computed(() => props.data?.futures ?? null)
@@ -171,18 +183,23 @@ const tabs = computed(() => [
   {value: 'bags' as Tab, label: '资产'}
 ])
 
-/** 按交易对分组挂单 */
+/**
+ * 按交易对分组挂单。
+ * ⚠️ 分组的 key 里要带**账户名** —— 「全部」那一格里，同一个币在 A 账户和 B 账户
+ *    各挂了一单，只按 symbol 分会把两套的挂单混进一组、数不清是哪家的。
+ */
 const orderGroups = computed(() => {
-  const m = new Map<string, ExchangeOpenOrder[]>()
+  const m = new Map<string, {symbol: string; keyName?: string; rows: ExchangeOpenOrder[]}>()
   for (const o of props.openOrders ?? []) {
-    const arr = m.get(o.symbol)
-    if (arr) arr.push(o)
-    else m.set(o.symbol, [o])
+    const k = `${o.keyName ?? ''}|${o.symbol}`
+    const g = m.get(k)
+    if (g) g.rows.push(o)
+    else m.set(k, {symbol: o.symbol, keyName: o.keyName, rows: [o]})
   }
-  return [...m.entries()].map(([symbol, rows]) => ({symbol, rows}))
+  return [...m.values()]
 })
 
-/** 已实现盈亏：按币种汇总（逐笔看着累） */
+/** 已实现盈亏：按（账户 + 币种）汇总（逐笔看着累） */
 const incomeRows = computed(() => props.income ?? [])
 const incomeTotal = computed(() =>
   incomeRows.value.reduce(
@@ -191,20 +208,46 @@ const incomeTotal = computed(() =>
   )
 )
 const incomeGroups = computed(() => {
-  const m = new Map<string, {symbol: string; sum: number; count: number}>()
+  const m = new Map<
+    string,
+    {symbol: string; keyName?: string; sum: number; count: number}
+  >()
   for (const r of incomeRows.value) {
-    const g = m.get(r.symbol) ?? {symbol: r.symbol, sum: 0, count: 0}
+    const k = `${r.keyName ?? ''}|${r.symbol}`
+    const g = m.get(k) ?? {symbol: r.symbol, keyName: r.keyName, sum: 0, count: 0}
     g.sum += r.income
     g.count++
-    m.set(r.symbol, g)
+    m.set(k, g)
   }
   return [...m.values()].sort((a, b) => Math.abs(b.sum) - Math.abs(a.sum))
 })
 
 /* ---------------- 格式化 ---------------- */
 
+/* ---------------- 货币：USDT / CNY 快捷切换 ---------------- */
+
+/** 当前按哪种货币看（**全局持久化**，见 `settings.ts`） */
+const currency = exchangeCurrency
+/** 汇率：接口没回来之前先用 7.1（跟后端 `USD_CNY` 的默认值一致） */
+const cnyRate = computed(() =>
+  props.rate && props.rate > 0 ? props.rate : 7.1
+)
+
+function toggleCurrency(): void {
+  exchangeCurrency.value = exchangeCurrency.value === 'cny' ? 'usd' : 'cny'
+}
+
 /** 金额带千分位（`format.ts` 的 `usd()` 不加逗号，六位数很难读） */
 function money(v: number): string {
+  if (currency.value === 'cny') {
+    return (
+      '¥' +
+      (v * cnyRate.value).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      })
+    )
+  }
   return (
     '$' +
     v.toLocaleString('en-US', {
@@ -213,6 +256,17 @@ function money(v: number): string {
     })
   )
 }
+
+/**
+ * 总杠杆倍数（用户 2026-10-05：「仓位统计显示总杠杆倍数」）。
+ *
+ * 口径：**名义总额 ÷ 保证金余额** —— 账户级别的真实杠杆（不是各仓杠杆相加，
+ * 那个数没有意义：不同仓位的保证金口径不一样）。保证金余额为 0 时不显示。
+ */
+const totalLev = computed(() => {
+  const m = fx.value?.margin ?? 0
+  return m > 0 ? stats.value.notional / m : 0
+})
 function signedMoney(v: number): string {
   return (v >= 0 ? '+' : '−') + money(Math.abs(v))
 }
@@ -254,38 +308,63 @@ const RANGES = [
 
 <template>
   <div class="exb">
+    <!--
+      账户切换：**tab 条**（用户 2026-10-05：不要下拉框，要「全部 + 每个 key 名称」）。
+      ⚠️ 放在 `v-if="data"` **外面** —— 加载/报错时也能切到别的账户。
+      只有一套 key 时 `accounts` 只有一项 ⇒ 不渲染，界面上不留一条没用的 tab。
+    -->
+    <SegTabs
+      v-if="showAcctTabs"
+      v-model="picked"
+      class="acct-tabs"
+      :options="accounts!"
+    />
     <template v-if="data">
       <!-- ① 净资产 -->
       <section class="panel hero">
         <div class="hero-h">
           <span class="hero-k">净资产</span>
-          <!-- 绑定的 key：多套就在这儿切；只有一套时当一个普通标签显示名字 -->
-          <select
-            v-if="(accounts?.length ?? 0) > 1"
-            class="acct"
-            :value="modelValue ?? ''"
-            aria-label="切换账户"
-            @change="onPick(($event.target as HTMLSelectElement).value)"
-          >
-            <option v-for="a in accounts" :key="a.id" :value="a.id">
-              {{ a.name }}
-            </option>
-          </select>
-          <span v-else class="tag">{{
-            accounts?.[0]?.name ?? '合约 + C2C'
-          }}</span>
+          <!-- 只有一套 key 时没有 tab 条，在这儿当普通标签显示名字 -->
+          <span v-if="!showAcctTabs && acctLabel" class="tag">
+            {{ acctLabel }}
+          </span>
+          <span v-else-if="!showAcctTabs" class="tag">合约 + C2C</span>
           <span class="spacer" />
           <span class="age" :class="{stale}" :title="bjTime(data.takenAt)">
             {{ ageText }}
           </span>
+          <!--
+            USDT / CNY 快捷切换（用户 2026-10-05：「账户添加人民币汇率切换快捷 usdt cny」）——
+            点一下整页金额就在 $ 和 ¥ 之间换（汇率跟用量页同源，见 `cnyRate`）。
+          -->
+          <button
+            class="ghost tiny cur"
+            :title="
+              currency === 'usd'
+                ? `按人民币看（1 USD = ${cnyRate} CNY）`
+                : '按美元看'
+            "
+            @click="toggleCurrency"
+          >
+            {{ currency === 'usd' ? 'USDT' : 'CNY' }}
+          </button>
+          <!--
+            刷新：**内联 SVG**，不是 `⟳` 那个字符 —— 那个字形在 Android WebView
+            的兜底字体里没有，App 里是一颗空白按钮（用户 2026-10-05：
+            「交易所账户的刷新图标在 app 没有显示」）。
+          -->
           <button
             class="ghost tiny rf"
             :class="{busy: refreshing}"
             :disabled="refreshing"
             title="立即刷新"
+            aria-label="立即刷新"
             @click="emit('refresh')"
           >
-            ⟳
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6.02" />
+              <path d="M20.5 3.5v5.2h-5.2" />
+            </svg>
           </button>
         </div>
 
@@ -393,6 +472,14 @@ const RANGES = [
       <section class="panel">
         <div class="pn-h">
           <h2>仓位统计</h2>
+          <!-- 总杠杆（用户 2026-10-05：「仓位统计显示总杠杆倍数」） -->
+          <span
+            v-if="totalLev > 0"
+            class="lev-chip"
+            :title="`总杠杆 = 名义总额 ÷ 保证金余额（${money(stats.notional)} ÷ ${money(fx?.margin ?? 0)}）`"
+          >
+            {{ totalLev.toFixed(2) }}x
+          </span>
           <span class="dim tiny">
             {{ stats.longCount + stats.shortCount }} 个持仓 · 多
             {{ stats.longCount }} / 空 {{ stats.shortCount }}
@@ -429,13 +516,15 @@ const RANGES = [
       <!-- 持仓 -->
       <section v-show="tab === 'pos'" class="panel">
         <ul v-if="positions.length" class="poss">
-          <li v-for="p in positions" :key="p.symbol + p.side">
+          <li v-for="p in positions" :key="(p.keyName ?? '') + p.symbol + p.side">
             <div class="p-h">
               <span class="sym">{{ p.symbol }}</span>
               <span class="side" :class="p.side === 'short' ? 'sell' : 'buy'">
                 {{ posText(p.side) }}
               </span>
               <span class="lev">{{ p.leverage }}x</span>
+              <!-- 「全部」那一格里同一币可能出现在两套账户 ⇒ 标出来源 -->
+              <span v-if="p.keyName" class="ktag">{{ p.keyName }}</span>
               <span class="spacer" />
               <span class="pnl" :class="tone(p.unrealizedPnl)">
                 {{ signedMoney(p.unrealizedPnl) }}
@@ -480,9 +569,14 @@ const RANGES = [
           <span class="spin" />正在查询挂单…
         </div>
         <div v-else-if="orderGroups.length" class="grps">
-          <div v-for="g in orderGroups" :key="g.symbol" class="grp">
+          <div
+            v-for="g in orderGroups"
+            :key="(g.keyName ?? '') + g.symbol"
+            class="grp"
+          >
             <div class="grp-h">
               <span class="sym">{{ g.symbol }}</span>
+              <span v-if="g.keyName" class="ktag">{{ g.keyName }}</span>
               <span class="spacer" />
               <span class="dim tiny">{{ g.rows.length }} 单</span>
             </div>
@@ -513,8 +607,9 @@ const RANGES = [
         </div>
         <template v-if="incomeRows.length">
           <ul class="incs">
-            <li v-for="g in incomeGroups" :key="g.symbol">
+            <li v-for="g in incomeGroups" :key="(g.keyName ?? '') + g.symbol">
               <span class="sym">{{ g.symbol }}</span>
+              <span v-if="g.keyName" class="ktag">{{ g.keyName }}</span>
               <span class="dim tiny">{{ g.count }} 笔</span>
               <span class="spacer" />
               <span class="pnl" :class="tone(g.sum)">{{
@@ -524,8 +619,12 @@ const RANGES = [
           </ul>
           <p class="sub-h dim tiny">最近明细</p>
           <ul class="rows">
-            <li v-for="(r, i) in incomeRows.slice(0, 10)" :key="i">
+            <li
+              v-for="(r, i) in incomeRows.slice(0, 10)"
+              :key="`${r.keyName ?? ''}-${r.symbol}-${i}`"
+            >
               <span class="sym">{{ r.symbol }}</span>
+              <span v-if="r.keyName" class="ktag">{{ r.keyName }}</span>
               <span class="spacer" />
               <span class="pnl" :class="tone(r.income)">{{
                 signedMoney(r.income)
@@ -547,12 +646,13 @@ const RANGES = [
           <span class="dim tiny">实时记账本</span>
         </div>
         <ul v-if="trades?.length" class="rows trades">
-          <li v-for="t in trades" :key="t.id">
+          <li v-for="t in trades" :key="`${t.keyName ?? ''}-${t.id}`">
             <div class="t-line">
               <span class="side" :class="t.side === 'buy' ? 'buy' : 'sell'">
                 {{ sideText(t.side) }}
               </span>
               <span class="sym">{{ t.symbol }}</span>
+              <span v-if="t.keyName" class="ktag">{{ t.keyName }}</span>
               <span class="spacer" />
               <span class="num">{{ fmt(t.price) }}</span>
             </div>
@@ -606,6 +706,7 @@ const RANGES = [
       </section>
     </template>
 
+    <p v-else-if="reason" class="dim no-data">{{ reason }}</p>
     <p v-else class="dim load"><span class="spin" />正在取账户快照…</p>
   </div>
 </template>
@@ -640,6 +741,13 @@ const RANGES = [
   gap: 8px;
   margin: 8px 0;
   font-size: 13px;
+}
+
+/* 「没有数据」那一句：比转圈那句稍微显眼一点（它是终态，不是过渡态） */
+.no-data {
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 /* ---------------- ① 净资产 ---------------- */
@@ -941,17 +1049,72 @@ const RANGES = [
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
-/* 账户下拉：挤在「净资产」旁边一行里，所以别太长、字号跟小标签一致 */
-.acct {
-  max-width: 46%;
-  padding: 2px 6px;
-  font-size: 12px;
-  border-radius: 7px;
+/*
+ * 账户 tab 条（原来这儿是「净资产」旁边一个 `<select class="acct">`）。
+ * key 名字可能长、套数可能多 ⇒ 横向滚动，不换行也不把按钮挤扁。
+ */
+.acct-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-/* 刷新中：⟳ 转圈（keyframes spin 是全局的，见 style.css） */
+.acct-tabs::-webkit-scrollbar {
+  display: none;
+}
+.acct-tabs :deep(button) {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 7px 14px;
+}
+/*
+ * 刷新按钮的图标：**内联 SVG**（原来那个 `⟳` 字符在 Android WebView 里
+ * 兜底字体没这个字形，App 上是一颗空白按钮）。
+ * 尺寸对齐 `.ghost.tiny` 的高度，别把这一行撑高。
+ */
+.rf {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 6px;
+}
+
+.rf svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 刷新中：整个按钮转圈（keyframes spin 是全局的，见 style.css） */
 .rf.busy {
   animation: spin 0.8s linear infinite;
   cursor: default;
+}
+
+/* USDT / CNY 切换：跟「几分钟前」并排的一颗小标签，点了就换 */
+.cur {
+  padding: 3px 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: var(--fw-bold);
+}
+
+/* 仓位统计标题右边那颗「总杠杆」 */
+.lev-chip {
+  margin-right: auto;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: var(--fw-bold);
 }
 
 /* ---------------- ⑥ 净资产走势（折叠） ---------------- */

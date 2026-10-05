@@ -60,9 +60,11 @@ export interface SwipeTabsOptions<T extends string> {
   /**
    * 手势区根元素（就是模板里挂 `ref` 的那个）。
    *
-   * ⚠️ 开单分析页**必须挂在左边那栏 `.col`**，不能挂 `.split`：
-   *    右边那栏是 K 线（`aside.col.side`），图上横划是**拖动图表看历史行情**，
-   *    挂到 `.split` 上会把那个手势抢走。
+   * ⚠️ 开单分析页挂的是**整个 `.split`**（左栏 tab 行 + 内容 + 窄屏「K 线」那格的
+   *    右栏），因为窄屏「K 线」时图在右栏、`.col` 只剩 tab 行那 40px（那样划到哪都
+   *    不生效）。所以**必须**把图上那块横划手势自己吃掉的东西标上 `[data-no-swipe]`
+   *    （`KlineChart` 的 `.chart-wrap` 就是这么干的）—— 否则图上拖动看历史行情会被
+   *    当成「切 tab」。
    */
   host: () => HTMLElement | null
   /** tab 的顺序 —— 按它挪一格 */
@@ -72,10 +74,7 @@ export interface SwipeTabsOptions<T extends string> {
   /** 切过去 */
   set: (v: T) => void
   /**
-   * 现在能不能划。**省略 = 「挡屏就行」**。
-   *
-   * ⚠️ 开单分析页用它额外排除了「K 线」那一格 ——
-   *    用户 2026-10-05：「k 线页面滑动不切换」（详见那边调用处的注释）。
+   * 现在能不能划。**省略 = 「挡屏就行」**（跟 CSS 的 `@media (max-width: 900px)` 对齐）。
    */
   enabled?: () => boolean
 }

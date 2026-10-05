@@ -297,7 +297,6 @@ let priceLines: any[] = []
 let levelLabels: {price: number; color: string; el: HTMLElement}[] = []
 let candles: Candle[] = []
 let candleIndex = new Map<number, number>()
-let volMa: number[] = []
 let emaValues: number[] = []
 let overlay: {refPrice: number} = {
   refPrice: NaN
@@ -365,17 +364,6 @@ function ema(values: number[], period: number): number[] {
   for (let i = period; i < values.length; i++) {
     prev = values[i] * k + prev * (1 - k)
     out[i] = prev
-  }
-  return out
-}
-
-function sma(values: number[], period: number): number[] {
-  const out = new Array<number>(values.length).fill(NaN)
-  let sum = 0
-  for (let i = 0; i < values.length; i++) {
-    sum += values[i]
-    if (i >= period) sum -= values[i - period]
-    if (i >= period - 1) out[i] = sum / period
   }
   return out
 }
@@ -544,7 +532,11 @@ function ensureChart(): boolean {
   const markPanned = () => {
     userPanned = true
   }
-  chartEl.value.addEventListener('pointerdown', markPanned)
+  /* 窄屏「点一下就出信息」也挂在这几个事件上（见 `onChartPointerDown` 那一组） */
+  chartEl.value.addEventListener('pointerdown', onChartPointerDown)
+  chartEl.value.addEventListener('pointermove', onChartPointerMove)
+  chartEl.value.addEventListener('pointerup', onChartPointerUp)
+  chartEl.value.addEventListener('pointercancel', onChartPointerCancel)
   chartEl.value.addEventListener('wheel', markPanned, {passive: true})
 
   /*
@@ -814,8 +806,14 @@ function positionLabels() {
   if (!refs) return
   const host = levelHost.value
   if (host) {
-    const axisW = refs.chart.priceScale('right').width()
-    host.style.right = Math.max(0, axisW) + 'px'
+    /*
+     * 跟价格轴**同位置同宽度** —— 标签直接挂在轴上（用户 2026-10-05：
+     * 「k 线右侧百分比会定在坐标轴上」）。以前是 `right: 轴宽`，浮在轴左边、
+     * 盖在 K 线上，看着像两条飘着的色块。
+     */
+    const axisW = Math.max(0, refs.chart.priceScale('right').width())
+    host.style.right = '0px'
+    host.style.width = axisW + 'px'
   }
   for (const item of levelLabels) {
     const y = refs.candle.priceToCoordinate(item.price)
@@ -832,18 +830,39 @@ function positionLabels() {
 
 /* ---------------- 左上角信息栏 ---------------- */
 
-/** 成交量：上百万就拿 M 说事，看着不炸眼 */
-function fmtVol(v: number): string {
+/** 成交额：中文量级（跟「行情条」上的 `big()` 一个口径），别糊一长串数字 */
+function fmtQuote(v: number): string {
   if (!Number.isFinite(v) || v <= 0) return '—'
-  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`
-  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`
+  if (Math.abs(v) >= 1e8) return `${(v / 1e8).toFixed(2)}亿`
+  if (Math.abs(v) >= 1e4) return `${(v / 1e4).toFixed(2)}万`
   return fmt(v, 0)
 }
 
+/**
+ * 这一根的成交额（USDT）。
+ *
+ * ⚠️ 是个**折算值**，不是币安那个 `quoteAssetVolume`：我们的 K 线是走
+ *    ccxt `fetchOHLCV` 拿的，它只回 6 个字段（没有成交额），所以用
+ *    **典型价 × 成交量** 折算（典型价 = (高 + 低 + 收) / 3，
+ *    比拿收盘价算更贴近真实成交均价）。
+ */
+function quoteOf(
+  bar: {high: number; low: number; close: number},
+  vol: number
+): number {
+  if (!Number.isFinite(vol) || vol <= 0) return NaN
+  const px = (bar.high + bar.low + bar.close) / 3
+  if (!Number.isFinite(px) || px <= 0) return NaN
+  return vol * px
+}
+
+/**
+ * 触碰 / 悬停时那一格信息（用户 2026-10-05：**去掉「成交量」和那个 `0.45x` 倍数，
+ * 改显示「成交额」**）。
+ */
 function infoHTML(
   bar: {open: number; high: number; low: number; close: number},
-  vol: number,
-  volRatio: number
+  vol: number
 ): string {
   const chg = bar.open ? ((bar.close - bar.open) / bar.open) * 100 : NaN
   const cls = Number.isFinite(chg) ? (chg >= 0 ? 'up' : 'down') : ''
@@ -856,9 +875,7 @@ function infoHTML(
     `<span><span class="k">低</span>${fmt(bar.low)}</span>`,
     `<span><span class="k">收</span>${fmt(bar.close)}</span>`,
     `<span class="${cls}">${chgText}</span>`,
-    `<span><span class="k">成交量</span>${fmtVol(vol)}${
-      Number.isFinite(volRatio) ? ` <em>${volRatio.toFixed(2)}x</em>` : ''
-    }</span>`
+    `<span><span class="k">成交额</span>${fmtQuote(quoteOf(bar, vol))}</span>`
   ].join('')
 }
 
@@ -867,11 +884,9 @@ function showInfoAt(i: number) {
   if (!infoEl.value || !candles.length) return
   const idx = Math.min(candles.length - 1, Math.max(0, i))
   const c = candles[idx]
-  const ma = volMa[idx]
   infoEl.value.innerHTML = infoHTML(
     {open: c.open, high: c.high, low: c.low, close: c.close},
-    c.volume,
-    Number.isFinite(ma) && ma > 0 ? c.volume / ma : NaN
+    c.volume
   )
 }
 
@@ -899,38 +914,31 @@ function syncWindowRefs() {
   showInfoAt(i)
 }
 
-/** 悬停 / 触碰：更新左上角信息栏与右侧「相对当前价」 */
-function updateHover(param: any) {
-  const reset = () => {
-    hovering = false
-    deltaEl.value?.classList.add('hidden')
-    showInfoAt(rightmostVisibleIndex())
-  }
-
-  if (!refs || !param?.point || param.time === undefined) return reset()
-
-  const bar = param.seriesData?.get(refs.candle)
-  if (!bar) return reset()
+/**
+ * 光标 / 手指落在图上时：信息栏 + 右侧「相对当前价」都按这根 K 线和这个价刷一遍。
+ *
+ * ⚠️ 抽出来是因为有**两条**路进来：鼠标 hover（`updateHover`）、
+ *    窄屏轻点（`showAtPointer`）—— 后者拿不到 crosshair 事件，得自己刷。
+ */
+function paintHover(
+  bar: {open: number; high: number; low: number; close: number},
+  vol: number,
+  cursorPrice: number | null | undefined,
+  cursorY: number
+): void {
   hovering = true
-
-  const timeSec = Number(param.time)
-  const idx = candleIndex.get(timeSec)
-  const volObj = param.seriesData.get(refs.volume)
-  const vol = Number(volObj?.value)
-  const ma = idx === undefined ? NaN : volMa[idx]
-
   if (infoEl.value) {
-    infoEl.value.innerHTML = infoHTML(
-      bar,
-      vol,
-      Number.isFinite(vol) && Number.isFinite(ma) && ma > 0 ? vol / ma : NaN
-    )
+    infoEl.value.innerHTML = infoHTML(bar, vol)
+    /*
+     * `.on` = 「现在真的在指/在碰」。窄屏只有带上它才显示（用户 2026-10-05：
+     * 「移动端的触碰信息是触碰才有」）—— 平时图上是干净的，不糊一层数字。
+     */
+    infoEl.value.classList.add('on')
   }
 
   const delta = deltaEl.value
-  if (!delta) return
+  if (!delta || !refs) return
   const refPrice = overlay.refPrice
-  const cursorPrice = refs.candle.coordinateToPrice(param.point.y)
   if (
     !Number.isFinite(refPrice) ||
     refPrice <= 0 ||
@@ -938,13 +946,110 @@ function updateHover(param: any) {
   )
     return delta.classList.add('hidden')
 
-  const vs = ((cursorPrice - refPrice) / refPrice) * 100
+  const vs = ((Number(cursorPrice) - refPrice) / refPrice) * 100
   delta.style.width = Math.max(0, refs.chart.priceScale('right').width()) + 'px'
-  delta.style.top = param.point.y + 14 + 'px'
+  delta.style.top = cursorY + 14 + 'px'
   delta.classList.remove('hidden')
   delta.classList.toggle('up', vs >= 0)
   delta.classList.toggle('down', vs < 0)
   delta.textContent = `${vs >= 0 ? '+' : ''}${vs.toFixed(2)}%`
+}
+
+/** 什么都没指着：信息栏退回「可见窗口最右边那根」、窄屏直接藏起来，右侧 ±% 也藏 */
+function clearHover(): void {
+  hovering = false
+  deltaEl.value?.classList.add('hidden')
+  infoEl.value?.classList.remove('on')
+  showInfoAt(rightmostVisibleIndex())
+}
+
+/** 悬停 / 触碰：更新左上角信息栏与右侧「相对当前价」 */
+function updateHover(param: any) {
+  if (!refs || !param?.point || param.time === undefined) return clearHover()
+
+  const bar = param.seriesData?.get(refs.candle)
+  if (!bar) return clearHover()
+
+  const volObj = param.seriesData.get(refs.volume)
+  paintHover(
+    bar,
+    Number(volObj?.value),
+    refs.candle.coordinateToPrice(param.point.y),
+    param.point.y
+  )
+}
+
+/* ---------------- 窄屏：点一下就出信息 ---------------- */
+
+/*
+ * 用户 2026-10-05：「移动端能够做到点击一下就能够出现信息，现在是长按才会有」。
+ *
+ * lightweight-charts 在触屏上**长按**才把十字光标交出来，轻点它只当「点了个空白」。
+ * 所以这里自己判一次「轻点」：位移没超过 `TAP_SLOP`、按住没超过 `TAP_MS` 才算；
+ * 拖了 / 按久了都不管（那是看历史行情、不是点信息）。
+ *
+ * ⚠️ 只认 `pointerType === 'touch'`：桌面端 hover 本来就有信息，不用再插一脚。
+ * ⚠️ `setCrosshairPosition()` **不会**触发 `subscribeCrosshairMove`
+ *    （内部是 `skipEvent = true`），所以信息栏得自己刷 —— 见 `paintHover`。
+ */
+const TAP_SLOP = 8
+const TAP_MS = 350
+
+let tapFrom: {x: number; y: number; at: number} | null = null
+
+/** 把十字光标摆到手指那一列，并刷出信息 */
+function showAtPointer(clientX: number, clientY: number): void {
+  const host = chartEl.value
+  if (!host || !refs || !candles.length) return
+  const rect = host.getBoundingClientRect()
+  const x = clientX - rect.left
+  const y = clientY - rect.top
+  const logical = refs.chart.timeScale().coordinateToLogical(x)
+  if (logical === null || logical === undefined) return
+  const i = Math.min(candles.length - 1, Math.max(0, Math.round(logical)))
+  const c = candles[i]
+  if (!c) return
+  const price = refs.candle.coordinateToPrice(y)
+  refs.chart.setCrosshairPosition(
+    Number.isFinite(price) ? (price as number) : c.close,
+    Math.floor(c.timestamp / 1000),
+    refs.candle
+  )
+  paintHover(c, c.volume, price, y)
+}
+
+function onChartPointerDown(e: PointerEvent): void {
+  /* 跟原来的 `markPanned` 一样：自己动过图就算「在看更早的行情」 */
+  userPanned = true
+  tapFrom =
+    e.pointerType === 'touch'
+      ? {x: e.clientX, y: e.clientY, at: Date.now()}
+      : null
+}
+
+function onChartPointerMove(e: PointerEvent): void {
+  if (!tapFrom) return
+  if (
+    Math.abs(e.clientX - tapFrom.x) > TAP_SLOP ||
+    Math.abs(e.clientY - tapFrom.y) > TAP_SLOP
+  ) {
+    tapFrom = null
+    /* 手指拖了 = 在看历史行情，刚才点出来的信息别赖在图上 */
+    refs?.chart.clearCrosshairPosition()
+    clearHover()
+  }
+}
+
+function onChartPointerUp(e: PointerEvent): void {
+  const from = tapFrom
+  tapFrom = null
+  if (!from || e.pointerType !== 'touch') return
+  if (Date.now() - from.at > TAP_MS) return
+  showAtPointer(e.clientX, e.clientY)
+}
+
+function onChartPointerCancel(): void {
+  tapFrom = null
 }
 
 /* ---------------- 画图 ---------------- */
@@ -1061,7 +1166,6 @@ function draw(data: Candle[], keepView = false) {
     refs.candle.setData([])
     refs.volume.setData([])
     refs.ema42.setData([])
-    volMa = []
     emaValues = []
     candleIndex = new Map()
     overlay.refPrice = NaN
@@ -1113,10 +1217,6 @@ function draw(data: Candle[], keepView = false) {
   )
 
   const closes = data.map(c => c.close)
-  volMa = sma(
-    data.map(c => c.volume),
-    20
-  )
   emaValues = ema(closes, 42)
   candleIndex = new Map(data.map((c, i) => [t(c), i]))
   refs.ema42.setData(
@@ -1330,14 +1430,10 @@ function applyTail(tail: Candle[]): void {
   }
   if (!changed) return
 
-  // 尾部重算：EMA / 量均线都要跟着最后一根走
+  // 尾部重算：EMA 要跟着最后一根走
   emaValues = ema(
     candles.map(x => x.close),
     42
-  )
-  volMa = sma(
-    candles.map(x => x.volume),
-    20
   )
 
   const i = candles.length - 1
@@ -1940,7 +2036,13 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div ref="wrapEl" class="chart-wrap" :class="{fading}">
+    <!--
+      ⚠️ `data-no-swipe`：窄屏一级 tab 的「左右滑动切换」把手势区铺到了整个 `.split`
+      （见 `AnalyzeView`），图这块得自己吃下横向手势 —— 图上横划是拖动看历史行情，
+      不能被当成「切 tab」。其余位置（tab 行 / 行情条 / 周期行 / 图下工具行 / 下单模块）
+      照旧能滑动切换。
+    -->
+    <div ref="wrapEl" class="chart-wrap" data-no-swipe :class="{fading}">
       <div ref="chartEl" class="chart"></div>
       <div ref="levelHost" class="level-labels"></div>
       <div ref="infoEl" class="chart-info"></div>

@@ -5,11 +5,14 @@ import {createExchange, humanize, type ExchangeCredentials} from './exchange-acc
  *
  * 用户原话：「合约下单，在 k 线页面底部新增下单模块，多空 / 滑动条 / 余额 / 杠杆」。
  *
- * ★ 当前**只走测试单**（用户 2026-10-05 确认）：
- *   `POST /fapi/v1/order/test` —— 币安照常校验签名 / 参数 / 权限 / 保证金，
- *   但**不进撮合、不真开仓**。
- *   以后要放开真下单，就是把 `placeTestOrder()` 里那个接口名换成 `order`，
- *   别的逻辑一模一样；但界面/文档里「测试单」那几处提示必须一起去掉。
+ * ★ 下单有**两种模式**，由前端显式传 `test` 决定（用户 2026-10-05 追加）：
+ *   · `test !== false`（**默认**）→ `POST /fapi/v1/order/test`
+ *     币安照常校验签名 / 参数 / 权限 / 保证金，但**不进撮合、不真开仓**。
+ *   · `test === false` → `POST /fapi/v1/order` —— **真下单**，会真开仓、真扣保证金。
+ *     开关在「配置 → 测试下单」里，关掉就是真单。
+ *
+ * ⚠️ 参数漏传 / 传错一律落在**测试单**那一侧（下面 `submitOrder` 里是 `test !== false`），
+ *    宁可误当测试单，也不能误真下单。
  *
  * 凭据同样**只在本进程里用**（`createExchange` 那套），不回前端。
  */
@@ -275,20 +278,78 @@ export async function fetchFuturesBalance(ex: any): Promise<FuturesBalance> {
  *   · **v2 照常回那一条**（`leverage: "20"`，`positionSide: "BOTH"`）
  * 所以**优先 v2**，v3 只当兜底（v2 哪天也下线了才轮到它）。
  */
-async function readLeverage(ex: any, symbol: string): Promise<number | null> {
+async function readPositionRiskRow(
+  ex: any,
+  symbol?: string
+): Promise<any[] | any | null> {
   const call =
     typeof ex.fapiPrivateV2GetPositionRisk === 'function'
       ? ex.fapiPrivateV2GetPositionRisk
       : typeof ex.fapiPrivateV3GetPositionRisk === 'function'
         ? ex.fapiPrivateV3GetPositionRisk
         : ex.fapiPrivateGetPositionRisk
-  const rows: any[] = (await call.call(ex, {symbol})) ?? []
-  const row = Array.isArray(rows)
-    ? (rows.find(
-        r => String(r?.symbol ?? '').toUpperCase() === symbol.toUpperCase()
-      ) ?? rows[0])
-    : null
-  return nullish(row?.leverage)
+  const rows: any[] = (await call.call(ex, symbol ? {symbol} : {})) ?? []
+  if (!Array.isArray(rows)) return null
+  if (!symbol) return rows
+  return (
+    rows.find(
+      r => String(r?.symbol ?? '').toUpperCase() === symbol.toUpperCase()
+    ) ?? rows[0] ?? null
+  )
+}
+
+/**
+ * 一条持仓（面板「仓位」那一格列出来的那种）。
+ * 比 `FuturesPosition` 多一个 `symbol` —— 那个是「某个交易对的持仓」，
+ * 这个能跨交易对凑成一个列表。
+ */
+export interface FuturesPositionRow extends FuturesPosition {
+  /** 币安原始符号（BTCUSDT） */
+  symbol: string
+}
+
+/** 一个交易对当前的持仓（没持仓就是 `null`） */
+export interface FuturesPosition {
+  side: 'long' | 'short'
+  /** 持仓量（基础币，**绝对值**） */
+  amount: number
+  /** 开仓均价 */
+  entryPrice: number
+  /** 标记价 */
+  markPrice: number
+  /** 未实现盈亏（USDT） */
+  unrealized: number
+  /** 名义价值（USDT） */
+  notional: number
+  /** 这个交易对的杠杆 */
+  leverage: number
+}
+
+/**
+ * 从 `positionRisk` 那一行里读持仓。
+ *
+ * ⚠️ 方向要看 `positionSide`：
+ *   · 双向持仓模式（`LONG` / `SHORT`）→ 直接用
+ *   · 单向持仓模式（`BOTH`）→ `positionAmt` **带正负号**（正 = 多）
+ */
+function positionFromRow(row: any): FuturesPosition | null {
+  if (!row) return null
+  const amt = n(row.positionAmt)
+  if (!Number.isFinite(amt) || amt === 0) return null
+  const ps = String(row.positionSide ?? 'BOTH').toUpperCase()
+  const side: 'long' | 'short' =
+    ps === 'LONG' ? 'long' : ps === 'SHORT' ? 'short' : amt > 0 ? 'long' : 'short'
+  const entryPrice = Number(row.entryPrice)
+  const markPrice = Number(row.markPrice)
+  return {
+    side,
+    amount: Math.abs(amt),
+    entryPrice: Number.isFinite(entryPrice) ? entryPrice : 0,
+    markPrice: Number.isFinite(markPrice) ? markPrice : 0,
+    unrealized: n(row.unRealizedProfit),
+    notional: Number.isFinite(markPrice) ? Math.abs(amt) * markPrice : 0,
+    leverage: Math.floor(n(row.leverage)) || 0
+  }
 }
 
 /** 这个交易对允许的最大杠杆（`GET /fapi/v1/leverageBracket?symbol=` 的第一档） */
@@ -313,6 +374,8 @@ export interface TradeInfo {
   leverage: number | null
   /** 交易所允许的最大杠杆（读不到就是 null） */
   maxLeverage: number | null
+  /** 当前持仓（没持仓 / 读不到就是 null） */
+  position: FuturesPosition | null
   /** 数量小数位（0.001 的步长 → 3） */
   amountPrecision: number
   /** 价格小数位 */
@@ -348,20 +411,29 @@ export async function collectTradeInfo(
   const errors: string[] = []
   let balanceError: string | null = null
 
-  const [balance, leverage, maxLeverage] = await Promise.all([
+  /* 杠杆和持仓出自**同一次** `positionRisk`（这个接口不便宜，别打两遍） */
+  let riskRow: any = null
+  const [balance, , maxLeverage] = await Promise.all([
     fetchFuturesBalance(ex).catch(e => {
       balanceError = humanizeTrade(e)
       return {available: 0, wallet: 0, unrealized: 0}
     }),
-    readLeverage(ex, spec.symbol).catch(e => {
-      errors.push(`当前杠杆没读到：${humanizeTrade(e)}`)
-      return null
-    }),
+    readPositionRiskRow(ex, spec.symbol).then(
+      r => {
+        riskRow = r
+        return r
+      },
+      e => {
+        errors.push(`当前杠杆没读到：${humanizeTrade(e)}`)
+        return null
+      }
+    ),
     readMaxLeverage(ex, spec.symbol).catch(e => {
       errors.push(`最大杠杆没读到：${humanizeTrade(e)}`)
       return null
     })
   ])
+  const leverage = nullish(riskRow?.leverage)
 
   return {
     symbol: spec.symbol,
@@ -369,6 +441,7 @@ export async function collectTradeInfo(
     balance,
     leverage,
     maxLeverage,
+    position: positionFromRow(riskRow),
     amountPrecision: stepToDecimals(spec.stepSize),
     pricePrecision: stepToDecimals(spec.tickSize),
     minAmount: spec.minQty,
@@ -419,7 +492,7 @@ export async function setSymbolLeverage(
   return {symbol: spec.symbol, leverage: n(r?.leverage) || lev}
 }
 
-export interface TestOrderInput {
+export interface OrderInput {
   /** 币安原始符号，如 BTCUSDT */
   symbol: string
   /** long = 买入 / short = 卖出 */
@@ -433,10 +506,17 @@ export interface TestOrderInput {
    *           不发给交易所 —— 给了能早点拦下「太小」的单，不给就跳过这项检查。
    */
   price?: number
+  /** 只减仓（平仓用）。⚠️ 双向持仓模式下币安**不允许**带这个参数，见 `placeOrder` */
+  reduceOnly?: boolean
+  /**
+   * `true`（或不传）= 走测试接口，只校验不真开仓；
+   * `false` = **真下单**（配置里「测试下单」关掉时才会传）。
+   */
+  test?: boolean
 }
 
 /** 真正发给交易所的那几个参数（回给前端，好在界面上复述一遍） */
-export interface TestOrderParams {
+export interface OrderParams {
   symbol: string
   side: 'BUY' | 'SELL'
   type: 'MARKET' | 'LIMIT'
@@ -444,19 +524,51 @@ export interface TestOrderParams {
   price?: number
   timeInForce?: string
   positionSide?: 'LONG' | 'SHORT'
+  reduceOnly?: boolean
+}
+
+/** 一张已经发出去的单：参数 + 走的哪种模式 + 交易所回的号（测试单没有） */
+export interface PlacedOrder extends OrderParams {
+  /** `true` = 测试单（只校验）；`false` = **真单**（已进撮合） */
+  test: boolean
+  orderId?: string
+  /** 交易所回的状态（真单一般回 `NEW` / `FILLED`；测试单是空对象、没有这个字段） */
+  status?: string
 }
 
 /**
- * 下一张**测试单**（`POST /fapi/v1/order/test`）。
+ * 真正把单发出去 —— 测试单 / 真单**只差最后那一行接口名**，别的逻辑一模一样。
  *
- * ⚠️ 它**不会真的开仓**：币安只校验参数 / 签名 / 权限 / 保证金。
+ * ⚠️ `test !== false` 才是测试单：默认值、`undefined`、`null` 全都落在这边。
+ */
+async function submitOrder(
+  ex: any,
+  params: OrderParams,
+  test: boolean
+): Promise<Pick<PlacedOrder, 'orderId' | 'status'>> {
+  if (test) {
+    await ex.fapiPrivatePostOrderTest({...params})
+    /* 测试单成功时交易所只回一个空对象 ⇒ 没有 orderId / status */
+    return {}
+  }
+  const r: any = await ex.fapiPrivatePostOrder({...params})
+  return {
+    orderId: r?.orderId === undefined ? undefined : String(r.orderId),
+    status: r?.status === undefined ? undefined : String(r.status)
+  }
+}
+
+/**
+ * 下一张单（`POST /fapi/v1/order/test`，或 `test: false` 时走 `POST /fapi/v1/order`）。
+ *
+ * ⚠️ 测试单**不会真的开仓**：币安只校验参数 / 签名 / 权限 / 保证金，
  *    成功时交易所回一个空对象（`{}`），所以这里把「发出去的参数」回给前端复述。
  */
-export async function placeTestOrder(
+export async function placeOrder(
   c: ExchangeCredentials,
   keyId: number | string,
-  input: TestOrderInput
-): Promise<TestOrderParams> {
+  input: OrderInput
+): Promise<PlacedOrder> {
   assertTradable(c)
   const qtyRaw = Number(input.quantity)
   if (!Number.isFinite(qtyRaw) || qtyRaw <= 0)
@@ -477,7 +589,7 @@ export async function placeTestOrder(
   if (spec.minQty && quantity < spec.minQty)
     throw new Error(`数量太小：这个合约最少要下 ${spec.minQty} ${spec.base}`)
 
-  const params: TestOrderParams = {
+  const params: OrderParams = {
     symbol,
     side: input.side === 'short' ? 'SELL' : 'BUY',
     type: input.type === 'limit' ? 'LIMIT' : 'MARKET',
@@ -507,10 +619,117 @@ export async function placeTestOrder(
   /*
    * 双向持仓模式下**必须**带 `positionSide`（不带会报 -4061）；
    * 单向持仓模式下**不能**带。所以先问一次账户是哪种（5 分钟内不重复问）。
+   *
+   * ⚠️ 同理，`reduceOnly` **只在单向持仓模式下能带**：双向模式下币安直接回
+   *    -1106（`Parameter 'reduceonly' sent when not required`）。双向模式本来就靠
+   *    「反方向 + 同一个 positionSide」自动减仓，不需要它。
    */
-  if (await isDualSide(ex, keyId))
-    params.positionSide = params.side === 'BUY' ? 'LONG' : 'SHORT'
+  const dual = await isDualSide(ex, keyId)
+  if (dual) params.positionSide = params.side === 'BUY' ? 'LONG' : 'SHORT'
+  else if (input.reduceOnly) params.reduceOnly = true
 
-  await ex.fapiPrivatePostOrderTest({...params})
-  return params
+  const test = input.test !== false
+  const placed = await submitOrder(ex, params, test)
+  return {...params, test, ...placed}
+}
+
+/* ------------------------------------------------------------------ */
+/* 平仓                                                               */
+/* ------------------------------------------------------------------ */
+
+export interface CloseOrderParams extends PlacedOrder {
+  /** 这一单对应的是哪个方向的持仓（给人看的） */
+  from: 'long' | 'short'
+}
+
+/** 从这个交易对的行里挑出「哪个方向」的那一条（双向持仓时一个币有两条） */
+function pickSide(rows: any[], side: 'long' | 'short'): any[] {
+  const hit = rows.filter(r => positionFromRow(r)?.side === side)
+  return hit.length ? hit : rows
+}
+
+/**
+ * 平仓（跟下单同一个接口：默认**测试单**，`test: false` 时**真平仓**）。
+ *
+ * 三种用法（`target` 越具体，平的越少）：
+ *   · 不传            → 把账户里**有持仓的全平一遍**（顶栏「一键平仓」）
+ *   · 只给 `symbol`   → 平这个交易对（⚠️ 双向持仓模式下会**两条都平**）
+ *   · `symbol + side` → 只平这个方向的这一条（面板上每一行的「平仓」）
+ */
+export async function closePositions(
+  c: ExchangeCredentials,
+  keyId: number | string,
+  target?: {symbol?: string; side?: 'long' | 'short'},
+  test = true
+): Promise<{orders: CloseOrderParams[]}> {
+  assertTradable(c)
+  const ex = createExchange(c)
+
+  let rows: any[]
+  if (target?.symbol) {
+    const spec = await specFor(c, target.symbol)
+    const row = await readPositionRiskRow(ex, spec.symbol)
+    rows = row ? [row] : []
+    /* 双向持仓：一个币两条（LONG / SHORT），面板上那一行要精确到方向 */
+    if (target.side && rows.length) rows = pickSide(rows, target.side)
+  } else {
+    const all = await readPositionRiskRow(ex, undefined)
+    rows = Array.isArray(all) ? all : all ? [all] : []
+  }
+
+  const held = rows.map(r => ({row: r, pos: positionFromRow(r)}))
+  const live = held.filter(h => h.pos) as {row: any; pos: FuturesPosition}[]
+
+  if (!live.length)
+    throw new Error(target?.symbol ? '这个交易对现在没有持仓' : '现在没有任何持仓')
+
+  const dual = await isDualSide(ex, keyId)
+  const orders: CloseOrderParams[] = []
+
+  for (const {row, pos} of live) {
+    const symbol = String(row.symbol ?? '').toUpperCase()
+    if (!symbol) continue
+    const spec = await specFor(c, symbol)
+    const quantity = floorToStep(pos.amount, spec.stepSize)
+    if (!(quantity > 0)) continue
+    /* ⚠️ `from` 只是回给前端看的，**不能**混进发给交易所的参数里 */
+    const params: OrderParams = {
+      symbol,
+      side: pos.side === 'long' ? 'SELL' : 'BUY',
+      type: 'MARKET',
+      quantity
+    }
+    if (dual) params.positionSide = pos.side === 'long' ? 'LONG' : 'SHORT'
+    else params.reduceOnly = true
+    const placed = await submitOrder(ex, params, test)
+    orders.push({...params, test, ...placed, from: pos.side})
+  }
+
+  if (!orders.length) throw new Error('持仓太小，按合约精度取整之后是 0，平不掉')
+  return {orders}
+}
+
+/**
+ * 账户里**所有**持仓（面板「仓位」那一格用的列表）。
+ *
+ * ⚠️ 双向持仓模式下同一个币会有两条（LONG / SHORT），所以每一条都得看
+ *    `positionSide`，不能只按 symbol 去重。
+ */
+export async function listPositions(
+  c: ExchangeCredentials
+): Promise<FuturesPositionRow[]> {
+  assertTradable(c)
+  const ex = createExchange(c)
+  const all = await readPositionRiskRow(ex, undefined)
+  const rows = Array.isArray(all) ? all : all ? [all] : []
+  const out: FuturesPositionRow[] = []
+  for (const r of rows) {
+    const pos = positionFromRow(r)
+    const symbol = String(r?.symbol ?? '').toUpperCase()
+    if (!pos || !symbol) continue
+    out.push({...pos, symbol})
+  }
+  /* 名义大的排前面：一眼看到最要紧的那笔 */
+  out.sort((a, b) => b.notional - a.notional)
+  return out
 }

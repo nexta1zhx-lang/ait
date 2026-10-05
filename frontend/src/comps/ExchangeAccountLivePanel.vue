@@ -22,6 +22,7 @@ import {
   fetchExchangeKeys,
   fetchExchangeOpenOrders,
   fetchExchangeOverview,
+  fetchRate,
   isAuthError,
   refreshExchangeOverview,
   type CurvePoint,
@@ -30,7 +31,9 @@ import {
   type ExchangeOpenOrder,
   type ExchangeOverview,
   type ExchangeSnapshotResult,
-  type ExchangeTrade
+  type ExchangeTrade,
+  type FuturesAsset,
+  type FuturesPosition
 } from '../api'
 
 /** 快照超过这么久就后台刷一次（后端采样是 5 分钟，这里更积极一点） */
@@ -39,7 +42,18 @@ const REFRESH_AFTER_SEC = 60
 const FILLS_MAX = 60
 
 const keys = ref<ExchangeKey[]>([])
-const picked = ref<number | undefined>(undefined)
+
+/**
+ * 选中的那一格：`'all'` = **全部**（多套 Key 加起来看），否则是某个 key 的 id（字符串）。
+ *
+ * 用户 2026-10-05：「交易所账户页面不要下拉框切换，改为 tab 全部 然后是每个 key 的名称」。
+ * 用字符串是因为 `SegTabs` 的泛型是 `string | number`，混着传会被 TS 挑刺。
+ *
+ * ⚠️ 初值故意是**空串**而不是 `'all'`：挂载时一定会被赋成「全部」（或多套里的第一套），
+ *    下面的 `watch(picked)` 才会动起来把数据拉进来。初值就写 `'all'` 的话，
+ *    赋同样的值不触发 watch ⇒ 永远停在「正在取账户快照…」。
+ */
+const picked = ref<string>('')
 
 const data = ref<ExchangeOverview | null>(null)
 /** 「没有数据」的原因（现货 / 没填 key / 还没采过）—— 有值时界面直接说原因 */
@@ -48,10 +62,149 @@ const err = ref('')
 
 const refreshing = ref(false)
 
-/** 顶部那个下拉用的账户列表（只取显名） */
-const accountOptions = computed(() =>
-  keys.value.map(k => ({id: k.id, name: k.name}))
-)
+/**
+ * 美元 → 人民币汇率（USDT / CNY 切换用）。
+ * ⚠️ 取不到就不报错：`ExchangeAccountBoard` 那边退回 7.1 显示，
+ *    汇率这种附属信息不该挡住整页资产。
+ */
+const rate = ref(0)
+
+/* ---------------- 看哪几套 Key ---------------- */
+
+/** 这次要看哪几套（「全部」= 所有；选中的那套被删了就退回全部） */
+const activeTargets = computed<ExchangeKey[]>(() => {
+  if (picked.value === 'all') return keys.value
+  const hit = keys.value.filter(k => String(k.id) === picked.value)
+  return hit.length ? hit : keys.value
+})
+
+/** 看的是**多套**（合并视图）—— 单套时不合并、也不打 key 标签，跟以前一模一样 */
+const multi = computed(() => activeTargets.value.length > 1)
+
+/** board 顶部那排 tab 的选项：`全部` + 每套的名字（只有一套时不摆 tab） */
+const accountOptions = computed(() => {
+  const list = keys.value.map(k => ({value: String(k.id), label: k.name}))
+  return keys.value.length > 1 ? [{value: 'all', label: '全部'}, ...list] : list
+})
+
+/* ---------------- 每套 Key 各自的快照 → 合并成一份 ---------------- */
+
+/** keyId → 那套的最新快照 */
+const parts = ref<Record<number, ExchangeOverview>>({})
+/** keyId → 那套「没数据」的原因 */
+const partReasons = ref<Record<number, string>>({})
+
+/**
+ * 把几套快照**加总**成一份（「全部」那一格用）。
+ *
+ * ⚠️ 只有一套时**原样返回** —— 保留 `account.name`、也不给行打 key 标签，
+ *    单账户的界面跟以前完全一样。
+ */
+function mergeOverviews(
+  list: {key: ExchangeKey; ov: ExchangeOverview}[]
+): ExchangeOverview | null {
+  if (!list.length) return null
+  if (list.length === 1) return list[0]!.ov
+
+  const sum = (f: (o: ExchangeOverview) => number): number =>
+    list.reduce((a, p) => a + (Number(f(p.ov)) || 0), 0)
+
+  /* 合约多资产：按币种加总（普通 U 本位账户只有 USDT 一行，但别假设） */
+  const assetMap = new Map<string, FuturesAsset>()
+  for (const p of list)
+    for (const a of p.ov.futures?.assets ?? []) {
+      const cur = assetMap.get(a.asset)
+      if (cur) {
+        cur.wallet += a.wallet
+        cur.available += a.available
+        cur.unrealized += a.unrealized
+      } else {
+        assetMap.set(a.asset, {
+          asset: a.asset,
+          wallet: a.wallet,
+          available: a.available,
+          unrealized: a.unrealized
+        })
+      }
+    }
+
+  /* C2C 钱包：同样按币种加总 */
+  const c2cMap = new Map<string, {asset: string; balance: number; usdt: number | null}>()
+  for (const p of list)
+    for (const a of p.ov.c2c?.assets ?? []) {
+      const cur = c2cMap.get(a.asset)
+      if (cur) {
+        cur.balance += a.balance
+        cur.usdt = (cur.usdt ?? 0) + (a.usdt ?? 0)
+      } else {
+        c2cMap.set(a.asset, {
+          asset: a.asset,
+          balance: a.balance,
+          usdt: a.usdt
+        })
+      }
+    }
+
+  /* 持仓：直接拼起来，**每条标上它来自哪套 Key**（用户：「其余针对 key 数据加标签」） */
+  const positions: FuturesPosition[] = []
+  for (const p of list)
+    for (const pos of p.ov.futures?.positions ?? [])
+      positions.push({...pos, keyName: p.key.name})
+
+  const anyC2c = list.some(p => p.ov.c2c)
+
+  return {
+    account: {
+      exchange: 'multi',
+      name: '全部',
+      sandbox: false,
+      marketType: 'swap'
+    },
+    /* 取**最旧**那份的时间：合并视图的「几分钟前」按最差的说，别报喜不报忧 */
+    takenAt: list.map(p => p.ov.takenAt).sort()[0] ?? new Date().toISOString(),
+    futures: {
+      wallet: sum(o => o.futures?.wallet ?? 0),
+      unrealized: sum(o => o.futures?.unrealized ?? 0),
+      margin: sum(o => o.futures?.margin ?? 0),
+      available: sum(o => o.futures?.available ?? 0),
+      used: sum(o => o.futures?.used ?? 0),
+      assets: [...assetMap.values()],
+      positions
+    },
+    c2c: anyC2c
+      ? {
+          active: list.some(p => p.ov.c2c?.active),
+          totalUsdt: sum(o => o.c2c?.totalUsdt ?? 0),
+          assets: [...c2cMap.values()]
+        }
+      : null,
+    stats: {
+      longCount: sum(o => o.stats?.longCount ?? 0),
+      shortCount: sum(o => o.stats?.shortCount ?? 0),
+      notional: sum(o => o.stats?.notional ?? 0),
+      unrealized: sum(o => o.stats?.unrealized ?? 0)
+    }
+  }
+}
+
+/** 按当前选中的那几套，把 `parts` 重新合成一份给界面 */
+function rebuild(): void {
+  const got: {key: ExchangeKey; ov: ExchangeOverview}[] = []
+  const miss: string[] = []
+  for (const k of activeTargets.value) {
+    const ov = parts.value[k.id]
+    if (ov) got.push({key: k, ov})
+    else if (partReasons.value[k.id])
+      miss.push(`${k.name}：${partReasons.value[k.id]}`)
+  }
+  if (!got.length) {
+    data.value = null
+    reason.value = miss.join('；') || '这些账户暂时都没有数据'
+    return
+  }
+  reason.value = ''
+  data.value = mergeOverviews(got)
+}
 
 const openOrders = ref<ExchangeOpenOrder[]>([])
 const ordersErr = ref('')
@@ -66,11 +219,16 @@ const curveBucketSec = ref(300)
 /** 上次取曲线的时间 —— SSE 事件来得勤，靠它节流（别每个快照都拉一遍） */
 let curveAt = 0
 
-/** 已实现盈亏 = 账本里带 realized 的那些（一笔成交一条） */
+/** 已实现盈亏 = 账本里带 realized 的那些（一笔成交一条）；多套时跟着成交一起带 key 名 */
 const income = computed<ExchangeIncomeRow[]>(() =>
   fills.value
     .filter(f => Number(f.realized ?? 0) !== 0)
-    .map(f => ({symbol: f.symbol, income: Number(f.realized), time: f.datetime}))
+    .map(f => ({
+      symbol: f.symbol,
+      income: Number(f.realized),
+      time: f.datetime,
+      keyName: f.keyName
+    }))
 )
 
 const loading = computed(() => !data.value && !reason.value && !err.value)
@@ -79,148 +237,276 @@ function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-/** 把一份快照结果贴到界面上（`noSnapshot` 不算错误，是把原因说出来） */
-function applySnapshot(r: ExchangeSnapshotResult): void {
-  if (r.noSnapshot) {
-    reason.value = r.reason ?? '这个账户暂时没有数据'
-    data.value = null
-    return
+/**
+ * 读当前选中那几套的快照（不合并、各自塞进 `parts`），读完整合一次。
+ *
+ * `refreshStale`：旧的 / 还没采过的，顺手后台刷一遍 ——
+ * 用户看到的是上一份快照（可能几小时前的），界面不空等。
+ */
+async function loadSnapshots(): Promise<void> {
+  const list = activeTargets.value
+  if (!list.length) return
+  const res = await Promise.all(
+    list.map(k =>
+      fetchExchangeOverview(k.id).then(
+        r => ({k, r, e: null as unknown}),
+        e => ({k, r: null, e})
+      )
+    )
+  )
+  const next = {...parts.value}
+  const nextReason = {...partReasons.value}
+  let stale = false
+  for (const item of res) {
+    if (item.e) {
+      if (!isAuthError(item.e)) err.value = `读取快照失败：${msg(item.e)}`
+      continue
+    }
+    const r = item.r as ExchangeSnapshotResult
+    const id = item.k.id
+    if (r.noSnapshot) {
+      nextReason[id] = r.reason ?? '这个账户暂时没有数据'
+      delete next[id]
+      /* `canRefresh === false` 是「刷也没用」（现货 / 没填 key） */
+      if (r.canRefresh !== false) stale = true
+      continue
+    }
+    if (r.overview) {
+      next[id] = r.overview
+      delete nextReason[id]
+    }
+    if ((r.ageSec ?? 0) > REFRESH_AFTER_SEC) stale = true
+    if (r.err) err.value = `上次采集不完整：${r.err}`
   }
-  if (r.err) {
-    err.value = `上次采集不完整：${r.err}`
-  } else {
-    err.value = ''
-  }
-  reason.value = ''
-  if (r.overview) data.value = r.overview
+  parts.value = next
+  partReasons.value = nextReason
+  rebuild()
+  if (stale) void doRefresh()
 }
 
-/** 去拉一次新的（慢，~2 秒）。⚠️ 并发保护：SSE 和轮询可能同时想刷 */
-async function doRefresh(id: number | undefined = picked.value): Promise<void> {
+/**
+ * 去拉一次新的（慢，~2 秒/套）。⚠️ 并发保护：SSE 和自动刷新可能同时想刷。
+ * 多套时**串行**刷（并发打交易所容易被限频）。
+ */
+async function doRefresh(): Promise<void> {
   if (refreshing.value) return
+  const list = activeTargets.value
+  if (!list.length) return
   refreshing.value = true
   try {
-    applySnapshot(await refreshExchangeOverview(id))
+    const next = {...parts.value}
+    const nextReason = {...partReasons.value}
+    for (const k of list) {
+      try {
+        const r = await refreshExchangeOverview(k.id)
+        if (r.overview) {
+          next[k.id] = r.overview
+          delete nextReason[k.id]
+        } else if (r.reason) {
+          nextReason[k.id] = r.reason
+          delete next[k.id]
+        }
+      } catch (e) {
+        if (isAuthError(e)) return
+        err.value = `刷新失败：${msg(e)}`
+      }
+    }
+    parts.value = next
+    partReasons.value = nextReason
+    rebuild()
     // 用户主动刷新 = 想看到最新状态，曲线也顺手重拉
-    void loadCurve(id)
-  } catch (e) {
-    if (isAuthError(e)) return
-    err.value = `刷新失败：${msg(e)}`
+    void loadCurve()
   } finally {
     refreshing.value = false
   }
 }
 
-async function loadSnapshot(id: number | undefined): Promise<void> {
-  try {
-    const r = await fetchExchangeOverview(id)
-    applySnapshot(r)
-    /*
-     * 旧了就后台刷 —— 用户看到的是上一份快照（可能几小时前的），
-     * 但界面不空等，数字一会儿自己会变。
-     * `canRefresh` 为 false 的是「刷也没用」的两种情况（现货 / 没填 key）。
-     */
-    const stale = !r.noSnapshot && (r.ageSec ?? 0) > REFRESH_AFTER_SEC
-    if ((stale || r.noSnapshot) && r.canRefresh !== false) void doRefresh(id)
-  } catch (e) {
-    if (isAuthError(e)) return
-    err.value = `读取快照失败：${msg(e)}`
+/** 成交账本：几套合起来、按时间倒序（多套时每条标出是哪套的） */
+async function loadFills(): Promise<void> {
+  const list = activeTargets.value
+  const many = multi.value
+  const all: ExchangeTrade[] = []
+  for (const k of list) {
+    try {
+      const r = await fetchExchangeFills(k.id, FILLS_MAX)
+      for (const t of r.fills ?? []) all.push(many ? {...t, keyName: k.name} : t)
+    } catch (e) {
+      if (!isAuthError(e)) err.value = `读取成交失败：${msg(e)}`
+    }
   }
+  all.sort((a, b) =>
+    String(b.datetime ?? '').localeCompare(String(a.datetime ?? ''))
+  )
+  fills.value = all.slice(0, FILLS_MAX)
 }
 
-async function loadFills(id: number | undefined): Promise<void> {
-  try {
-    fills.value = (await fetchExchangeFills(id, FILLS_MAX)).fills ?? []
-  } catch (e) {
-    if (!isAuthError(e)) err.value = `读取成交失败：${msg(e)}`
-  }
-}
-
-async function loadOrders(id: number | undefined): Promise<void> {
+/** 挂单：几套合起来（多套时每条标出是哪套的），失败原因也带上账户名 */
+async function loadOrders(): Promise<void> {
+  const list = activeTargets.value
+  const many = multi.value
   loadingOrders.value = true
   ordersErr.value = ''
-  try {
-    const r = await fetchExchangeOpenOrders(id)
-    openOrders.value = r.openOrders ?? []
-    ordersErr.value = r.error ?? ''
-  } catch (e) {
-    if (!isAuthError(e)) ordersErr.value = msg(e)
-  } finally {
-    loadingOrders.value = false
+  const out: ExchangeOpenOrder[] = []
+  const errs: string[] = []
+  for (const k of list) {
+    try {
+      const r = await fetchExchangeOpenOrders(k.id)
+      if (r.error) errs.push(many ? `${k.name}：${r.error}` : r.error)
+      for (const o of r.openOrders ?? [])
+        out.push(many ? {...o, keyName: k.name} : o)
+    } catch (e) {
+      if (!isAuthError(e)) errs.push(many ? `${k.name}：${msg(e)}` : msg(e))
+    }
   }
+  openOrders.value = out
+  ordersErr.value = errs.join('；')
+  loadingOrders.value = false
 }
 
 /**
  * 取净资产曲线。
  * ⚠️ 失败**不吵**（不往 `err` 里写）：主数字已经在了，曲线属于锦上添花。
+ *
+ * 多套时**按时间桶加总**（用户 2026-10-05 选的「都合并」）——
+ * 区间带取各家上沿 / 下沿之和，正好是合并后的包络（单取 max 会偏窄）。
  */
-async function loadCurve(id: number | undefined = picked.value): Promise<void> {
-  try {
-    const r = await fetchExchangeCurve(id, curveRange.value)
-    curve.value = r.points ?? []
-    curveBucketSec.value = r.bucketSec ?? 300
-    curveAt = Date.now()
-  } catch (e) {
-    if (!isAuthError(e)) curve.value = []
+async function loadCurve(): Promise<void> {
+  const list = activeTargets.value
+  if (!list.length) return
+  const range = curveRange.value
+  const res = await Promise.all(
+    list.map(k => fetchExchangeCurve(k.id, range).catch(() => null))
+  )
+  const ok = res.filter(Boolean) as {
+    points: CurvePoint[]
+    bucketSec: number
+  }[]
+  if (!ok.length) {
+    curve.value = []
+    return
   }
+  curveBucketSec.value = ok[0]!.bucketSec ?? 300
+  if (ok.length === 1) {
+    curve.value = ok[0]!.points ?? []
+    curveAt = Date.now()
+    return
+  }
+  const byT = new Map<string, CurvePoint>()
+  for (const r of ok)
+    for (const p of r.points ?? []) {
+      const cur = byT.get(p.t)
+      if (cur) {
+        cur.close += p.close
+        cur.high += p.high
+        cur.low += p.low
+      } else {
+        byT.set(p.t, {...p})
+      }
+    }
+  curve.value = [...byT.values()].sort((a, b) =>
+    a.t < b.t ? -1 : a.t > b.t ? 1 : 0
+  )
+  curveAt = Date.now()
 }
 
 /* ---------------- SSE ---------------- */
 
-let stopStream: (() => void) | null = null
+/**
+ * 每个选中的账户一条 SSE（后端本来就按 key_id 分流）。
+ * 多套时就是几条并行 —— 数量就是账户数，不会爆。
+ */
+let stops: (() => void)[] = []
 
-function startStream(id: number | undefined): void {
-  stopStream?.()
-  stopStream = exchangeStream(id, {
-    snapshot: r => {
-      applySnapshot(r)
-      // SSE 来了新快照：最多每分钟把曲线也重拉一次（不节流的话事件多时太吵）
-      if (Date.now() - curveAt > 60_000) void loadCurve(id)
-    },
-    fill: t => {
-      // 同一笔可能「实时事件」和「REST 回补」都给到 → 按 tradeId 去重
-      if (fills.value.some(f => f.id === t.id)) return
-      fills.value = [t, ...fills.value].slice(0, FILLS_MAX)
-    },
-    backfill: () => void loadFills(id),
-    reject: r => {
-      /*
-       * 这套账户不参与统计（现货 / 没填 key）。⚠️ **必须把订阅关掉** ——
-       * `liveSse` 不知道「这条流永远不会有数据」，EventSource 会一直重连。
-       */
-      reason.value = r
-      data.value = null
-      stopStream?.()
-      stopStream = null
-    },
-    reconnect: () => {
-      void loadSnapshot(id)
-      void loadFills(id)
-      void loadCurve(id)
-    }
-  })
+function stopStreams(): void {
+  for (const s of stops) s()
+  stops = []
+}
+
+function startStreams(): void {
+  stopStreams()
+  const many = multi.value
+  for (const k of activeTargets.value) {
+    stops.push(
+      exchangeStream(k.id, {
+        snapshot: r => {
+          const next = {...parts.value}
+          const nextReason = {...partReasons.value}
+          if (r.noSnapshot) {
+            nextReason[k.id] = r.reason ?? '这个账户暂时没有数据'
+            delete next[k.id]
+          } else if (r.overview) {
+            next[k.id] = r.overview
+            delete nextReason[k.id]
+          }
+          parts.value = next
+          partReasons.value = nextReason
+          rebuild()
+          // SSE 来得勤：最多每分钟把曲线也重拉一次
+          if (Date.now() - curveAt > 60_000) void loadCurve()
+        },
+        fill: t => {
+          // 同一笔可能「实时事件」和「REST 回补」都给到 → 按 tradeId 去重
+          if (fills.value.some(f => f.id === t.id)) return
+          fills.value = [many ? {...t, keyName: k.name} : t, ...fills.value].slice(
+            0,
+            FILLS_MAX
+          )
+        },
+        backfill: () => void loadFills(),
+        reject: r => {
+          /*
+           * 这套账户不参与统计（现货 / 没填 key）。
+           * ⚠️ 以前这里会**关掉订阅**（`liveSse` 不知道「这条流永远不会有数据」，
+           *    EventSource 会一直重连）。多套之后不能整体关 —— 只把这一套的原因
+           *    记下来，其余几套的流照旧。
+           */
+          partReasons.value = {...partReasons.value, [k.id]: r}
+          const next = {...parts.value}
+          delete next[k.id]
+          parts.value = next
+          rebuild()
+        },
+        reconnect: () => {
+          void loadSnapshots()
+          void loadFills()
+          void loadCurve()
+        }
+      })
+    )
+  }
 }
 
 /* 换跨度（1d / 7d / 30d）只重拉曲线，不动快照 */
 watch(curveRange, () => void loadCurve())
 
-/* ---------------- 换账户 ---------------- */
+/* ---------------- 换 tab ---------------- */
 
-watch(picked, id => {
+watch(picked, () => {
+  /* 换格：把上一格攒下的 parts 清掉（不然「全部」会把没在看的那套也算进来） */
+  parts.value = {}
+  partReasons.value = {}
   data.value = null
   reason.value = ''
   err.value = ''
   openOrders.value = []
   ordersErr.value = ''
   fills.value = []
-  void loadSnapshot(id)
-  void loadFills(id)
-  void loadOrders(id)
-  void loadCurve(id)
-  startStream(id)
+  curve.value = []
+  void loadSnapshots()
+  void loadFills()
+  void loadOrders()
+  void loadCurve()
+  startStreams()
 })
 
 onMounted(async () => {
+  /* 汇率：跟账户列表一起并行拿，拿不到也无所谓（只用默认值） */
+  void fetchRate()
+    .then(r => {
+      rate.value = Number(r?.usdCny) || 0
+    })
+    .catch(() => undefined)
+
   try {
     keys.value = (await fetchExchangeKeys()).keys ?? []
   } catch (e) {
@@ -228,14 +514,14 @@ onMounted(async () => {
     return
   }
   if (!keys.value.length) return
-  const def = keys.value.find(k => k.isDefault) ?? keys.value[0]
-  picked.value = def.id
+  /*
+   * 默认落在「全部」（用户 2026-10-05 要的就是先看总账）；
+   * 只有一套时 `activeTargets` 就是它自己，效果跟以前一样。
+   */
+  picked.value = keys.value.length > 1 ? 'all' : String(keys.value[0]!.id)
 })
 
-onUnmounted(() => {
-  stopStream?.()
-  stopStream = null
-})
+onUnmounted(stopStreams)
 </script>
 
 <template>
@@ -245,18 +531,17 @@ onUnmounted(() => {
     <section v-if="!keys.length && !loading" class="panel empty">
       还没有配置交易所 API Key —— 去「我的 → 个人信息 → 交易所」加一套。
     </section>
-    <section v-else-if="reason" class="panel empty">
-      {{ reason }}
-    </section>
     <!--
-      ⚠️ 账户切换现在就在 board 的「净资产」那一行（绑定的 key 名字），
-      所以这里不再另开一行；刷新也是用 board 里那个 ⟳。
+      ⚠️ 板子**始终挂着**（不再是 `v-else-if="reason"` 把它整块换掉）——
+      顶部那排账户 tab 就在板子里，某套账户没数据时也得能切回别的账户。
+      「没有数据」的原因改成板子底部一行字（见 `:reason`）。
     -->
     <ExchangeAccountBoard
       v-else
       v-model="picked"
       :accounts="accountOptions"
       :data="data"
+      :reason="reason"
       :open-orders="openOrders"
       :trades="fills"
       :income="income"
@@ -265,6 +550,7 @@ onUnmounted(() => {
       :curve="curve"
       :curve-range="curveRange"
       :curve-bucket-sec="curveBucketSec"
+      :rate="rate"
       @update:curve-range="curveRange = $event"
       @refresh="doRefresh()"
     />
@@ -287,11 +573,6 @@ onUnmounted(() => {
 }
 .dim {
   color: var(--muted);
-}
-.bar select {
-  width: 100%;
-  padding: 7px 9px;
-  font-size: 13px;
 }
 .err {
   margin: 0;

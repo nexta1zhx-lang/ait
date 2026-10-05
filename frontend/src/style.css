@@ -592,6 +592,25 @@ a {
   padding: 1px 7px;
 }
 
+/*
+ * 「这条数据来自哪套 key」（用户 2026-10-05：「其余针对 key 数据加标签」）。
+ * 只在多套 key 的「全部」视图里出现，用来区分同一个币在两套账户上的两条记录 ——
+ * 所以做得比 `.tag` 更淡，不抢价格/盈亏的注意力。
+ */
+.ktag {
+  flex: 0 0 auto;
+  max-width: 9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--accent, #7aa2f7);
+  background: var(--accent-soft, rgba(122, 162, 247, 0.12));
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 /* 清单通过率达标 / 未达标（门槛默认 60%，不必全过） */
 .hint {
   margin: 0;
@@ -3298,24 +3317,35 @@ body.fixed-viewport .split {
   min-width: 0;
 }
 
-/* 右侧百分比标签（相对当前价） */
+/*
+ * 右侧百分比标签（相对当前价）——**贴在价格轴上**（用户 2026-10-05：
+ * 「k 线右侧百分比会定在坐标轴上」）。
+ *
+ * 以前是浮在轴**左边**、盖在 K 线上；现在跟价格轴同位置同宽度，
+ * 像币安那样直接挂在轴上（JS 里 `positionLabels()` 按轴的实际宽度覆盖 `width`）。
+ */
 .level-labels {
   position: absolute;
   top: 0;
-  left: 0;
+  left: auto;
   bottom: 0;
-  right: 84px;
+  right: 0;
+  /* 兜底：JS 一定会上报轴宽，拿不到时才用这个 */
+  width: 84px;
   pointer-events: none;
   overflow: hidden;
 }
 
 .level-labels span {
   position: absolute;
-  right: 6px;
+  left: 0;
+  right: 0;
   transform: translateY(-50%);
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: rgba(11, 15, 20, 0.82);
+  text-align: center;
+  padding: 1px 2px;
+  border-radius: 3px;
+  /* 压得比轴底色实一点：它是**盖在刻度上**的 */
+  background: rgba(11, 15, 20, 0.92);
   font-family: var(--mono);
   font-size: 11px;
   font-weight: var(--fw-bold);
@@ -3837,20 +3867,18 @@ body.fixed-viewport .split {
   margin-bottom: 8px;
 }
 
-.ord-head .ord-title {
-  font-size: 13px;
-  font-weight: var(--fw-bold);
-}
-
-/* 「可用 xxx USDT」顶到行尾 */
-.ord-head .ord-avail {
-  margin-left: auto;
+/*
+ * 「可用 xxx USDT」——在价格那一行的最右（以前挂在顶栏的最右，见 `.ord-price-row`）。
+ * 现在不属于 `.ord-head`，选择器去掉了那层限定。
+ */
+.ord-avail {
   font-size: 11px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.ord-head .ord-avail b {
+.ord-avail b {
   font-family: var(--mono);
   color: var(--text);
 }
@@ -3898,17 +3926,35 @@ body.fixed-viewport .split {
 }
 
 /*
- * 价格那一行：**整行都是它的**（数量挪到杆子下面去了，见 `.ord-read`），
- * 所以限价时那颗「现价」也有地方站了 —— 手机上不再被挤掉（用户 2026-10-05）。
- * 宽屏别让它拉成一条 930px 的输入框，给个上限。
+ * 价格那一行：左边「价格 + 市价开关 + 输入框（限价时多一颗现价）」，
+ * 右边顶到行尾放「账户标签 + 可用余额」。
+ *
+ * 用户 2026-10-05：「价格那行输入价格太长了，缩短右侧放账户和余额可用，账户用标签的形式」
+ * ⇒ 输入框改成**固定短宽**（130px），整行不再被它撑满；`.ord-right` 用
+ *    `margin-left: auto` 顶到行尾。
  *
  * ⚠️ 高度要**钉死**：市价模式这一行只有输入框（27px），限价模式多一颗「现价」，
  *    而那颗 `.ghost.tiny` 自带 padding、比输入框高 4px —— 不钉的话整个下单区
  *    会跟着长高 4px（用户 2026-10-05：「下单区域高度固定」）。
  */
-.ord-field.ord-price {
-  max-width: 420px;
+.ord-price-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-bottom: 6px;
+}
+
+.ord-field.ord-price {
+  /* 行宽交给 `.ord-price-row`，自己只吃内容那么多 */
+  flex: 0 1 auto;
+  max-width: none;
+  margin-bottom: 0;
+}
+
+/* 价格输入框：以前 `flex: 1 1 auto` 会一路拉满，现在钉死一个短宽度 */
+.ord-field.ord-price input {
+  flex: 0 1 130px;
+  max-width: 130px;
 }
 
 .ord-field.ord-price input,
@@ -3920,6 +3966,20 @@ body.fixed-viewport .split {
   display: inline-flex;
   align-items: center;
   padding: 0 10px;
+}
+
+/* 右侧那一组（账户标签 + 可用余额）：顶到行尾，且不许换行挤压 */
+.ord-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+/* 账户标签：跟「交易所账户」页里那种 `.ktag` 同款，但这里点不动（切换在配置里） */
+.ord-acct {
+  cursor: default;
 }
 
 /*
@@ -4105,12 +4165,38 @@ body.fixed-viewport .split {
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * 下单区的「身子」：开单 / 仓位两页**叠在同一个格子**里。
+ *
+ * 用户 2026-10-05 反复强调「下单区域高度固定」——切页时不许把上面的 K 线顶来顶去。
+ * 用 grid 叠放而不是写死一个高度：格子高度 = **两页里高的那一页**（开单），
+ * 换主题色 / 改字号都自动跟着，不用维护一个magic number。
+ * 不用的那页只是 `visibility: hidden`（还占着高度，正是要的效果；也不进无障碍树）。
+ */
+.ord-body {
+  display: grid;
+}
+
+.ord-page {
+  grid-area: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ord-page.off {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* 右下角那一行：两颗下单按钮（做多 / 做空），整行右对齐 */
 .ord-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  /* 行高也钉住：`做多/做空` 是大按钮，比 `刷新持仓` 那种 ghost 高 3px */
+  min-height: 35px;
 }
 
 /*
@@ -4146,6 +4232,147 @@ body.fixed-viewport .split {
 .ord-submit.short {
   background: var(--bad-fill);
   color: #fff;
+}
+
+/*
+ * 「仓位」那一格的持仓列表：一行一条，行尾一颗「平仓」。
+ *
+ * ⚠️ 高度封顶 + 自己滚 —— 下单区整体高度是钉死的（用户 2026-10-05：
+ *    「下单区域高度固定」），持仓多也不能把面板撑高、把上面的 K 线顶上去。
+ * 多 / 空的颜色跟全站一致（多 = 绿、空 = 红）。
+ */
+/*
+ * 列表**吃掉这一页剩下的高度**，自己在里面滚 ——
+ * `flex-basis: 0` + `min-height: 0` + `overflow-y: auto` 这三样一起，
+ * 它就不会按「有多少条」去把页面撑高（高度是 `.ord-page` 那个格子给的）。
+ */
+.ord-pos {
+  flex: 1 1 0;
+  min-height: 0;
+  margin: 0 0 8px;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.ord-pos li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ord-pos li:first-child {
+  border-top: 0;
+}
+
+.ord-pos .op-sym {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: var(--fw-bold);
+}
+
+.ord-pos .op-side {
+  flex: 0 0 auto;
+  font-weight: var(--fw-bold);
+}
+
+.ord-pos .side-long,
+.ord-pos .op-pnl.pnl-up {
+  color: var(--ok);
+}
+
+.ord-pos .side-short,
+.ord-pos .op-pnl.pnl-down {
+  color: var(--bad);
+}
+
+.ord-pos .op-qty,
+.ord-pos .op-entry {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+}
+
+/* 盈亏顶到行尾（挨着「平仓」那颗） */
+.ord-pos .op-pnl {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.ord-pos .op-close {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+/* 没持仓 / 读失败：一句话摆在列表原位（高度由 `.ord-body` 兜住） */
+.ord-empty {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/*
+ * 市价开关（价格那一行最左边）。
+ * 高度跟同一行的输入框 / 「现价」对齐（27px），别把这一行撑高 ——
+ * 下单区整体高度是钉死的（用户 2026-10-05：「下单区域高度固定」）。
+ */
+.ord-market {
+  flex: 0 0 auto;
+  height: 27px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: var(--fw-bold);
+}
+
+.ord-market.on {
+  color: var(--blue);
+  border-color: var(--accent-line);
+  background: var(--blue-soft);
+}
+
+/* 顶栏那颗「一键平仓」：警示色，`margin-left: auto` 顶到**最右**（用户 2026-10-05） */
+.ord-head .ord-close-all {
+  margin-left: auto;
+  padding: 4px 9px;
+  font-size: 11px;
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+
+.ord-head .ord-close-all:disabled {
+  opacity: 0.5;
+}
+
+/*
+ * 「真单」章 —— **只在配置里把「测试下单」关掉时出现**（`OrderPanel.vue` 里
+ * `v-if="!testOrder"`）。真单是会真扣保证金的模式，所以给个一直红着的标记，
+ * 别让人在真单模式下以为自己还在测试。
+ */
+.ord-live {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--bad, #e55361) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bad, #e55361) 14%, transparent);
+  color: var(--bad, #e55361);
+  font-size: 10px;
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.5px;
 }
 
 /* 杠杆小标签：跟在「市价 / 限价」后面那颗 */
@@ -5623,6 +5850,29 @@ button.badge:disabled {
     min-height: 150px;
   }
   /*
+   * 窄屏的信息栏：**左上角、竖着排、只有触碰时才出现**。
+   *
+   * 用户 2026-10-05：「移动端信息不显示在顶部，左侧显示，和币安移动端一样」
+   * → 后来定成「位置左上角」。它贴左竖排（币安 App 那种），但**平时不显示** ——
+   * 「触碰信息是触碰才有」，所以要有 `.on`（见 `KlineChart` 的 `paintHover`）。
+   */
+  .chart-info {
+    left: 4px;
+    top: 4px;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    gap: 1px;
+    max-width: none;
+    padding: 5px 7px;
+    background: rgba(13, 17, 23, 0.72);
+    font-size: 11px;
+  }
+  /* 没在碰的时候不显示（桌面端照旧一直显示） */
+  .chart-info:not(.on) {
+    display: none;
+  }
+  /*
    * 周期切换：窄屏走「简约模式」但**靠左排**——
    * 去掉分段框和分隔线，按钮就排在左边（原来那种摊满整行的排法太散）。
    * 这一行右边留给那颗「分析」闪电（`margin-left: auto` 把它顶到行尾）。
@@ -5924,6 +6174,31 @@ button.badge:disabled {
 .sheet-seg button {
   flex: 1 1 0;
   text-align: center;
+}
+
+/*
+ * 「配置」里的**下单账户**选择（用户 2026-10-05：「配置中可切换用户」）——
+ * 一排 Key 名字胶囊，选中的那颗点亮；名字可能长 / 套数可能多，所以换行排。
+ */
+.tk-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tk-picks button {
+  padding: 6px 12px;
+  border-radius: 999px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tk-picks button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 /*

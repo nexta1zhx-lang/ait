@@ -148,12 +148,14 @@ export const error = ref('')
  * 桌面端宽屏放得下，保持「左行情 + 右 K 线」不变（用户：「pc 端开单分析保持不变」）。
  *
  * 「交易所账户」（用户 2026-10-04：「实时分析 tab 后加入交易所账户信息，
- * 显示账户余额和订单历史」）就插在「实时分析」后面。
+ * 显示账户余额和订单历史」）原本插在「实时分析」后面；
+ * **2026-10-05 用户要求两者换个位置**（「实时分析和交易所 tab 换个位置」），
+ * 所以现在「交易所账户」在前、「实时分析」在后。
  */
 export const LEFT_TABS = [
   {value: 'market' as const, label: '合约行情'},
-  {value: 'live' as const, label: '实时分析'},
   {value: 'exchange' as const, label: '交易所账户'},
+  {value: 'live' as const, label: '实时分析'},
   {value: 'test' as const, label: '测试'},
   {value: 'history' as const, label: '历史分析'},
   {value: 'add' as const, label: '添加案例'}

@@ -20,9 +20,10 @@
 **明确不做**
 - ❌ **现货（Spot 钱包）完全不参与统计** —— 老版那套「按币种估值的现货余额列表」整块删掉
 - ❌ 币本位 COIN-M（`dapi*`）
-- ⚠️ **下单**：2026-10-05 加了 K 线页底部的下单模块，但**只走币安的测试接口**
+- ⚠️ **下单**：2026-10-05 加了 K 线页底部的下单模块，**默认走币安的测试接口**
   （`POST /fapi/v1/order/test`）—— 只校验参数 / 权限 / 保证金，**不进撮合、不真开仓**。
-  真下单 / 撤单还没做（要放开就是把接口名从 `order/test` 换成 `order`，见第 5 节末尾）
+  在「配置 → 测试下单」里把开关**关掉**就是真下单（`POST /fapi/v1/order`，会真扣保证金），
+  由请求体里的 `test: false` 决定，见第 5 节末尾。撤单还没做
 - ❌ 跨账户、跨用户汇总（净资产 = **那一套 key** 的合约 + C2C）
 
 **净资产口径**：`合约 totalMarginBalance（= 钱包 + 浮盈）+ C2C 折 USDT`
@@ -266,13 +267,20 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 
 ### 合约下单（M6，2026-10-05）
 
-K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
+K 线页底部那个下单模块用的几条（`data/exchange-trade.ts`）：
 
 | 方法 | 路径 | 打哪个交易所接口 | 说明 |
 |---|---|---|---|
-| GET | `/api/exchange/trade?id=&symbol=BTCUSDT` | `fapi/v2/balance` + **v2** `positionRisk` + `leverageBracket` | 面板初始化：可用余额 / 当前杠杆 / 最大杠杆 / 数量价格精度（三项并发，单项失败只记进 `errors`，余额失败单列 `balanceError`） |
+| GET | `/api/exchange/trade?id=&symbol=BTCUSDT` | `fapi/v2/balance` + **v2** `positionRisk` + `leverageBracket` | 面板初始化：可用余额 / 当前杠杆 / 最大杠杆 / **当前持仓** / 数量价格精度（三项并发，单项失败只记进 `errors`，余额失败单列 `balanceError`）。⚠️ 杠杆和持仓出自**同一次** `positionRisk`，别打两遍 |
+| GET | `/api/exchange/trade/positions?id=` | **v2** `positionRisk`（**不带 symbol**） | 账户里**所有**持仓（面板「仓位」那一格列出来的列表，按名义价值倒序）。⚠️ 双向持仓模式下同一个币有两条（LONG / SHORT），按 `positionSide` 区分 |
 | POST | `/api/exchange/trade/leverage?id=` | `POST /fapi/v1/leverage` | 调这个交易对的杠杆（有持仓 / 挂单时交易所会拒，原样翻出来） |
-| POST | `/api/exchange/trade/order?id=` | **`POST /fapi/v1/order/test`** | 下单（**测试单**：只校验，不进撮合、不真开仓） |
+| POST | `/api/exchange/trade/order?id=` | `POST /fapi/v1/order/test` **或** `/fapi/v1/order` | 下单。⚠️ 走哪个由请求体里的 **`test`** 决定：`test !== false`（**默认**，含漏传）→ 测试单（只校验，不进撮合、不真开仓）；`test === false` → **真单** |
+| POST | `/api/exchange/trade/close?id=` | 同上（`order/test` / `order`） | 平仓，同样看 `test`。`{symbol, side}` 只平那一条（列表里每一行的「平仓」）；只给 `symbol` 平这个交易对；**都不给就是「一键平仓」**（有持仓的全平一遍） |
+| GET | `/api/rate` | — | 美元 → 人民币汇率（`USD_CNY`，默认 7.1）——「交易所账户」USDT / CNY 快捷切换用，跟用量页同源 |
+
+⚠️ 平仓那两个参数有讲究：**单向持仓模式**带 `reduceOnly`，**双向持仓模式绝对不能带**
+（币安直接回 `-1106 Parameter 'reduceonly' sent when not required`）—— 双向模式本来就靠
+「反方向 + 同一个 `positionSide`」自动减仓。数量按真实持仓量 × 合约步长向下取整。
 
 ⚠️ 五个实测踩到的坑（都是真 Key 打出来的）：
 
@@ -311,8 +319,18 @@ K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
 把 `LOT_SIZE.stepSize` / `PRICE_FILTER.tickSize` / `MIN_NOTIONAL.notional` 缓存 6 小时。
 数量 `= 可用余额 × 仓位% × 杠杆 ÷ 参考价`，按 `stepSize` **向下**取整，再校验 minQty / minNotional。
 
-**要放开真下单**：`placeTestOrder()` 里 `fapiPrivatePostOrderTest` → `fapiPrivatePostOrder`，
-其余逻辑一模一样；但前端「测试单」那几处提示 + 本文档这一段必须一起改。
+**测试单 / 真单**（2026-10-05 追加）：由请求体里的 `test` 决定，
+`placeOrder()` / `closePositions()` 里只差最后那一行接口名（`submitOrder()`）：
+
+| `test` | 币安接口 | 效果 |
+| --- | --- | --- |
+| 不传 / `true` | `POST /fapi/v1/order/test` | 只校验参数 / 权限 / 保证金，**不进撮合** |
+| `false` | `POST /fapi/v1/order` | **真下单 / 真平仓**，会真扣保证金 |
+
+⚠️ 判断式写的是 **`test !== false`**（不是 `test === true`）：漏传、传错、传 `null`
+全都落在测试单那一侧 —— 宁可误当测试单，也不能误真下单。前端开关在
+「配置 → **测试下单**」（`settings.ts` 的 `testOrder`，默认**开**，落 localStorage），
+关掉时真单模式会在下单模块顶栏挂一枚红色「真单」章。
 
 ### 本地开发：IP 白名单怎么办（2026-10-05）
 
@@ -408,16 +426,20 @@ Node 24 的 `fetch` 认 `NODE_USE_ENV_PROXY`（`undici` 的 ProxyAgent 那条路
 
 ## 6. 前端
 
-**界面已定稿**（`comps/ExchangeAccountBoard.vue`）：净资产 → 合约明细四格 → 仓位统计
-→ 二级 tab（持仓 / 挂单 / 盈亏 / 成交 / 资产）。
+**界面已定稿**（`comps/ExchangeAccountBoard.vue`）：账户 tab 条 → 净资产 → 合约明细四格
+→ 仓位统计 → 二级 tab（持仓 / 挂单 / 盈亏 / 成交 / 资产）。
 
 数据接法：
 
 1. 进页面 → `GET /api/exchange/overview` → **立刻渲染**（顶部「3 分钟前」+ ⟳）
 2. `age > 60s` 或用户点 ⟳ → `POST /refresh` → 回填
 3. 订阅 `/api/exchange/stream`（SSE）→ 有更新就回填，数字**淡闪一下**
+   （**每套 Key 一条**，见 M7）
 4. 挂单 / 成交 / 盈亏三个 tab **懒加载**（进 tab 才拉）
 5. 局部失败只提示那一块，不阻塞整页
+6. 顶部的账户 tab 条（`全部` + 每套 Key）**只有 ≥2 套时才有**；
+   选中值 `picked` 往上 emit，重新取数全由 `ExchangeAccountLivePanel` 负责
+   （板子本身是纯展示的，一个请求都不发）
 
 > M3/M5（已完成）：换成 `ExchangeAccountLivePanel` 真容器，
 > mock / 预览页 / 老面板 / 老接口已经全删。
@@ -434,7 +456,31 @@ Node 24 的 `fetch` 认 `NODE_USE_ENV_PROXY`（`undici` 的 ProxyAgent 那条路
 | **M3** ✅ | 成交/盈亏**读**接口 + 前端接真数据（`交易所账户` tab 换成 `ExchangeAccountLivePanel`，SSE 接上） | 去掉 mock（界面已用真数据） |
 | M4 ✅ | 资产曲线：`GET /api/exchange/history?id=&range=1d\|7d\|30d` + `ExchangeCurveChart.vue`（echarts：close 折线 + high/low 区间带、断档不插值） | 2026-10-05 完成 |
 | M5 ✅ | 删 mock / 预览页 / 老面板 / 老 `/api/exchange/account`（连同它那套余额估值、全量订单、已实现盈亏函数） | 收尾（2026-10-05 完成） |
-| M6 ✅ | K 线页底部**下单模块**（多空 / 滑动条 / 余额 / 杠杆 / 市价·限价）+ `/api/exchange/trade*` 三条接口 —— **只走测试单** | 2026-10-05 完成（`comps/OrderPanel.vue`） |
+| M6 ✅ | K 线页底部**下单模块**（多空 / 滑动条 / 余额 / 杠杆）+ `/api/exchange/trade*` 三条接口 —— **只走测试单** | 2026-10-05 完成（`comps/OrderPanel.vue`） |
+| M6.1 ✅ | 下单模块改版：顶部两格 **「开单」/「仓位」**（市价降级成开单页里的开关：开着价格框禁用、关掉可填 = 限价单）；仓位页简略显示持仓 + 平仓 / 全部补仓；顶栏**一键平仓**。新增 `POST /api/exchange/trade/close` | 2026-10-05 完成 |
+| M6.2 ✅ | 下单模块：**去掉「补仓」**、仓位页改成「账户里所有持仓，每条自带平仓」、顶栏标题换成**在用的那套账户名**；「配置」里新增**下单账户**切换（`trade-account.ts`，落 `localStorage.ca-trade-key`） | 2026-10-05 完成 |
+| M6.3 ✅ | 下单模块第三版：顶栏**删掉账户昵称和「测试单」标签**、`一键平仓` 挪到**最右**并加二次确认；账户名（`.ktag`）+ 可用余额挪到**价格行右侧**、价格输入框收窄到 130px；**「测试单」变成「配置 → 测试下单」开关**，关掉走真单（`/fapi/v1/order`），真单模式顶栏挂红色「真单」章 | 2026-10-05 完成 |
+| M7 ✅ | **多账户视图**：「交易所账户」页顶部的账户下拉框换成 **tab 条（`全部` + 每套 Key 的名字）**；`全部` = 各套快照**加总**（持仓/挂单/盈亏按账户拆行并打 `.ktag` 标签，曲线按时间桶相加），单套时不合并、也不打标签 | 2026-10-05 完成（`comps/ExchangeAccountLivePanel.vue`） |
+
+### 多账户视图（M7）—— 为什么是「加总」而不是「切来切去」
+
+一套 Key = 一个账户，但用户手上可能同时挂好几套（主号 / 小号 / 测试号）。
+看总账是常态，看单号是例外 ⇒ **默认落在 `全部`**，tab 条才有意义。
+
+- **数据层**（`ExchangeAccountLivePanel.vue`）：每套 Key 各发一条
+  `GET /api/exchange/overview?id=` / 一条 `SSE /api/exchange/stream?id=`，
+  结果按 key_id 攒在 `parts` 里，`rebuild()` 用 `mergeOverviews()` 合成一份给纯展示的
+  `ExchangeAccountBoard`。⚠️ 因此这个页面的 SSE 是**并行 N 条**（N = 账户数），
+  离开 tab 时必须 `stopStreams()` 全关，不然 EventSource 会一直挂着。
+- **合并口径**：金额类（钱包 / 可用 / 未实现 / C2C / 名义）**求和**；
+  `takenAt` 取**最旧**那一份（合并视图的「几分钟前」按最差的说，别报喜不报忧）；
+  持仓列表**拼接**并给每条塞 `keyName`；成交/挂单/盈亏按（`keyName` + 交易对）分组，
+  界面上打 `.ktag` 小标签区分来源 —— 同一个币在两套账户上各有一条时，不分就会看成一条。
+- **单套账户**：`accounts` 只有一项 ⇒ **不摆 tab 条**，hero 里退回一个名字标签，
+  合并逻辑整体短路（`mergeOverviews` 原样返回），单账户的界面跟以前逐字一样。
+- ⚠️ **`picked` 的初值是空串**，不是 `'all'`：挂载时要靠赋值触发 `watch(picked)`
+  才会去拉数据；初值写成 `'all'` 的话赋同样的值不触发 watcher，
+  页面会永远停在「正在取账户快照…」。
 
 ### M2 实测记录（2026-10-05，本地跑通）
 
