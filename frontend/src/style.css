@@ -4308,8 +4308,21 @@ body.fixed-viewport .split {
 
 .ord-pos .op-sym {
   flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-family: inherit;
   font-size: 12px;
   font-weight: var(--fw-bold);
+}
+
+/*
+ * 现在这张 K 线就是这只币（用户 2026-10-06：「点击仓位中币种可以切换到该k线」）——
+ * 点过的那个币换个颜色，一眼看出「图上画的是哪一条」。
+ */
+.ord-pos .op-sym.on {
+  color: var(--blue);
 }
 
 .ord-pos .op-side {
@@ -4459,6 +4472,18 @@ body.fixed-viewport .split {
   font-weight: var(--fw-bold);
   /* 还没跟交易所对过（读不到当前杠杆）时先不高亮，见模板里的 `.set` */
   color: var(--muted);
+}
+
+/*
+ * 「仓位」那一格顶栏那颗**排序方式**（用户 2026-10-06：「点击切换 盈利/价值」）——
+ * 跟杠杆那颗同位置、同高度（`padding` / `font-size` 对齐，不然顶栏会高 1~2px，
+ * 下面的 K 线跟着跳）。文字是中文，所以不套 mono 字体。
+ */
+.ord-head .ord-sort {
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: var(--fw-mid);
+  color: var(--text);
 }
 
 .ord-head .ord-lev.set {

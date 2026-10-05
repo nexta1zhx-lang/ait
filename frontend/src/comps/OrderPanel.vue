@@ -48,6 +48,7 @@ import {
   type TradeInfoResult,
   type TradePositionRow
 } from '../api'
+import {pickSymbol, prefetchSymbol} from '../analyze'
 import {fmt, usd} from '../format'
 import {isForeground, onForegroundChange} from '../live'
 import {testOrder} from '../settings'
@@ -522,6 +523,49 @@ let posFetching = false
 /** 读失败的原因：**列表里那一行小字**（不弹 toast —— 切过来看见空列表总得知道为什么） */
 const posErr = ref('')
 
+/**
+ * 持仓列表的**排序方式**（用户 2026-10-06：「仓位界面…显示排序方式 点击切换 盈利/价值」）。
+ *
+ * · `pnl`（默认）→ 按**未实现盈亏**从大到小
+ * · `value`     → 按**仓位价值**从大到小
+ *
+ * 只存在内存里（没落 localStorage）：这是个「这会儿想先看哪一批」的临时视角，
+ * 刷新页面回到默认的「按盈利」。
+ */
+const posSort = ref<'pnl' | 'value'>('pnl')
+
+const posSortText = computed(() => (posSort.value === 'pnl' ? '盈利' : '价值'))
+
+function toggleSort(): void {
+  posSort.value = posSort.value === 'pnl' ? 'value' : 'pnl'
+  buzz(8)
+}
+
+/** 排完序的持仓（列表按它渲染）。**从大到小**，两种都是。 */
+const sortedPositions = computed(() => {
+  const arr = [...positions.value]
+  const by = posSort.value
+  arr.sort((a, b) => (by === 'pnl' ? b.unrealized - a.unrealized : b.notional - a.notional))
+  return arr
+})
+
+/**
+ * 点持仓里的**币种** → 上面那张 K 线切到这只币（用户 2026-10-06：「k线联动」
+ * 「点击仓位中币种可以切换到该k线」）。
+ *
+ * 走的是分析页那套全局币种（`analyze.ts` 的 `pickSymbol`）——
+ * 跟「合约」页点一行、顶部币种下拉选一个，是**同一条路**：
+ * 换完 K 线 / 行情条 / 历史结论一起跟着走。
+ * `prefetchSymbol` 先把这只币的行情预热上，免得切过去先白一屏。
+ */
+function gotoChart(p: TradePositionRow): void {
+  const base = baseOf(p.symbol)
+  if (!base || base === props.symbol) return
+  prefetchSymbol(base)
+  pickSymbol(base)
+  buzz(8)
+}
+
 /** 列表里那一条的「币」：BTCUSDT → BTC */
 function baseOf(symbol: string): string {
   return String(symbol).toUpperCase().replace(/USDT$/, '') || symbol
@@ -842,8 +886,11 @@ onMounted(async () => {
           仓位
         </button>
       </div>
-      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-05：默认 10 倍、最高 20 倍） -->
+      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-05：默认 10 倍、最高 20 倍）
+           ⚠️ **「仓位」那一格不显示它**（用户 2026-10-06：「仓位界面不要显示杠杆配置」）——
+           那一格显示的东西按下面那颗「排序方式」的语义走。 -->
       <button
+        v-if="tab === 'open'"
         type="button"
         class="ghost tiny ord-lev"
         :class="{set: levConfirmed}"
@@ -851,6 +898,20 @@ onMounted(async () => {
         @click="levOpen = true"
       >
         {{ lev }}x
+      </button>
+      <!--
+        排序方式（用户 2026-10-06：「显示排序方式 点击切换 盈利/价值」）——
+        跟杠杆那颗同位置、同版式，只在「仓位」那一格出现：点一下在
+        「按未实现盈亏」和「按仓位价值」之间换，都是**从大到小**。
+      -->
+      <button
+        v-else
+        type="button"
+        class="ghost tiny ord-sort"
+        :title="`排序方式：按${posSortText}（从大到小）—— 点一下换成另一种`"
+        @click="toggleSort"
+      >
+        按{{ posSortText }}
       </button>
       <!--
         ⚠️ 真单章：**只在「配置 → 测试下单」关掉时出现**。
@@ -1080,7 +1141,7 @@ onMounted(async () => {
       -->
       <ul v-if="positions.length" class="ord-pos">
         <li
-          v-for="p in positions"
+          v-for="p in sortedPositions"
           :key="p.symbol + p.side"
           :title="posTitle(p)"
         >
@@ -1090,9 +1151,19 @@ onMounted(async () => {
               币种 · 方向 · 杠杆 · 仓位价值 …… 未实现盈亏 · 减仓 / 平仓
             开仓数量 / 开仓价单行塞不下（窄屏会截断），挪进 `title` —— 要核对
             数量时手指按住这一行就看见了。
+            ⚠️ 币种是一颗**按钮**（用户 2026-10-06：「点击仓位中币种可以切换到该k线」）：
+              点一下上面那张 K 线就切到这只币，跟「合约」页点一行是同一条路。
           -->
           <div class="op-row">
-            <b class="op-sym">{{ baseOf(p.symbol) }}</b>
+            <button
+              type="button"
+              class="op-sym"
+              :class="{on: baseOf(p.symbol) === props.symbol}"
+              :title="`切到 ${baseOf(p.symbol)} 的 K 线`"
+              @click="gotoChart(p)"
+            >
+              {{ baseOf(p.symbol) }}
+            </button>
             <span
               class="op-side"
               :class="p.side === 'long' ? 'side-long' : 'side-short'"
