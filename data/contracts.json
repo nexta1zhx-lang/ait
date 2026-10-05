@@ -1,9 +1,9 @@
 {
   "exchange": "binance",
   "marketType": "swap",
-  "updatedAt": "2026-10-04T00:48:56.117Z",
+  "updatedAt": "2026-10-05T10:37:03.994Z",
   "source": "https://fapi.binance.com/fapi/v1/exchangeInfo",
-  "count": 528,
+  "count": 525,
   "contracts": [
     {
       "symbol": "0GUSDT",
@@ -11,15 +11,6 @@
       "quote": "USDT",
       "ccxt": "0G/USDT:USDT",
       "display": "0G/USDT",
-      "contractType": "PERPETUAL",
-      "status": "TRADING"
-    },
-    {
-      "symbol": "1000000BOBUSDT",
-      "base": "1000000BOB",
-      "quote": "USDT",
-      "ccxt": "1000000BOB/USDT:USDT",
-      "display": "1000000BOB/USDT",
       "contractType": "PERPETUAL",
       "status": "TRADING"
     },
@@ -3282,15 +3273,6 @@
       "status": "TRADING"
     },
     {
-      "symbol": "PROMPTUSDT",
-      "base": "PROMPT",
-      "quote": "USDT",
-      "ccxt": "PROMPT/USDT:USDT",
-      "display": "PROMPT/USDT",
-      "contractType": "PERPETUAL",
-      "status": "TRADING"
-    },
-    {
       "symbol": "PROVEUSDT",
       "base": "PROVE",
       "quote": "USDT",
@@ -3314,15 +3296,6 @@
       "quote": "USDT",
       "ccxt": "PUMP/USDT:USDT",
       "display": "PUMP/USDT",
-      "contractType": "PERPETUAL",
-      "status": "TRADING"
-    },
-    {
-      "symbol": "PUMPBTCUSDT",
-      "base": "PUMPBTC",
-      "quote": "USDT",
-      "ccxt": "PUMPBTC/USDT:USDT",
-      "display": "PUMPBTC/USDT",
       "contractType": "PERPETUAL",
       "status": "TRADING"
     },

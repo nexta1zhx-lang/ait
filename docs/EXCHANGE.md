@@ -274,7 +274,7 @@ K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
 | POST | `/api/exchange/trade/leverage?id=` | `POST /fapi/v1/leverage` | 调这个交易对的杠杆（有持仓 / 挂单时交易所会拒，原样翻出来） |
 | POST | `/api/exchange/trade/order?id=` | **`POST /fapi/v1/order/test`** | 下单（**测试单**：只校验，不进撮合、不真开仓） |
 
-⚠️ 四个实测踩到的坑（都是真 Key 打出来的）：
+⚠️ 五个实测踩到的坑（都是真 Key 打出来的）：
 
 1. **`/fapi/v1/positionRisk` 已经下线** —— 直接 404，而且回的是币安那张 HTML 错误页
    （不翻中文的话界面上就是一坨 HTML）。要用 **v2**。
@@ -287,7 +287,17 @@ K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
    实测（2026-10-05，线上真账户）：读余额、读杠杆都正常，**一下单**就被这条拦，
    MARKET / LIMIT 都一样。这是币安那边的「冷静期」限制（新 Key / 刚开合约权限常见），
    代码里认不出来就只能说「没有权限」，会把人往白名单上引。所以 `humanizeTrade()` 里
-   专门有一条 `-4192` → 直说「币安在冷静期，过一阵再试」。
+   专门有一条 `-4192` → 直说「币安在冷静期，过一阵再试」。**它排在参数校验之后**：
+   参数本身不合法的测试单会先回 `-1111` / `-1102`，参数全对才轮得到 `-4192`。
+5. **交割中 / 已下架的币会「赖」在币种表里最多一天** ——
+   币种表（`data/contracts.json` + 库里 `contract_store`）是**每天**同步一次
+   （`CONTRACTS_MAX_AGE_MS` = 24h）。实测 2026-10-05：`1000000BOBUSDT`、`PROMPTUSDT`、
+   `PUMPBTCUSDT` 在币安那边状态已经变成 `SETTLING`（正在交割 / 已下架），
+   但当天同步过的表里还留着它们（528 → 刷新后 525）。
+   下载单面板读的是**实时** `exchangeInfo`（缓存 6h），所以下这种币会被拦住 ——
+   `specFor()` 会分清两种说法：「已经不能交易了（正在交割 / 已下架）」和
+   「币安的列表里没有这个交易对」。
+   想马上刷一次：`npm run sync:contracts`（服务每天自己也会刷）。
 
 **数量 / 精度**：不走 ccxt 的 `loadMarkets()`（它会顺手调一个**私有**的 `fetchCurrencies`，
 对只有合约权限的 Key 是多余的请求、还慢一倍），而是直接读公开的 `GET /fapi/v1/exchangeInfo`，
@@ -364,6 +374,28 @@ npm run ui:dev:cloud        # = API_TARGET=https://bitcoooin.cn npm run ui:dev
 > 前端也可以直接 `VITE_API_BASE=https://bitcoooin.cn npm run web`（走线上 CORS，
 > 已放行 `http://localhost:*`），不过那样本地后端还在跑、还会拿本地 Key 去开
 > listenKey，日志会一直刷 `-2015`，所以更推荐上面的 `ui:dev:cloud`。
+
+### 📌 代理 TUN 和「本地开发」是打架的（2026-10-05 实测）
+
+| | 代理 TUN 开着 | 代理 TUN 关着 |
+|---|---|---|
+| SSH 到服务器（`release.sh`） | ✗ 被劫持（`kex_exchange_identification: Connection closed`，连 `203.0.113.7:9999` 都“连得上”） | ✓ 通 |
+| 本机连币安（K 线行情 / 刷币种表） | ✓ 通 | ✗ 直连被墙 |
+
+**不用二选一**：Node 自己的出站走代理就行，SSH 不需要代理。
+
+```bash
+# 币安全部走本地代理（7890 是 Clash 那种混合口），TUN 就可以一直关着
+NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7890 npm run web
+```
+
+Node 24 的 `fetch` 认 `NODE_USE_ENV_PROXY`（`undici` 的 ProxyAgent 那条路），
+实测用它在本机**成功刷了币种表**（528 → 525，剔掉 3 个交割中的币）。
+`npm run sync:contracts` 这种一次性命令同样能这么套。
+
+> 另一个坑：新服务器（`52.194.6.144`）的**主机密钥不在 `known_hosts`** 里时，
+> `release.sh` 会直接挂在半路（`Host key verification failed` —— `BatchMode` 下不会问你要不要信任）。
+> 先 `ssh-keyscan -T 8 -t ed25519,rsa 52.194.6.144 >> ~/.ssh/known_hosts` 再发。
 
 ---
 
