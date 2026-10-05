@@ -103,6 +103,12 @@ import {
   fetchOpenOrders,
   humanize
 } from './data/exchange-account'
+import {
+  collectTradeInfo,
+  humanizeTrade,
+  placeTestOrder,
+  setSymbolLeverage
+} from './data/exchange-trade'
 import {fetchExchangeOverview} from './data/exchange-overview'
 import {
   firstSnapshotHours,
@@ -3171,6 +3177,128 @@ async function route(
       })
     } catch (e) {
       return sendJson(res, 200, {openOrders: null, error: humanize(e)})
+    }
+  }
+
+  /*
+   * 合约下单（2026-10-05）—— K 线页底部那个下单模块用的三条接口。
+   *
+   * ⚠️ `POST /api/exchange/trade/order` 走的**是币安的测试接口**
+   *    （`/fapi/v1/order/test`，用户 2026-10-05 定的）：只校验参数 / 权限 / 保证金，
+   *    **不进撮合、不真开仓**。要放开真下单就是改 `placeTestOrder` 里那个接口名，
+   *    但界面 / 文档上「测试单」的说法必须一起改 —— 别让人以为一直是测试的。
+   */
+
+  /* 面板初始化：可用余额 + 当前/最大杠杆 + 数量价格精度（都打交易所，单项失败不拖垮整体） */
+  if (p === '/api/exchange/trade' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (key.marketType !== 'swap')
+      return sendJson(res, 200, {
+        ready: false,
+        account: publicExchangeKey(key),
+        reason: '这套账户是现货，不能下合约单（去「交易所」加一套 U 本位合约的 Key）'
+      })
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {
+        ready: false,
+        account: publicExchangeKey(key),
+        reason: '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）'
+      })
+    try {
+      const info = await collectTradeInfo(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        str(url.searchParams.get('symbol'), 'BTCUSDT')
+      )
+      return sendJson(res, 200, {
+        ready: true,
+        account: publicExchangeKey(key),
+        ...info
+      })
+    } catch (e) {
+      return sendJson(res, 200, {
+        ready: false,
+        account: publicExchangeKey(key),
+        reason: humanizeTrade(e)
+      })
+    }
+  }
+
+  /* 调杠杆（只调这一个交易对） */
+  if (p === '/api/exchange/trade/leverage' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const r = await setSymbolLeverage(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        str(body.symbol, 'BTCUSDT'),
+        Number(body.leverage)
+      )
+      return sendJson(res, 200, {ok: true, ...r, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /* 下单（**测试单**：只校验，不进撮合） */
+  if (p === '/api/exchange/trade/order' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    const type = str(body.type, 'market') === 'limit' ? 'limit' : 'market'
+    const side = str(body.side, 'long') === 'short' ? 'short' : 'long'
+    try {
+      const params = await placeTestOrder(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        key.id,
+        {
+          symbol: str(body.symbol, 'BTCUSDT'),
+          side,
+          type,
+          quantity: Number(body.quantity),
+          price: body.price === undefined ? undefined : Number(body.price)
+        }
+      )
+      return sendJson(res, 200, {ok: true, test: true, order: params, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
     }
   }
 

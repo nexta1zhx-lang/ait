@@ -2,15 +2,17 @@
 /**
  * K 线块**顶部**那条行情（币安期货页顶部那种排法）：
  *
- *   左 = 币种（下拉，外层用 #symbol 插进来）+ 永续标记
- *   中 = 现价（大字）+ 24h 涨跌额 / 涨跌幅
- *   右 = 标记价格 / 指数价格 / 资金费率 + 倒计时 / 24h 高低 / 成交量额 / 持仓量
+ *   左 = 币种（下拉，外层用 #symbol 插进来）
+ *   中 = 现价（大字）+ 24h 涨跌额 / 涨跌幅 + 24h 位置条
+ *   右 = 两行：① 多周期涨幅（1天…1年，原来在图**底部**那行，用户 2026-10-05 挪上来）
+ *              ② 成交额 / 资金费率（原来一共 8 项，用户 2026-10-05 砍到只剩这 2 项）
  *
  * 数据来自「../ticker」（15 秒刷一次），拿不到就显示「—」，不挡页面。
  */
 import {computed, onBeforeUnmount, ref, watch} from 'vue'
 import {fixed, fmt} from '../format'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
+import TickerChanges from './TickerChanges.vue'
 
 /** 涨了绿、跌了红 —— 跟图上蜡烛一套 */
 const tone = computed(() => {
@@ -102,7 +104,7 @@ const rangeTitle = computed(() => {
   return `24h 低 ${fmt(d?.low24h)} · 高 ${fmt(d?.high24h)}`
 })
 
-/** 成交量 / 成交额 / 持仓量：中文量级，别糊一长串数字 */
+/** 成交额：中文量级，别糊一长串数字 */
 function big(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
   const n = Number(v)
@@ -136,18 +138,18 @@ const fundingLabel = computed(() => {
   return h ? `资金费率 (${h}时)` : '资金费率'
 })
 
-/** 右侧那一串指标：两列排，跟交易所一样 */
+/**
+ * 右侧那两块（两行）。
+ *
+ * ★ 2026-10-05 用户精简：
+ *   · 原来 8 项（标记价格 / 24h 高低 / 指数价格 / 成交量 / 成交额 / 持仓量 / 资金费率）
+ *     → 只剩 **成交额 + 资金费率**；价格在中间那颗大字里，其余与下单无关
+ *   · 多周期涨幅那一行原本在图**底部**（`#bottom` 插槽），现在挪到这块的上面
+ *     （底下让给下单模块了）
+ */
 const rows = computed(() => {
   const d = ticker.value
-  return [
-    {k: '标记价格', v: fmt(d?.markPrice)},
-    {k: '24h最高价', v: fmt(d?.high24h)},
-    {k: '指数价格', v: fmt(d?.indexPrice)},
-    {k: '24h最低价', v: fmt(d?.low24h)},
-    {k: '24h成交量', v: big(d?.volume24h)},
-    {k: '24h成交额', v: big(d?.quoteVolume24h)},
-    {k: '合约持仓量', v: big(d?.openInterestValue)}
-  ]
+  return [{k: '24h成交额', v: big(d?.quoteVolume24h)}]
 })
 </script>
 
@@ -190,18 +192,28 @@ const rows = computed(() => {
       </div>
     </div>
 
-    <div class="tk-stats">
-      <div v-for="r in rows" :key="r.k" class="tk-item">
-        <span class="k">{{ r.k }}</span>
-        <span class="v">{{ r.v }}</span>
-      </div>
-      <!-- 资金费率 + 倒计时摆一格，跟交易所一样 -->
-      <div class="tk-item">
-        <span class="k">{{ fundingLabel }}</span>
-        <span class="v">
-          <em class="tk-fund">{{ fundingText }}</em>
-          <template v-if="countdown"> / {{ countdown }}</template>
-        </span>
+    <!--
+      右边这一块 = 两行（用户 2026-10-05）：
+        ① 多周期涨幅（从图的底部挪上来，见 `TickerChanges`）
+        ② 成交额 / 资金费率 —— 原来是 8 项，砍到只剩这 2 项
+      ⚠️ `.tk-stats` 原来的 `margin-left: auto` 挪到 `.tk-right` 上了
+         （右对齐现在由整块负责，不然两行各飘各的）。
+    -->
+    <div class="tk-right">
+      <TickerChanges />
+      <div class="tk-stats">
+        <div v-for="r in rows" :key="r.k" class="tk-item">
+          <span class="k">{{ r.k }}</span>
+          <span class="v">{{ r.v }}</span>
+        </div>
+        <!-- 资金费率 + 倒计时摆一格，跟交易所一样 -->
+        <div class="tk-item">
+          <span class="k">{{ fundingLabel }}</span>
+          <span class="v">
+            <em class="tk-fund">{{ fundingText }}</em>
+            <template v-if="countdown"> / {{ countdown }}</template>
+          </span>
+        </div>
       </div>
     </div>
     <!--

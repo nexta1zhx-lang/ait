@@ -856,6 +856,100 @@ export function exchangeStream(
   )
 }
 
+/* ---------------- 合约下单（K 线页底部那个模块，2026-10-05） ---------------- */
+
+/**
+ * ★ 下单走的是币安的**测试接口**（`/fapi/v1/order/test`，用户 2026-10-05 定的）：
+ *   只校验参数 / 权限 / 保证金，**不进撮合、不真开仓**。
+ *   要放开真下单，是后端把接口名换掉的事，前端只需把界面上「测试单」的说法一起去掉。
+ */
+
+/** 合约账户余额（`/fapi/v2/balance`） */
+export interface TradeBalance {
+  /** 可用余额（能开新仓的那部分） */
+  available: number
+  wallet: number
+  unrealized: number
+}
+
+/**
+ * 面板初始化那一把：余额 + 杠杆 + 精度。
+ *
+ * ⚠️ `ready: false` 时**不是错误**：没配 Key / 是现货账户 / 币安那边报错，
+ *    原因都在 `reason` 里，面板照常摆出来、只是不能下单。
+ */
+export interface TradeInfoResult {
+  ready: boolean
+  account: ExchangeKey
+  reason?: string
+  /** 币安原始符号（BTCUSDT） */
+  symbol?: string
+  base?: string
+  balance?: TradeBalance
+  /** 当前杠杆（读不到是 null） */
+  leverage?: number | null
+  /** 交易所允许的最大杠杆（读不到是 null） */
+  maxLeverage?: number | null
+  /** 数量小数位（0.001 的步长 → 3） */
+  amountPrecision?: number
+  pricePrecision?: number
+  /** 最小下单量（基础币） */
+  minAmount?: number
+  /** 最小名义价值（USDT） */
+  minCost?: number
+  /**
+   * 余额没读到的原因（有值 = 可用余额不可信，面板要拦住并把这句摆出来）。
+   * ⚠️ 跟 `errors` 不同：`errors` 是杠杆那类「读不到也能下单」的提示。
+   */
+  balanceError?: string | null
+  /** 杠杆 / 最大杠杆没拿到的原因（提示用） */
+  errors?: string[]
+}
+
+export const fetchTradeInfo = (symbol: string, id?: number) =>
+  get<TradeInfoResult>(
+    `/api/exchange/trade?symbol=${encodeURIComponent(symbol)}` +
+      (id ? `&id=${id}` : '')
+  )
+
+/** 调这个交易对的杠杆（`POST /fapi/v1/leverage`） */
+export const setTradeLeverage = (symbol: string, leverage: number, id?: number) =>
+  post<{ok: boolean; symbol?: string; leverage?: number; error: string | null}>(
+    `/api/exchange/trade/leverage${id ? `?id=${id}` : ''}`,
+    {symbol, leverage}
+  )
+
+export interface TestOrderInput {
+  /** 币安原始符号，如 BTCUSDT */
+  symbol: string
+  /** long = 买入 / short = 卖出 */
+  side: 'long' | 'short'
+  type: 'market' | 'limit'
+  quantity: number
+  /** 限价单 = 委托价；市价单 = 算数量用的参考价（只做最小名义价值的体检） */
+  price?: number
+}
+
+/** 后端复述回来的「实际发出去的参数」——测试单成功时交易所只回一个空对象 */
+export interface TestOrderParams {
+  symbol: string
+  side: 'BUY' | 'SELL'
+  type: 'MARKET' | 'LIMIT'
+  quantity: number
+  price?: number
+  timeInForce?: string
+  positionSide?: 'LONG' | 'SHORT'
+}
+
+export const placeTestOrder = (input: TestOrderInput, id?: number) =>
+  post<{
+    ok: boolean
+    /** 永远是 true：现在只走测试接口 */
+    test?: boolean
+    order?: TestOrderParams
+    error: string | null
+  }>(`/api/exchange/trade/order${id ? `?id=${id}` : ''}`, input)
+
 /** 改自己的用户名（「个人信息」页） */
 export const authRename = (username: string) =>
   post<{ok: boolean; user: AuthUser}>('/api/auth/profile', {username})

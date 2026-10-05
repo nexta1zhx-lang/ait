@@ -6,10 +6,13 @@ import ccxt from 'ccxt'
  * 用户原话：「实时分析 tab 后加入交易所账户信息，显示账户余额和订单历史」。
  *
  * 用 CCXT 统一接口：一个交易所 id + apiKey/secret（+ 有的要 passphrase）就能
- * 走 `fetchBalance()` / `fetchOrders()`。这里只做**只读**查询，
- * 不下单、不撤单 —— 绑进来的 Key 建议只用「读权限」。
+ * 走 `fetchBalance()` / `fetchOrders()`。**这里只做只读查询**（账户 / 持仓 / 挂单），
+ * 不下单、不撤单 —— 下单在 `data/exchange-trade.ts`（2026-10-05 加的，
+ * ⚠️ 那边也**只走币安的测试接口**，不做真下单）。
  *
  * ⚠️ 凭据只在这个进程里用，**不回给前端**（列表接口只回掩码，见 db/exchange-keys.ts）。
+ *    不过「建议只用读权限」这句话 2026-10-05 起不成立了：要用 K 线页底部那个
+ *    下单模块，Key 得有**合约交易**权限（下单模块本身仍是测试单，不会真成交）。
  */
 const CCXT: any = ccxt
 
@@ -156,18 +159,57 @@ function requiresSymbol(e: unknown): boolean {
 
 /**
  * 把 ccxt 的英文报错翻成人能看的中文（认不出就原样回）。
- * 这几条是绑 Key 时最常撞的。
+ * 这几条是绑 Key / 下单最常撞的。
+ *
+ * ⚠️ **匹配前必须先把请求 URL 抠掉**：ccxt 的报错里带着 URL
+ *    （`binance GET https://fapi.binance.com/fapi/v2/balance?timestamp=…&signature=…`），
+ *    而 `signature` / `ip` / `leverage` / `positionSide` 这些词**在 URL 里全都有** ⇒
+ *    一次网络抖动 / 404 会被翻译成「Key 不对」「IP 没白名单」「杠杆超范围」，
+ *    跟真实原因毫不相干，照着查能查一整天（实测踩过）。
+ *    抠掉 URL 后还剩关键字的，才是真·那句话。
+ *
+ * ⚠️ **顺序也有讲究**：`-2015` 那句话里 `API-key` / `IP` / `permissions` 三个词
+ *    是**一起**出现的（`Invalid API-key, IP, or permissions for action, request ip: 1.2.3.4`），
+ *    而币安绝大多数情况下这条就是**IP 白名单**问题。原来的顺序先判「Key 不对」，
+ *    于是永远轮不到 IP 那条 ⇒ 所以 `-2015` 单独按 code 拎出来最先判。
  */
 export function humanize(e: unknown): string {
-  const m = (e as Error)?.message ?? String(e)
+  const raw = (e as Error)?.message ?? String(e)
+  // 抠掉 URL 再匹配（原因见上面那段）；下面那个 code 从原文里取
+  const m = raw.replace(/https?:\/\/\S+/g, ' ')
+  const code = Number(raw.match(/"code"\s*:\s*(-?\d+)/)?.[1])
+
+  /* 币安「页面不存在」时回一张 HTML（接口版本下线就是这样）—— 别把 HTML 甩给用户 */
+  if (/404 Not Found/i.test(m) || /<html/i.test(m))
+    return '交易所这个接口调不通（404）—— 多半是接口版本变了，需要更新代码'
+
+  if (code === -2015) {
+    const ip = raw.match(/request ip:\s*([0-9a-f.:]+)/i)?.[1]
+    return (
+      '这把 Key 接不下这次请求：多半是「IP 白名单」没放行' +
+      (ip ? `（把 ${ip} 加进白名单）` : '') +
+      '，其次看它有没有开对应的交易权限'
+    )
+  }
+  if (code === -1003)
+    return '交易所限流了（请求太频繁）—— 过一会儿再试'
+  if (code === -1022 || code === -2014 || code === -2008)
+    return 'API Key / Secret 不对（或复制时多了空格）'
   if (/signature|invalid api-key|api[- ]?key.*(invalid|not exist)/i.test(m))
     return 'API Key / Secret 不对（或复制时多了空格）'
-  if (/ip|whitelist|restricted location/i.test(m))
-    return '这把 Key 有 IP 白名单限制 —— 要把服务器 IP 加进白名单'
-  if (/permission|not authorized|forbidden|-2015|-1002/i.test(m))
-    return '这把 Key 没有读取权限（去交易所给它开「读取」权限）'
+  if (/permission|not authorized|forbidden|-1002/i.test(m))
+    return '这把 Key 没有这个操作需要的权限（去交易所给它开对应权限）'
+  if (/whitelist|restricted location/i.test(m))
+    return '这把 Key 有 IP 白名单限制 —— 要把服务器出口 IP 加进白名单'
   if (requiresSymbol(m)) return '这个交易所要指定交易对才能查订单'
-  return m
+  /* 网络层的问题：把带 URL 的原始报错换成一句人话（URL 已经抠掉了，这些词不会误命中） */
+  if (
+    /timed out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|TLS|handshake/i.test(
+      m
+    )
+  )
+    return '连不上交易所（超时 / TLS 被断 / 网络不通）—— 过一会儿再试'
+  return raw
 }
 
 /* ------------------------------------------------------------------ */

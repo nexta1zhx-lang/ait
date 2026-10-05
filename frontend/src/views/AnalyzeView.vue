@@ -31,7 +31,7 @@ import CollectForm from '../comps/CollectForm.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
 import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
-import TickerChanges from '../comps/TickerChanges.vue'
+import OrderPanel from '../comps/OrderPanel.vue'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
 import {useSwipeTabs} from '../swipe-tabs'
@@ -1128,9 +1128,14 @@ const heatRows = computed(() => {
               </svg>
             </button>
           </template>
-          <!-- 底部：1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅 -->
+          <!--
+            底部：**合约下单模块**（2026-10-05）。
+            ⚠️ 原来这儿是「1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅」，用户要求
+            挪到顶部行情条右侧那块指标的上方（见 `TickerHead` → `TickerChanges`），
+            腾出来的位置给下单用。
+          -->
           <template #bottom>
-            <TickerChanges />
+            <OrderPanel :symbol="symbol" :active="pageAlive && chartActive" />
           </template>
         </KlineChart>
       </aside>

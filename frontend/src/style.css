@@ -3704,11 +3704,32 @@ body.fixed-viewport .split {
   transition: left 0.6s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
+/*
+ * 右边那一块（**两行**，用户 2026-10-05）：
+ *   ① 多周期涨幅（1天…1年，原来在图**底部**那行，挪上来的）
+ *   ② 成交额 / 资金费率（原来 8 项砍到只剩这 2 项）
+ *
+ * `flex: 0 0 auto`：宽度按内容（涨幅那行最宽）定死，**不给缩** ——
+ * 挤窄了那 6 个档位会折字。真放不下就让整块换行（`.tk-head` 是 `flex-wrap: wrap`）。
+ */
+.tk-head .tk-right {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+/*
+ * 成交额 / 资金费率：两列，**贴着右边**排。
+ * ⚠️ 必须 `justify-content: end` —— 上面那行涨幅比这两个宽，
+ *    不贴右这两格就悬在左边、跟上面的档位对不齐。
+ */
 .tk-head .tk-stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(150px, auto));
   gap: 3px 18px;
-  margin-left: auto;
+  justify-content: end;
   font-size: 11px;
 }
 
@@ -3742,15 +3763,19 @@ body.fixed-viewport .split {
   color: var(--warn);
 }
 
-/* ==================== K 线块底部的多周期涨幅 ==================== */
-/* 平分整行，档位之间用竖线隔开（跟交易所一样） */
+/* ==================== 多周期涨幅（行情条右侧第一行） ==================== */
+/*
+ * 位置变过：原来在 K 线块的**底部**，2026-10-05 用户要求挪到顶部行情条
+ * 右侧那块指标（原来以「标记价格」打头的那块）的**上方** —— 底部腾给下单模块了。
+ * 所以分隔线也从「上边」改成「下边」（它现在是这一块的第一行）。
+ * 平分整行，档位之间用竖线隔开（跟交易所一样）。
+ */
 .tk-changes {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 0;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border);
   font-size: 11px;
 }
 
@@ -3786,6 +3811,407 @@ body.fixed-viewport .split {
 
 .tk-changes .v.down {
   color: var(--bad);
+}
+
+/* ==================== 合约下单模块（K 线页底部） ==================== */
+/*
+ * 2026-10-05：底部那行多周期涨幅挪去顶部行情条了（见 `.tk-right`），
+ * 这一格腾出来给下单（`comps/OrderPanel.vue`）。
+ *
+ * 所以它跟 `.chart-foot`（图下面那行工具）之间只隔一条细线，**不再单独套一层卡片**：
+ * 外面已经是 `.panel` 了，再套一层边框就成了一层套一层。
+ */
+.ord {
+  /* 高度按内容，别被 flex 挤扁（图那一块是 `flex: 1 1 auto`） */
+  flex: 0 0 auto;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.ord-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.ord-head .ord-title {
+  font-size: 13px;
+  font-weight: var(--fw-bold);
+}
+
+/* 「可用 xxx USDT」顶到行尾 */
+.ord-head .ord-avail {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ord-head .ord-avail b {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.ord-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ord-field > span {
+  flex: 0 0 auto;
+}
+
+/*
+ * 输入框：全局那条 `input { width: 100% }` 在 flex 行里会把标签挤没，
+ * 这里改成「吃掉剩下的宽度」。
+ */
+.ord-field input:not([type='range']) {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  padding: 5px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* 数量是算出来的，不是填的 —— 不要输入框那张“能编辑”的脸 */
+.ord-field input[readonly] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+
+.ord-field em {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/*
+ * 价格那一行：**整行都是它的**（数量挪到杆子下面去了，见 `.ord-read`），
+ * 所以限价时那颗「现价」也有地方站了 —— 手机上不再被挤掉（用户 2026-10-05）。
+ * 宽屏别让它拉成一条 930px 的输入框，给个上限。
+ *
+ * ⚠️ 高度要**钉死**：市价模式这一行只有输入框（27px），限价模式多一颗「现价」，
+ *    而那颗 `.ghost.tiny` 自带 padding、比输入框高 4px —— 不钉的话整个下单区
+ *    会跟着长高 4px（用户 2026-10-05：「下单区域高度固定」）。
+ */
+.ord-field.ord-price {
+  max-width: 420px;
+  margin-bottom: 6px;
+}
+
+.ord-field.ord-price input,
+.ord-field.ord-price .ord-fill {
+  height: 27px;
+}
+
+.ord-field.ord-price .ord-fill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+}
+
+/*
+ * 仓位滑动条：**整条都走「细线 + 描边」这一套，不用任何实色块**
+ * （用户 2026-10-05：「刻度放在线上」「不要正方形了」「整体统一」「不要实色」）：
+ *   · 轨道        = 4px 细线
+ *   · 已选那一段  = 主色**半透明**（不是实色块）
+ *   · 刻度        = 2px 半透明灰短线**横穿细线**（不是黑色缺口）
+ *   · 滑块        = **空心圆**（2px 描边 + 面板色内芯，不是实心点）
+ * 四样东西同宽（线 2px / 描边 2px / 刻度 2px），所以看着是一整套。
+ *
+ * ⚠️ `-webkit-` 那套是 Chrome / Android WebView（主战场）；`-moz-` 是桌面 Firefox。
+ *    少写一套后台就退化成系统默认样式（能用，只是不那么统一）。
+ */
+.ord-field.ord-slider {
+  margin-bottom: 4px;
+}
+
+/*
+ * 杆子 + 刻度。
+ *
+ * ★ 刻度为什么自己画：`<datalist>` 那套刻度在 Chrome 里画在**轨道内部**、
+ *   样式改不动，而且不一定显示（实测 headless 里就没有）。
+ *
+ * ⚠️ 位置要跟**滑块的行程**对齐，不是跟轨道两端对齐：
+ *    滑块的**中心**只能在 `[6px, 宽度 - 6px]` 之间跑（半个 12px 圆），
+ *    所以刻度区左右各让出 6px，0% / 100% 才正好压在滑块中心上。
+ *
+ * ⚠️ 选择器必须带 `.ord-field >`：上面那条 `.ord-field > span { flex: 0 0 auto }`
+ *    是给「仓位」这种标签用的，但**它也命中这个 wrapper**（同样是个 span），
+ *    于是 `flex: 1 1 auto` 被它以 (0,1,1) 压掉，杆子缩成 129px（实测）。
+ *    `.ord-field > .ord-bar` 是 (0,2,0) —— 比它重，才长得起来。
+ */
+.ord-field > .ord-bar {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ord-ticks {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  /* 竖直方向以轨道中心为基准（轨道 4px，居中在 22px 的输入框里） */
+  top: 50%;
+  height: 0;
+  /* 只画不挡：不然手指按在刻度上就拖不动杆子了 */
+  pointer-events: none;
+}
+
+/*
+ * 刻度线：**压在轨道线上**（上下各 3px，正好横穿 4px 的细线）。
+ *
+ * ⚠️ 颜色来回试了三轮（用户 2026-10-05 连续反馈），最后落在这儿：
+ *   · `var(--panel)`（线上开黑口子，实心）→「刻度黑色不太行」
+ *   · `--muted` 78% 半透明亮灰          →「白色太违和了还是暗色吧」
+ *   · `--muted` 45% 半透明             → 面板上够暗，但压在**主色淡填充**上会
+ *                                        被底色往回带亮（≈#867D72），照样发白 ✗
+ *   ⇒ 用 **不透明**的暗灰（中性灰 + 面板色调和）：面板上看得见，
+ *     压在填充上也始终比底色深，不会翻成白的。远没到纯黑。
+ */
+.ord-ticks i {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 6px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--muted) 45%, var(--panel));
+}
+
+.ord-field input[type='range'] {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  /* 比轨道高不少：方形滑块小，得把命中区撑大一点才好拖 */
+  height: 22px;
+  padding: 0;
+  /*
+   * ⚠️ `margin: 0` 不能省：Chrome 给 `input[type=range]` 带 **2px 左右外边距**，
+   *    于是它比外面那个 wrapper 窄 4px —— 刻度是照 wrapper 算的，就会跟着偏 2px
+   *    （实测滑动条的行程 898 vs 刻度铺 890，两边各差 2px）。
+   */
+  margin: 0;
+  border: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.ord-field input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  /* 已选那段是主色**半透明**（不是实色块）；没选的是很淡的一条灰线 */
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--blue) 55%, transparent) var(--fill, 0%),
+    color-mix(in srgb, var(--muted) 18%, transparent) var(--fill, 0%)
+  );
+}
+
+/*
+ * 滑块：**空心圆**（用户 2026-10-05：「不要正方形了」「整体统一」「不要实色」）——
+ * 2px 主色描边 + 面板色内芯，跟刻度那 2px 缺口同宽，看着是一套东西。
+ */
+.ord-field input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px; /* (4px 轨道 - 12px 圆) / 2 */
+  border: 2px solid var(--blue);
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: none;
+}
+
+.ord-field input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 18%, transparent);
+}
+
+.ord-field input[type='range']::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--blue) 55%, transparent);
+}
+
+.ord-field input[type='range']::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--blue);
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: none;
+}
+
+/* 空着的时候（没余额 / 没配 Key）别让滑块看着还能拖 */
+.ord-field input[type='range']:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/*
+ * 杆子底下那四格：仓位% / 保证金 / 数量 / 名义价值。
+ *
+ * ★ 固定两列 × 两行（用户 2026-10-05：「下单区域高度固定」）：
+ *   数字用等宽 + `tabular-nums`，格子宽度按 `1fr` 平分 ⇒
+ *   数值怎么变、有没有「—」，这一块的高度都一样，K 线图不会被挤上挤下。
+ */
+.ord-read {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px 16px;
+  margin-bottom: 8px;
+}
+
+.ord-read .ord-r {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: nowrap;
+}
+
+.ord-read .ord-r em {
+  flex: 0 0 auto;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.ord-read .ord-r b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: var(--fw-mid);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 右下角那一行：方向开关 + 下单按钮（用户：「做多做空放右侧」） */
+.ord-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 方向开关：选中那格按方向染色（做多绿、做空红） */
+/* 方向开关：两块等宽，跟着右边那一列（下单按钮）对齐 */
+.ord-side {
+  flex: 0 0 auto;
+}
+
+.ord-side button {
+  flex: 1 1 0;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: var(--fw-bold);
+}
+
+.ord-side button.long.active {
+  background: var(--ok-fill);
+  color: #fff;
+}
+
+.ord-side button.short.active {
+  background: var(--bad-fill);
+  color: #fff;
+}
+
+/*
+ * 下单按钮：右边那一列里宽的那颗，颜色跟着方向走。
+ * 用 `--ok-fill` / `--bad-fill`（实心块专用、已经压深到白字够读），
+ * 别直接拿 `--ok` / `--bad` 铺底 —— 那两个是浅色，压白字看不清（见 `:root` 那段）。
+ *
+ * ⚠️ 它**不因为「暂时下不了」而禁用**（用户 2026-10-05：报错改用提示）——
+ *    点了才弹一条 toast 说为什么下不了；禁用着不解释反而让人不知道卡在哪。
+ *    只有「正在提交」时才 disable。
+ */
+.ord-submit {
+  min-width: 132px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: var(--fw-bold);
+  white-space: nowrap;
+}
+
+.ord-submit.long {
+  background: var(--ok-fill);
+  color: #fff;
+}
+
+.ord-submit.short {
+  background: var(--bad-fill);
+  color: #fff;
+}
+
+/* 杠杆小标签：跟在「市价 / 限价」后面那颗 */
+.ord-head .ord-lev {
+  padding: 4px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: var(--fw-bold);
+  /* 还没跟交易所对过（读不到当前杠杆）时先不高亮，见模板里的 `.set` */
+  color: var(--muted);
+}
+
+.ord-head .ord-lev.set {
+  color: var(--blue);
+  border-color: var(--accent-line);
+  background: var(--blue-soft);
+}
+
+/* 杠杆弹层里的档位格子 */
+.ord-lev-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+  gap: 8px;
+  padding: 10px 0 4px;
+  border-top: 1px solid var(--border);
+}
+
+.ord-lev-grid button {
+  padding: 10px 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: var(--fw-bold);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.ord-lev-grid button.on {
+  background: var(--blue-soft);
+  border-color: var(--accent-line);
+  color: var(--blue);
+}
+
+/*
+ * 下单模块的提示：借用全站那条 `.toast`（位置就是全站默认的**顶部中间**，
+ * 用户 2026-10-05：「提示都放顶部」），只多一件事 ——
+ * `z-index` 要**压过弹层**（`.sheet-mask` 300 / `.sheet` 301）：
+ * 调杠杆失败时弹层还开着，提示得能看见。
+ */
+.toast.ord-toast {
+  z-index: 400;
 }
 
 /* ==================== 币种下拉 ==================== */
@@ -5184,15 +5610,28 @@ button.badge:disabled {
   .chart-side .chart-head,
   .chart-side .chart-foot,
   .chart-side .tk-head,
-  .chart-side .tk-changes {
+  .chart-side .ord {
     /* 8px：跟图那块的左右留白一致（用户：「左右间距放小」） */
     padding-left: 8px;
     padding-right: 8px;
   }
+  /*
+   * 下单模块在窄屏（用户 2026-10-05）：
+   *   ① 提示占屏幕 80% 宽 —— 全站那条 `.toast` 是「跟着文字长短缩」的，
+   *      手机上字一少就成一小条、跳出来看不见；
+   *   ② 「做多/做空 + 下单」都在右下角，把宽度让给上面的仓位杆。
+   */
+  .toast.ord-toast {
+    width: 80vw;
+    max-width: 80vw;
+  }
+  .ord-submit {
+    min-width: 128px;
+  }
   .chart-side .chart-wrap {
     flex: 1 1 auto;
     height: auto;
-    /* 窄屏上限低一点：头顶有行情条、脚下有两行涨幅，别把它们顶出面板 */
+    /* 窄屏上限低一点：头顶有行情条、脚下是下单模块，别把它们顶出面板 */
     min-height: 150px;
   }
   /*
@@ -5343,12 +5782,18 @@ button.badge:disabled {
     flex: 1 1 auto;
     width: auto;
   }
-  .tk-head .tk-stats {
+  /*
+   * 右侧那块（多周期涨幅 + 成交额/资金费率）整块占一行，排在价格下面。
+   * ⚠️ 别再给 `.tk-stats` 写 `flex: 1 0 100%` —— 它现在在 `.tk-right` 这个**列**里，
+   *    百分比是「高度」不是「宽度」，会把它撑成一整屏高。
+   */
+  .tk-head .tk-right {
     flex: 1 0 100%;
-    margin-left: 0;
+    order: 3;
+  }
+  .tk-head .tk-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 3px 12px;
-    order: 3;
   }
   .tk-changes {
     gap: 4px 0;

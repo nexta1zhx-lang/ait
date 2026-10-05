@@ -20,7 +20,9 @@
 **明确不做**
 - ❌ **现货（Spot 钱包）完全不参与统计** —— 老版那套「按币种估值的现货余额列表」整块删掉
 - ❌ 币本位 COIN-M（`dapi*`）
-- ❌ 下单 / 撤单 / 改杠杆 —— 全程**只读**
+- ⚠️ **下单**：2026-10-05 加了 K 线页底部的下单模块，但**只走币安的测试接口**
+  （`POST /fapi/v1/order/test`）—— 只校验参数 / 权限 / 保证金，**不进撮合、不真开仓**。
+  真下单 / 撤单还没做（要放开就是把接口名从 `order/test` 换成 `order`，见第 5 节末尾）
 - ❌ 跨账户、跨用户汇总（净资产 = **那一套 key** 的合约 + C2C）
 
 **净资产口径**：`合约 totalMarginBalance（= 钱包 + 浮盈）+ C2C 折 USDT`
@@ -262,6 +264,34 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 | GET | `/api/exchange/stream?id=` | **SSE** | 推快照/成交变化（照抄 `/api/tickers/stream`） |
 | — | ~~`/api/exchange/account`~~ | — | ✅ M5 已下线（连同它那套 `fetchExchangeBalance` / `fetchExchangeOrders` / `fetchRealizedPnl`） |
 
+### 合约下单（M6，2026-10-05）
+
+K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
+
+| 方法 | 路径 | 打哪个交易所接口 | 说明 |
+|---|---|---|---|
+| GET | `/api/exchange/trade?id=&symbol=BTCUSDT` | `fapi/v2/balance` + **v2** `positionRisk` + `leverageBracket` | 面板初始化：可用余额 / 当前杠杆 / 最大杠杆 / 数量价格精度（三项并发，单项失败只记进 `errors`，余额失败单列 `balanceError`） |
+| POST | `/api/exchange/trade/leverage?id=` | `POST /fapi/v1/leverage` | 调这个交易对的杠杆（有持仓 / 挂单时交易所会拒，原样翻出来） |
+| POST | `/api/exchange/trade/order?id=` | **`POST /fapi/v1/order/test`** | 下单（**测试单**：只校验，不进撮合、不真开仓） |
+
+⚠️ 三个实测踩到的坑（都是真 Key 打出来的）：
+
+1. **`/fapi/v1/positionRisk` 已经下线** —— 直接 404，而且回的是币安那张 HTML 错误页
+   （不翻中文的话界面上就是一坨 HTML）。要用 **v2**。
+2. **v3 的 positionRisk 在「这个交易对没持仓」时回空数组**（`[]`）⇒ 拿不到杠杆；
+   而 **v2 照常回那一条**（`leverage: "20"`, `positionSide: "BOTH"`）。所以优先 v2、v3 只兜底。
+3. **`-2015` 别当「Key 不对」** —— 它是 `Invalid API-key, IP, or permissions for action, request ip: x.x.x.x`，
+   实测绝大多数是 **IP 白名单**没放行。`humanize()` 里这条必须**最先**判，
+   不然会被前面那条 `invalid api-key` 抢走，提示成「API Key / Secret 不对」，怎么查都查不出来。
+
+**数量 / 精度**：不走 ccxt 的 `loadMarkets()`（它会顺手调一个**私有**的 `fetchCurrencies`，
+对只有合约权限的 Key 是多余的请求、还慢一倍），而是直接读公开的 `GET /fapi/v1/exchangeInfo`，
+把 `LOT_SIZE.stepSize` / `PRICE_FILTER.tickSize` / `MIN_NOTIONAL.notional` 缓存 6 小时。
+数量 `= 可用余额 × 仓位% × 杠杆 ÷ 参考价`，按 `stepSize` **向下**取整，再校验 minQty / minNotional。
+
+**要放开真下单**：`placeTestOrder()` 里 `fapiPrivatePostOrderTest` → `fapiPrivatePostOrder`，
+其余逻辑一模一样；但前端「测试单」那几处提示 + 本文档这一段必须一起改。
+
 ---
 
 ## 6. 前端
@@ -292,6 +322,7 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 | **M3** ✅ | 成交/盈亏**读**接口 + 前端接真数据（`交易所账户` tab 换成 `ExchangeAccountLivePanel`，SSE 接上） | 去掉 mock（界面已用真数据） |
 | M4 ✅ | 资产曲线：`GET /api/exchange/history?id=&range=1d\|7d\|30d` + `ExchangeCurveChart.vue`（echarts：close 折线 + high/low 区间带、断档不插值） | 2026-10-05 完成 |
 | M5 ✅ | 删 mock / 预览页 / 老面板 / 老 `/api/exchange/account`（连同它那套余额估值、全量订单、已实现盈亏函数） | 收尾（2026-10-05 完成） |
+| M6 ✅ | K 线页底部**下单模块**（多空 / 滑动条 / 余额 / 杠杆 / 市价·限价）+ `/api/exchange/trade*` 三条接口 —— **只走测试单** | 2026-10-05 完成（`comps/OrderPanel.vue`） |
 
 ### M2 实测记录（2026-10-05，本地跑通）
 
