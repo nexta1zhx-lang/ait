@@ -172,20 +172,22 @@ const exchangeMaxLev = computed(() => {
  * 交易所那边上限更低（冷门币可能只有 5x）时不硬撑，按它来。
  */
 const LEV_STEPS = [1, 2, 3, 5, 10, 15, 20]
+/** 面板打开时的杠杆（用户 2026-10-05：「杠杆默认 10 倍」） */
+const DEFAULT_LEVERAGE = 10
 const levOptions = computed(() =>
   LEV_STEPS.filter(v => v <= Math.min(20, exchangeMaxLev.value))
 )
 const maxLev = computed(() => levOptions.value[levOptions.value.length - 1] ?? 10)
 
 /**
- * 交易所报的杠杆落到哪个档位上。
+ * 一个杠杆值落到哪个**可选档位**上（交易所上限更低时不硬撑 —— 冷门币可能只有 5x）。
  *
- * 用户 2026-10-05 定「**默认 10 倍**、最高 20 倍」：
- *   · 读不到（没配 Key / 读失败）→ 就用 **10**
- *   · 读到但**不在档位里**（比如 8x、50x）→ 取不超过它的最大档
+ * 用户 2026-10-05 定「默认 10 倍、最高 20 倍」：
+ *   · 传进来读不到（0）→ 用 **10**（或这币的上限，取其小）
+ *   · 传进来**不在档位里**（8x、50x）→ 取不超过它的最大档
  *     （50x → 20x，因为上限就是 20；8x → 5x）
- * ⚠️ 这种情况**不算「确认过」**（见下面 `levConfirmed`）：面板显示 5x 而交易所是 8x
- *    就是骗人，所以下单前会真把它设成显示的那个值。
+ *   · ⚠️ 现在**只拿它来夹 `DEFAULT_LEVERAGE`**，不再拿交易所当前值当默认
+ *     （那是 20x，会把「默认 10 倍」顶掉，见 `load()` 里那段注释）。
  */
 function fitLeverage(l: number): number {
   const opts = levOptions.value
@@ -363,13 +365,17 @@ async function load(): Promise<void> {
     if (my !== seq) return
     info.value = r
     /*
-     * 杠杆：交易所报的那个值如果在档位里就直接用它（那是事实）；
-     * 不在档位里 / 读不到 → 落到最接近的档位（默认 10x），并且**标记成没确认**，
-     * 下单前会真设一次，免得「面板写 5x、交易所其实 8x」。
+     * 杠杆：**默认 10 倍**（用户 2026-10-05 定了两次）。
+     *
+     * ⚠️ 不跟着**交易所当前值**走：以前是 `fitLeverage(交易所报的)`，
+     *    而那两个账户上交易所值是 **20x**，于是「默认」实际变成了 20x
+     *    —— 用户 2026-10-05 又提了一次「杠杆默认 10 倍」，这次按默认值来。
+     *    交易所那边不等于 10x 时 `levConfirmed=false`，下单前会真设一次 10x，
+     *    所以面板上写 10x 就一定按 10x 开（不会出现「写着 10、其实是 20」）。
      */
     const l = Math.floor(Number(r.leverage ?? 0))
-    lev.value = fitLeverage(l)
-    levConfirmed.value = l >= 1 && levOptions.value.includes(l)
+    lev.value = fitLeverage(DEFAULT_LEVERAGE)
+    levConfirmed.value = l === lev.value
     if (!priceInput.value) prefillPrice()
     /* 读失败的原因（没配 Key / 现货 / IP 白名单 / 网络）也走提示，不占内容区 */
     if (!r.ready) say(r.reason || '现在下不了单')
@@ -827,12 +833,34 @@ onMounted(async () => {
           >
             {{ tradeKey.name }}
           </span>
-          <!-- 可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast） -->
-          <span class="ord-avail">可用 <b>{{ availableText }}</b> USDT</span>
+          <!--
+            可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast）。
+            真读到 0 的时候**标红 + 带一句怎么办**（用户 2026-10-05：「我怎么开仓位」——
+            默认那套 Key 的钱在现货/资金钱包，合约里是 0，光看「可用 0 USDT」不知道下一步）。
+          -->
+          <span
+            class="ord-avail"
+            :class="{empty: ready && available <= 0}"
+            :title="
+              ready && available <= 0
+                ? '合约账户没有可用余额 —— 先去「交易所账户 → 划转」把 USDT 划到合约钱包，或在「配置 → 下单账户」换一套 Key'
+                : undefined
+            "
+          >
+            可用 <b>{{ availableText }}</b> USDT
+          </span>
         </span>
       </div>
-      <!-- 仓位：按 USDT 算（用户 2026-10-05）—— 每 25% 一个节点，带阻尼 + 震动 -->
-      <label class="ord-field ord-slider ord-pos">
+      <!--
+        仓位：按 USDT 算（用户 2026-10-05）—— 每 25% 一个节点，带阻尼 + 震动
+
+        ⚠️ 这一行的类名**不能叫 `ord-pos`**：那是下面**持仓列表**（`<ul class="ord-pos">`）
+           的类，它带着 `flex: 1 1 0` + `min-height: 0` + `overflow-y: auto`
+           （列表要「吃掉剩余高度、自己在里面滚」）—— 套在滑轨这一行上会把
+           这一行压成 **0 高 + 自动裁剪**，滑轨整个看不见（用户 2026-10-05
+           报「滑轨的怎么没有了」就是这个）。现在叫 `ord-pct`。
+      -->
+      <label class="ord-field ord-slider ord-pct">
         <span>仓位</span>
         <!--
           ⚠️ 刻度是**自己画的**（`.ord-ticks`），没用 `<datalist>` ——

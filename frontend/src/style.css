@@ -3883,6 +3883,14 @@ body.fixed-viewport .split {
   color: var(--text);
 }
 
+/*
+ * 合约里一分钱都没有：把「0」标红，并挂一句「先去划转」的 title
+ *（用户 2026-10-05：「我怎么开仓位」—— 光一个 0 看不出下一步该干嘛）。
+ */
+.ord-avail.empty b {
+  color: var(--bad);
+}
+
 .ord-field {
   display: flex;
   align-items: center;
@@ -5826,6 +5834,26 @@ button.badge:disabled {
     /* 8px：跟图那块的左右留白一致（用户：「左右间距放小」） */
     padding-left: 8px;
     padding-right: 8px;
+    /*
+     * 底部开单区在窄屏用**视口比例**定高（用户 2026-10-05：
+     * 「底部开单可以在高一点，可以用百分比适配大一点的手机」）——
+     * 大屏手机自然更高，小屏由 clamp 兜住（不会比原来的内容高度还矮）。
+     * 内部按 flex 列排，多出来的高度**全给滑轨那一行**（见下面 `.ord-pct`）：
+     * 手机上要「拉百分比」，那一行越高越好按，别的几行不会被拉变形。
+     */
+    display: flex;
+    flex-direction: column;
+    height: clamp(200px, 28dvh, 320px);
+  }
+  .ord-body {
+    /* 高度得一路传下去：`.ord`(定高) → `.ord-body` → `.ord-page` → 滑轨行 */
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .ord-pct {
+    /* 滑轨那一行吃掉剩下的高度，轨道在行内居中（触摸区变大，不是轨道变粗） */
+    flex: 1 1 auto;
+    min-height: 24px;
   }
   /*
    * 下单模块在窄屏（用户 2026-10-05）：
