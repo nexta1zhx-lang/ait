@@ -75,6 +75,8 @@ const props = defineProps<{
   curveBucketSec?: number
   /** 美元 → 人民币汇率（USDT / CNY 切换用；拿不到就退回 7.1） */
   rate?: number
+  /** 正在提交「减仓 / 平仓」（按钮转圈 + 禁点） */
+  busy?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -83,7 +85,19 @@ const emit = defineEmits<{
   (e: 'update:curveRange', range: string): void
   /** 点「划转」——弹层由外层（LivePanel）挂，它才知道当前是哪套 Key */
   (e: 'transfer'): void
+  /** 点「减仓」——弹层由外层挂（选百分比 → 调接口） */
+  (e: 'reduce', pos: PositionRef): void
+  /** 点「平仓」——同样交给外层（它知道是哪套 Key） */
+  (e: 'close', pos: PositionRef): void
 }>()
+
+/** 交给外层的「这是哪一条持仓」——带着 keyId，外层才知道用哪套 Key 去平 */
+export interface PositionRef {
+  symbol: string
+  side: 'long' | 'short'
+  keyId?: number
+  keyName?: string
+}
 
 /** tab 选中的那一格（`'all'` / key id 字符串）：只读 prop，切换往上 emit */
 const picked = computed({
@@ -157,6 +171,52 @@ const shortNotional = computed(() =>
     .reduce((s, p) => s + p.notional, 0)
 )
 const lsTotal = computed(() => longNotional.value + shortNotional.value)
+/**
+ * 币种简写（用户 2026-10-05：「合约币种简写」）。
+ *
+ * ⚠️ 这个板子上的 symbol 有**两种写法**，都要认：
+ *    · 快照里的持仓是 ccxt 统一写法 `1000LUNC/USDT:USDT`（`fetchPositions` 来的）
+ *    · 账本 / 挂单那些是币安原始写法 `1000LUNCUSDT`
+ *   原来只 `replace(/USDT$/)`，统一写法就切成了 `1000LUNC/USDT:` —— 界面上真出现了这个。
+ */
+function baseOf(symbol: string): string {
+  const s = String(symbol).toUpperCase()
+  const head = s.split('/')[0]
+  return head.replace(/USDT$/, '') || s
+}
+
+/** 归一成币安原始交易对（跨数据源比对用：`1000LUNC/USDT:USDT` 与 `1000LUNCUSDT` 等价） */
+function pairOf(symbol: string): string {
+  const s = String(symbol).toUpperCase()
+  return s.includes('/') ? `${s.split('/')[0]}USDT` : s
+}
+
+/** 交给外层的持仓标识（带 keyId，外层才知道用哪套 Key） */
+function posRef(p: FuturesPosition): PositionRef {
+  return {symbol: p.symbol, side: p.side, keyId: p.keyId, keyName: p.keyName}
+}
+
+/**
+ * 这个交易对的**已实现盈亏**（用户 2026-10-05：「已结盈利小字在下面」）。
+ *
+ * ⚠️ 数据来自后端账本（`income` 那批：成交带 realized 的那些），
+ *    所以**只有账本里有这个币的记录时**才有值 —— 没有就返回 `null`，那一行不显示
+ *    （宁可不说，也别显示成 0 让人以为「这个仓位从来没赚过钱」）。
+ * ⚠️ 多套账户合起来看时按 `symbol + keyName` 匹配，别把两套账户的同名币加一起。
+ */
+function realizedOf(p: FuturesPosition): number | null {
+  const rows = props.income ?? []
+  let sum = 0
+  let hit = false
+  for (const r of rows) {
+    if (pairOf(r.symbol) !== pairOf(p.symbol)) continue
+    if (p.keyName && r.keyName && r.keyName !== p.keyName) continue
+    sum += Number(r.income ?? 0)
+    hit = true
+  }
+  return hit ? sum : null
+}
+
 /** 只有一个方向时（比如全是多仓），条子别画成 0% —— 那一段独占整条 */
 const longPct = computed(() =>
   lsTotal.value > 0
@@ -392,41 +452,12 @@ const RANGES = [
 
         <div class="hero-v">{{ money(netValue) }}</div>
 
-        <div class="split-bar">
-          <i class="fx" :style="{width: pctOf(futuresValue) + '%'}" />
-          <i class="c2c" :style="{width: pctOf(c2cValue) + '%'}" />
-          <i class="sp" :style="{width: pctOf(spotValue) + '%'}" />
-        </div>
-        <ul class="split-lg">
-          <li>
-            <i class="fx" />
-            <span class="lb">USDT 合约</span>
-            <b>{{ money(futuresValue) }}</b>
-            <span class="pc">{{ pctOf(futuresValue).toFixed(1) }}%</span>
-          </li>
-          <li v-if="c2c">
-            <i class="c2c" />
-            <span class="lb">C2C 钱包</span>
-            <b>{{ money(c2cValue) }}</b>
-            <span class="pc">{{ pctOf(c2cValue).toFixed(1) }}%</span>
-          </li>
-          <!--
-            现货：**只有 USDT 一个币**（用户 2026-10-05：「只要 usdt 的统计简单化」）——
-            所以标签直接写「现货（USDT）」，别写成「现货」让人以为别的币也算进来了。
-            老快照没有这一列 ⇒ `spot` 是 null，整行不显示。
-          -->
-          <li v-if="spot">
-            <i class="sp" />
-            <span class="lb">现货（USDT）</span>
-            <b>{{ money(spotValue) }}</b>
-            <span class="pc">{{ pctOf(spotValue).toFixed(1) }}%</span>
-          </li>
-        </ul>
-
         <!--
-          ⑥ 净资产走势（M4）—— **默认折叠**在这个位置（钱包余额 / 未实现盈亏的上方）；
-          折叠时这一行正好当作下面四格的小标题，展开才拉图。
-          切换开关就是右边那个**小图标**（不占地方，也不给整行做 tab 背景）。
+          ⑥ **币种占比 + 净资产走势**（合并成一块、可折叠）。
+          用户 2026-10-05：「币种占比和资产走势放到一起可折叠」。
+
+          折叠时标题那一行就把三块的百分比摆出来（不然折叠起来等于把占比也藏了，
+          净资产只剩一个光秃秃的大数）。展开才是完整的占比条 / 图例 / 曲线。
           ⚠️ 用 `v-if` 而不是 `v-show`：折叠时**根本不下载** echarts 那个 chunk，
           也不存在「容器 0 宽高时 init」那个坑（见 `ExchangeCurveChart.vue` 注释）。
         -->
@@ -437,7 +468,18 @@ const RANGES = [
             :aria-expanded="curveOpen"
             @click="curveOpen = !curveOpen"
           >
-            <span class="fold-t">净资产走势</span>
+            <span class="fold-t">币种占比 · 净资产走势</span>
+            <span class="fold-sum">
+              <span class="fs fx"
+                >合约 {{ pctOf(futuresValue).toFixed(0) }}%</span
+              >
+              <span v-if="c2c" class="fs c2c"
+                >C2C {{ pctOf(c2cValue).toFixed(0) }}%</span
+              >
+              <span v-if="spot" class="fs sp"
+                >现货 {{ pctOf(spotValue).toFixed(0) }}%</span
+              >
+            </span>
             <span class="spacer" />
             <svg
               class="chev"
@@ -459,6 +501,33 @@ const RANGES = [
           </button>
 
           <template v-if="curveOpen">
+            <!-- 占比条 + 图例（原来在折叠区外面一直露着，现在跟走势收在一起） -->
+            <div class="split-bar">
+              <i class="fx" :style="{width: pctOf(futuresValue) + '%'}" />
+              <i class="c2c" :style="{width: pctOf(c2cValue) + '%'}" />
+              <i class="sp" :style="{width: pctOf(spotValue) + '%'}" />
+            </div>
+            <ul class="split-lg">
+              <li>
+                <i class="fx" />
+                <span class="lb">USDT 合约</span>
+                <b>{{ money(futuresValue) }}</b>
+                <span class="pc">{{ pctOf(futuresValue).toFixed(1) }}%</span>
+              </li>
+              <li v-if="c2c">
+                <i class="c2c" />
+                <span class="lb">C2C 钱包</span>
+                <b>{{ money(c2cValue) }}</b>
+                <span class="pc">{{ pctOf(c2cValue).toFixed(1) }}%</span>
+              </li>
+              <li v-if="spot">
+                <i class="sp" />
+                <span class="lb">现货（USDT）</span>
+                <b>{{ money(spotValue) }}</b>
+                <span class="pc">{{ pctOf(spotValue).toFixed(1) }}%</span>
+              </li>
+            </ul>
+
             <ExchangeCurveChart
               :points="curve ?? []"
               :bucket-sec="curveBucketSec ?? 300"
@@ -482,30 +551,23 @@ const RANGES = [
           </template>
         </div>
 
-        <!-- ② 合约明细：手机上排 2×2，别挤成一行小字 -->
-        <div v-if="fx" class="grid4">
-          <div>
-            <span class="k">钱包余额</span><b>{{ money(fx.wallet) }}</b>
-          </div>
-          <div>
-            <span class="k">未实现盈亏</span>
-            <b :class="tone(fx.unrealized)">{{ signedMoney(fx.unrealized) }}</b>
-          </div>
-          <div>
-            <span class="k">可用余额</span><b>{{ money(fx.available) }}</b>
-          </div>
-          <div>
-            <span class="k">占用保证金</span><b>{{ money(fx.used) }}</b>
-          </div>
-        </div>
-
         <p v-if="data.account.sandbox" class="hint">模拟盘（sandbox）</p>
       </section>
 
-      <!-- ③ 仓位统计 -->
+      <!--
+        ③ **合约 · 仓位**（用户 2026-10-05：「仓位统计和资产走势下面的钱包信息合并，
+        上面显示可用占用未实现，下面显示仓位总额多头空头」）。
+
+        原来这里是两块：上面hero卡里「钱包余额/未实现/可用/占用」四格，
+        下面「仓位统计」又重复了一遍「名义总额/未实现/多头/空头」。
+        现在并成一块，两排三格，**未实现盈亏只出现一次**：
+          上排 = 账户的钱（可用 / 占用 / 未实现）
+          下排 = 仓位的事（仓位总额 / 多头 / 空头）
+        ⚠️ 钱包余额那一格去掉了 —— 它在上面「币种占比」的图例里就是「USDT 合约」那一行。
+      -->
       <section class="panel">
         <div class="pn-h">
-          <h2>仓位统计</h2>
+          <h2>合约 · 仓位</h2>
           <!-- 总杠杆（用户 2026-10-05：「仓位统计显示总杠杆倍数」） -->
           <span
             v-if="totalLev > 0"
@@ -519,19 +581,26 @@ const RANGES = [
             {{ stats.longCount }} / 空 {{ stats.shortCount }}
           </span>
         </div>
-        <div class="grid4">
+        <div class="grid3">
           <div>
-            <span class="k">名义总额</span><b>{{ money(stats.notional) }}</b>
+            <span class="k">可用余额</span><b>{{ money(fx?.available ?? 0) }}</b>
+          </div>
+          <div>
+            <span class="k">占用保证金</span><b>{{ money(fx?.used ?? 0) }}</b>
           </div>
           <div>
             <span class="k">未实现盈亏</span>
-            <b :class="tone(stats.unrealized)">{{
-              signedMoney(stats.unrealized)
+            <b :class="tone(fx?.unrealized ?? 0)">{{
+              signedMoney(fx?.unrealized ?? 0)
             }}</b>
           </div>
+        </div>
+        <div class="grid3">
           <div>
-            <span class="k">多头</span
-            ><b class="up">{{ money(longNotional) }}</b>
+            <span class="k">仓位总额</span><b>{{ money(stats.notional) }}</b>
+          </div>
+          <div>
+            <span class="k">多头</span><b class="up">{{ money(longNotional) }}</b>
           </div>
           <div>
             <span class="k">空头</span
@@ -547,12 +616,27 @@ const RANGES = [
       <!-- ④ tab -->
       <SegTabs v-model="tab" :options="tabs" />
 
+      <!--
+        tab 内容区（用户 2026-10-05：「底部的几个 tab 内容价格高度，不要让外屏无限滚动」）：
+        **定高 + 内部自己滚** —— 持仓/挂单/成交一多，原来会把整页（外屏）越撑越长，
+        滑到下面找 tab 得翻半天。现在列表再长也只在这个框里滚。
+        ⚠️ `overscroll-behavior: contain`：滚到底之后别把外层页面一起带走
+          （手机上特别烦，一滑就滑飞）。
+      -->
+      <div class="tabs-body">
       <!-- 持仓 -->
       <section v-show="tab === 'pos'" class="panel">
         <ul v-if="positions.length" class="poss">
+          <!--
+            一条持仓的版式（用户 2026-10-05 逐条提的）：
+              · 币种用**简写**（`1000LUNCUSDT` → `1000LUNC`），别把 USDT 也念一遍
+              · **未实现盈亏靠右**，下面挂一行小字「已结」= 这个币到现在的已实现盈亏
+              · 「名义」改叫「价值」，强平价 / 距强平**不要小字**（它不是附注，是要紧的数）
+              · 底部两颗按钮：减仓（弹窗选百分比）/ 平仓
+          -->
           <li v-for="p in positions" :key="(p.keyName ?? '') + p.symbol + p.side">
             <div class="p-h">
-              <span class="sym">{{ p.symbol }}</span>
+              <span class="sym">{{ baseOf(p.symbol) }}</span>
               <span class="side" :class="p.side === 'short' ? 'sell' : 'buy'">
                 {{ posText(p.side) }}
               </span>
@@ -560,12 +644,22 @@ const RANGES = [
               <!-- 「全部」那一格里同一币可能出现在两套账户 ⇒ 标出来源 -->
               <span v-if="p.keyName" class="ktag">{{ p.keyName }}</span>
               <span class="spacer" />
-              <span class="pnl" :class="tone(p.unrealizedPnl)">
-                {{ signedMoney(p.unrealizedPnl) }}
-                <em v-if="p.percentage !== null">
-                  {{ p.percentage >= 0 ? '+' : '−'
-                  }}{{ fixed(Math.abs(p.percentage), 2) }}%
-                </em>
+              <span class="pnl-wrap">
+                <span class="pnl" :class="tone(p.unrealizedPnl)">
+                  {{ signedMoney(p.unrealizedPnl) }}
+                  <em v-if="p.percentage !== null">
+                    {{ p.percentage >= 0 ? '+' : '−'
+                    }}{{ fixed(Math.abs(p.percentage), 2) }}%
+                  </em>
+                </span>
+                <span
+                  v-if="realizedOf(p) !== null"
+                  class="realized"
+                  :class="tone(realizedOf(p) ?? 0)"
+                  title="这个交易对到现在的已实现盈亏（手续费/资金费也算在里面）"
+                >
+                  已结 {{ signedMoney(realizedOf(p) ?? 0) }}
+                </span>
               </span>
             </div>
             <div class="kv">
@@ -584,13 +678,33 @@ const RANGES = [
               </div>
             </div>
             <div class="p-f">
-              <span>名义 {{ money(p.notional) }}</span>
+              <span class="p-val">价值 {{ money(p.notional) }}</span>
               <span
                 v-if="liqGap(p) !== null"
-                :class="liqGap(p)! < 5 ? 'warn' : 'dim'"
+                class="p-liq"
+                :class="{warn: liqGap(p)! < 5}"
               >
                 距强平 {{ liqGap(p)!.toFixed(1) }}%
               </span>
+              <span class="spacer" />
+              <button
+                type="button"
+                class="ghost tiny p-btn"
+                :disabled="busy"
+                title="减仓（只平掉一部分）"
+                @click="emit('reduce', posRef(p))"
+              >
+                减仓
+              </button>
+              <button
+                type="button"
+                class="ghost tiny p-btn warn"
+                :disabled="busy"
+                title="平掉这一条持仓（市价全平）"
+                @click="emit('close', posRef(p))"
+              >
+                平仓
+              </button>
             </div>
           </li>
         </ul>
@@ -759,6 +873,7 @@ const RANGES = [
           <p class="dim tiny">⚠️ 只统计 USDT，现货里的其他币种不计入净资产</p>
         </template>
       </section>
+      </div>
     </template>
 
     <p v-else-if="reason" class="dim no-data">{{ reason }}</p>
@@ -899,6 +1014,78 @@ const RANGES = [
   background: #4cc4b0;
 }
 
+/*
+ * 三格（用户 2026-10-05 合并后的「合约 · 仓位」那块）：两排，每排三个。
+ * ⚠️ 手机上三列会有点挤（112px × 3 + 间距 ≈ 356px，390 宽的屏正好），
+ *    所以窄屏降到 `minmax(86px, 1fr)` —— 数字是等宽的，挤一点也读得清。
+ */
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.16));
+}
+.grid3 + .grid3 {
+  /* 第二排（仓位总额 / 多头 / 空头）—— 不再来一条分隔线，看着是一张表 */
+  margin-top: 10px;
+  padding-top: 0;
+  border-top: 0;
+}
+.grid3 > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.grid3 .k {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.grid3 b {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 折叠标题右边那串百分比摘要（折叠时也能看出占比） */
+.fold-sum {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.fold-sum .fs {
+  color: var(--muted);
+}
+.fold-sum .fs::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  border-radius: 2px;
+  vertical-align: 1px;
+}
+.fold-sum .fx::before {
+  background: var(--accent, #d3b583);
+}
+.fold-sum .c2c::before {
+  background: #5b8def;
+}
+.fold-sum .sp::before {
+  background: #4cc4b0;
+}
+
 /* 四格：手机 2×2、宽一点自动 4 列（不写死断点，靠 minmax） */
 .grid4 {
   display: grid;
@@ -968,6 +1155,19 @@ const RANGES = [
 .sub-h {
   margin: 12px 0 2px;
 }
+/*
+ * 「底部几个 tab 的内容」定高 + 自己滚（用户 2026-10-05：
+ * 「底部的几个 tab 内容价格高度，不要让外屏无限滚动」）。
+ *
+ * 高度取视口的 46%（手机上 ≈390px，正好装 3~4 条持仓），插到 460px 封顶 ——
+ * 桌面端不至于空出一大片。内容少的时候自然高度，不会被撑成空白。
+ */
+.tabs-body {
+  max-height: min(46vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .poss,
 .incs,
 .rows {
@@ -1047,14 +1247,56 @@ const RANGES = [
   font-weight: 500;
   font-size: 12.5px;
 }
+/*
+ * 盈亏那一块（用户 2026-10-05）：
+ *   未实现盈亏**靠右**、字号大一点（它是这一条里最要紧的数）；
+ *   下面挂一行小字「已结 +x.xx」= 这个币到现在的已实现盈亏（账本里来的）。
+ * 所以包一层 `.pnl-wrap`（纵向），`margin-left:auto` 顶到行尾 —— 原来靠 `.spacer` 顶，
+ * 但那样右面只剩一个裸数字，下面是空的一行。
+ */
+.pnl-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  margin-left: auto;
+  min-width: 0;
+}
+.realized {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
 .p-f {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 6px;
+  gap: 10px;
+  margin-top: 8px;
   font-size: 11.5px;
   color: var(--muted);
+}
+/*
+ * 「强平价 / 距强平」**不用小字**（用户 2026-10-05：「强平不要小写」）——
+ * 这俩是要紧的数，别拿 `.dim` 那种淡灰埋了。跟同行正文一个字号、正常颜色，
+ * 只有确实危险（<5%）时才转成警示色。
+ */
+.p-f .p-val,
+.p-f .p-liq {
+  font-size: 12px;
+  color: var(--text);
+}
+.p-f .p-liq.warn {
+  color: var(--warn, #e0a33e);
+  font-weight: 500;
+}
+/* 底部那两颗按钮：靠右、别把「价值」挤走 */
+.p-btn {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+.p-btn.warn {
+  color: var(--warn, #e0a33e);
+  border-color: color-mix(in srgb, var(--warn, #e0a33e) 45%, transparent);
 }
 .grps {
   display: flex;

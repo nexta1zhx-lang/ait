@@ -4264,13 +4264,37 @@ body.fixed-viewport .split {
 }
 
 .ord-pos li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
+  display: block;
+  padding: 6px 0;
   border-top: 1px solid var(--border);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/*
+ * 一条持仓**两行**（用户 2026-10-05）：
+ *   ① 币种 · 方向 · 仓位价值 …… 未实现盈亏（顶到行尾）
+ *   ② 开仓数量 · 开仓价 · 杠杆 …… 减仓 / 平仓
+ * 两行都是 flex + `nowrap`，`overflow: hidden` 兜住窄屏（宁可截断也不换行撑高）。
+ */
+.ord-pos .op-l1,
+.ord-pos .op-l2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ord-pos .op-l2 {
+  margin-top: 3px;
+}
+
+/* 把后面那组推到行尾（`.spacer` 只在组件里，这里自己写一份） */
+.ord-pos .op-l1 > .spacer,
+.ord-pos .op-l2 > .spacer {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .ord-pos li:first-child {
@@ -4286,6 +4310,25 @@ body.fixed-viewport .split {
 .ord-pos .op-side {
   flex: 0 0 auto;
   font-weight: var(--fw-bold);
+}
+
+/* 仓位价值（方向后面那串小字，原来是数量，用户 2026-10-05 让换成它） */
+.ord-pos .op-val {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+}
+
+/* 杠杆：灰色小字，跟着第二行 */
+.ord-pos .op-lev {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .ord-pos .side-long,
@@ -4308,11 +4351,19 @@ body.fixed-viewport .split {
   text-overflow: ellipsis;
 }
 
-/* 盈亏顶到行尾（挨着「平仓」那颗） */
+/* 盈亏顶到第一行行尾（前面那个 `.spacer` 干的活） */
 .ord-pos .op-pnl {
-  margin-left: auto;
+  flex: 0 0 auto;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* 减仓：中性色（黄色留给「平仓」那颗，别两个都吓人） */
+.ord-pos .op-reduce {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .ord-pos .op-close {

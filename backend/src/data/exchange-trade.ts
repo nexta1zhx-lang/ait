@@ -737,7 +737,16 @@ function pickSide(rows: any[], side: 'long' | 'short'): any[] {
 export async function closePositions(
   c: ExchangeCredentials,
   keyId: number | string,
-  target?: {symbol?: string; side?: 'long' | 'short'},
+  target?: {
+    symbol?: string
+    side?: 'long' | 'short'
+    /**
+     * 只平掉这么多（百分比 0~100，用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」）。
+     * 不传 / ≥100 = 全平。⚠️ 按合约精度**向下取整**，取整后是 0 就报错，
+     * 绝不「四舍五入」多平一点。
+     */
+    pct?: number
+  },
   test = true
 ): Promise<{orders: CloseOrderParams[]}> {
   assertTradable(c)
@@ -761,6 +770,12 @@ export async function closePositions(
   if (!live.length)
     throw new Error(target?.symbol ? '这个交易对现在没有持仓' : '现在没有任何持仓')
 
+  const pctRaw = Number(target?.pct)
+  const partial = Number.isFinite(pctRaw) && pctRaw > 0 && pctRaw < 100
+  if (partial && !(target?.symbol))
+    throw new Error('减仓要指定交易对（一次只减一个仓位）')
+  const ratio = partial ? pctRaw / 100 : 1
+
   const dual = await isDualSide(ex, keyId)
   const orders: CloseOrderParams[] = []
 
@@ -768,8 +783,14 @@ export async function closePositions(
     const symbol = String(row.symbol ?? '').toUpperCase()
     if (!symbol) continue
     const spec = await specFor(c, symbol)
-    const quantity = floorToStep(pos.amount, spec.stepSize)
-    if (!(quantity > 0)) continue
+    const quantity = floorToStep(pos.amount * ratio, spec.stepSize)
+    if (!(quantity > 0)) {
+      if (partial)
+        throw new Error(
+          `减仓 ${pctRaw}% 按合约精度取整之后是 0（这个仓位一共 ${pos.amount}，最小变动 ${spec.stepSize}），比例放大一点`
+        )
+      continue
+    }
     /* ⚠️ `from` 只是回给前端看的，**不能**混进发给交易所的参数里 */
     const params: OrderParams = {
       symbol,

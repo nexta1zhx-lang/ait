@@ -16,7 +16,11 @@
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
 import ExchangeAccountBoard from './ExchangeAccountBoard.vue'
 import TransferSheet from './TransferSheet.vue'
+import ReduceSheet from './ReduceSheet.vue'
+import type {PositionRef} from './ExchangeAccountBoard.vue'
+import {testOrder} from '../settings'
 import {
+  closeTradePositions,
   exchangeStream,
   fetchExchangeCurve,
   fetchExchangeFills,
@@ -37,8 +41,15 @@ import {
   type FuturesPosition
 } from '../api'
 
-/** 快照超过这么久就后台刷一次（后端采样是 5 分钟，这里更积极一点） */
-const REFRESH_AFTER_SEC = 60
+/**
+ * 快照超过这么久就后台刷一次（后端采样是 5 分钟，这里更积极）。
+ *
+ * ⚠️ 2026-10-05 从 60s 收到 **15s**：用户反馈「持仓…出来太慢」——
+ *    后端采样本身是 5 分钟一次，页面一打开如果快照已经 40 秒没更新，
+ *    就得等一分钟才看见刚开的仓。现在 15 秒以上的旧快照一进页面就刷。
+ *    不会变成轮询：刷完 age 归零，要等它再旧过 15 秒才可能触发下一次。
+ */
+const REFRESH_AFTER_SEC = 15
 /** 成交列表最多留多少条 */
 const FILLS_MAX = 60
 
@@ -150,7 +161,8 @@ function mergeOverviews(
   const positions: FuturesPosition[] = []
   for (const p of list)
     for (const pos of p.ov.futures?.positions ?? [])
-      positions.push({...pos, keyName: p.key.name})
+      /* `keyId` 是给「减仓 / 平仓」用的（要知道拿哪套凭据去下单） */
+      positions.push({...pos, keyName: p.key.name, keyId: p.key.id})
 
   const anyC2c = list.some(p => p.ov.c2c)
   /* 现货：**只要有一套报了数**就显示合计（都没报就 null，整块不出现）。
@@ -223,6 +235,113 @@ const curveRange = ref('1d')
 const curveBucketSec = ref(300)
 /** 上次取曲线的时间 —— SSE 事件来得勤，靠它节流（别每个快照都拉一遍） */
 let curveAt = 0
+
+/* ---------------- 减仓 / 平仓（持仓卡片底部那两颗按钮） ---------------- */
+
+/** 操作结果提示（这一页没有全局 toast，就摆在面板底下，4 秒自己消失） */
+const posMsg = ref('')
+let posMsgTimer: ReturnType<typeof setTimeout> | null = null
+function sayMsg(text: string): void {
+  posMsg.value = text
+  if (posMsgTimer) clearTimeout(posMsgTimer)
+  posMsgTimer = setTimeout(() => {
+    posMsg.value = ''
+  }, 4000)
+}
+
+/** 正在提交（两颗按钮一起禁点） */
+const posBusy = ref(false)
+
+/** 正在减仓的那一条（null = 弹层关着） */
+const reduceRow = ref<PositionRef | null>(null)
+
+/** 那条持仓现在多大（从当前视图里找；找不到就 0，弹层只是少显示一行估算） */
+const reducePos = computed<FuturesPosition | null>(() => {
+  const r = reduceRow.value
+  if (!r) return null
+  const rows = data.value?.futures?.positions ?? []
+  return (
+    rows.find(
+      p =>
+        p.symbol === r.symbol &&
+        p.side === r.side &&
+        (!r.keyId || !p.keyId || p.keyId === r.keyId)
+    ) ?? null
+  )
+})
+const reduceAmount = computed(() => reducePos.value?.amount ?? 0)
+const reduceNotional = computed(() => reducePos.value?.notional ?? 0)
+
+/**
+ * 币种简写（`1000LUNCUSDT` → `1000LUNC`），跟板子里同一个写法。
+ * ⚠️ 持仓是 ccxt 统一写法（`1000LUNC/USDT:USDT`），所以先按 `/` 切一刀再剥 USDT ——
+ *    不然弹层标题会写成「1000LUNC/USDT:」。
+ */
+function baseOf(symbol: string): string {
+  const s = String(symbol).toUpperCase()
+  return s.split('/')[0].replace(/USDT$/, '') || s
+}
+
+function openReduce(p: PositionRef): void {
+  if (posBusy.value) return
+  reduceRow.value = p
+}
+
+/** 减仓：市价 reduceOnly 只平一部分（真单，⚠️ 会真成交） */
+async function confirmReduce(pct: number): Promise<void> {
+  const r = reduceRow.value
+  if (!r || posBusy.value) return
+  posBusy.value = true
+  try {
+    const res = await closeTradePositions(
+      {symbol: r.symbol, side: r.side, pct},
+      r.keyId,
+      /* ⚠️ 跟「配置 → 测试下单」保持一致：开着测试单就只校验，不然这里会真成交 */
+      testOrder.value
+    )
+    if (res.ok) {
+      reduceRow.value = null
+      sayMsg(
+        res.test
+          ? `✅ 测试减仓通过校验：${baseOf(r.symbol)} ${pct}%（没进撮合）`
+          : `✅ 已减仓 ${baseOf(r.symbol)} ${pct}%`
+      )
+      void doRefresh()
+    } else {
+      sayMsg(res.error || '减仓失败')
+    }
+  } catch (e) {
+    sayMsg(msg(e))
+  } finally {
+    posBusy.value = false
+  }
+}
+
+/** 平仓：整条市价全平（真单） */
+async function closeRow(p: PositionRef): Promise<void> {
+  if (posBusy.value) return
+  const name = baseOf(p.symbol)
+  const warn = testOrder.value ? '（当前是测试单，只校验、不会真平）' : '，市价全平，真成交。'
+  if (!window.confirm(`平掉 ${name} 这一条持仓？${warn}`)) return
+  posBusy.value = true
+  try {
+    const res = await closeTradePositions(
+      {symbol: p.symbol, side: p.side},
+      p.keyId,
+      testOrder.value
+    )
+    if (res.ok) {
+      sayMsg(res.test ? `✅ 测试平仓通过校验：${name}（没进撮合）` : `✅ 已平仓 ${name}`)
+      void doRefresh()
+    } else {
+      sayMsg(res.error || '平仓失败')
+    }
+  } catch (e) {
+    sayMsg(msg(e))
+  } finally {
+    posBusy.value = false
+  }
+}
 
 /** 已实现盈亏 = 账本里带 realized 的那些（一笔成交一条）；多套时跟着成交一起带 key 名 */
 const income = computed<ExchangeIncomeRow[]>(() =>
@@ -586,9 +705,28 @@ onUnmounted(stopStreams)
       :curve-range="curveRange"
       :curve-bucket-sec="curveBucketSec"
       :rate="rate"
+      :busy="posBusy"
       @update:curve-range="curveRange = $event"
       @refresh="doRefresh()"
       @transfer="transferOpen = true"
+      @reduce="openReduce"
+      @close="closeRow"
+    />
+
+    <!--
+      减仓弹层（用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」）——
+      跟划转一样挂在容器这一层：只有它知道那一条持仓是哪套 Key 的。
+    -->
+    <ReduceSheet
+      :open="!!reduceRow"
+      :name="reduceRow ? baseOf(reduceRow.symbol) : ''"
+      :side="reduceRow?.side ?? 'long'"
+      :amount="reduceAmount"
+      :notional="reduceNotional"
+      :test-order="testOrder"
+      :busy="posBusy"
+      @close="reduceRow = null"
+      @confirm="confirmReduce"
     />
 
     <!--
@@ -606,6 +744,7 @@ onUnmounted(stopStreams)
     />
 
     <p v-if="ordersErr" class="dim tiny">挂单查询失败：{{ ordersErr }}</p>
+    <p v-if="posMsg" class="dim tiny">{{ posMsg }}</p>
   </div>
 </template>
 

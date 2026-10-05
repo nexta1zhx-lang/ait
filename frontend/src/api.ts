@@ -707,6 +707,11 @@ export interface FuturesPosition {
    * 单套账户时不带。用来在列表里标出来源（用户 2026-10-05：「其余针对 key 数据加标签」）。
    */
   keyName?: string
+  /**
+   * 同上，那套 Key 的 id —— 「减仓 / 平仓」要知道拿哪套凭据去下单
+   * （用户 2026-10-05：持仓卡片底部加「减仓 / 平仓」）。
+   */
+  keyId?: number
 }
 
 /** 一份快照 —— 后端落库后读回来的那份（见 `docs/EXCHANGE.md`） */
@@ -1014,16 +1019,18 @@ export const placeOrder = (
   )
 
 /**
- * 平仓。
+ * 平仓 / 减仓。
  *
  * · 不传 `target` → **一键平仓**（账户里所有持仓全平）
  * · 只给 `symbol` → 平这个交易对
  * · `symbol + side` → 只平那一条（面板上每一行那颗「平仓」；双向持仓时一个币有两条）
+ * · `symbol + side + pct` → **减仓**：只平掉这个仓位的 `pct`%（用户 2026-10-05
+ *   「加个按钮减仓 弹窗选择百分比」）
  *
  * `test = false` 时是**真平仓**。
  */
 export const closeTradePositions = (
-  target?: {symbol?: string; side?: 'long' | 'short'},
+  target?: {symbol?: string; side?: 'long' | 'short'; pct?: number},
   id?: number,
   test = true
 ) =>

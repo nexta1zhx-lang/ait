@@ -48,11 +48,12 @@ import {
   type TradeInfoResult,
   type TradePositionRow
 } from '../api'
-import {fmt} from '../format'
+import {fmt, usd} from '../format'
 import {testOrder} from '../settings'
 import {contracts} from '../store'
 import {freshLivePrice, ticker} from '../ticker'
 import {loadTradeKeys, tradeKey} from '../trade-account'
+import ReduceSheet from './ReduceSheet.vue'
 
 const props = defineProps<{
   /** 当前币种（基础币，如 BTC） */
@@ -532,6 +533,48 @@ function pnlText(v: number): string {
   return `${v >= 0 ? '+' : '−'}${fmt(Math.abs(v), 2)}`
 }
 
+/* ---------------- 减仓（用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」） ---------------- */
+
+/** 正在减仓的那一条（null = 弹层关着） */
+const reduceRow = ref<TradePositionRow | null>(null)
+
+function openReduce(p: TradePositionRow): void {
+  if (busy.value || levBusy.value) return
+  reduceRow.value = p
+}
+
+async function confirmReduce(pct: number): Promise<void> {
+  const p = reduceRow.value
+  if (!p || busy.value) return
+  busy.value = true
+  try {
+    const r = await closeTradePositions(
+      {symbol: p.symbol, side: p.side, pct},
+      keyId.value,
+      testOrder.value
+    )
+    if (r.ok) {
+      reduceRow.value = null
+      buzz(12)
+      const q = ((p.amount * pct) / 100).toFixed(Math.min(12, amountPrecision.value))
+      say(
+        r.test
+          ? `✅ 测试减仓通过校验：${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）—— 没进撮合`
+          : `✅ 已减仓 ${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）`,
+        'ok'
+      )
+      void loadPositions()
+    } else {
+      buzz([20, 60, 20])
+      say(r.error || '减仓失败')
+    }
+  } catch (e) {
+    say((e as Error).message)
+  } finally {
+    busy.value = false
+  }
+}
+
 async function loadPositions(): Promise<void> {
   if (posLoading.value) return
   posLoading.value = true
@@ -896,7 +939,7 @@ onMounted(async () => {
         <span class="ord-r"><em>保证金</em><b>{{ marginText }} USDT</b></span>
         <span class="ord-r"><em>数量</em><b>{{ quantityText }} {{ base }}</b></span>
         <span class="ord-r"
-          ><em>名义价值</em><b>{{ notionalText }} USDT</b></span
+          ><em>仓位价值</em><b>{{ notionalText }} USDT</b></span
         >
       </div>
 
@@ -949,32 +992,59 @@ onMounted(async () => {
       -->
       <ul v-if="positions.length" class="ord-pos">
         <li v-for="p in positions" :key="p.symbol + p.side">
-          <b class="op-sym">{{ baseOf(p.symbol) }}</b>
-          <span
-            class="op-side"
-            :class="p.side === 'long' ? 'side-long' : 'side-short'"
-            >{{ sideText(p) }}</span
-          >
-          <span class="op-qty">{{ posQty(p) }}</span>
-          <span class="op-entry">开 {{ fmt(p.entryPrice) }}</span>
-          <b
-            class="op-pnl"
-            :class="p.unrealized >= 0 ? 'pnl-up' : 'pnl-down'"
-            >{{ pnlText(p.unrealized) }}</b
-          >
-          <button
-            type="button"
-            class="ghost tiny op-close"
-            :disabled="busy || levBusy"
-            :title="
-              `平掉 ${baseOf(p.symbol)} 这一条持仓（` +
-              (testOrder ? '测试单，只校验、不真平' : '真单') +
-              '）'
-            "
-            @click="closeOne(p)"
-          >
-            平仓
-          </button>
+          <!--
+            第一行（用户 2026-10-05：「简略显示 方向后面的小字改为 仓位价值」）：
+              币种简写 · 方向 · **仓位价值**（原来是数量当小字）· 右侧未实现盈亏
+          -->
+          <div class="op-l1">
+            <b class="op-sym">{{ baseOf(p.symbol) }}</b>
+            <span
+              class="op-side"
+              :class="p.side === 'long' ? 'side-long' : 'side-short'"
+              >{{ sideText(p) }}</span
+            >
+            <span class="op-val" :title="`仓位价值：${usd(p.notional)}`"
+              >{{ usd(p.notional) }}</span
+            >
+            <span class="spacer" />
+            <b
+              class="op-pnl"
+              :class="p.unrealized >= 0 ? 'pnl-up' : 'pnl-down'"
+              >{{ pnlText(p.unrealized) }}</b
+            >
+          </div>
+          <!--
+            第二行（用户 2026-10-05：「仓位 tab 显示开仓数量」）：开仓数量 + 开仓价，
+            右侧两颗按钮：减仓（弹窗选百分比）/ 平仓。
+          -->
+          <div class="op-l2">
+            <span class="op-qty">{{ posQty(p) }}</span>
+            <span class="op-entry">开 {{ fmt(p.entryPrice) }}</span>
+            <span class="op-lev" :title="`这个交易对的杠杆`">{{ p.leverage }}x</span>
+            <span class="spacer" />
+            <button
+              type="button"
+              class="ghost tiny op-reduce"
+              :disabled="busy || levBusy"
+              :title="`减仓（只平掉一部分）`"
+              @click="openReduce(p)"
+            >
+              减仓
+            </button>
+            <button
+              type="button"
+              class="ghost tiny op-close"
+              :disabled="busy || levBusy"
+              :title="
+                `平掉 ${baseOf(p.symbol)} 这一条持仓（` +
+                (testOrder ? '测试单，只校验、不真平' : '真单') +
+                '）'
+              "
+              @click="closeOne(p)"
+            >
+              平仓
+            </button>
+          </div>
         </li>
       </ul>
 
@@ -1042,6 +1112,19 @@ onMounted(async () => {
         </p>
       </section>
     </Teleport>
+
+    <!-- 减仓弹层：选百分比（只平一部分），提交走同一个 close 接口 -->
+    <ReduceSheet
+      :open="!!reduceRow"
+      :name="reduceRow ? baseOf(reduceRow.symbol) : ''"
+      :side="reduceRow?.side ?? 'long'"
+      :amount="reduceRow?.amount ?? 0"
+      :notional="reduceRow?.notional ?? 0"
+      :test-order="testOrder"
+      :busy="busy"
+      @close="reduceRow = null"
+      @confirm="confirmReduce"
+    />
 
     <!-- 提示：3.5 秒自己关；点一下也关。⚠️ z-index 要压过弹层（见 style.css） -->
     <Teleport to="body">

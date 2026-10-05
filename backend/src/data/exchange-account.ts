@@ -205,6 +205,19 @@ export function createExchange(c: ExchangeCredentials): any {
     options: {
       ...marketOptionsFor(c),
       /*
+       * ⚠️⚠️ **持仓必须走 v2 的 `/fapi/v2/positionRisk`**（2026-10-05 查出来的 bug：
+       *      用户「持仓杠杆倍数显示不对」）。
+       *
+       * 币安 v3 版把 `leverage` 字段**删掉了**（实测同一时刻同一个持仓：
+       *      v2 → leverage="10"，还有 marginType / maxNotionalValue
+       *      v3 → 压根没有 leverage 字段）
+       * 而 ccxt 的 `fetchPositions()` 默认走 v3 ⇒ 杠杆读回来是 `undefined`
+       * ⇒ `mapPosition()` 里 `n(undefined)` = 0 ⇒ 界面上显示 **0x**。
+       * ccxt 留了 `useV2` 这个开关（`fetchPositionsRisk` 的 option），打开就回 v2。
+       * 顺带跟 `data/exchange-trade.ts` 的 `readPositionRiskRow()` 口径一致（那边一直用 v2）。
+       */
+      fetchPositionsRisk: {useV2: true},
+      /*
        * ⚠️ 币安不带交易对查挂单，ccxt 会**抛**一条「限流更严」的警告
        * （不是真错，但会中断调用）。按它提示显式关掉。
        */

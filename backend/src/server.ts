@@ -3377,6 +3377,8 @@ async function route(
     const sideRaw = str(body.side, '')
     const side =
       sideRaw === 'long' || sideRaw === 'short' ? sideRaw : undefined
+    /* `pct` 是「减仓」用的（部分平仓，0~100）；不传 = 全平 */
+    const pct = body.pct === undefined ? undefined : Number(body.pct)
     try {
       /* 同下单：`test !== false` 才是测试单，漏传一律当测试单 */
       const test = body.test !== false
@@ -3390,7 +3392,7 @@ async function route(
           sandbox: key.sandbox
         },
         key.id,
-        body.symbol ? {symbol: str(body.symbol, 'BTCUSDT'), side} : undefined,
+        body.symbol ? {symbol: str(body.symbol, 'BTCUSDT'), side, pct} : undefined,
         test
       )
       return sendJson(res, 200, {ok: true, test, ...r, error: null})
