@@ -2,6 +2,7 @@
 import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
 import * as LWC from 'lightweight-charts'
 import {
+  cancelTradeOrder,
   fetchCandles,
   klineStream,
   placeStopOrder,
@@ -724,11 +725,20 @@ interface OrderLine {
   title: string
   /** 实线还是虚线 */
   dashed: boolean
-  /** 左侧标签（仓位 = 盈利价值；挂单 = 止损/止盈 + 预计收益 + 数量%） */
-  label: string | null
+  /**
+   * 左侧标签：**两段**，中间一条实线分割（用户 2026-10-06：
+   * 「标签都移到左边…描框带透明度中间实线分割」）。
+   *   · 仓位 → `[多] | [−$0.0881]`
+   *   · 强平 → `[强平] | [0.00190]`
+   *   · 挂单 → `[止损] | [−$0.1764 10%]`
+   * `null` = 这条线不放标签。
+   */
+  label: [string, string] | null
   labelTitle: string
   /** 左侧标签的颜色（不填跟线同色） */
   labelColor?: string
+  /** 挂单才有的单号：标签上会冒出一颗「✕」，点了确认就能撤（用户 2026-10-06） */
+  cancelId?: string
   /**
    * 这条线**能不能拖**（拖了会怎样）。
    *
@@ -807,13 +817,15 @@ function orderTargetPos(o: TradeOpenOrder): TradePositionRow | null {
  * · **数量百分比** = 这一单的数量 ÷ 那条持仓的数量（平掉多少比例的仓位）
  * ⚠️ 不含手续费（两张单两边都要吃一次 taker/maker），所以叫「预计」。
  */
-function orderLabel(o: TradeOpenOrder, px: number): {text: string; title: string; color: string} {
+function orderLabel(
+  o: TradeOpenOrder,
+  px: number
+): {kind: string; value: string; title: string; color: string} {
   const pos = orderTargetPos(o)
   const kind = orderKind(o)
+  /* 标签第一段：止损 / 止盈 / 委托（短，两个字） */
   const name = kind === 'profit' ? '止盈' : kind === 'stop' ? '止损' : '委托'
-  const parts = [name]
   const notes: string[] = [`${name} ${fmt(px)}`, `数量 ${fmt(o.amount)}`]
-  let color: string
   /*
    * 这一单是**平仓**（那才有「预计收益」）：
    *   卖单打多头、买单打空头 = 平仓；反过来的那两种是加仓。
@@ -822,19 +834,25 @@ function orderLabel(o: TradeOpenOrder, px: number): {text: string; title: string
   if (pos && (o.reduceOnly || closing)) {
     const diff = o.side === 'sell' ? px - pos.entryPrice : pos.entryPrice - px
     const pnl = diff * o.amount
-    parts.push(money(pnl))
     notes.push(`预计收益 ${money(pnl)}（按开仓均价 ${fmt(pos.entryPrice)} 算，不含手续费）`)
+    let value = money(pnl)
     if (pos.amount > 0) {
       const pct = Math.min(100, (o.amount / pos.amount) * 100)
-      parts.push(`${pct.toFixed(0)}%`)
+      value += ` ${pct.toFixed(0)}%`
       notes.push(`平掉这条持仓的 ${pct.toFixed(1)}%`)
     }
-    color = pnl >= 0 ? '#5eba89' : '#e35561'
-  } else {
-    notes.push('这一单是加仓（不是平仓），不结算盈亏')
-    color = sideColor(o.side === 'buy' ? 'long' : 'short')
+    /*
+     * 颜色按**赚还是亏**走（绿 / 红）—— 止盈止损一眼看出是保护盈利还是割肉。
+     */
+    return {kind: name, value, title: notes.join(' · '), color: pnl >= 0 ? '#5eba89' : '#e35561'}
   }
-  return {text: parts.join(' '), title: notes.join(' · '), color}
+  notes.push('这一单是加仓（不是平仓），不结算盈亏')
+  return {
+    kind: name,
+    value: `数量 ${fmt(o.amount)}`,
+    title: notes.join(' · '),
+    color: sideColor(o.side === 'buy' ? 'long' : 'short')
+  }
 }
 
 /** 这张图现在该画哪几条线（数据不是这个币的一律不画） */
@@ -861,7 +879,7 @@ function orderLineList(): OrderLine[] {
         color: sideColor(p.side),
         title: `开仓均价 ${who}`,
         dashed: false,
-        label: `${who} ${money(pnl)}`,
+        label: [who, money(pnl)],
         labelColor: pnl >= 0 ? '#5eba89' : '#e35561',
         /* 拖着这条线上下走 = 给这条仓位挂一张止盈 / 止损（见 `ordLabelDown`） */
         drag: {
@@ -886,8 +904,10 @@ function orderLineList(): OrderLine[] {
         color: LINE_LIQ,
         title: `强平 ${who}`,
         dashed: true,
-        label: null,
-        labelTitle: ''
+        /* 强平也放左边（用户：「标签都移到左边吧」）—— 价位本来就是右边轴上那个数，
+           这里给「强平」两个字，好认是哪条线 */
+        label: ['强平', fmt(p.liquidationPrice)],
+        labelTitle: `强平价 ${fmt(p.liquidationPrice)} · ${who}单`
       })
     }
   }
@@ -902,10 +922,11 @@ function orderLineList(): OrderLine[] {
         p: px,
         /* 挂单：**多（买）绿、空（卖）红，虚线**（用户 2026-10-06） */
         color: sideColor(o.side === 'buy' ? 'long' : 'short'),
-        title: `${lab.text.split(' ')[0]} ${o.side === 'buy' ? '多' : '空'}`,
+        title: `${lab.kind} ${o.side === 'buy' ? '多' : '空'}`,
         dashed: true,
-        label: lab.text,
+        label: [lab.kind, lab.value],
         labelColor: lab.color,
+        cancelId: o.id,
         /* 拖着它走 = **改单**（撤旧的、挂新价）；认不出平的是哪条就只给看、不给拖 */
         drag: target
           ? {
@@ -1022,7 +1043,8 @@ function renderOrderLines(): void {
         price: lv.p,
         color: lv.color,
         title: lv.title,
-        lineStyle: lv.dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid
+        lineStyle: lv.dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
+        axisLabelVisible: false
       })
     }
   } else {
@@ -1039,7 +1061,12 @@ function renderOrderLines(): void {
         color: lv.color,
         lineWidth: 1,
         lineStyle: lv.dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
-        axisLabelVisible: true,
+        /*
+         * ⚠️ 右侧轴上**不再挂小字**（用户 2026-10-06：「标签都移到左边吧」）——
+         *    手机右边那条轴本来就窄，再压上「开仓均价 多 0.003852」这种长标签
+         *    整块都是糊的；这信息现在都在左边那枚标签上。
+         */
+        axisLabelVisible: false,
         title: lv.title
       })
     )
@@ -1061,11 +1088,69 @@ function renderOrderLines(): void {
 let ordLabels: {
   price: number
   color: string
+  /** 整颗标签（描框那个盒子） */
   el: HTMLElement
+  /** 两段文字（中间那条竖线是 CSS 的 `i`） */
+  p1: HTMLElement
+  p2: HTMLElement
   drag: DragRef | null
   /** 这条标签对应 `orderLines` 里的第几条（拖动时按它改那条线） */
   lineIdx: number
+  /** 挂单才有：点了它就去撤这张单 */
+  cancelId?: string
 }[] = []
+
+/** 现在露出一颗「✕」的是哪颗标签（点一下标签出✕，再点别处收起来） */
+let cancelShownEl: HTMLElement | null = null
+
+/**
+ * 撤一张挂单（用户 2026-10-06：「点击左侧标签出现叉号，点击弹窗确认可撤单」）。
+ *
+ * ⚠️ 撤单**没有测试版**：撤了就是撤了（跟「测试下单」开关无关），
+ *    所以这一步必须问一次 —— 用系统确认框，跟「一键平仓」一个路子。
+ */
+async function cancelOrderAsk(id: string, symbol: string, price: number): Promise<void> {
+  const name = baseToName(symbol)
+  const ok = window.confirm(
+    `撤掉 ${name} 这张挂单？\n\n委托价 ${fmt(price)}。撤掉之后这一份平仓保护就没了。`
+  )
+  if (!ok) return
+  try {
+    const r = await cancelTradeOrder(symbol, id, tradeKey.value?.id)
+    if (!r.ok) {
+      emit('note', r.error || '撤单失败', 'bad')
+      return
+    }
+    emit('note', `✅ 已撤单：${name} @ ${fmt(price)}`, 'ok')
+    void pullOverlay()
+  } catch (e) {
+    emit('note', (e as Error).message, 'bad')
+  }
+}
+
+/** 点标签（不是拖）= 露出 / 收起那颗「✕」 */
+function toggleCancelX(item: (typeof ordLabels)[number]): void {
+  if (!item.cancelId) return
+  const el = item.el
+  if (cancelShownEl === el) {
+    el.classList.remove('show-x')
+    cancelShownEl = null
+    return
+  }
+  cancelShownEl?.classList.remove('show-x')
+  el.classList.add('show-x')
+  cancelShownEl = el
+  buzzLight()
+}
+
+/** 轻轻震一下（跟别处一个路子，不支持就算了） */
+function buzzLight(): void {
+  try {
+    navigator.vibrate?.(8)
+  } catch {
+    /* 忽略 */
+  }
+}
 
 /**
  * 画左侧标签。
@@ -1077,14 +1162,25 @@ function renderOrdLabels(lines: OrderLine[]): void {
   const host = ordLabelHost.value
   if (!host) return
   const items = lines.map((l, i) => ({l, i})).filter(x => x.l.label)
-  if (ordLabels.length !== items.length) {
+  /* 标签数 / 有没有「能撤的单」变了就重建（重建后要重新挂手势） */
+  const sameShape =
+    ordLabels.length === items.length &&
+    items.every((x, k) => !!x.l.cancelId === !!ordLabels[k]!.cancelId)
+  if (!sameShape) {
     host.innerHTML = ''
+    cancelShownEl = null
     ordLabels = items.map(({l, i}, k) => {
       const el = document.createElement('span')
+      el.className = 'olb'
       el.style.color = l.labelColor ?? l.color
+      const p1 = document.createElement('b')
+      const div = document.createElement('i')
+      const p2 = document.createElement('span')
+      el.append(p1, div, p2)
       /*
        * 能拖的才有手势（仓位线 / 挂单线）：按住这颗标签上下拖 —— 线本身只有 1px，
        * 手指去按它太苛刻，标签就压在线上、位置一样准。
+       * ⚠️ 按一下**不动** = 点（挂单那张会冒出「✕」），动了才算拖（见 `ordLabelUp`）。
        */
       if (l.drag) {
         el.classList.add('draggable')
@@ -1093,13 +1189,28 @@ function renderOrdLabels(lines: OrderLine[]): void {
         el.addEventListener('pointerup', ordLabelUp)
         el.addEventListener('pointercancel', ordLabelCancel)
       }
+      if (l.cancelId) {
+        const x = document.createElement('button')
+        x.type = 'button'
+        x.className = 'olb-x'
+        x.textContent = '✕'
+        x.title = '撤掉这张挂单'
+        x.addEventListener('click', e => {
+          e.stopPropagation()
+          void cancelOrderAsk(l.cancelId!, overlaySymbol.value, l.p)
+        })
+        el.appendChild(x)
+      }
       host.appendChild(el)
       return {
         price: l.p,
         color: l.labelColor ?? l.color,
         el,
+        p1,
+        p2,
         drag: l.drag ?? null,
-        lineIdx: i
+        lineIdx: i,
+        cancelId: l.cancelId
       }
     })
   }
@@ -1109,9 +1220,11 @@ function renderOrdLabels(lines: OrderLine[]): void {
     item.price = lv.p
     item.drag = lv.drag ?? null
     item.lineIdx = items[k]!.i
+    item.cancelId = lv.cancelId
     const color = lv.labelColor ?? lv.color
-    const text = lv.label!
-    if (item.el.textContent !== text) item.el.textContent = text
+    const [a, b] = lv.label!
+    if (item.p1.textContent !== a) item.p1.textContent = a
+    if (item.p2.textContent !== b) item.p2.textContent = b
     if (item.color !== color) {
       item.color = color
       item.el.style.color = color
@@ -1154,10 +1267,12 @@ function positionOrdLabels(): void {
  *    表现是「拖着的时候线上那枚标签不动」）。踩过一次。
  */
 const drag = shallowRef<DragRef | null>(null)
+/** 手指按下时的位置（用来分「点一下」和「拖动」：挪动 < 6px 算点） */
+let dragStartX = 0
 /** 手指现在拖到的价（吸附到一个 tick 之后） */
 const dragPrice = ref(0)
 /** 松手后要弹的确认单（`null` = 没弹） */
-const stopSheet = shallowRef<{drag: DragRef; price: number} | null>(null)
+const stopSheet = shallowRef<{drag: DragRef; price: number; pct: number} | null>(null)
 /** 发单中（按钮转圈、防连点） */
 const stopBusy = ref(false)
 /** 按住时手指的 y 与那条线的价（按「挪了多少像素」换算价格，手指滑出图外也不会跳） */
@@ -1206,6 +1321,7 @@ function ordLabelDown(e: PointerEvent, labelIdx: number): void {
   dragFromPrice = item.price
   dragPrice.value = item.price
   dragFromY = e.clientY
+  dragStartX = e.clientX
   /* 这条线在 `orderLines` 里的下标（标签建的时候就记好了，见 `renderOrdLabels`） */
   dragLineIdx = item.lineIdx
   try {
@@ -1228,17 +1344,49 @@ function ordLabelMove(e: PointerEvent): void {
   drawDragPreview()
 }
 
-/** 松手 → 弹确认单（**这一步不发单**） */
+/** 松手：**没挪动** = 点一下标签（露出「✕」）；挪动了 = 弹确认单（这一步不发单） */
 function ordLabelUp(e: PointerEvent): void {
   if (!drag.value) return
   e.preventDefault()
+  const moved =
+    Math.abs(e.clientY - dragFromY) > 6 || Math.abs(e.clientX - dragStartX) > 6
   const d = drag.value
   const price = dragPrice.value
+  const idx = dragLineIdx
   drag.value = null
   dragLineIdx = -1
-  /* 先把图恢复成「数据的样子」，再让确认单接管 */
+  /* 先把图恢复成「数据的样子」，再决定是弹单还是弹✕ */
   renderOrderLines()
-  stopSheet.value = {drag: d, price}
+  if (!moved) {
+    const item = ordLabels.find(l => l.lineIdx === idx)
+    if (item) toggleCancelX(item)
+    return
+  }
+  stopSheet.value = {drag: d, price, pct: defaultPct(d)}
+}
+
+/**
+ * 这次拖动**默认平掉多少**（用户 2026-10-06：
+ * 「优化当有止损止盈时再从仓位上拉就拉剩余的百分比」）。
+ *
+ *   · 改单（拖的是已经挂着的那张）→ 默认跟它原来一样（只改价、不改量）
+ *   · 新挂（拖的是仓位线）→ 默认 = **还没被保护的那部分**（100% − 已有的挂单占比）
+ */
+function defaultPct(d: DragRef): number {
+  const pos = overlayPositions.value.find(p => p.side === d.side)
+  if (!pos || pos.amount <= 0) return 100
+  if (d.orderId) {
+    const self = overlayOrders.value.find(o => o.id === d.orderId)
+    if (self) return Math.max(1, Math.min(100, Math.round((self.amount / pos.amount) * 100)))
+  }
+  let used = 0
+  for (const o of overlayOrders.value) {
+    const t = orderTargetPos(o)
+    if (!t || t.side !== d.side) continue
+    used += o.amount
+  }
+  const left = 100 - (used / pos.amount) * 100
+  return Math.max(1, Math.min(100, Math.round(left)))
 }
 
 function ordLabelCancel(): void {
@@ -1259,8 +1407,10 @@ function drawDragPreview(): void {
   const long = d.side === 'long'
   const isProfit = (px >= d.entry) === long
   const diff = long ? px - d.entry : d.entry - px
-  const pnl = diff * d.amount
-  const text = `${isProfit ? '止盈' : '止损'} ${money(pnl)} · 100%`
+  const pct = defaultPct(d)
+  const pnl = diff * (d.amount * pct) / 100
+  const t1 = isProfit ? '止盈' : '止损'
+  const t2 = `${money(pnl)} ${pct}%`
   const line = dragLineIdx >= 0 ? orderLines[dragLineIdx] : null
   line?.applyOptions({
     price: px,
@@ -1271,7 +1421,8 @@ function drawDragPreview(): void {
   })
   const hit = ordLabels.find(l => l.drag === d)
   if (hit) {
-    if (hit.el.textContent !== text) hit.el.textContent = text
+    if (hit.p1.textContent !== t1) hit.p1.textContent = t1
+    if (hit.p2.textContent !== t2) hit.p2.textContent = t2
     const color = pnl >= 0 ? '#5eba89' : '#e35561'
     if (hit.color !== color) {
       hit.color = color
@@ -3050,7 +3201,7 @@ onBeforeUnmount(() => {
       :price="stopSheet?.price ?? 0"
       :entry="stopSheet?.drag.entry ?? 0"
       :amount="stopSheet?.drag.amount ?? 0"
-      :decimals="decimalsFor(stopSheet?.price)"
+      :pct="stopSheet?.pct ?? 100"
       :order-id="stopSheet?.drag.orderId"
       :test-order="testOrder"
       :busy="stopBusy"

@@ -111,10 +111,7 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
       <div class="sheet-row col">
         <div class="sheet-text">
           <b>行情过滤</b>
-          <p>
-            24h 成交额低于这个数的合约，<b>合约行情</b>列表里就不显示（单位：
-            <em>百万 USDT</em>）。填 <em>0</em> = 全部显示。
-          </p>
+          <p>24h 成交额低于此值的合约不显示（单位：百万 USDT）。<em>0</em> = 不限。</p>
         </div>
         <div class="mvol">
           <input
@@ -148,10 +145,7 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
       <div class="sheet-row col">
         <div class="sheet-text">
           <b>下单账户</b>
-          <p>
-            K 线页底部的<b>下单模块</b>用这一套 Key（余额 / 杠杆 / 持仓都看它）。
-            要改 Key 本身去「我的 → 个人信息 → 交易所」。
-          </p>
+          <p>下单模块使用的账户。管理密钥请前往「我的 → 个人信息 → 交易所」。</p>
         </div>
         <div class="tk-picks">
           <button
@@ -178,13 +172,8 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
       <div class="sheet-row">
         <div class="sheet-text">
           <b>测试下单</b>
-          <p v-if="testOrder">
-            开着：只发到币安<b>测试接口</b>，校验参数 / 权限 / 保证金，
-            <b>不进撮合、不真开仓、不真平仓</b>。
-          </p>
-          <p v-else>
-            ⚠️ 已关闭：下单 / 平仓都是<b>真单</b>，会真扣保证金、真的平掉持仓。
-          </p>
+          <p v-if="testOrder">开启时仅校验参数与权限，不会真实成交。</p>
+          <p v-else>⚠️ 已关闭：下单与平仓均为真实成交。</p>
         </div>
         <!--
           ⚠️ 打开/关掉都让用户二次确认 —— 这个开关的另一侧是真钱，
@@ -213,16 +202,13 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
       <div class="sheet-row col">
         <div class="sheet-text">
           <b>订单设置</b>
-          <p>
-            这四样要不要<b>画在 K 线上</b>（跟上面「下单账户」那套 Key 联动）。
-            关掉的不显示、也不会再去交易所取这份数据。
-          </p>
+          <p>控制以下内容是否绘制在 K 线上。关闭后不再请求对应数据。</p>
         </div>
         <div class="oset">
           <div class="oset-row">
             <span class="oset-dot" data-kind="pos" />
             <b>仓位</b>
-            <em>持仓的<b>开仓均价</b>画一条线（多空各一条）</em>
+            <em>持仓均价线</em>
             <button
               type="button"
               class="switch"
@@ -239,7 +225,7 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
           <div class="oset-row">
             <span class="oset-dot" data-kind="his" />
             <b>订单历史</b>
-            <em>历史成交标成图上的<b>买卖点</b></em>
+            <em>成交点位</em>
             <button
               type="button"
               class="switch"
@@ -256,7 +242,7 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
           <div class="oset-row">
             <span class="oset-dot" data-kind="ord" />
             <b>仓位委托</b>
-            <em>当前<b>挂单</b>每张画一条线</em>
+            <em>挂单价格线</em>
             <button
               type="button"
               class="switch"
@@ -273,7 +259,7 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
           <div class="oset-row">
             <span class="oset-dot" data-kind="liq" />
             <b>强平价格</b>
-            <em>强平价画一条线</em>
+            <em>强平价格线</em>
             <button
               type="button"
               class="switch"
@@ -290,7 +276,7 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
         </div>
       </div>
 
-      <p class="sheet-foot">改完立刻生效，自动记在这台设备上。</p>
+      <p class="sheet-foot">改动即时生效，保存在本机。</p>
     </section>
   </Teleport>
 </template>

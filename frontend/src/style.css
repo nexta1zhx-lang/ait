@@ -3369,28 +3369,65 @@ body.fixed-viewport .split {
   z-index: 26;
 }
 
-.ord-labels span {
+/*
+ * 左侧标签（用户 2026-10-06：「标签都移到左边…描框带透明度中间实线分割」）：
+ * 一枚**带描边的半透明盒子**，里面两段字、中间一条**实线**竖着分开：
+ *   `多 │ −$0.0881`、`强平 │ 0.00190`、`止损 │ −$0.1764 10%`
+ * 描边用 `currentColor` 的半透明 —— 线的颜色就是标签的颜色，一眼对得上。
+ */
+.ord-labels .olb {
   position: absolute;
   left: 5px;
   transform: translateY(-50%);
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, currentColor 55%, transparent);
   border-radius: 3px;
-  /* 比底色实一点：它压在 K 线上 */
-  background: rgba(11, 15, 20, 0.82);
+  background: rgba(11, 15, 20, 0.55);
   font-family: var(--mono);
   font-size: 10px;
   font-weight: var(--fw-bold);
   white-space: nowrap;
+  line-height: 1.5;
 }
 
-/*
- * 能拖的那几枚（仓位 / 挂单，用户 2026-10-06：「按住…可上下拖动」）。
- * ⚠️ 手指按住时别选字 / 别弹系统菜单；`touch-action: none` 是关键 ——
- *    不写的话手机上这一下会被当成「滚动页面」，`pointermove` 根本不来。
- * ⚠️ `::after` 把触摸区往外撑 9px：标签本身才 14px 高，手指按不住，
- *    但看上去还是那么细一条。
- */
-.ord-labels span.draggable {
+/* 中间那条**实线**分割 */
+.ord-labels .olb i {
+  flex: 0 0 auto;
+  width: 1px;
+  align-self: stretch;
+  margin: 0 4px;
+  background: color-mix(in srgb, currentColor 55%, transparent);
+}
+
+/* 第二段（数值）不跟第一段（多/空、强平、止损）抢眼，用它的颜色就够 */
+.ord-labels .olb > span {
+  opacity: 0.95;
+}
+
+/* 挂单那张：点一下冒出来的「✕」（撤单） */
+.ord-labels .olb-x {
+  display: none;
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin-left: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  color: inherit;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.ord-labels .olb.show-x .olb-x {
+  display: block;
+}
+
+/* 标签整体可以点（露出 ✕）/ 可以拖 */
+.ord-labels .olb.draggable {
   pointer-events: auto;
   cursor: ns-resize;
   touch-action: none;
@@ -3399,7 +3436,8 @@ body.fixed-viewport .split {
   -webkit-touch-callout: none;
 }
 
-.ord-labels span.draggable::after {
+/* ⚠️ 触摸区往外撑 9px：标签本身才 17px 高，手指按不住，但看上去还是那么细一条 */
+.ord-labels .olb.draggable::after {
   content: '';
   position: absolute;
   inset: -9px -8px;
@@ -4586,6 +4624,127 @@ body.fixed-viewport .split {
 }
 
 .os-pnl.down {
+  color: var(--bad);
+}
+
+/* ------------------------------------------------------------------
+ * 「确认」弹层（`StopSheet.vue`，用户 2026-10-06）：
+ *   标题就叫「确认」、**两列**（触发价 | 平仓比例快捷）+ 底部滑轨 + 三格读数，
+ *   不要括号 / 小字解释。
+ * ------------------------------------------------------------------ */
+.sheet-confirm {
+  /* 手机上默认占屏幕的 80%（用户：「移动端默认 80%」） */
+  max-height: 80vh;
+  min-height: 0;
+}
+
+/* 简化过的关闭符号：没有底、没有框，就一个小叉 */
+.sheet-x {
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.cf-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 4px 0 10px;
+}
+
+.cf-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cf-lb {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cf-price {
+  display: flex;
+}
+
+.cf-price input {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: right;
+}
+
+.cf-price input:focus {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
+/* 平仓比例快选：2×2 格子 */
+.cf-presets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.cf-presets button {
+  padding: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: var(--fw-mid);
+}
+
+.cf-presets button.on {
+  border-color: var(--accent-line);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+/* 三格读数：不带任何解释文字 */
+.cf-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--border);
+}
+
+.cf-stats > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cf-stats em {
+  font-size: 10px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.cf-stats b {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cf-stats .pnl-up {
+  color: var(--ok);
+}
+
+.cf-stats .pnl-down {
   color: var(--bad);
 }
 
@@ -6724,6 +6883,22 @@ button.badge:disabled {
 .switch.on span {
   transform: translateX(20px);
   background: var(--blue);
+}
+
+/*
+ * 桌面端：底部弹层**限个最大宽度**并居中（用户 2026-10-06：「pc端要有最大宽度！」）——
+ * 宽屏上从 0 铺到右边缘、里面一行字几千像素长，读起来很累。
+ * ⚠️ 用 `margin: 0 auto` 居中，**不要**用 `transform: translateX(-50%)`：
+ *    `.sheet` 有 `sheet-up` 入场动画（动画里也改 `transform`），会被顶掉。
+ */
+@media (min-width: 901px) {
+  .sheet {
+    max-width: 520px;
+    margin: 0 auto;
+    bottom: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+  }
 }
 
 /* ==================================================================
