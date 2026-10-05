@@ -572,8 +572,12 @@ async function changePw(): Promise<void> {
         <li>
           <span>原生壳版本</span><b>{{ shell.version }} ({{ shell.build }})</b>
         </li>
-        <li><span>平台</span><b>{{ shell.platform }}</b></li>
-        <li><span>WebView 主版本</span><b>{{ shell.webview }}</b></li>
+        <li>
+          <span>平台</span><b>{{ shell.platform }}</b>
+        </li>
+        <li>
+          <span>WebView 主版本</span><b>{{ shell.webview }}</b>
+        </li>
         <li>
           <span>env(safe-area-inset-top)</span>
           <b>{{ shell.envTop }} px</b>
@@ -590,7 +594,9 @@ async function changePw(): Promise<void> {
           <span>SystemBars 注入 bottom</span>
           <b>{{ shell.cssBottom || '（未注入）' }}</b>
         </li>
-        <li><span>系统深色模式</span><b>{{ shell.dark ? '是' : '否' }}</b></li>
+        <li>
+          <span>系统深色模式</span><b>{{ shell.dark ? '是' : '否' }}</b>
+        </li>
       </ul>
     </section>
 
