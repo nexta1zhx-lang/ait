@@ -27,6 +27,11 @@ interface Stored {
   exchangeCurrency?: 'usd' | 'cny'
   /** 下单走测试单（默认**开**）。`false` = 真下单 —— 见 `testOrder` */
   testOrder?: boolean
+  /** 订单设置（2026-10-06）：这四样画不画在 K 线上。缺省 = 都画 */
+  chartShowPosition?: boolean
+  chartShowHistory?: boolean
+  chartShowOrders?: boolean
+  chartShowLiq?: boolean
 }
 
 function read(): Stored {
@@ -38,7 +43,11 @@ function read(): Stored {
       return {
         marketMinVolM: v.marketMinVolM,
         exchangeCurrency: v.exchangeCurrency === 'cny' ? 'cny' : 'usd',
-        testOrder: v.testOrder !== false
+        testOrder: v.testOrder !== false,
+        chartShowPosition: v.chartShowPosition !== false,
+        chartShowHistory: v.chartShowHistory !== false,
+        chartShowOrders: v.chartShowOrders !== false,
+        chartShowLiq: v.chartShowLiq !== false
       }
     }
     // 老键里已经没有认得的东西了（旧配置全部废弃）
@@ -87,6 +96,25 @@ export const exchangeCurrency = ref<'usd' | 'cny'>(
 export const testOrder = ref(saved.testOrder !== false)
 
 /**
+ * 「订单设置」（用户 2026-10-06）——
+ * 「配置界面可以配置订单设置，1.仓位 2.订单历史 3.仓位委托 4.强平价格」
+ * 「是控制和 k 线联动的价格或历史是否显示在 k 线上」。
+ *
+ * 就是币安合约图那套，四样各自一个开关，控制**画不画在 K 线上**：
+ *  · `chartShowPosition` —— **仓位**：持仓的**开仓均价**画一条价格线（多空分色）
+ *  · `chartShowLiq`      —— **强平价格**：强平价画一条线（红）
+ *  · `chartShowOrders`   —— **仓位委托**：当前挂单每条画一条线（蓝）
+ *  · `chartShowHistory`  —— **订单历史**：成交历史标成图上的买卖点
+ *
+ * ⚠️ 默认**四条都开**：这四样都是自己账户的仓位 / 委托，看不看得见由用户决定，
+ *    他自己的东西默认该看得见（不想看就在配置里关掉，关掉的项也不再去取数）。
+ */
+export const chartShowPosition = ref(saved.chartShowPosition !== false)
+export const chartShowLiq = ref(saved.chartShowLiq !== false)
+export const chartShowOrders = ref(saved.chartShowOrders !== false)
+export const chartShowHistory = ref(saved.chartShowHistory !== false)
+
+/**
  * 手机端那颗「分析」闪电 —— **已经不再存位置了**。
  *
  * 2026-10-04 做成了「可以自由移动 + 记到 localStorage」；
@@ -95,7 +123,15 @@ export const testOrder = ref(saved.testOrder !== false)
  */
 
 watch(
-  [marketMinVolM, exchangeCurrency, testOrder],
+  [
+    marketMinVolM,
+    exchangeCurrency,
+    testOrder,
+    chartShowPosition,
+    chartShowLiq,
+    chartShowOrders,
+    chartShowHistory
+  ],
   () => {
     try {
       localStorage.setItem(
@@ -103,7 +139,11 @@ watch(
         JSON.stringify({
           marketMinVolM: marketMinVolM.value,
           exchangeCurrency: exchangeCurrency.value,
-          testOrder: testOrder.value
+          testOrder: testOrder.value,
+          chartShowPosition: chartShowPosition.value,
+          chartShowLiq: chartShowLiq.value,
+          chartShowOrders: chartShowOrders.value,
+          chartShowHistory: chartShowHistory.value
         })
       )
     } catch {

@@ -401,6 +401,15 @@ export interface FuturesPosition {
   notional: number
   /** 这个交易对的杠杆 */
   leverage: number
+  /**
+   * 强平价（2026-10-06 加）。
+   *
+   * 用户要「强平价格」能画在 K 线上 —— `positionRisk` 里本来就有这个字段
+   * （v2 那个 `liquidationPrice`），早先只是没往后端对象上搬。
+   * ⚠️ 没持仓 / 逐仓没这个数时币安回 `0` 或 `null` ⇒ 这里给 `null`，
+   *    界线不要画一条 0 的线出来。
+   */
+  liquidationPrice: number | null
 }
 
 /**
@@ -426,7 +435,12 @@ function positionFromRow(row: any): FuturesPosition | null {
     markPrice: Number.isFinite(markPrice) ? markPrice : 0,
     unrealized: n(row.unRealizedProfit),
     notional: Number.isFinite(markPrice) ? Math.abs(amt) * markPrice : 0,
-    leverage: Math.floor(n(row.leverage)) || 0
+    leverage: Math.floor(n(row.leverage)) || 0,
+    /* 强平价：`0` / 空 / 非数一律当「没有」（别画一条 0 的线） */
+    liquidationPrice: (() => {
+      const lq = nullish(row.liquidationPrice)
+      return lq !== null && lq > 0 ? lq : null
+    })()
   }
 }
 
@@ -830,5 +844,129 @@ export async function listPositions(
   }
   /* 名义大的排前面：一眼看到最要紧的那笔 */
   out.sort((a, b) => b.notional - a.notional)
+  return out
+}
+
+/* ---------------- 画在 K 线上的那两样（2026-10-06） ----------------
+ *
+ * 用户：「配置界面可以配置订单设置，1.仓位 2.订单历史 3.仓位委托 4.强平价格」
+ * 「是控制和 k 线联动的价格或历史是否显示在 k 线上」——
+ * 也就是币安合约图那套：开仓均价线 / 强平线 / 挂单线 / 成交点。
+ * 这里只负责**取数**（前两个用 `listPositions` 就够），画图在前端的 `KlineChart`。
+ */
+
+/** 一张挂单（画成 K 线上的「仓位委托」那条价格线） */
+export interface OpenOrderRow {
+  id: string
+  /** 币安原始符号（BTCUSDT） */
+  symbol: string
+  side: 'buy' | 'sell'
+  /** 订单类型（`LIMIT` / `STOP_MARKET` …，界面上不翻译，照币安的原样） */
+  type: string
+  /** 委托价（市价单没有，给 `null`） */
+  price: number | null
+  /** 触发价（止损 / 止盈那类条件单才有） */
+  stopPrice: number | null
+  /** 委托量（基础币） */
+  amount: number
+  /** 已成交（基础币） */
+  filled: number
+  /** 只减仓（平仓单）—— 界面上跟开仓单分个色可用 */
+  reduceOnly: boolean
+  /** 下单时间（毫秒） */
+  time: number
+}
+
+/**
+ * 当前挂单（某个交易对；不给 `symbol` 就是整个账户）。
+ *
+ * ⚠️ 市价单 / 条件单**没有委托价**，`price` 给 `null` —— 调用方别拿它当 0 画线
+ *    （0 会被画到价格轴最底下）。
+ */
+export async function listOpenOrders(
+  c: ExchangeCredentials,
+  symbol?: string
+): Promise<OpenOrderRow[]> {
+  assertTradable(c)
+  const ex = createExchange(c)
+  const raw: any[] = (await ex.fetchOpenOrders(symbol)) ?? []
+  const out: OpenOrderRow[] = []
+  for (const o of raw) {
+    const id = String(o?.id ?? '')
+    /* ⚠️ 用 `info.symbol`（币安原始 `1000BONKUSDT`）优先，ccxt 那个是统一写法
+       `1000BONK/USDT:USDT` —— 前端要拿它跟合约表里的 symbol 对得上 */
+    const sym = String(o?.info?.symbol ?? o?.symbol ?? symbol ?? '').toUpperCase()
+    if (!id || !sym) continue
+    out.push({
+      id,
+      symbol: sym,
+      side: String(o?.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy',
+      type: String(o?.type ?? '').toUpperCase(),
+      price: nullish(o?.price),
+      stopPrice: nullish(o?.stopPrice),
+      amount: n(o?.amount),
+      filled: n(o?.filled),
+      reduceOnly: o?.reduceOnly === true || o?.info?.reduceOnly === true,
+      time: n(o?.timestamp)
+    })
+  }
+  /* 新的排前面（跟币安 App 的委托列表一致） */
+  out.sort((a, b) => b.time - a.time)
+  return out
+}
+
+/** 一笔成交（画成 K 线上的买卖点 = 「订单历史」） */
+export interface UserTradeRow {
+  id: string
+  symbol: string
+  side: 'buy' | 'sell'
+  /** 成交均价 */
+  price: number
+  /** 成交量（基础币） */
+  amount: number
+  /** 这一笔已实现盈亏（USDT，币安 `realizedPnl`；没有就给 `null`） */
+  realizedPnl: number | null
+  /** 手续费（**计价币**，通常是 USDT） */
+  fee: number
+  /** 成交时间（毫秒） */
+  time: number
+}
+
+/**
+ * 成交历史（某个交易对最近的若干笔，画「订单历史」用）。
+ *
+ * 走 ccxt 的 `fetchMyTrades` → 币安 `fapi/v1/userTrades`。
+ * ⚠️ 不传 `since`：币安这个接口默认回**最近 7 天**、最多 1000 条，
+ *    画在图上够用了；传 `since` 反而要自己分页。
+ */
+export async function listUserTrades(
+  c: ExchangeCredentials,
+  symbol: string,
+  limit = 100
+): Promise<UserTradeRow[]> {
+  assertTradable(c)
+  const ex = createExchange(c)
+  const raw: any[] = (await ex.fetchMyTrades(symbol, undefined, limit)) ?? []
+  const out: UserTradeRow[] = []
+  for (const t of raw) {
+    const id = String(t?.id ?? '')
+    /* 同挂单：优先币安原始符号 */
+    const sym = String(t?.info?.symbol ?? t?.symbol ?? symbol).toUpperCase()
+    const price = n(t?.price)
+    const time = n(t?.timestamp)
+    if (!id || !sym || !price || !time) continue
+    out.push({
+      id,
+      symbol: sym,
+      side: String(t?.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy',
+      price,
+      amount: n(t?.amount),
+      realizedPnl: nullish(t?.info?.realizedPnl),
+      fee: n(t?.fee?.cost),
+      time
+    })
+  }
+  /* 旧的排前面（画点按时间顺序） */
+  out.sort((a, b) => a.time - b.time)
   return out
 }

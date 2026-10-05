@@ -6,6 +6,24 @@ import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
 import {setLivePrice} from '../ticker'
+import {isForeground, onForegroundChange} from '../live'
+import {
+  chartShowHistory,
+  chartShowLiq,
+  chartShowOrders,
+  chartShowPosition
+} from '../settings'
+import {tradeKey} from '../trade-account'
+import {
+  baseToExSymbol,
+  clearTradeOverlay,
+  overlayEnabled,
+  overlayFills,
+  overlayOrders,
+  overlayPositions,
+  overlaySymbol,
+  refreshTradeOverlay
+} from '../trade-overlay'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
 import TimeModal from './TimeModal.vue'
@@ -642,6 +660,250 @@ function sameLevels(a: Levels, b: Levels): boolean {
   )
 }
 
+/* ---------------- 叠加层：订单信息（2026-10-06） ----------------
+ *
+ * 用户：「配置界面可以配置订单设置，1.仓位 2.订单历史 3.仓位委托 4.强平价格」
+ *      「是控制和 k 线联动的价格或历史是否显示在 k 线上」。
+ *
+ * 四样**各画各的**，跟上面「压力 / 支撑」那两条线**分开存**（`orderLines`）——
+ * 那两条是「按可见窗口现算」的、跟着平移每帧重画；这四条是账户数据，
+ * 15 秒才变一次。混在一个数组里，两边的「就地改价」逻辑会互相踩。
+ *
+ * 颜色特意避开图上已有的：压力橙 / 支撑青 / EMA 琥珀 / 蜡烛红绿 →
+ * 开仓均价用**淡紫**、强平用**亮红**、委托用**蓝**。
+ */
+const LINE_POSITION = '#b39ddb'
+const LINE_LIQ = '#ff5252'
+const LINE_ORDER = '#64b5f6'
+/** 成交点（买 / 卖）—— 比蜡烛亮一档，压在蜡烛里也找得着 */
+const MARKER_BUY = '#7ee787'
+const MARKER_SELL = '#ff7b72'
+
+let orderLines: any[] = []
+let orderMarkers: ReturnType<typeof LWC.createSeriesMarkers> | null = null
+
+/** 这张图现在该画哪几条线（数据不是这个币的一律不画） */
+function orderLineList(): {p: number; color: string; title: string}[] {
+  const out: {p: number; color: string; title: string}[] = []
+  if (!overlaySymbol.value || overlaySymbol.value !== baseToExSymbol(props.symbol)) {
+    return out
+  }
+  for (const p of overlayPositions.value) {
+    const who = p.side === 'long' ? '多' : '空'
+    if (chartShowPosition.value && p.entryPrice > 0) {
+      out.push({p: p.entryPrice, color: LINE_POSITION, title: `开仓均价 ${who}`})
+    }
+    /* 强平价只有币安真给了才画（逐仓 / 没持仓时是 null） */
+    if (chartShowLiq.value && p.liquidationPrice && p.liquidationPrice > 0) {
+      out.push({p: p.liquidationPrice, color: LINE_LIQ, title: `强平 ${who}`})
+    }
+  }
+  if (chartShowOrders.value) {
+    for (const o of overlayOrders.value) {
+      /* 市价 / 条件单没有委托价 → 退回触发价；两个都没有就不画 */
+      const px = o.price ?? o.stopPrice
+      if (!px || px <= 0) continue
+      out.push({
+        p: px,
+        color: LINE_ORDER,
+        title: o.reduceOnly ? '平仓委托' : '开仓委托'
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * 把「成交历史」按**当前周期**落到对应的那根 K 线上。
+ *
+ * 币安给的是精确到毫秒的成交时刻，图上只有一根根 K 线 —— 得先找到
+ * 「这笔成交落在哪一根」。用**二分**在 `candles` 里找最后一个
+ * `barTime <= 成交时刻` 的（比拿周期名字去算步长稳：往前补历史、跨月都不会错）。
+ * 落在已加载这段之外的直接不要（画上去 LWC 也不认）。
+ */
+function barTimeOf(ms: number): number | null {
+  if (!candles.length) return null
+  const sec = Math.floor(ms / 1000)
+  const first = Math.floor(candles[0]!.timestamp / 1000)
+  if (sec < first) return null
+  let lo = 0
+  let hi = candles.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (Math.floor(candles[mid]!.timestamp / 1000) <= sec) lo = mid
+    else hi = mid - 1
+  }
+  return Math.floor(candles[lo]!.timestamp / 1000)
+}
+
+/** 成交点（买 = 往上箭头、卖 = 往下箭头），位置按这笔价跟那根 K 线的高低摆 */
+function renderOrderMarkers(): void {
+  if (!refs) return
+  const on =
+    chartShowHistory.value &&
+    overlaySymbol.value === baseToExSymbol(props.symbol) &&
+    candles.length > 0
+  const list = on ? overlayFills.value : []
+  const markers: any[] = []
+  for (const t of list) {
+    const time = barTimeOf(t.time)
+    if (time === null) continue
+    const buy = t.side === 'buy'
+    /*
+     * ⚠️ 成交点用**比蜡烛更亮**的一对绿 / 红（蜡烛是 #5eba89 / #e35561）：
+     *    这一点是「我在这儿成交过」的事件标记，压在蜡烛的红绿里就找不着了。
+     *    配置里那个小圆点（`.oset-dot[data-kind='his']`）用的是同一对颜色。
+     */
+    markers.push({
+      time,
+      position: buy ? 'belowBar' : 'aboveBar',
+      color: buy ? MARKER_BUY : MARKER_SELL,
+      shape: buy ? 'arrowUp' : 'arrowDown',
+      text: ''
+    })
+  }
+  /* ⚠️ LWC 要求按时间升序（后端已经排过，这里再兜一次，别信上游） */
+  markers.sort((a, b) => a.time - b.time)
+  if (!orderMarkers) {
+    orderMarkers = LWC.createSeriesMarkers(refs.candle, markers)
+    return
+  }
+  orderMarkers.setMarkers(markers)
+}
+
+/**
+ * 把订单信息那几条线 / 点**全部撤掉**（图空了、或者判定该什么都不画时用）。
+ *
+ * ⚠️ 跟 `renderOrderLines()` 的「就地改价」不一样：这里是真删 —— 图上一个币的数据
+ *    都没有了，留着上个币的价位线没有意义。
+ */
+function dropOrderLines(): void {
+  if (refs) {
+    for (const l of orderLines) {
+      try {
+        refs.candle.removePriceLine(l)
+      } catch {
+        /* 已移除 */
+      }
+    }
+  }
+  orderLines = []
+  orderMarkers?.setMarkers([])
+}
+
+/**
+ * 重画订单信息那几样。数据变（15 秒轮询）/ 开关变 / 换币 / 图的这一段变
+ * 都要走一遍 —— 但**不是每帧**（跟压力支撑不一样，这个不随平移变）。
+ */
+function renderOrderLines(): void {
+  if (!refs) return
+  const list = orderLineList()
+  if (orderLines.length === list.length) {
+    for (let i = 0; i < list.length; i++) {
+      orderLines[i]?.applyOptions({
+        price: list[i]!.p,
+        color: list[i]!.color,
+        title: list[i]!.title
+      })
+    }
+  } else {
+    for (const l of orderLines) {
+      try {
+        refs.candle.removePriceLine(l)
+      } catch {
+        /* 已移除 */
+      }
+    }
+    orderLines = list.map(lv =>
+      refs.candle.createPriceLine({
+        price: lv.p,
+        color: lv.color,
+        lineWidth: 1,
+        /* 订单那几条一律**虚线**：跟压力/支撑一样是参考位，不是价格本身 */
+        lineStyle: LWC.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: lv.title
+      })
+    )
+  }
+  renderOrderMarkers()
+}
+
+/* ---------------- 订单信息：什么时候去拉 ---------------- */
+
+/**
+ * 订单信息 15 秒刷一次（跟「仓位」那一格同频）。
+ *
+ * 只在**这张主图被看着**（`active`）+ 前台 + 四个开关至少开一个的时候拉：
+ *   · 桌面端左栏那张小图不传 `active` ⇒ 它一次都不拉（不然一进页面打两遍交易所）
+ *   · 全关掉 = 一个请求都不发
+ */
+const OVERLAY_MS = 15_000
+let overlayTimer: ReturnType<typeof setInterval> | null = null
+let stopOverlayForeground: (() => void) | null = null
+
+function overlayWanted(): boolean {
+  return !!props.active && overlayEnabled() && isForeground()
+}
+
+async function pullOverlay(): Promise<void> {
+  if (!overlayWanted()) return
+  await refreshTradeOverlay(props.symbol, tradeKey.value?.id)
+}
+
+function syncOverlayTimer(): void {
+  if (!overlayWanted()) {
+    if (overlayTimer) clearInterval(overlayTimer)
+    overlayTimer = null
+    return
+  }
+  if (overlayTimer) return
+  overlayTimer = setInterval(() => {
+    if (overlayWanted()) void pullOverlay()
+  }, OVERLAY_MS)
+}
+
+/**
+ * 关掉某一样时得**立刻**把它从图上抹掉（不然要等下一次数据到达才消失），
+ * 所以四个开关任一变化都重画一遍，并按需要补拉数据。
+ */
+watch(
+  [chartShowPosition, chartShowLiq, chartShowOrders, chartShowHistory],
+  () => {
+    if (!overlayEnabled()) clearTradeOverlay()
+    renderOrderLines()
+    syncOverlayTimer()
+    void pullOverlay()
+  }
+)
+
+/* 换币：先把上一个币的线抹掉（`refreshTradeOverlay` 里会清），顺便重排定时器 */
+watch(
+  () => props.symbol,
+  () => {
+    renderOrderLines()
+    void pullOverlay()
+    syncOverlayTimer()
+  }
+)
+
+/* 数据到了就重画（15 秒一次，开销可以忽略） */
+watch(
+  [overlaySymbol, overlayPositions, overlayOrders, overlayFills],
+  () => renderOrderLines(),
+  {deep: true}
+)
+
+/* 换了下单账户：这一批数据是上一套 Key 的，作废重拉 */
+watch(
+  () => tradeKey.value?.id,
+  () => {
+    clearTradeOverlay()
+    renderOrderLines()
+    void pullOverlay()
+  }
+)
+
 /* ---------------- 报给外层（节流） ---------------- */
 
 /** 上一次把压力 / 支撑报出去的时刻（毫秒） */
@@ -1173,6 +1435,8 @@ function draw(data: Candle[], keepView = false) {
     levels.value = emptyLevels()
     emitLevels(null)
     renderLevels()
+    /* 图空了：订单信息那几条线 / 点也得撤掉，别留在空图上 */
+    dropOrderLines()
     drawSelection()
     return
   }
@@ -1303,6 +1567,12 @@ function draw(data: Candle[], keepView = false) {
    * 走 rAF → 排在它们后面执行，拿到的就是铺好之后的区间。
    */
   scheduleLevels()
+  /*
+   * 订单信息（开仓均价 / 强平 / 委托线 + 成交点）跟着新数据重画一次：
+   * 换币要立刻换成新币的线、成交点也要按新的一段重新落位
+   * （`barTimeOf` 是拿 `candles` 二分找的，数据换了不重画就会画在错的一根上）。
+   */
+  renderOrderLines()
   emit('loaded', data)
 }
 
@@ -1974,6 +2244,24 @@ onMounted(startStream)
 watch([() => props.symbol, () => props.timeframe, testMode], startStream)
 // 「这一页被切走 / 切回来」也要断和重订（路由 KeepAlive 之后组件不卸载了）
 watch(() => props.active, startStream)
+
+/*
+ * 订单信息（仓位 / 强平 / 仓位委托 / 订单历史）的取数：
+ * 进来看见就要有 → 挂载时拉一次；切走 / 切回来（`active`）各对齐一次；
+ * 前台翻转立刻补一次；之后 15 秒一轮（见 `syncOverlayTimer`）。
+ */
+onMounted(() => {
+  void pullOverlay()
+  syncOverlayTimer()
+  stopOverlayForeground = onForegroundChange(on => {
+    if (on) void pullOverlay()
+    syncOverlayTimer()
+  })
+})
+watch(() => props.active, on => {
+  if (on) void pullOverlay()
+  syncOverlayTimer()
+})
 watch(() => props.symbol, load)
 watch(() => props.timeframe, load)
 watch(() => props.from, load)
@@ -1995,6 +2283,11 @@ onBeforeUnmount(() => {
   stopStream = null
   if (levelsEmitTimer) clearTimeout(levelsEmitTimer)
   levelsEmitTimer = null
+  /* 订单信息那套（定时器 + 前后台监听）也要收掉，不然切页之后还在打交易所 */
+  if (overlayTimer) clearInterval(overlayTimer)
+  overlayTimer = null
+  stopOverlayForeground?.()
+  stopOverlayForeground = null
   try {
     refs?.chart.remove()
   } catch {
@@ -2003,6 +2296,9 @@ onBeforeUnmount(() => {
   refs = null
   priceLines = []
   levelLabels = []
+  /* ⚠️ 这两个引用的是**已经拆掉的图**，不清掉的话下次挂载会往死对象上 setMarkers */
+  orderLines = []
+  orderMarkers = null
 })
 </script>
 

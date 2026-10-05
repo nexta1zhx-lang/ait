@@ -914,6 +914,42 @@ export interface TradePosition {
   notional: number
   /** 这个交易对的杠杆 */
   leverage: number
+  /** 强平价（逐仓 / 没持仓时是 `null`）—— 画在 K 线上那条「强平价格」 */
+  liquidationPrice: number | null
+}
+
+/** 一张挂单（K 线上「仓位委托」那条价格线） */
+export interface TradeOpenOrder {
+  id: string
+  /** 币安原始符号（1000BONKUSDT） */
+  symbol: string
+  side: 'buy' | 'sell'
+  /** 订单类型（照币安原样：`LIMIT` / `STOP_MARKET` …） */
+  type: string
+  /** 委托价（市价 / 条件单没有 ⇒ `null`，**别当 0 画**） */
+  price: number | null
+  /** 触发价 */
+  stopPrice: number | null
+  amount: number
+  filled: number
+  reduceOnly: boolean
+  /** 下单时间（毫秒） */
+  time: number
+}
+
+/** 一笔成交（K 线上那个买卖点） */
+export interface TradeFill {
+  id: string
+  symbol: string
+  side: 'buy' | 'sell'
+  price: number
+  amount: number
+  /** 这一笔已实现盈亏（USDT，可能是 `null`） */
+  realizedPnl: number | null
+  /** 手续费（计价币） */
+  fee: number
+  /** 成交时间（毫秒） */
+  time: number
 }
 
 /**
@@ -1045,6 +1081,24 @@ export const closeTradePositions = (
 export const fetchTradePositions = (id?: number) =>
   get<{ok: boolean; positions?: TradePositionRow[]; error: string | null}>(
     `/api/exchange/trade/positions${id ? `?id=${id}` : ''}`
+  )
+
+/**
+ * 某个交易对当前的挂单（K 线上那条「仓位委托」价格线）。
+ * `symbol` 传**币安原始符号**（`1000BONKUSDT`）。
+ */
+export const fetchTradeOpenOrders = (symbol: string, id?: number) =>
+  get<{ok: boolean; orders?: TradeOpenOrder[]; error: string | null}>(
+    `/api/exchange/trade/open-orders?symbol=${encodeURIComponent(symbol)}` +
+      (id ? `&id=${id}` : '')
+  )
+
+/** 某个交易对最近的成交（K 线上那些买卖点 = 「订单历史」） */
+export const fetchTradeHistory = (symbol: string, id?: number, limit = 100) =>
+  get<{ok: boolean; trades?: TradeFill[]; error: string | null}>(
+    `/api/exchange/trade/history?symbol=${encodeURIComponent(symbol)}` +
+      `&limit=${limit}` +
+      (id ? `&id=${id}` : '')
   )
 
 /** 美元 → 人民币汇率（「交易所账户」USDT / CNY 切换用，跟用量页同一个源） */

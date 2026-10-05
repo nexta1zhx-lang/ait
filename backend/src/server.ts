@@ -107,7 +107,9 @@ import {
   closePositions,
   collectTradeInfo,
   humanizeTrade,
+  listOpenOrders,
   listPositions,
+  listUserTrades,
   placeOrder,
   setSymbolLeverage
 } from './data/exchange-trade'
@@ -3353,6 +3355,72 @@ async function route(
         sandbox: key.sandbox
       })
       return sendJson(res, 200, {ok: true, positions, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 当前挂单（K 线上那条「仓位委托」价格线要的）。
+   *
+   * ⚠️ 跟上面 `/trade/positions` 分开：挂单变得比持仓勤（随时可能成交 / 撤单），
+   *    而且**只关心当前这个交易对**（图上就画这一个币），所以 `symbol` 必传更省。
+   */
+  if (p === '/api/exchange/trade/open-orders' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const orders = await listOpenOrders(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        str(url.searchParams.get('symbol'), '') || undefined
+      )
+      return sendJson(res, 200, {ok: true, orders, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 成交历史（K 线上那些买卖点 = 「订单历史」）。
+   * 币安 `userTrades` 默认回最近 7 天、最多 1000 条，图上够用，不分页。
+   */
+  if (p === '/api/exchange/trade/history' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    const symbol = str(url.searchParams.get('symbol'), '')
+    if (!symbol) return sendJson(res, 400, {error: '缺 symbol'})
+    try {
+      const limit = Math.min(1000, Math.max(1, num(url.searchParams.get('limit')) ?? 100))
+      const trades = await listUserTrades(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        symbol,
+        limit
+      )
+      return sendJson(res, 200, {ok: true, trades, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
     }

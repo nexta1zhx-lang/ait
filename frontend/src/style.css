@@ -6482,6 +6482,65 @@ button.badge:disabled {
   color: var(--muted);
 }
 
+/*
+ * 「订单设置」那四行（2026-10-06）：每行 = 颜色点 + 名字 + 一句说明 + 右侧开关。
+ * 说明文字会被挤到第二行（窄屏一行放不下名字 + 说明 + 开关），
+ * 所以 `em` 允许换行、`flex: 1 1 auto` 吃掉中间。
+ */
+.oset {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.oset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.oset-row > b {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.oset-row > em {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.oset-row > em b {
+  color: var(--text);
+}
+
+/* 小色点：跟 K 线上那条线一个颜色，一眼对上是哪条 */
+.oset-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.oset-dot[data-kind='pos'] {
+  background: #b39ddb;
+}
+
+.oset-dot[data-kind='liq'] {
+  background: #ff5252;
+}
+
+.oset-dot[data-kind='ord'] {
+  background: #64b5f6;
+}
+
+.oset-dot[data-kind='his'] {
+  background: linear-gradient(90deg, #7ee787 50%, #ff7b72 50%);
+}
+
 /* 开关（就这一个，够了；以后要多写几个就复用） */
 .switch {
   flex: 0 0 auto;
