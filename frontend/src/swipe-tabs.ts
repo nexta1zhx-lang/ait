@@ -71,6 +71,13 @@ export interface SwipeTabsOptions<T extends string> {
   current: () => T
   /** 切过去 */
   set: (v: T) => void
+  /**
+   * 现在能不能划。**省略 = 「挡屏就行」**。
+   *
+   * ⚠️ 开单分析页用它额外排除了「K 线」那一格 ——
+   *    用户 2026-10-05：「k 线页面滑动不切换」（详见那边调用处的注释）。
+   */
+  enabled?: () => boolean
 }
 
 /**
@@ -91,7 +98,10 @@ export function useSwipeTabs<T extends string>(
     s = null
     const host = o.host()
     if (!host || e.touches.length !== 1) return
-    if (!window.matchMedia(MOBILE_QUERY).matches) return
+    // 没给 `enabled` 就是「挡屏就行」（跟 CSS 的 `@media (max-width: 900px)` 对齐）
+    const canSwipe =
+      o.enabled ?? (() => window.matchMedia(MOBILE_QUERY).matches)
+    if (!canSwipe()) return
     if (ownsHorizontal(e.target, host)) return
     const t = e.touches[0]
     if (!t) return

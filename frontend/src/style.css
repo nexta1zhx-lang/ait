@@ -2898,14 +2898,18 @@ body.fixed-viewport .split {
 }
 
 /*
- * 手机端才露的那颗「AI 分析」（摆在顶部行情条里、币种旁边）。
- * 桌面端图宽，按钮留在周期那一行；窄屏那一行要腾给周期，所以把按钮搬上来。
+ * 「跑分析」两颗按钮**二选一**（两个都在 `KlineChart` 的 `#head-end` 插槽里，
+ * 也就是**周期行最右侧**）：
+ *  · 桌面 → `.head-run`（文字按钮）
+ *  · 窄屏 → `.tk-run`（一颗闪电，样式在下面窄屏那段）
+ *
+ * ⚠️ 2026-10-05 之前窄屏那颗是**搬到上面币种旁边、还能拖着走**的；
+ *    用户改口：「闪电图标**固定**在选择周期一行最右侧」，于是搬回这一行、
+ *    拖拽整套拆掉（`AnalyzeView` 里那段说明 + `settings.ts` 的 `runBtnPos`）。
+ *    所以这里只剩「桌面不露」这一条，位置完全交给周期行。
  */
-.tk-head .tk-run {
+.chart-head .tk-run {
   display: none;
-  padding: 5px 12px;
-  font-size: 12px;
-  white-space: nowrap;
 }
 
 /* 「＋ / 添加案例 / ✕」同样只在窄屏露（桌面走左边那格完整的表单） */
@@ -5188,7 +5192,7 @@ button.badge:disabled {
   /*
    * 周期切换：窄屏走「简约模式」但**靠左排**——
    * 去掉分段框和分隔线，按钮就排在左边（原来那种摊满整行的排法太散）。
-   * （AI 按钮已经被挑到上面币种旁边了，这一行整行都归周期用）
+   * 这一行右边留给那颗「分析」闪电（`margin-left: auto` 把它顶到行尾）。
    */
   .chart-head-right {
     /* 外面这层默认是「只占自己那么宽」，窄屏让它铺满这一行 */
@@ -5220,19 +5224,33 @@ button.badge:disabled {
   .tk-head .tk-left {
     flex-wrap: wrap;
   }
-  /* 窄屏：AI 分析跟币种并排；周期那一行的那颗收起来 */
-  .tk-head .tk-run,
+  /* 窄屏：「＋」跟币种并排（桌面走左边那格完整的表单） */
   .tk-head .tk-only-mobile {
     display: inline-flex;
     align-items: center;
   }
   /*
-   * 「分析」在窄屏就是**一颗闪电图标**（用户：「分析改为闪电图标」）。
-   * 做成实心主色方块 + 墨色闪电（跟全站 CTA 那套一致），
-   * 尺寸（30×28）跟旁边的 ＋ / ✓ / 配置 对齐，一排看着是一路的。
-   * 文案（分析 / 分析中… / 按这段行情判断）走 `title` + `aria-label`。
+   * 「分析」在窄屏就是**一颗闪电图标**（用户：「分析改为闪电图标」），
+   * 钉在**周期行最右侧**（用户 2026-10-05：「闪电图标固定在选择周期一行最右侧」）。
+   *
+   * 位置怎么「固定」的：它就待在 `KlineChart` `#head-end` 这个插槽里，
+   * 也就是 `.chart-head-right` 里紧跟周期那排 `seg` 的后面；
+   * 而下面那条 `.chart-head-right { flex: 1 1 100% }` 让整行铺满，
+   * 所以这里给一个 `margin-left: auto` 就把它顶到行的最右边
+   *（跟 `.tab-row .tab-balance` 是同一个手法）。
+   *
+   * ⚠️ **不要再改成 `position: fixed`** —— 那是上一版「可拖拽 + 存位置」的做法，
+   *    现在不拖了：老老实实待在文档流里，窗口怎么变、切页面回来都自己跟着走。
+   *
+   * 样式：实心主色方块 + 墨色闪电（跟全站 CTA 那套一致），尺寸 30×28
+   * 跟旁边那颗「＋」对齐；文案（分析 / 分析中… / 按这段行情判断）走 `title` + `aria-label`。
    */
-  .tk-head .tk-run {
+  .chart-head .tk-run {
+    display: inline-flex;
+    align-items: center;
+    /* 顶到行尾（这一行是铺满的，见 `.chart-head-right`） */
+    margin-left: auto;
+    flex: 0 0 auto;
     width: 30px;
     height: 28px;
     padding: 0;
@@ -5241,48 +5259,8 @@ button.badge:disabled {
     border-color: transparent;
     color: var(--accent-ink);
     font-size: 12px;
-    /*
-     * 可以拖着走（用户 2026-10-04：「移动端闪电图标位置可以自由移动固定 保存位置」）。
-     *
-     * ⚠️ `position: fixed` + **不给 left/top** 时，浏览器把它摆在「本来在文档流里的位置」
-     * —— 所以没拖过的人看到的跟以前一模一样；拖过之后 JS 才写死 left/top 并记到
-     * localStorage（见 AnalyzeView 的 `runStyle` / `runBtnPos`）。
-     *
-     * `touch-action: none` 是必须的：否则拖它的时候页面会跟着滚。
-     * z-index 45 —— 盖得住底部导航（40），但压不住下拉列表（50）和各种弹层。
-     */
-    position: fixed;
-    z-index: 45;
-    touch-action: none;
-    cursor: grab;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
-    /*
-     * 位置是 JS 量出来才给的（见 `syncRunPos`），就位前先别显示 ——
-     * 否则 fixed 元素会先在行首闪一下（实测 x=8，压在币种下拉上）。
-     */
-    visibility: hidden;
   }
-  .tk-head .tk-run.placed {
-    visibility: visible;
-  }
-  /* 占位块：跟闪电同样大，就顶在它原来的位置上 */
-  .tk-head .tk-run-slot {
-    display: inline-block;
-    width: 30px;
-    height: 28px;
-    flex: 0 0 auto;
-  }
-  /*
-   * 拖动中：手型 + 抬起来一点。
-   * ⚠️ 只过渡阴影/亮度，**千万别给 left/top 加过渡** —— 那会拖得「粘手」。
-   * 也不用 transform: scale（会改 getBoundingClientRect，跟夹边界打架）。
-   */
-  .tk-head .tk-run.dragging {
-    cursor: grabbing;
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.6);
-    filter: brightness(1.12);
-  }
-  .tk-head .tk-run svg {
+  .chart-head .tk-run svg {
     width: 15px;
     height: 15px;
     fill: currentColor;

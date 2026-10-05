@@ -80,7 +80,6 @@ import {
   refreshingBalance
 } from '../store'
 import {stopTicker, watchTicker} from '../ticker'
-import {runBtnPos, setRunBtnPos} from '../settings'
 import {
   VERDICT_TEXT,
   bjShort,
@@ -95,9 +94,6 @@ import {
 // 结论、分析过程、报错都在 ../analyze 的模块作用域里，
 // 切到别的页面再回来不会丢；这里只负责首次进页面把历史拉一次。
 onMounted(() => void loadHistory(symbol.value))
-// 那颗闪电的位置要等 DOM 出来才量得到（KeepAlive 切回来也可能要重贴）
-onMounted(() => void nextTick(syncRunPos))
-onActivated(() => void nextTick(syncRunPos))
 
 /*
  * 顶部行情条 / 底部涨幅：跟着币种走，进来就拉、换币立刻重拉。
@@ -130,133 +126,20 @@ const runLabel = computed(() =>
   loading.value ? '分析中…' : testMode.value ? '按这段行情判断' : '分析'
 )
 
-/* ---------------- 窄屏：那颗「分析」闪电能拖着走，位置记住 ---------------- */
+/* ---------------- 窄屏那颗「分析」闪电：钉在周期行最右侧 ---------------- */
 
-/**
- * 用户 2026-10-04：「移动端闪电图标位置可以自由移动固定 保存位置」。
+/*
+ * ⚠️ 这里原来挂着整套「拖着走 + 位置存 localStorage」的实现
+ *（用户 2026-10-04：「移动端闪电图标位置可以自由移动固定 保存位置」）。
+ * 2026-10-05 用户改口：「闪电图标**固定**在选择周期一行最右侧」——
+ * 于是整套拖拽（`runEl` / `runSlot` / `runPos` / `runStyle` / `syncRunPos` /
+ * `clampRunPos` / `onRunDown` / `onRunMove` / `onRunUp` / `onRunTap` /
+ * `RUN_DRAG_MIN` / `RUN_EDGE`）连同 `settings.ts` 里的 `runBtnPos` 一起删了，
+ * 按钮改成老老实实待在周期行（`KlineChart` 的 `#head-end` 插槽）里。
  *
- * 实现要点：窄屏下它是 `position: fixed`（见 style.css），位置由下面这个 `runStyle` 给。
- *
- * ⚠️ `runPos` 为 `null` 时**不给 left/top** —— fixed 元素在 left/top 为 auto 时
- * 恰好停在「它本来在文档流里的位置」，所以：
- *  · **没拖过的人看到的和以前一模一样**（不用量坐标、不用拿占位元素顶着，窗口变化还会自己跟着走）；
- *  · 只有拖过之后才写死 left/top，并落进 localStorage。
+ * 位置也不用再记：它现在是文档流里的一个格子，窗口怎么变都自己跟着走。
+ * 「固定」这个诉求靠 CSS 完成 —— 跟桌面上那颗「分析」同一个插槽、同一行。
  */
-const runEl = ref<HTMLButtonElement | null>(null)
-/** 流里那个占位块（按钮 fixed 之后靠它撑住原位，币种行才不会塔） */
-const runSlot = ref<HTMLElement | null>(null)
-/** 一进页面就用上次存的位置；没存过就等 `syncRunPos()` 量一下占位块 */
-const runPos = ref<{x: number; y: number} | null>(runBtnPos.value)
-const runDragging = ref(false)
-
-/** 按下那一下的客户区坐标 + 按钮当时的左上角 */
-let runDown = {x: 0, y: 0, left: 0, top: 0}
-/** 这一次按住有没有走成「拖」（用来区分点击：拖完松手不该又开始分析） */
-let runMoved = false
-/** 手指是不是还按着 */
-let runPressing = false
-
-/** 超过这个距离才算「拖动」，小抖动按「点一下」处理 */
-const RUN_DRAG_MIN = 4
-/** 离屏幕边缘留的余量 */
-const RUN_EDGE = 6
-
-/** 别让它被拖到屏幕外面去 */
-function clampRunPos(x: number, y: number): {x: number; y: number} {
-  const el = runEl.value
-  const w = el?.offsetWidth || 30
-  const h = el?.offsetHeight || 28
-  const maxX = Math.max(RUN_EDGE, window.innerWidth - w - RUN_EDGE)
-  const maxY = Math.max(RUN_EDGE, window.innerHeight - h - RUN_EDGE)
-  return {
-    x: Math.min(Math.max(RUN_EDGE, x), maxX),
-    y: Math.min(Math.max(RUN_EDGE, y), maxY)
-  }
-}
-
-/**
- * 定位。
- *
- * ⚠️ 不能指望「`position: fixed` 且不给 left/top 就会停在原位」—— 实测在 flex 行里
- * 它会落到**行首**（x=8，正好压在币种下拉上）。所以位置一律由这里给：
- * 没拖过时由 `syncRunPos()` 量那个占位块得到（= 以前那个位置）。
- */
-const runStyle = computed(() => {
-  if (!isMobile.value || !runPos.value) return undefined
-  return {left: `${runPos.value.x}px`, top: `${runPos.value.y}px`}
-})
-
-/**
- * 把按钮对齐到「它该在的地方」：
- *  · 拖过 → 用存下来的那个（顺手夹回可视区）
- *  · 没拖过 → 量占位块的位置（跟以前一模一样，而且窗口变化会自己跟上）
- *
- * 调用于：挂载 / KeepAlive 激活 / 宽窄切换 / 窗口 resize。
- */
-function syncRunPos(): void {
-  if (!isMobile.value) return
-  const kept = runBtnPos.value
-  if (kept) {
-    runPos.value = clampRunPos(kept.x, kept.y)
-    return
-  }
-  const slot = runSlot.value
-  if (!slot) return
-  const r = slot.getBoundingClientRect()
-  // 这会儿不在布局里（切到别的 tab 了），别把位置写成 0
-  if (!r.width && !r.height) return
-  runPos.value = {x: r.left, y: r.top}
-}
-
-function onRunDown(e: PointerEvent): void {
-  if (!isMobile.value) return
-  const el = runEl.value
-  if (!el) return
-  const r = el.getBoundingClientRect()
-  runDown = {x: e.clientX, y: e.clientY, left: r.left, top: r.top}
-  runMoved = false
-  runPressing = true
-  try {
-    // ⚠️ 要 try/catch：合成事件或指针已失效时会抛 NotFoundError（用 `?.` 挡不住）
-    el.setPointerCapture(e.pointerId)
-  } catch {
-    /* 抓不住也能拖，只是移出按钮后可能收不到事件 */
-  }
-}
-
-function onRunMove(e: PointerEvent): void {
-  if (!runPressing) return
-  const dx = e.clientX - runDown.x
-  const dy = e.clientY - runDown.y
-  // 还没越过阈值：先当它是「按着」，别急着动
-  if (!runMoved && Math.hypot(dx, dy) < RUN_DRAG_MIN) return
-  runMoved = true
-  runDragging.value = true
-  runPos.value = clampRunPos(runDown.left + dx, runDown.top + dy)
-}
-
-function onRunUp(e: PointerEvent): void {
-  if (!runPressing) return
-  runPressing = false
-  try {
-    runEl.value?.releasePointerCapture(e.pointerId)
-  } catch {
-    /* 同上，没抓着就无所谓 */
-  }
-  if (!runDragging.value) return
-  runDragging.value = false
-  // 落哪儿存哪儿
-  if (runPos.value) setRunBtnPos(runPos.value)
-}
-
-/** 点一下 = 跑分析；但「刚拖完」的那一下不算，不然拖完就自己开跑了 */
-function onRunTap(): void {
-  if (runMoved) {
-    runMoved = false
-    return
-  }
-  onRun()
-}
 
 /**
  * ⚠️ 用 `resize` + `innerWidth` 判断，别用 `matchMedia` 的 change ——
@@ -264,11 +147,8 @@ function onRunTap(): void {
  */
 function onViewport(): void {
   const m = window.innerWidth <= MOBILE_MAX
-  if (m === isMobile.value) {
-    // 宽窄没变，只是尺寸变了：拖过的夹回可视区，没拖过的重新贴到占位块
-    syncRunPos()
-    return
-  }
+  // 宽窄没变：什么都不用做（那颗闪电现在是文档流里的格子，自己会跟着走）
+  if (m === isMobile.value) return
   isMobile.value = m
   /*
    * 宽窄切换时把「对方不存在的那一格」收回来：
@@ -317,7 +197,20 @@ const {onTouchStart, onTouchMove, onTouchEnd} = useSwipeTabs<LeftTab>({
   current: () => leftTab.value,
   set: v => {
     leftTab.value = v
-  }
+  },
+  /*
+   * ⚠️ **「K 线」那一格不响应滑动**
+   *
+   * 用户 2026-10-05：「k 线页面滑动不切换」。
+   * 实测那一格的几何：左栏 `.col` 只剩 **40px**（就是 tab 行本身，y=10..50），
+   * K 线栏 `aside` 从 y=60 铺到屏幕底（726px）—— 屏幕中线从上扫到下，
+   * 没有一处落在手势区里，也就是说「划图」本来就走不到这儿来。
+   * 能误切的只有紧贴在图上沿那条 40px 的 tab 行，而那正是手指往上
+   * 够图表头部（行情条 / 周期行）时最容易扫到的地方 —— 所以整格关掉。
+   *
+   * 代价：在 K 线页只能**点** tab 行切换；离开 K 线后滑动照旧。
+   */
+  enabled: () => isMobile.value && leftTab.value !== CHART_TAB.value
 })
 
 /**
@@ -438,7 +331,8 @@ function onPickMarket(base: string): void {
 }
 
 /**
- * 点「分析」（桌面 `#head-end` 和手机上币种旁那颗共用这一个）。
+ * 点「分析」—— 桌面那颗文字按钮和窄屏那颗闪电共用这一个
+ * （2026-10-05 起两颗都在 `KlineChart` 的 `#head-end` 插槽里，即**周期行最右侧**）。
  *
  * 用户 2026-10-03：「点击分析自动跳转实时分析界面」——
  * 默认停在「合约行情 / K 线」那一格，点完分析还杵在榜单前面，看不见结论，
@@ -1160,35 +1054,6 @@ const heatRows = computed(() => {
                   @pick="pickSymbol"
                   @submit="onRun"
                 />
-                <!--
-                  占位块：那颗闪电是 `position: fixed` 的（要能拖），
-                  得在这儿留出同样大的一格，币种行才不会因为它「脱离文档流」而变形。
-                -->
-                <span ref="runSlot" class="tk-run-slot" aria-hidden="true" />
-                <!--
-                  窄屏：「分析」就**贴在币种旁边**（用户 2026-10-03：「ai 分析改为分析
-                  靠在币种旁边」），后来又要「**分析改为闪电图标**」。
-                  所以窄屏这颗就是一颗闪电，文案走 title / aria-label（`runLabel`）。
-                  放 `#symbol` 里而不是 `#actions` —— 后者整组带 `margin-left: auto`，会被推到最右边。
-                -->
-                <button
-                  ref="runEl"
-                  class="btn-run tk-run"
-                  :class="{dragging: runDragging, placed: !!runPos}"
-                  :style="runStyle"
-                  :disabled="loading"
-                  :title="runLabel"
-                  :aria-label="runLabel"
-                  @click="onRunTap"
-                  @pointerdown="onRunDown"
-                  @pointermove="onRunMove"
-                  @pointerup="onRunUp"
-                  @pointercancel="onRunUp"
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                  </svg>
-                </button>
               </template>
               <!-- 最右侧那组：＋ / 添加案例 / 配置 -->
               <template #actions>
@@ -1238,10 +1103,29 @@ const heatRows = computed(() => {
               </template>
             </TickerHead>
           </template>
-          <!-- 右边：跑分析（桌面端在这儿，手机端在上面币种旁） -->
+          <!--
+            周期行（`KlineChart` 的 `.chart-head-right`）**最右边那颗**「跑分析」：
+            桌面是文字按钮，窄屏是一颗闪电 —— 两个都放在这一个插槽里，靠 CSS 二选一。
+
+            用户 2026-10-05：「闪电图标固定在选择周期一行最右侧」。
+            ⚠️ 窄屏那颗原来挂在上面币种旁边（`#symbol` 里）、而且是 `position: fixed`
+            可以拖着走的（user 2026-10-04 的要求）—— 现在整套拖拽都拆了，
+            它就跟桌面那颗一样老实待在文档流里（详见脚本里那段说明）。
+          -->
           <template #head-end>
             <button class="btn-run head-run" :disabled="loading" @click="onRun">
               {{ runLabel }}
+            </button>
+            <button
+              class="btn-run tk-run"
+              :disabled="loading"
+              :title="runLabel"
+              :aria-label="runLabel"
+              @click="onRun"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+              </svg>
             </button>
           </template>
           <!-- 底部：1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅 -->
