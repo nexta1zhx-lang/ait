@@ -4105,7 +4105,7 @@ body.fixed-viewport .split {
   font-variant-numeric: tabular-nums;
 }
 
-/* 右下角那一行：方向开关 + 下单按钮（用户：「做多做空放右侧」） */
+/* 右下角那一行：两颗下单按钮（做多 / 做空），整行右对齐 */
 .ord-actions {
   display: flex;
   align-items: center;
@@ -4113,40 +4113,25 @@ body.fixed-viewport .split {
   gap: 8px;
 }
 
-/* 方向开关：选中那格按方向染色（做多绿、做空红） */
-/* 方向开关：两块等宽，跟着右边那一列（下单按钮）对齐 */
-.ord-side {
-  flex: 0 0 auto;
-}
-
-.ord-side button {
-  flex: 1 1 0;
-  padding: 7px 10px;
-  font-size: 12px;
-  font-weight: var(--fw-bold);
-}
-
-.ord-side button.long.active {
-  background: var(--ok-fill);
-  color: #fff;
-}
-
-.ord-side button.short.active {
-  background: var(--bad-fill);
-  color: #fff;
-}
-
 /*
- * 下单按钮：右边那一列里宽的那颗，颜色跟着方向走。
- * 用 `--ok-fill` / `--bad-fill`（实心块专用、已经压深到白字够读），
+ * 两颗下单按钮：一颗做多、一颗做空，**按哪颗就是哪个方向**
+ *（用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」——
+ *  去掉了原来「方向开关 + 一颗下单按钮」那套）。
+ *
+ * 宽度：等分（`flex: 1 1 0`）+ 上限 200px。
+ *   · 窄屏（手机一整行 300 出头）两颗平分，手指好点，不会一排挤成两颗小方块；
+ *   · 宽屏不让它们拉成两条 900px 的色带，撑到 200px 就停、整行仍然右对齐。
+ * 颜色用 `--ok-fill` / `--bad-fill`（实心块专用、已经压深到白字够读），
  * 别直接拿 `--ok` / `--bad` 铺底 —— 那两个是浅色，压白字看不清（见 `:root` 那段）。
  *
- * ⚠️ 它**不因为「暂时下不了」而禁用**（用户 2026-10-05：报错改用提示）——
+ * ⚠️ 它们**不因为「暂时下不了」而禁用**（用户 2026-10-05：报错改用提示）——
  *    点了才弹一条 toast 说为什么下不了；禁用着不解释反而让人不知道卡在哪。
  *    只有「正在提交」时才 disable。
  */
 .ord-submit {
-  min-width: 132px;
+  flex: 1 1 0;
+  min-width: 96px;
+  max-width: 200px;
   padding: 8px 14px;
   font-size: 13px;
   font-weight: var(--fw-bold);
@@ -5626,7 +5611,10 @@ button.badge:disabled {
     max-width: 80vw;
   }
   .ord-submit {
-    min-width: 128px;
+    /* 两颗拿这一行平分（上限放开、下限收到 0）：320px 上两颗也放得下，不挤破 */
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
   }
   .chart-side .chart-wrap {
     flex: 1 1 auto;

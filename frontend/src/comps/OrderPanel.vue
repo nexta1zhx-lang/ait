@@ -64,8 +64,14 @@ const levConfirmed = ref(false)
 
 /** 市价（默认）/ 限价 */
 const mode = ref<'market' | 'limit'>('market')
-/** 方向：做多 / 做空 —— 只决定那颗按钮叫什么、什么颜色 */
+/**
+ * 方向：做多 / 做空。
+ * 用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」—— 所以它不再是「开关状态」，
+ * 只是「这颗按钮按下去时带的方向」，按下那一刻才写进来（见 `submit()`）。
+ */
 const side = ref<'long' | 'short'>('long')
+/** 正在提交的是哪一边 —— 只有那一颗显示「提交中…」，另一颗只是变灰 */
+const busySide = ref<'long' | 'short' | null>(null)
 /** 仓位：占可用余额的百分比（滑动条的值，已经过阻尼） */
 const pct = ref(0)
 /** 杠杆：用户 2026-10-05 定「默认 10 倍、最高 20 倍」 */
@@ -388,8 +394,14 @@ async function ensureLeverage(): Promise<boolean> {
 
 /* ---------------- 下单 ---------------- */
 
-async function submit(): Promise<void> {
+/**
+ * 下单 `dir` = 按的是哪颗按钮（做多 / 做空）。
+ * 两颗按钮各管一边、不共享状态：按下去就以这个方向提交，
+ * 不用先在别处把方向拨对（用户 2026-10-05 去掉那个切换开关）。
+ */
+async function submit(dir: 'long' | 'short'): Promise<void> {
   if (busy.value || levBusy.value) return
+  side.value = dir
   /* 报错统一走提示：先把「为什么下不了」弹出来，不占内容区 */
   if (blocker.value) {
     buzz([20, 60, 20])
@@ -397,6 +409,7 @@ async function submit(): Promise<void> {
     return
   }
   busy.value = true
+  busySide.value = dir
   try {
     if (!(await ensureLeverage())) {
       buzz([20, 60, 20])
@@ -429,6 +442,7 @@ async function submit(): Promise<void> {
     say((e as Error).message)
   } finally {
     busy.value = false
+    busySide.value = null
   }
 }
 
@@ -584,7 +598,7 @@ onMounted(() => {
       >
     </div>
 
-    <!-- 右侧：方向开关 + 那颗下单按钮（用户：「做多做空放右侧」） -->
+    <!-- 右下角那一行：两颗下单按钮（做多 / 做空），都在右边 -->
     <div class="ord-actions">
       <!-- 读不到余额时才有：重新拉一次（放在这一行，不占头部额外高度） -->
       <button
@@ -596,36 +610,29 @@ onMounted(() => {
       >
         重试
       </button>
-      <div class="seg ord-side">
-        <button
-          type="button"
-          class="long"
-          :class="{active: side === 'long'}"
-          title="做多（买入开仓）"
-          @click="side = 'long'"
-        >
-          做多
-        </button>
-        <button
-          type="button"
-          class="short"
-          :class="{active: side === 'short'}"
-          title="做空（卖出开仓）"
-          @click="side = 'short'"
-        >
-          做空
-        </button>
-      </div>
+      <!--
+        直接两颗按钮（用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」）——
+        原来那颗「方向开关」得先把方向拨对、再点下单，两下才下得去，
+        而且不点下单看不出会往哪个方向走。现在**按哪颗就是哪个方向**。
+        ⚠️ 文案里不带币种：两颗并排，币名重复两遍反而挤（币种在头顶行情条上）。
+      -->
       <button
         type="button"
-        class="ord-submit"
-        :class="side"
+        class="ord-submit long"
         :disabled="busy || levBusy"
-        @click="submit"
+        title="做多（买入开仓）"
+        @click="submit('long')"
       >
-        {{
-          busy ? '提交中…' : side === 'long' ? `做多 ${base}` : `做空 ${base}`
-        }}
+        {{ busySide === 'long' ? '提交中…' : '做多' }}
+      </button>
+      <button
+        type="button"
+        class="ord-submit short"
+        :disabled="busy || levBusy"
+        title="做空（卖出开仓）"
+        @click="submit('short')"
+      >
+        {{ busySide === 'short' ? '提交中…' : '做空' }}
       </button>
     </div>
 
