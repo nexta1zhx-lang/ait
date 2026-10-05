@@ -21,3 +21,6 @@ android/.gradle/
 logs/
 *.log
 .DS_Store
+
+# 编辑器本地配置（每个人那份不一样，不进仓库）
+.vscode/
