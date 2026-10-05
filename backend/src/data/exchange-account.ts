@@ -78,12 +78,29 @@ export function createExchange(c: ExchangeCredentials): any {
       fetchOpenOrders: {warnWithoutSymbol: false}
     }
   })
-  if (c.sandbox && typeof ex.setSandboxMode === 'function') {
-    const r = ex.setSandboxMode(true)
-    if (r && typeof r.then === 'function') {
-      // 返回 Promise 的版本：这里不能 await（createExchange 是同步的），
-      // 忽略即可 —— 沙盒只是改 url，绝大多数版本是同步的
-      void r.catch(() => undefined)
+  /*
+   * 沙盒 / 模拟盘。
+   *
+   * ⚠️ 币安这边**老办法已经不能用了**：`setSandboxMode(true)` 对合约会直接抛
+   *    `NotSupported: binance testnet/sandbox mode is not supported for futures
+   *    anymore`（ccxt 把旧合约测试网 `testnet.binancefuture.com` 摘了）。
+   *    官方替代品是**模拟盘 demo trading**，地址 `https://demo-fapi.binance.com`
+   *    —— ccxt 用 `enableDemoTrading(true)` 切（它把 `urls.api` 换成 `urls.demo`）。
+   *    别的交易所没这回事，照旧走 `setSandboxMode`。
+   *
+   * 这一步是**本地开发能不能跑起来的关键**：本地出口 IP 会变，白名单填不住；
+   * 模拟盘 Key 不用白名单、不碰真钱，整条链路（余额 / 杠杆 / 规格 / 测试单）都通。
+   */
+  if (c.sandbox) {
+    if (c.exchange === 'binance' && typeof ex.enableDemoTrading === 'function') {
+      ex.enableDemoTrading(true)
+    } else if (typeof ex.setSandboxMode === 'function') {
+      const r = ex.setSandboxMode(true)
+      if (r && typeof r.then === 'function') {
+        // 返回 Promise 的版本：这里不能 await（createExchange 是同步的），
+        // 忽略即可 —— 沙盒只是改 url，绝大多数版本是同步的
+        void r.catch(() => undefined)
+      }
     }
   }
   return ex

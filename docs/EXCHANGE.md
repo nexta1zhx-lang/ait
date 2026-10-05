@@ -292,6 +292,47 @@ K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
 **要放开真下单**：`placeTestOrder()` 里 `fapiPrivatePostOrderTest` → `fapiPrivatePostOrder`，
 其余逻辑一模一样；但前端「测试单」那几处提示 + 本文档这一段必须一起改。
 
+### 本地开发：IP 白名单怎么办（2026-10-05）
+
+**问题**：币安那把 Key 勾了「限制访问 IP」之后，本机就再也连不上了 ——
+报错是 `-2015 ... request ip: x.x.x.x`（`humanize()` 会把**当前出口 IP 原样打出来**，
+界面上的提示里就有，直接照抄去白名单里改就行）。麻烦有两点：
+
+1. **一把 Key 只能填一个 IP**（币安那个输入框是单值，不是列表）⇒ 服务器 IP 占掉之后，
+   本地就没有位置了。
+2. **本地出口 IP 是会变的**（实测：一会儿 `157.254.20.163`、一会儿又换一个）——
+   就算把当前的填进去，过一会儿又失效，改白名单改成体力活。
+
+三条路，按推荐顺序：
+
+**① 本地用「模拟盘」（demo trading）Key —— 推荐**
+
+* 去 <https://demo.binance.com>（币安官方模拟盘）开一套 API Key：**假钱、不用白名单**。
+* 在「我的 → 个人信息 → 交易所」里把它加进来，勾上 **「沙盒 / 测试网」**。
+* 后端会自动切环境：ccxt 走 `enableDemoTrading(true)`（`urls.api` 整体换成
+  `https://demo-fapi.binance.com`），`exchange-trade.ts` 里读合约规格的
+  `exchangeInfo` 也跟着切（`fapiBase()`）。
+* ⚠️ **规格必须跟着环境走**：实测同一时间 BTCUSDT 的 `stepSize`
+  demo `0.0001` / 线上 `0.001`（合约数量 741 vs 920 个）—— 拿线上规格去算 demo 单，
+  数量会被 `-1111`（精度不对）顶回来。所以缓存 key 里带着环境。
+* ⚠️ 老写法 `setSandboxMode(true)` **对合约已经不能用了**（ccxt 抛
+  `testnet/sandbox mode is not supported for futures anymore`，它把旧的
+  `testnet.binancefuture.com` 摘了）—— 别再往回改。
+
+**② 本地专用 Key（要真数据就这么干）**
+
+单独建一把，**只勾 U 本位合约交易**（别给提现 / 划转权限）、**不填 IP 白名单**，
+只在本地开发用；生产那把继续绑服务器 IP。两边互不影响 —— 一把 Key 一个 IP
+的限制就是这么绕过去的。
+
+**③ 固定出口 IP**
+
+本地请求经固定 IP 出去（比如生产服务器 `52.194.6.144` 上开个转发），
+再把那个 IP 填进白名单。稳定性最好，但要维护一条链路。
+
+> 域名可用环境变量换：`FAPI_BASE`（线上，默认 `https://fapi.binance.com`）、
+> `FAPI_DEMO_BASE`（模拟盘，默认 `https://demo-fapi.binance.com`）。
+
 ---
 
 ## 6. 前端

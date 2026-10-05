@@ -77,11 +77,15 @@ function assertTradable(c: ExchangeCredentials): void {
     throw new Error(
       '这套账户是现货，不能下合约单 —— 去「我的 → 个人信息 → 交易所」加一套 U 本位合约的 Key'
     )
-  if (c.sandbox)
-    throw new Error(
-      '币安合约测试网已下线（ccxt 不再支持），请改用正式合约 Key —— ' +
-        '下单走的是 /fapi/v1/order/test 测试接口，不会真进撮合'
-    )
+  /*
+   * 沙盒（模拟盘）**放行**：以前这里拦着，理由是「币安合约测试网已下线」——
+   * 那说的是 ccxt 的 `setSandboxMode`（对合约直接抛 NotSupported），
+   * 官方替代品是**模拟盘 demo trading**（`https://demo-fapi.binance.com`），
+   * ccxt 用 `enableDemoTrading(true)` 切（见 `exchange-account.createExchange`）。
+   *
+   * 放行之后**本地开发就有路走了**（2026-10-05 用户问的）：本地出口 IP 会变，
+   * 白名单根本填不住；模拟盘 Key 不用白名单、不碰真钱，这一整条链路照样跑得通。
+   */
 }
 
 /* ------------------------------------------------------------------ */
@@ -90,6 +94,19 @@ function assertTradable(c: ExchangeCredentials): void {
 
 /** 币安 U 本位合约接口（跟 `contracts.ts` 同一个环境变量口径） */
 const FAPI_BASE = process.env.FAPI_BASE ?? 'https://fapi.binance.com'
+/** 币安**模拟盘**（沙盒 Key 走的那个环境）。旧合约测试网已废弃，见 `assertTradable` */
+const FAPI_DEMO_BASE = process.env.FAPI_DEMO_BASE ?? 'https://demo-fapi.binance.com'
+
+/**
+ * 这套凭据该打哪个环境。
+ *
+ * ⚠️ 规格（精度 / 最小量）**必须跟凭据同一个环境**：
+ *    实测 demo 与线上并不一致（BTCUSDT 的 `stepSize` demo 0.0001、线上 0.001），
+ *    拿线上规格去算 demo 单的数量，会被 -1111（精度不对）顶回来。
+ *    所以缓存 key 里也带着环境（见 `loadSpecs`）。
+ */
+const fapiBase = (c: ExchangeCredentials): string =>
+  c.sandbox ? FAPI_DEMO_BASE : FAPI_BASE
 
 /** 一个合约的下单规格（就是 exchangeInfo 里那几条 filter，摊平出来） */
 interface SymbolSpec {
@@ -126,11 +143,12 @@ const SPECS_TTL = 6 * 60 * 60 * 1000
 const specsCache = new Map<string, SpecsCache>()
 
 async function loadSpecs(c: ExchangeCredentials): Promise<Map<string, SymbolSpec>> {
-  const key = `${c.exchange}|${c.marketType}`
+  /* 环境也算进 key：demo 和线上的规格不一样（见 `fapiBase`） */
+  const key = `${c.exchange}|${c.marketType}|${c.sandbox ? 'demo' : 'live'}`
   const hit = specsCache.get(key)
   if (hit && Date.now() - hit.at < SPECS_TTL) return hit.bySymbol
 
-  const url = `${FAPI_BASE}/fapi/v1/exchangeInfo`
+  const url = `${fapiBase(c)}/fapi/v1/exchangeInfo`
   const res = await fetch(url, {
     headers: {'User-Agent': 'crypto-entry-advisor'}
   })

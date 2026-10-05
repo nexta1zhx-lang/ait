@@ -266,7 +266,10 @@ onMounted(load)
               <option value="spot">现货</option>
             </select>
           </label>
-          <label class="inline chk">
+          <label
+            class="inline chk"
+            title="本地开发用：币安模拟盘（demo.binance.com）—— 假钱、不用 IP 白名单；勾上后余额/杠杆/合约规格/测试单全打 demo 环境"
+          >
             <input v-model="fSandbox" type="checkbox" />
             <span>沙盒 / 测试网</span>
           </label>
