@@ -1,4 +1,5 @@
 import ccxt from 'ccxt'
+import {ccxtProxyOptions} from './exchange-account'
 import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
 import {describeSeries} from '../analysis/describe'
 import {ema42Of} from '../analysis/ema'
@@ -333,6 +334,8 @@ async function getExchange(
 
   const exchange = new Ctor({
     enableRateLimit: true,
+    // 行情这条也走代理，理由同 `exchange-account.ts` 的 `ccxtProxyOptions()`
+    ...ccxtProxyOptions(),
     options: marketOptions(marketType)
   })
   if (apiBase) applyApiBase(exchange, apiBase)

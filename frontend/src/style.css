@@ -6201,6 +6201,135 @@ button.badge:disabled {
   background: var(--accent-soft);
 }
 
+/* ==================== 万能划转弹层（2026-10-05） ==================== */
+
+/*
+ * ⚠️ 这一块是**真钱**：币安没有划转的测试接口，点一下钱就换钱包了。
+ *    所以警示语是**常驻**的（不是 3.5 秒就消失的 toast），红框、不折叠。
+ */
+.tr-warn {
+  margin: 0 0 4px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--bad, #e55361) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bad, #e55361) 10%, transparent);
+  color: var(--bad, #e55361);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.tr-who {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tr-who b {
+  color: var(--text);
+}
+
+/* 方向：从 [?] ⇅ 到 [?]，手机上也能一行放下 */
+.tr-dir {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tr-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tr-side select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.tr-swap {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+}
+
+.tr-amount {
+  margin-top: 8px;
+}
+
+.tr-amount input {
+  text-align: right;
+}
+
+.tr-avail {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.tr-avail b {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.tr-bad {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--bad, #e55361);
+  background: color-mix(in srgb, var(--bad, #e55361) 12%, transparent);
+}
+
+.tr-ok {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ok, #5eba89);
+  background: color-mix(in srgb, var(--ok, #5eba89) 12%, transparent);
+}
+
+.tr-go {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--accent-line, var(--accent));
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: var(--fw-bold);
+}
+
+.tr-go:disabled {
+  opacity: 0.45;
+}
+
+.tr-why {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* 净资产那行那颗「划转」：跟 USDT/CNY、⟳ 并排，别比它们高 */
+.tr-open {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  font-size: 11px;
+}
+
 /*
  * 「行情过滤」那一行的输入：数字框 + 单位 M + 一排常用档位。
  * 档位是给手机准备的 —— 点一下就行，不用弹键盘。

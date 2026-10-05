@@ -7,26 +7,39 @@
 
 ## 1. 范围
 
-**只统计两个钱包**（用户 2026-10-05 定）：
+**统计三个钱包**（用户 2026-10-05 追加了现货）：
 
 | 维度 | 接口 | 拿到什么 |
 |---|---|---|
 | USDT 合约（USDⓈ-M） | `GET /fapi/v2/account` | `totalWalletBalance` / `totalUnrealizedProfit` / `totalMarginBalance` / `availableBalance` + `assets[]` + **`positions[]`** |
 | C2C 钱包 | `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true` | `walletName` / `balance` / `assetBalances[]` —— ⚠️ 两个坑（2026-10-05 真丢过钱）：**① 钱包名各账号不一样**（官方文档写 `"C2C"`，实测本账号是 `"Funding"`）⇒ 两个都得认；**② `assetBalances[]` 里没有 `balance` 字段**，金额在 `free`/`locked`/`freeze`/`withdrawing` 里（钱包层级那个 `balance` 是 **BTC 估值**） |
+| **现货（只 USDT）** | `GET /api/v3/account` | 只挑 `balances[]` 里 `asset === 'USDT'` 那一行的 `free + locked` —— 见下面那条「简单化」 |
 | 挂单 | `GET /fapi/v1/openOrders`（**不需要交易对**） | |
 | 成交 | WS `ORDER_TRADE_UPDATE`，REST `userTrades` 兜底 | |
 | 已实现盈亏 | WS 同事件里的 `rp`，REST `fapi/v1/income` 兜底 | |
 
+> **现货为什么只算 USDT**（用户 2026-10-05：「现货统计也加上，只要 usdt 的统计简单化」）：
+> 别的币种要「按币种估值」才进得了净值 —— 那套东西（老版 `/api/exchange/account`）
+> 第一版做过，维护成本高、币种对不上时只能静默少算，所以整个删掉了。
+> 现在这条线很硬：**现货只看 USDT，其他币种一概不折价、不进净值**，界面上也
+> 明写「现货（USDT）」+ 一句「其他币种不计入净资产」，不给人错觉。
+> ⚠️ 只读现货余额**不需要**现货交易权限（`enableSpotAndMarginTrading` 可以是 false），
+> 只要有「允许读取」就行 —— 实测两把 Key 都是 false 但读得到。
+
 **明确不做**
-- ❌ **现货（Spot 钱包）完全不参与统计** —— 老版那套「按币种估值的现货余额列表」整块删掉
+- ❌ 现货里**除 USDT 之外**的币种估值（见上面那段）
 - ❌ 币本位 COIN-M（`dapi*`）
 - ⚠️ **下单**：2026-10-05 加了 K 线页底部的下单模块，**默认走币安的测试接口**
   （`POST /fapi/v1/order/test`）—— 只校验参数 / 权限 / 保证金，**不进撮合、不真开仓**。
   在「配置 → 测试下单」里把开关**关掉**就是真下单（`POST /fapi/v1/order`，会真扣保证金），
   由请求体里的 `test: false` 决定，见第 5 节末尾。撤单还没做
-- ❌ 跨账户、跨用户汇总（净资产 = **那一套 key** 的合约 + C2C）
+- ⚠️ **划转**：2026-10-05 加了「万能划转」（第 5.5 节）—— **真钱、没有测试接口**，
+  支持「现货 / 资金(C2C) / USDTⓈ 合约」之间六种组合
+- ❌ 跨账户、跨用户汇总（净资产 = **那一套 key** 的合约 + C2C + 现货USDT）
 
-**净资产口径**：`合约 totalMarginBalance（= 钱包 + 浮盈）+ C2C 折 USDT`
+**净资产口径**：`合约 totalMarginBalance（= 钱包 + 浮盈）+ C2C 折 USDT + 现货 USDT`
+—— 只有 `db/exchange-store.ts` 的 `netOf()` 一处定义，前端 `ExchangeAccountBoard`
+和曲线 SQL 都跟着它，三处口径必须一致。
 
 ---
 
@@ -277,6 +290,9 @@ K 线页底部那个下单模块用的几条（`data/exchange-trade.ts`）：
 | POST | `/api/exchange/trade/order?id=` | `POST /fapi/v1/order/test` **或** `/fapi/v1/order` | 下单。⚠️ 走哪个由请求体里的 **`test`** 决定：`test !== false`（**默认**，含漏传）→ 测试单（只校验，不进撮合、不真开仓）；`test === false` → **真单** |
 | POST | `/api/exchange/trade/close?id=` | 同上（`order/test` / `order`） | 平仓，同样看 `test`。`{symbol, side}` 只平那一条（列表里每一行的「平仓」）；只给 `symbol` 平这个交易对；**都不给就是「一键平仓」**（有持仓的全平一遍） |
 | GET | `/api/rate` | — | 美元 → 人民币汇率（`USD_CNY`，默认 7.1）——「交易所账户」USDT / CNY 快捷切换用，跟用量页同源 |
+| POST | `/api/exchange/transfer?id=` | **`POST /sapi/v1/asset/transfer`** | **万能划转（真钱，没有测试接口）**。`{from, to, amount, asset?}`，`from`/`to` ∈ `spot`/`funding`/`futures`，见第 5.5 节 |
+| GET | `/api/exchange/wallet?id=&wallet=` | `api/v3/account` / `sapi` / `fapi` | 某个钱包 USDT **能划走多少**（划转弹层的「全部」+ 余额提示；实时读，不读快照） |
+| GET | `/api/exchange/permissions?id=` | `GET /sapi/v1/account/apiRestrictions` | 这套 Key 开没开「允许通用划转」（`permitsUniversalTransfer`）|
 
 ⚠️ 平仓那两个参数有讲究：**单向持仓模式**带 `reduceOnly`，**双向持仓模式绝对不能带**
 （币安直接回 `-1106 Parameter 'reduceonly' sent when not required`）—— 双向模式本来就靠
@@ -331,6 +347,68 @@ K 线页底部那个下单模块用的几条（`data/exchange-trade.ts`）：
 全都落在测试单那一侧 —— 宁可误当测试单，也不能误真下单。前端开关在
 「配置 → **测试下单**」（`settings.ts` 的 `testOrder`，默认**开**，落 localStorage），
 关掉时真单模式会在下单模块顶栏挂一枚红色「真单」章。
+
+### 5.5 万能划转（2026-10-05）
+
+「交易所账户」页净资产那一行的**「划转」**按钮 → 弹层选账户 / 方向 / 金额 → 二次确认。
+
+⚠️⚠️ **这是全站唯一一处"真钱、且没有测试接口"的操作**：下单有 `/fapi/v1/order/test`
+（只校验不成交），划转**没有**对应物 —— 调一次钱就真的换钱包了。所以：
+
+- 弹层顶部一条**常驻**红色警示（不是 3.5 秒就消失的 toast）
+- 提交前 `window.confirm` 复述「哪套账户 / 从哪到哪 / 多少」
+- 没勾「允许通用划转」的 Key **直接禁用提交**，并写清去哪开
+- 金额里的「全部」走 `/api/exchange/wallet` 实时读**能划走的那部分**
+  （现货/资金是 `free`，挂在单子上的锁定额划不动）—— 照着快照里的"总额"填会被 `-4046` 拒
+
+#### 用哪条接口
+
+**零售版**全能划转 `POST /sapi/v1/asset/transfer`（ccxt `sapiPostAssetTransfer`）。
+
+> ❌ **不要用 `/sapi/v1/broker/universalTransfer`** —— 那是「Broker 万能划转」，
+> 要券商/经纪商身份 + `X-SAPI-USED-UC-UID` 之类请求头，**普通个人账号打过去直接被拒**。
+> 用户最初给的就是这条 broker 路径，据此纠正。
+
+#### 支持的方向（**在真实账号上逐个验过枚举**）
+
+验法：拿 `GET /sapi/v1/asset/transfer?type=…`（**只读**的查询历史）去试每个候选
+`type`，合法的回历史（可能空）、非法的回 `-1102 Mandatory parameter 'type' …`。
+结果（2026-10-05）：
+
+| `type` | 方向 | 实测 |
+|---|---|---|
+| `MAIN_UMFUTURE` | 现货 → USDTⓈ 合约 | ✅ |
+| `UMFUTURE_MAIN` | USDTⓈ 合约 → 现货 | ✅ |
+| `MAIN_FUNDING` | 现货 → 资金(C2C) | ✅ |
+| `FUNDING_MAIN` | 资金(C2C) → 现货 | ✅ |
+| `UMFUTURE_FUNDING` | USDTⓈ 合约 → 资金(C2C) | ✅ |
+| `FUNDING_UMFUTURE` | 资金(C2C) → USDTⓈ 合约 | ✅ |
+| `MAIN_CMFUTURE` / `CMFUTURE_MAIN` / `CMFUTURE_FUNDING` / `FUNDING_CMFUTURE` | 币本位那几对 | ✅ 合法，但本仓库不碰 COIN-M，**不放出来** |
+| `MAIN_MARGIN` / `MARGIN_MAIN` | 现货 ↔ 全仓杠杆 | ✅ 合法，同上不放出来 |
+| **`MAIN_C2C` / `C2C_MAIN`** | **真的 C2C 账户** | ❌ `-1102`，**不存在** |
+
+所以后端只放行上面六种（`data/exchange-transfer.ts` 的 `TYPE_OF`），其余一律拒并给出中文原因。
+⚠️ **合约之间互转**（`UMFUTURE_CMFUTURE` 之类）压根没有对应 `type`，也不支持。
+
+> ⚠️ 别把「C2C 钱包」和「C2C 账户」搞混：本项目界面上那块 **「C2C 钱包」其实是
+> Funding（资金）钱包**（见 `exchange-overview.ts` 文件头 ①），**它是能划的**；
+> 币安真正的 C2C（P2P）账户才是划不了的那个。
+
+#### 权限
+
+`GET /sapi/v1/account/apiRestrictions` 里的 **`permitsUniversalTransfer`**
+= 币安「API 管理 → 编辑权限 → **允许通用划转**」。没开就报通用的 `-2015`（看不出真原因），
+所以弹层一打开就先问一次这把 Key 的权限，没开就把话直接摆出来。
+
+⚠️ 同一把 Key 上实测：`测试` 开了（`permitsUniversalTransfer: true`）、
+`币安` 没开（false）—— 所以「划不动」大概率是没勾这个开关，不是 IP 白名单。
+
+#### 不在万能划转里的钱包
+
+`/sapi/v1/asset/wallet/balance` 会带回 10 个钱包（Spot / Funding / Cross Margin /
+Isolated Margin / USDⓈ-M Futures / COIN-M Futures / Earn / Options / Trading Bots /
+Copy Trading）。**只有现货、资金、USDTⓈ合约这三个**在万能划转里，其余（Earn / 期权 /
+杠杆 / 跟单）都不通 —— 界面上也就只摆这三个。
 
 ### 本地开发：IP 白名单怎么办（2026-10-05）
 
@@ -394,6 +472,91 @@ npm run ui:dev:cloud        # = API_TARGET=https://bitcoooin.cn npm run ui:dev
 > `-2015 Invalid API-key, IP, or permissions for action, request ip: 157.254.20.163`。
 > 所以「反正只打测试单」并不能免掉白名单（读余额那步也过不去）。
 
+**④ 本地请求从服务器出去（走隧道代理）—— 2026-10-05 起推荐用这个**
+
+`③` 的痛点（本机出口 IP 会变）不用忍：让**服务器**替本机出网，白名单里只留
+`52.194.6.144` 一个就永远不用改；顺带把「TUN 和 SSH 打架」那件事也一起绕开
+（只拐你那个 dev 进程，不拐整机）。
+
+```
+dev server --HTTP CONNECT--> 127.0.0.1:8888 --(ssh -L)--> 服务器 127.0.0.1:8888 --> fapi.binance.com
+                                                          （tinyproxy，只监听回环）
+```
+
+服务器上装的是一份 `tinyproxy`（Ubuntu 官方源里的小包，**只 `Listen 127.0.0.1`**
+⇒ 公网扫不到、不用开 Lightsail 规则、也不需要 BasicAuth，够得着的只有能 SSH 进来的人）：
+
+```bash
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tinyproxy
+# 配置：Port 8888 / Listen 127.0.0.1 / Allow 127.0.0.1 / ConnectPort 443,80
+sudo systemctl enable --now tinyproxy
+```
+
+本机两条命令（脚本都封好了）：
+
+```bash
+bash scripts/dev-proxy.sh --check     # 体检：出口 IP 是不是 52.194.6.144、币安通不通
+bash scripts/dev-proxy.sh             # 开隧道（前台挂着，Ctrl+C 就关）
+# 另开一个终端：
+export EXCHANGE_PROXY=http://127.0.0.1:8888
+export NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:8888
+npm run web
+```
+
+**两个环境变量各管一半**（2026-10-06 补测：缺一个就有一半接口超时）：
+
+| 谁 | 靠什么变量 | 管哪些 |
+|---|---|---|
+| ccxt 实例 | `EXCHANGE_PROXY` | 余额 / 持仓 / 下单 / 划转 / listenKey，**以及行情那条**（`market.ts` 的 `getExchange()`：exchangeInfo / K 线 / ticker 都是 ccxt 打的） |
+| 裸 `fetch` | `NODE_USE_ENV_PROXY` + `HTTPS_PROXY` | CoinGecko 市值排名这种 |
+| 裸 `WebSocket` | `EXCHANGE_PROXY`（同一个） | K 线实时（`data/kline-stream.ts`）、用户数据流（`exchange-stream.ts`）—— 见下面两段 |
+
+> ⚠️ **WebSocket 得单独接一次**（2026-10-06 查清，「连上了但一条数据都不推」的真因）：
+> `ws` 既不认 `HTTP_PROXY` / `HTTPS_PROXY`，也不认 `NODE_USE_ENV_PROXY`，必须自己
+> `new WebSocket(url, {agent})`。不塞 agent 时**不会报 DNS 错** —— 墙把
+> `fstream.binance.com` 解析成**假 IP**（实测拿到 `31.13.94.7`（Facebook）/
+> `108.160.167.165`，每次不一样），TCP 偶尔还能连上、`open` 也触发，但**零帧**。
+> 看着像「币安不推数据」，其实是压根没连到币安。
+> ⇒ `data/exchange-account.ts` 里加了 `wsAgent()`：读同一个 `EXCHANGE_PROXY`，
+>   用 `https-proxy-agent` 建 CONNECT 隧道。塞上之后 0.7 秒就出货。
+> 实测（本地带代理跑 `npm run web`）：`[kline] 上游 WS 已连`、`[exch:7]/[exch:9] WS 已连（用户数据流）`、
+> K 线 SSE 12 秒 31 条事件、**0 次**「退回 REST 轮询」、`交易所 实例已预热`、
+> `常点币已预热 122/122`、`行情条 已预热 61/61`（这几条在没代理时全是超时/失败）。
+>
+> `https-proxy-agent` 装在 **devDependencies**（生产不需要代理）：生产镜像
+> `npm ci --omit=dev` 里没有它，`wsAgent()` 用**动态 import** 并吞掉失败 ⇒ 直连；
+> 而且生产不设 `EXCHANGE_PROXY`，压根走不到那段。
+>
+> 顺带修了个隐患：`kline-stream.ts` 原来 `new WebSocket(...)` **没 import**，
+> 用的是 Node 24 的**全局** WebSocket（undici），而 `exchange-stream.ts` 用的是 `ws`
+> 包 —— 两处不一致，且全局那个**不支持代理**。现在两处统一走 `ws`。
+>
+> 还有一个顺带修的坑：`loadSpecs()`（`data/exchange-trade.ts`，下单面板要的合约规格）
+> 走的是**裸 fetch** 那条路。本地实测碰到过「拿回一个**没有 `symbols` 的 200**」，
+> 结果空列表被缓存 6 小时，之后**每个币**都报「币安的合约列表里没有「BTC」这个交易对」
+> —— 一句话把人指到币安身上（真因在本地网络/代理）。现在空列表直接抛错（含响应开头）
+> 且**不进缓存**，下一次请求会重试。
+
+> ❌ **别用 `@codelook/proxy-server` 这类来路不明的 npm 包**（用户 2026-10-05 问过）：
+> 只有 0.1.0 一个版本、没有仓库、没有 homepage、维护者陌生，还夹带一份 `.env`。
+> 源码读了确实没恶意，但能力等价于 tinyproxy，而在**装着 Postgres 和交易所 Key 的机器**
+> 上跑一个没人维护的第三方包，风险/收益完全不对等。
+
+> ⚠️⚠️ **为什么是 `EXCHANGE_PROXY` 而不是 `HTTPS_PROXY` + `NODE_USE_ENV_PROXY`**
+> （这条 2026-10-05 订正过一次，之前那版是错的）：
+> ccxt 4.5 走原生 fetch（Node 下就是 undici），但它在加载完 undici 之后会
+> **自己 new 一个直连的 keep-alive dispatcher**（`Exchange.fetchDispatcher`），
+> 然后**显式挂到每个请求的 `dispatcher` 上**（`setFetchProxyOptions`）——
+> 显式 dispatcher 压过全局 dispatcher，于是 `HTTPS_PROXY` 被**整条绕过**。
+> 实测：同一条代理，裸 `fetch` 200，ccxt 10s connect timeout。
+> ⇒ 代理只能交给 ccxt 自己（`httpProxy`），见 `data/exchange-account.ts` 的 `exchangeProxy()`。
+>
+> 而 `NODE_USE_ENV_PROXY=1` **对裸 fetch 那条路仍然有效**（`npm run sync:contracts`
+> 这种一次性脚本就是这么刷币种表的），只是**管不到 ccxt**。
+> 另外 ccxt **不允许同时给 `httpProxy` 和 `httpsProxy`**（回
+> `multiple conflicting proxy settings`），只给 `httpProxy` 就行 —— 它内部按
+> httpProxy → httpsProxy 顺序挑一个，挑中的那个对**所有**请求都生效。
+
 > 域名可用环境变量换：`FAPI_BASE`（线上，默认 `https://fapi.binance.com`）、
 > `FAPI_DEMO_BASE`（模拟盘，默认 `https://demo-fapi.binance.com`）；
 > 前端也可以直接 `VITE_API_BASE=https://bitcoooin.cn npm run web`（走线上 CORS，
@@ -407,7 +570,7 @@ npm run ui:dev:cloud        # = API_TARGET=https://bitcoooin.cn npm run ui:dev
 | SSH 到服务器（`release.sh`） | ✗ 被劫持（`kex_exchange_identification: Connection closed`，连 `203.0.113.7:9999` 都“连得上”） | ✓ 通 |
 | 本机连币安（K 线行情 / 刷币种表） | ✓ 通 | ✗ 直连被墙 |
 
-**不用二选一**：Node 自己的出站走代理就行，SSH 不需要代理。
+**不用二选一**（2026-10-05 订正过：下面这条**只对裸 fetch 有效**，管不到 ccxt）：
 
 ```bash
 # 币安全部走本地代理（7890 是 Clash 那种混合口），TUN 就可以一直关着
@@ -417,6 +580,11 @@ NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7890 npm run web
 Node 24 的 `fetch` 认 `NODE_USE_ENV_PROXY`（`undici` 的 ProxyAgent 那条路），
 实测用它在本机**成功刷了币种表**（528 → 525，剔掉 3 个交割中的币）。
 `npm run sync:contracts` 这种一次性命令同样能这么套。
+
+> ⚠️ 但**下单 / 余额 / 快照这些走 ccxt 的调用不吃这一套** —— ccxt 会自己塞一个直连
+> dispatcher 把环境变量代理绕过去（`docs` 上面「④」那节有详解）。
+> 要连 ccxt（含行情）和 WebSocket 一起走代理，用上面「④」那两条变量：
+> `EXCHANGE_PROXY=... NODE_USE_ENV_PROXY=1 HTTPS_PROXY=... npm run web`。
 
 > 另一个坑：新服务器（`52.194.6.144`）的**主机密钥不在 `known_hosts`** 里时，
 > `release.sh` 会直接挂在半路（`Host key verification failed` —— `BatchMode` 下不会问你要不要信任）。
@@ -462,6 +630,7 @@ Node 24 的 `fetch` 认 `NODE_USE_ENV_PROXY`（`undici` 的 ProxyAgent 那条路
 | M6.3 ✅ | 下单模块第三版：顶栏**删掉账户昵称和「测试单」标签**、`一键平仓` 挪到**最右**并加二次确认；账户名（`.ktag`）+ 可用余额挪到**价格行右侧**、价格输入框收窄到 130px；**「测试单」变成「配置 → 测试下单」开关**，关掉走真单（`/fapi/v1/order`），真单模式顶栏挂红色「真单」章 | 2026-10-05 完成 |
 | M7 ✅ | **多账户视图**：「交易所账户」页顶部的账户下拉框换成 **tab 条（`全部` + 每套 Key 的名字）**；`全部` = 各套快照**加总**（持仓/挂单/盈亏按账户拆行并打 `.ktag` 标签，曲线按时间桶相加），单套时不合并、也不打标签 | 2026-10-05 完成（`comps/ExchangeAccountLivePanel.vue`） |
 
+| M8 ✅ | **现货（只 USDT）进统计** + **万能划转**：净资产 = 合约 + C2C + 现货USDT（快照加 `spot_usdt` 列）；「交易所账户」净资产那行加「划转」按钮 → 弹层支持现货/资金/合约之间六种组合（**真钱**，无测试接口，常驻警示 + 二次确认） | 2026-10-05 完成 |
 ### 多账户视图（M7）—— 为什么是「加总」而不是「切来切去」
 
 一套 Key = 一个账户，但用户手上可能同时挂好几套（主号 / 小号 / 测试号）。
@@ -544,7 +713,7 @@ SSE 用真 token 验过：`open` → `snapshot`（底稿，带真实 `ageSec`）
 | 多副本重复订阅 | 现在单实例；将来加锁或指定主副本 |
 | 币安只留 3 个月 | 成交**永久落库**（存它的根本理由） |
 | 交易所额度 | 每 key：2 请求/5 分钟 + 1 次对账/15 分钟，可忽略 |
-| 只绑了现货 key 的账户 | 这一页直接提示「现货不参与统计」，不硬算 |
+| 只绑了现货 key 的账户（`marketType=spot`） | 提示「这套账户不是合约账户」，**不硬算** —— 现货 USDT 只是顺带统计，这一页的主体仍是合约 |
 
 ---
 

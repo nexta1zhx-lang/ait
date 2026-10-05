@@ -19,7 +19,11 @@
  * ⚠️ 单实例假设：多副本会重复订阅同一个 key（要分布式锁 / 指定主副本），见 docs。
  */
 import {WebSocket} from 'ws'
-import {createExchange, type ExchangeCredentials} from './data/exchange-account'
+import {
+  createExchange,
+  wsAgent,
+  type ExchangeCredentials
+} from './data/exchange-account'
 import {fetchExchangeOverview, type ExchangeOverview} from './data/exchange-overview'
 import {saveSnapshot, upsertFill, type FillInput} from './db/exchange-store'
 import {query, queryOne} from './db/client'
@@ -56,7 +60,7 @@ interface KeyRow {
   sandbox: boolean
 }
 
-/** 要盯的 key：填了凭据的**合约**账户（现货不参与统计，见方案） */
+/** 要盯的 key：填了凭据的**合约**账户（现货 USDT 只是顺带统计，主体仍是合约，见方案） */
 async function listKeys(): Promise<KeyRow[]> {
   return query<KeyRow>(
     `SELECT id, user_id, exchange, name, api_key, secret, password, market_type, sandbox
@@ -184,7 +188,7 @@ class KeyStream {
         if (!this.listenKey) throw new Error('没拿到 listenKey')
         console.log(`${this.tag} listenKey 就绪（${this.listenKey.length} 位）`)
       }
-      this.open()
+      void this.open()
       if (!this.keepTimer) {
         this.keepTimer = setInterval(() => void this.keepAlive(), KEEPALIVE_MS)
       }
@@ -196,8 +200,11 @@ class KeyStream {
     }
   }
 
-  private open(): void {
-    const ws = new WebSocket(streamUrl(this.listenKey, this.row.sandbox))
+  private async open(): Promise<void> {
+    // 本地开发要经代理才连得上（见 `data/exchange-account.ts` 的 `wsAgent()`）
+    const ws = new WebSocket(streamUrl(this.listenKey, this.row.sandbox), {
+      agent: await wsAgent()
+    })
     this.ws = ws
     ws.on('open', () => {
       const isReconnect = this.everConnected

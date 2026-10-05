@@ -1,9 +1,12 @@
 /**
  * 「交易所资产」取数（2026-10-05 新增，方案见 `docs/EXCHANGE.md`）。
  *
- * 范围（用户定）：**只统计两个钱包，现货不参与**
+ * 范围（用户定）：**合约 + C2C（资金）+ 现货 USDT**
  *   · USDT 合约（USDⓈ-M）—— `GET /fapi/v2/account`（余额 + 多资产明细）+ `fetchPositions()`
  *   · C2C 钱包 —— `GET /sapi/v1/asset/wallet/balance?needBalanceDetail=true`
+ *   · 现货 —— `GET /api/v3/account`，**只取 USDT**（用户 2026-10-05：
+ *     「现货统计也加上，只要 usdt 的统计简单化」）。别的币不折价 —— 全资产估值
+ *     那套东西当年就是因为不好维护才整块删掉的，别再加回来。
  *
  * ⚠️⚠️ 实测踩到的四个坑（别再踩）：
  *   ① **C2C 钱包的名字各账号不一样**：文档写 `walletName` 返回 `"C2C"`，实际这台
@@ -65,6 +68,17 @@ export interface FuturesPosition {
   percentage: number | null
 }
 
+/**
+ * 现货钱包 —— **只关心 USDT**（用户 2026-10-05：「只要 usdt 的统计简单化」）。
+ *
+ * ⚠️ 就一个数：其他币种一概不折价、不进净值。要看「可用 / 挂单锁定」去划转那个
+ * 弹层（它单独读一次实时余额），快照里不留那么多字段。
+ */
+export interface SpotWallet {
+  /** 现货钱包里的 USDT（可用 + 挂单锁定） */
+  usdt: number
+}
+
 /** 取数结果 = 将来要写进 `exchange_snapshots` 的那一份 */
 export interface ExchangeOverview {
   /** 这套 key 的展示信息（脱敏，不含凭据） */
@@ -91,6 +105,11 @@ export interface ExchangeOverview {
     totalUsdt: number
     assets: {asset: string; balance: number; usdt: number | null}[]
   } | null
+  /**
+   * 现货钱包里的 **USDT**；读不到（没权限 / 不是币安）就是 null。
+   * ⚠️ 只有 USDT 一个数：别的币不折价，`totalUsdt` 也不等于「现货总资产」。
+   */
+  spot: SpotWallet | null
   /** 仓位统计（就在这儿算好，省得前端重复算） */
   stats: {
     longCount: number
@@ -213,16 +232,37 @@ async function fetchC2c(ex: any): Promise<ExchangeOverview['c2c']> {
 }
 
 /**
- * 一次取全：合约账户（余额 + 多资产）+ 持仓 + C2C。
+ * 现货钱包里的 **USDT**。
  *
- * ⚠️ 只支持**合约**（`marketType=swap`）：现货账户不参与统计，直接抛错让调用方提示用户
- * （别硬算成 0 —— 那会让人以为账户真的没钱）。
+ * ⚠️ 走 `GET /api/v3/account`（ccxt `privateGetAccount`），**只挑 USDT 那一行**：
+ *    `balances[]` 里其余币种一概不算 —— 见文件头那句「简单化」。
+ *    `free` / `locked` 是**字符串**，直接 `Number()` 就对了（跟 C2C 那边不同，
+ *    那边连 `balance` 字段都没有，见文件头 ②）。
+ *
+ * 读不到（不是币安 / 没读权限）⇒ 返回 null，界面那一块直接不显示，**不报错**：
+ * 现货属于「顺带统计」，缺了不该拖垮整个页面。
+ */
+async function fetchSpot(ex: any): Promise<SpotWallet | null> {
+  if (typeof ex.privateGetAccount !== 'function') return null
+  const acc: any = await ex.privateGetAccount()
+  const b = (Array.isArray(acc?.balances) ? acc.balances : []).find(
+    (x: any) => String(x?.asset ?? '').toUpperCase() === 'USDT'
+  )
+  /* `free` / `locked` 是**字符串**，直接 Number() 就对了 */
+  return {usdt: r8(n(b?.free) + n(b?.locked))}
+}
+
+/**
+ * 一次取全：合约账户（余额 + 多资产）+ 持仓 + C2C + 现货 USDT。
+ *
+ * ⚠️ 只支持**合约**（`marketType=swap`）：账户类型本身还是要求合约
+ * （合约那半边是主体），现货只是「顺带统计一个 USDT」。
  */
 export async function fetchExchangeOverview(
   c: ExchangeCredentials
 ): Promise<ExchangeOverview> {
   if (c.marketType !== 'swap') {
-    throw new Error('这套账户不是合约账户（现货不参与统计）')
+    throw new Error('这套账户不是合约账户（这一页的主体是合约）')
   }
   const ex = createExchange(c)
   await ex.loadMarkets()
@@ -276,6 +316,15 @@ export async function fetchExchangeOverview(
     c2c = null
   }
 
+  // ---- 现货（只 USDT）----
+  let spot: SpotWallet | null = null
+  try {
+    spot = await fetchSpot(ex)
+  } catch {
+    /* 没读权限 / 不是币安 ⇒ 这块就不显示 */
+    spot = null
+  }
+
   const longCount = positions.filter(p => p.side !== 'short').length
   return {
     account: {
@@ -295,6 +344,7 @@ export async function fetchExchangeOverview(
       positions
     },
     c2c,
+    spot,
     stats: {
       longCount,
       shortCount: positions.length - longCount,

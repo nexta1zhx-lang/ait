@@ -1,4 +1,5 @@
 import ccxt from 'ccxt'
+import type {Agent} from 'node:http'
 
 /**
  * 交易所账户取数（2026-10-04）。
@@ -56,6 +57,73 @@ export const STABLES = new Set([
   'PYUSD'
 ])
 
+/**
+ * 交易所**出网代理**（可选，只在本地开发时设）。
+ *
+ * ★ 为什么非得从这儿过、不能用 `NODE_USE_ENV_PROXY` 那种环境变量代理：
+ *   ccxt 4.5 走的是**原生 fetch**（Node 下就是 undici），而它在加载完 undici 后会
+ *   自己 new 一个**直连**的 keep-alive dispatcher（`Exchange.fetchDispatcher`），
+ *   然后**显式挂到每个请求的 `dispatcher` 上**（`setFetchProxyOptions`）。
+ *   显式 dispatcher 的优先级高于全局 dispatcher ⇒ `HTTPS_PROXY` + `NODE_USE_ENV_PROXY=1`
+ *   会被**整条绕过**（实测：裸 fetch 经代理 200，ccxt 同一条代理下 10s 超时）。
+ *   ⇒ 代理只能交给 ccxt 自己：`httpProxy` / `httpsProxy`，它内部会建 ProxyAgent。
+ *
+ * ★ 用途：本地开发机连不上币安（或币安 API Key 的 IP 白名单里只有服务器 IP）时，
+ *   把请求从一台能出去的机器绕出去。见 `scripts/dev-proxy.sh` 与 docs/EXCHANGE.md。
+ *   ⚠️ 生产**不设**这个变量 ⇒ 一个字节的行为都不变。
+ */
+export function exchangeProxy(): string | undefined {
+  const v = process.env.EXCHANGE_PROXY?.trim()
+  return v ? v : undefined
+}
+
+/**
+ * ccxt 实例的代理选项（`exchangeProxy()` 没值就返回空对象，等于什么都没加）。
+ *
+ * ⚠️ 只能给 `httpProxy` **一个**，别同时给 `httpsProxy` —— ccxt 会直接拒掉
+ *   （`multiple conflicting proxy settings`）。给 `httpProxy` 它内部按
+ *   httpProxy → httpsProxy 的顺序挑，挑中的那个对**所有**请求生效（https 也走它）。
+ */
+export function ccxtProxyOptions(): {httpProxy?: string} {
+  const proxy = exchangeProxy()
+  return proxy ? {httpProxy: proxy} : {}
+}
+
+/** 同一个代理地址，给**裸 WebSocket** 用（没有就返回 undefined） */
+let wsAgentCache: Agent | undefined
+let wsAgentTried = false
+
+/**
+ * WS 用的 CONNECT 隧道 agent（跟 `exchangeProxy()` 同一个环境变量，开发用）。
+ *
+ * ★ 为什么 WS 得单独接一遍：`ws` **不认** `HTTP_PROXY` / `HTTPS_PROXY`，也不认
+ *   `NODE_USE_ENV_PROXY` —— 必须自己 `new WebSocket(url, {agent})` 塞进去。
+ *
+ * ★ 不塞会怎样（本地实测）：墙把 `fstream.binance.com` 解析成**假 IP**（查到的
+ *   31.13.94.7 / 108.160.167.165 这类，全是 Facebook / Twitter 的地址），
+ *   TCP 甚至能连上、`open` 也触发，但**一条消息都不推** —— 表面看像「连上了没数据」，
+ *   实际是根本没连到币安。塞了 agent 之后由代理那侧解析域名，0.7 秒就出货。
+ *
+ * ⚠️ `https-proxy-agent` 在 **devDependencies** 里（只有本机开发要代理）：
+ *   生产镜像 `npm ci --omit=dev` 里没这个包，所以这里用**动态 import** 并吞掉失败 ——
+ *   而且生产不设 `EXCHANGE_PROXY`，压根走不到这儿。
+ */
+export async function wsAgent(): Promise<Agent | undefined> {
+  const proxy = exchangeProxy()
+  if (!proxy) return undefined
+  if (wsAgentTried) return wsAgentCache
+  wsAgentTried = true
+  try {
+    const {HttpsProxyAgent} = await import('https-proxy-agent')
+    wsAgentCache = new HttpsProxyAgent(proxy) as unknown as Agent
+  } catch (e) {
+    console.warn(
+      `[proxy] WS 代理用不了（${(e as Error).message.slice(0, 80)}），WS 走直连`
+    )
+  }
+  return wsAgentCache
+}
+
 /** 认得出的交易所实例 */
 export function createExchange(c: ExchangeCredentials): any {
   const Ctor = CCXT[c.exchange]
@@ -69,6 +137,8 @@ export function createExchange(c: ExchangeCredentials): any {
     apiKey: c.apiKey,
     secret: c.secret,
     ...(c.password ? {password: c.password} : {}),
+    // 走代理（本地开发用，见上面 `ccxtProxyOptions()` 那段）
+    ...ccxtProxyOptions(),
     options: {
       ...marketOptionsFor(c),
       /*

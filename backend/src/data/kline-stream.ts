@@ -27,10 +27,16 @@
  *         `/private`（用户数据）。不带路由的连接**能握手、也会回 SUBSCRIBE 回执，
  *         但只给 /public 数据，@kline 静默收不到**（实测无路由 9 秒 0 帧，加 /market 后 1.6 秒 4 帧）；
  *         旧的无路由地址 2026-04-23 下线。
- *      ② 本地代理并不干扰 WS —— 之前怀疑错了，就是上面那个路由问题。
+ *      ② 本地网络**会**干扰 WS（2026-10-06 才查清，之前怀疑错了又反过来错了）：
+ *         墙把 `fstream.binance.com` 解析到假 IP（31.13.94.7 / 108.160.167.165 这类），
+ *         裸连能触发 `open` 但**零帧** —— 看着像「连上了没数据」。本地开发要经出口代理，
+ *         见 `scripts/dev-proxy.sh` 与 `exchange-account.ts` 的 `wsAgent()`。
+ *         上面 ① 那条路由问题是真的，两者是两回事，别混。
  *    兜底留着当保险（断网/被限流时不至于卡住），对客户端来说两条路都是「后端推过来的」。
  *    （想单测 WS 那条路：`BINANCE_WS_BASE=ws://127.0.0.1:8765` 指到自己的假上游即可。）
  */
+import {WebSocket} from 'ws'
+import {wsAgent} from './exchange-account'
 import {fetchCandles, fetchMarketList, type MarketRow} from './market'
 import {loadConfig} from '../config'
 import {Candle, Timeframe} from '../types'
@@ -137,11 +143,11 @@ function scheduleReconnect(): void {
   retry++
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
-    ensureUpstream()
+    void ensureUpstream()
   }, wait)
 }
 
-function ensureUpstream(): void {
+async function ensureUpstream(): Promise<void> {
   if (!wanted.size) return
   if (ws && (ws.readyState === 0 || ws.readyState === 1)) {
     flushSubscriptions()
@@ -150,7 +156,8 @@ function ensureUpstream(): void {
   const url = wsUrl()
   let sock: WebSocket
   try {
-    sock = new WebSocket(url)
+    // 本地开发要经代理才连得上（见 `exchange-account.ts` 的 `wsAgent()`）
+    sock = new WebSocket(url, {agent: await wsAgent()})
   } catch (e) {
     console.warn(`[kline] 上游 WS 建不起来：${(e as Error).message}`)
     degradeAll()
@@ -163,7 +170,7 @@ function ensureUpstream(): void {
     console.info(`[kline] 上游 WS 已连 ${url}（要订 ${wanted.size} 条流）`)
     flushSubscriptions()
   }
-  sock.onmessage = (ev: MessageEvent) => onUpstreamMessage(ev)
+  sock.onmessage = ev => onUpstreamMessage(ev)
   sock.onerror = () => {
     /* 具体原因拿不到，交给 onclose 收尾 */
   }
@@ -178,8 +185,8 @@ function ensureUpstream(): void {
   }
 }
 
-/** 上游推来的东西：订阅回执，或某条流的 K 线 */
-function onUpstreamMessage(ev: MessageEvent): void {
+/** 上游推来的东西：订阅回执，或某条流的 K 线（`ws` 给的 `data` 可能是 string 也可能 Buffer） */
+function onUpstreamMessage(ev: {data: string | Buffer | ArrayBuffer | Buffer[]}): void {
   let msg: any
   try {
     msg = JSON.parse(String(ev.data))
@@ -368,7 +375,7 @@ export function subscribeKline(
     ch.watchdog = setTimeout(() => {
       if (ch && ch.mode === 'ws' && !ch.lastMsgAt) startRestFallback(ch)
     }, WS_IDLE_MS)
-    ensureUpstream()
+    void ensureUpstream()
   }
   if (ch.idleTimer) {
     clearTimeout(ch.idleTimer)
@@ -503,7 +510,7 @@ function ensureTickerWs(): void {
   tickerWatchdog = setTimeout(() => {
     if (tickerMode === 'ws' && !tickerLastMsgAt) startTickerRest()
   }, TICKER_IDLE_MS)
-  ensureUpstream()
+  void ensureUpstream()
 }
 
 /** 退回 REST：整表当一批增量推下去（前端按 pair 合并，顺带能捡到上新币） */

@@ -2,13 +2,14 @@
 /**
  * 「交易所资产」面板 —— **移动端优先**（用户 2026-10-05：先设计移动端界面）。
  *
- * 范围（用户原话：「只统计这两个维度的钱，不算现货」）：
- *   · USDT 合约（USDⓈ-M）`fapi/v2/account` + `fapi/v2/balance`
+ * 范围（用户 2026-10-05 追加了现货）：
+ *   · USDT 合约（USDⓈ-M）`fapi/v2/account` + `fapi/v2/positionRisk`
  *   · C2C 钱包 `sapi/v1/asset/wallet/balance?needBalanceDetail=true`
- *   ⇒ 现货不参与统计，老版那套「按币种估值的现货余额列表」整块删了。
+ *   · 现货 —— **只算 USDT 一个数**（用户：「现货统计也加上，只要 usdt 的统计简单化」）
+ *   ⇒ 老版那套「按币种估值的现货余额列表」仍然是删掉的状态：别的币种不折价、不进净值。
  *
  * 排版（手机一屏从上往下）：
- *   ① **净资产** = 合约保证金余额 + C2C（一个大数 + 占比条 + 两行分解）
+ *   ① **净资产** = 合约保证金余额 + C2C + 现货 USDT（一个大数 + 占比条 + 分解行）
  *   ② 合约明细四格：钱包余额 / 未实现盈亏 / 可用 / 占用
  *   ③ **仓位统计**：名义总额、未实现盈亏、多空占比条（用户要的「统计仓位」）
  *   ④ 二级 tab：持仓 / 挂单 / 盈亏 / 成交 / 资产明细
@@ -16,6 +17,7 @@
  *
  * ⚠️ **组件是纯展示的**：数据全走 props（自己不发请求）⇒ 真数据由
  *    `ExchangeAccountLivePanel.vue` 传进来。
+ *    （「划转」那颗按钮也只 `emit('transfer')`，弹层和取数都在容器那一层。）
  * ⚠️ 顶部的「几分钟前」是**架构的一部分**：先渲染上一份快照、后台再刷新，
  *    所以界面上必须让用户看到「这份数据有多旧」，而不是空等一个 loading。
  */
@@ -79,6 +81,8 @@ const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'update:modelValue', id: number): void
   (e: 'update:curveRange', range: string): void
+  /** 点「划转」——弹层由外层（LivePanel）挂，它才知道当前是哪套 Key */
+  (e: 'transfer'): void
 }>()
 
 /** tab 选中的那一格（`'all'` / key id 字符串）：只读 prop，切换往上 emit */
@@ -93,6 +97,8 @@ const acctLabel = computed(() => props.accounts?.[0]?.label ?? '')
 const acct = computed(() => props.data?.account ?? null)
 const fx = computed(() => props.data?.futures ?? null)
 const c2c = computed(() => props.data?.c2c ?? null)
+/** 现货（只 USDT）；老快照 / 没权限时是 null */
+const spot = computed(() => props.data?.spot ?? null)
 const stats = computed(
   () =>
     props.data?.stats ?? {
@@ -104,12 +110,17 @@ const stats = computed(
 )
 const positions = computed(() => props.data?.futures?.positions ?? [])
 
-/* ---------------- ① 净资产 = 合约保证金余额 + C2C ---------------- */
+/* ---------------- ① 净资产 = 合约保证金余额 + C2C + 现货 USDT ---------------- */
 
 /** 合约那边的「钱」用的是**保证金余额**（= 钱包 + 浮盈），不是钱包余额 */
 const futuresValue = computed(() => fx.value?.margin ?? 0)
 const c2cValue = computed(() => c2c.value?.totalUsdt ?? 0)
-const netValue = computed(() => futuresValue.value + c2cValue.value)
+/** 现货只算 USDT 那一个数（用户 2026-10-05：「只要 usdt 的统计简单化」） */
+const spotValue = computed(() => spot.value?.usdt ?? 0)
+/* ⚠️ 三项相加的口径必须跟后端 `netOf()` / `listCurve()` 完全一致，不然曲线对不上 */
+const netValue = computed(
+  () => futuresValue.value + c2cValue.value + spotValue.value
+)
 function pctOf(v: number): number {
   return netValue.value > 0 ? (v / netValue.value) * 100 : 0
 }
@@ -330,6 +341,17 @@ const RANGES = [
           </span>
           <span v-else-if="!showAcctTabs" class="tag">合约 + C2C</span>
           <span class="spacer" />
+          <!--
+            划转（用户 2026-10-05：「在交易所账户，各个里面添加划转功能」）。
+            ⚠️ 这是真钱操作（币安没有划转测试接口），弹层里带常驻警示 + 二次确认。
+          -->
+          <button
+            class="ghost tiny tr-open"
+            title="万能划转：现货 / 资金(C2C) / USDT 合约 之间搬 USDT（真钱）"
+            @click="emit('transfer')"
+          >
+            划转
+          </button>
           <span class="age" :class="{stale}" :title="bjTime(data.takenAt)">
             {{ ageText }}
           </span>
@@ -373,6 +395,7 @@ const RANGES = [
         <div class="split-bar">
           <i class="fx" :style="{width: pctOf(futuresValue) + '%'}" />
           <i class="c2c" :style="{width: pctOf(c2cValue) + '%'}" />
+          <i class="sp" :style="{width: pctOf(spotValue) + '%'}" />
         </div>
         <ul class="split-lg">
           <li>
@@ -386,6 +409,17 @@ const RANGES = [
             <span class="lb">C2C 钱包</span>
             <b>{{ money(c2cValue) }}</b>
             <span class="pc">{{ pctOf(c2cValue).toFixed(1) }}%</span>
+          </li>
+          <!--
+            现货：**只有 USDT 一个币**（用户 2026-10-05：「只要 usdt 的统计简单化」）——
+            所以标签直接写「现货（USDT）」，别写成「现货」让人以为别的币也算进来了。
+            老快照没有这一列 ⇒ `spot` 是 null，整行不显示。
+          -->
+          <li v-if="spot">
+            <i class="sp" />
+            <span class="lb">现货（USDT）</span>
+            <b>{{ money(spotValue) }}</b>
+            <span class="pc">{{ pctOf(spotValue).toFixed(1) }}%</span>
           </li>
         </ul>
 
@@ -670,7 +704,7 @@ const RANGES = [
         <p v-else class="dim">还没有成交记录（下单成交后会自动记进来）</p>
       </section>
 
-      <!-- 资产明细（合约多资产 + C2C 钱包） -->
+      <!-- 资产明细（合约多资产 + C2C 钱包 + 现货 USDT） -->
       <section v-show="tab === 'bags'" class="panel">
         <div class="pn-h"><h2>合约账户资产</h2></div>
         <ul class="rows">
@@ -703,6 +737,27 @@ const RANGES = [
         <p v-else class="dim">
           {{ c2c ? 'C2C 钱包是空的' : '这个账户没有 C2C 钱包' }}
         </p>
+
+        <!--
+          现货：**只列 USDT 一行**（用户 2026-10-05：「只要 usdt 的统计简单化」）。
+          别的币种确实还在现货账户里，但这里不列、也不折价 —— 想全看请去币安 App。
+        -->
+        <template v-if="spot">
+          <div class="pn-h mt">
+            <h2>现货（USDT）</h2>
+            <span class="spacer" />
+            <span class="dim tiny">{{ money(spot.usdt) }}</span>
+          </div>
+          <ul class="rows">
+            <li>
+              <span class="sym">USDT</span>
+              <span class="spacer" />
+              <span class="num">{{ qty(spot.usdt) }}</span>
+              <span class="dim num">{{ money(spot.usdt) }}</span>
+            </li>
+          </ul>
+          <p class="dim tiny">⚠️ 只统计 USDT，现货里的其他币种不计入净资产</p>
+        </template>
       </section>
     </template>
 
@@ -796,7 +851,8 @@ const RANGES = [
   transition: width 0.2s;
 }
 .split-bar .fx,
-.split-bar .c2c {
+.split-bar .c2c,
+.split-bar .sp {
   min-width: 2px;
 }
 .split-lg {
@@ -832,12 +888,15 @@ const RANGES = [
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-/* 合约 / C2C 两个色：合约用主色（暖沙），C2C 用蓝，跟全站色系不打架 */
+/* 合约 / C2C / 现货三个色：合约用主色（暖沙），C2C 用蓝，现货用青，跟全站色系不打架 */
 .fx {
   background: var(--accent, #d3b583);
 }
 .c2c {
   background: #5b8def;
+}
+.sp {
+  background: #4cc4b0;
 }
 
 /* 四格：手机 2×2、宽一点自动 4 列（不写死断点，靠 minmax） */

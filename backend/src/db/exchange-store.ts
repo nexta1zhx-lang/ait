@@ -45,9 +45,16 @@ export interface SaveOptions {
   minGapSec?: number
 }
 
-/** 净资产 = 合约保证金余额 + C2C（折 USDT） */
+/**
+ * 净值口径（**全仓库只有这一处**）：合约保证金余额 + C2C + 现货 USDT。
+ *
+ * ⚠️ 三处读的地方（`saveSnapshot` / `listCurve` / 前端 `ExchangeAccountBoard`）
+ *    口径必须一致，不然列表上的「净资产」和曲线上的数会对不上。
+ */
 export function netOf(ov: ExchangeOverview): number {
-  return r8(ov.futures.margin + (ov.c2c?.totalUsdt ?? 0))
+  return r8(
+    ov.futures.margin + (ov.c2c?.totalUsdt ?? 0) + (ov.spot?.usdt ?? 0)
+  )
 }
 
 function r8(x: number): number {
@@ -93,10 +100,10 @@ export async function saveSnapshot(
     `INSERT INTO exchange_snapshots
        (user_id, key_id, kind, taken_at, high, high_at, low, low_at,
         wallet, unrealized, margin, available, positions, assets,
-        c2c_total, c2c_detail, source, err)
+        c2c_total, c2c_detail, spot_usdt, source, err)
      VALUES ($1, $2, '5m', now(), $3, now(), $3, now(),
              $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-             $10, $11::jsonb, $12, $13)`,
+             $10, $11::jsonb, $12, $13, $14)`,
     [
       userId,
       keyId,
@@ -109,6 +116,7 @@ export async function saveSnapshot(
       JSON.stringify(ov.futures.assets),
       ov.c2c ? ov.c2c.totalUsdt : null,
       ov.c2c ? JSON.stringify(ov.c2c) : null,
+      ov.spot ? ov.spot.usdt : null,
       source,
       err
     ]
@@ -243,7 +251,8 @@ export interface CurvePoint {
  *    长跨度（180 天 / 一年 / 全部）会扫很多行；等归档做了应该改读聚合档。
  * ⚠️ 桶内**取 close / max / min，绝不取平均**：平均会把「中间爆过一次仓」这种
  *    真实的尖峰抹平（见 docs 的「聚合不取平均」）。
- * ⚠️ 净值口径 = `margin + c2c_total`，跟列表页那个「净资产」必须一致。
+ * ⚠️ 净值口径 = `margin + c2c_total + spot_usdt`（`netOf()` 那一份），
+ *    跟列表页那个「净资产」必须一致。
  */
 export async function listCurve(
   userId: number,
@@ -253,9 +262,9 @@ export async function listCurve(
 ): Promise<CurvePoint[]> {
   const rows = await query<Record<string, unknown>>(
     `SELECT to_timestamp(floor(extract(epoch FROM taken_at) / $4) * $4) AS t,
-            max(margin + coalesce(c2c_total, 0)) AS high,
-            min(margin + coalesce(c2c_total, 0)) AS low,
-            (array_agg(margin + coalesce(c2c_total, 0)
+            max(margin + coalesce(c2c_total, 0) + coalesce(spot_usdt, 0)) AS high,
+            min(margin + coalesce(c2c_total, 0) + coalesce(spot_usdt, 0)) AS low,
+            (array_agg(margin + coalesce(c2c_total, 0) + coalesce(spot_usdt, 0)
                        ORDER BY taken_at DESC))[1] AS close
        FROM exchange_snapshots
       WHERE user_id = $1 AND key_id = $2 AND kind = '5m'
@@ -299,7 +308,7 @@ export async function latestSnapshot(
 ): Promise<LatestSnapshot | null> {
   const row = await queryOne<Record<string, unknown>>(
     `SELECT taken_at, source, err, wallet, unrealized, margin, available,
-            positions, assets, c2c_total, c2c_detail
+            positions, assets, c2c_total, c2c_detail, spot_usdt
        FROM exchange_snapshots
       WHERE user_id = $1 AND key_id = $2 AND kind = '5m'
       ORDER BY taken_at DESC LIMIT 1`,
@@ -329,6 +338,11 @@ export async function latestSnapshot(
       positions
     },
     c2c: (row.c2c_detail ?? null) as ExchangeOverview['c2c'],
+    /* 老行没有这一列（NULL）⇒ 那块不显示，算净值时当 0（跟 `netOf` 一致） */
+    spot:
+      row.spot_usdt === null || row.spot_usdt === undefined
+        ? null
+        : {usdt: num(row.spot_usdt)},
     stats: {
       longCount,
       shortCount: positions.length - longCount,

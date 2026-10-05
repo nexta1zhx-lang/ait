@@ -173,6 +173,20 @@ async function loadSpecs(c: ExchangeCredentials): Promise<SpecsCache> {
   })
   if (!res.ok) throw new Error(`读合约规格失败：${url} 返回 HTTP ${res.status}`)
   const json = (await res.json()) as {symbols?: Array<Record<string, any>>}
+  /*
+   * 空列表直接报错 —— 别让它往后走。
+   *
+   * 2026-10-06 本地实测踩到过：某一次拿到的是**没有 `symbols` 的 200**，
+   * 于是 `bySymbol` 建成空的、还被缓存 6 小时，接着每个币都报
+   * 「币安的合约列表里没有「BTC」这个交易对」—— 一句话把人带偏到币安身上。
+   * 现在这种响应直接失败（不缓存），并把响应开头带出来。
+   */
+  if (!json.symbols?.length) {
+    const body = JSON.stringify(json).slice(0, 160)
+    throw new Error(
+      `读合约规格失败：${url} 的响应里没有合约列表（HTTP ${res.status}，${body}）`
+    )
+  }
 
   const bySymbol = new Map<string, SymbolSpec>()
   const off = new Map<string, string>()

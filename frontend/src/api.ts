@@ -739,6 +739,11 @@ export interface ExchangeOverview {
     totalUsdt: number
     assets: {asset: string; balance: number; usdt: number | null}[]
   } | null
+  /**
+   * 现货钱包里的 **USDT**（只统计这一个币，用户 2026-10-05 定的）；
+   * 读不到（老快照 / 没权限）就是 null。
+   */
+  spot: {usdt: number} | null
   /** 仓位统计（后端算好，前端不重复算） */
   stats: {
     longCount: number
@@ -1037,6 +1042,71 @@ export const fetchTradePositions = (id?: number) =>
 
 /** 美元 → 人民币汇率（「交易所账户」USDT / CNY 切换用，跟用量页同一个源） */
 export const fetchRate = () => get<{usdCny: number}>('/api/rate')
+
+/* ---------------- 万能划转（2026-10-05） ---------------- */
+
+/**
+ * 能划的三个钱包。
+ * ⚠️ `funding` 就是界面上那块「C2C 钱包」—— 币安接口里它的 `walletName` 实际叫
+ *    `Funding`（真正的 C2C 账户不在万能划转里，币安会回 `-1102`）。
+ */
+export type TransferWallet = 'spot' | 'funding' | 'futures'
+
+/** 某个钱包里 USDT 能划走多少（`/api/exchange/wallet`，实时读不打快照） */
+export interface WalletBalance {
+  wallet: TransferWallet
+  asset: string
+  /** 能划走的（现货/资金是 free，合约是 availableBalance） */
+  available: number
+  /** 钱包总额（含挂单锁定的那部分） */
+  total: number
+}
+
+/** 这套 Key 的划转权限（`permitsUniversalTransfer` = 币安那个「允许通用划转」） */
+export interface TransferPermissions {
+  permitsUniversalTransfer: boolean
+  enableReading: boolean
+  enableFutures: boolean
+  enableSpotAndMarginTrading: boolean
+}
+
+export interface TransferInput {
+  from: TransferWallet
+  to: TransferWallet
+  amount: number
+  asset?: string
+}
+
+export interface TransferResult {
+  tranId: string
+  type: string
+  asset: string
+  amount: number
+  from: TransferWallet
+  to: TransferWallet
+}
+
+export const fetchWalletBalance = (wallet: TransferWallet, id?: number) =>
+  get<{ok: boolean; error: string | null} & Partial<WalletBalance>>(
+    `/api/exchange/wallet?wallet=${wallet}${id ? `&id=${id}` : ''}`
+  )
+
+export const fetchTransferPermissions = (id?: number) =>
+  get<{
+    ok: boolean
+    permissions?: TransferPermissions
+    error: string | null
+  }>(`/api/exchange/permissions${id ? `?id=${id}` : ''}`)
+
+/**
+ * 划一笔 —— ⚠️ **真钱操作**：币安没有划转的测试接口，调一次就真动钱。
+ * 方向只放行「现货 / 资金(C2C) / USDTⓈ合约」之间**六种组合**（见后端注释）。
+ */
+export const exchangeTransfer = (input: TransferInput, id?: number) =>
+  post<{ok: boolean; transfer?: TransferResult; error: string | null}>(
+    `/api/exchange/transfer${id ? `?id=${id}` : ''}`,
+    input
+  )
 
 /** 改自己的用户名（「个人信息」页） */
 export const authRename = (username: string) =>

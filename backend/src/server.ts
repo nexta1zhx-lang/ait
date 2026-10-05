@@ -113,6 +113,12 @@ import {
 } from './data/exchange-trade'
 import {fetchExchangeOverview} from './data/exchange-overview'
 import {
+  transferPermissions,
+  universalTransfer,
+  walletAvailable,
+  type Wallet
+} from './data/exchange-transfer'
+import {
   firstSnapshotHours,
   latestSnapshot,
   listCurve,
@@ -3390,6 +3396,104 @@ async function route(
       return sendJson(res, 200, {ok: true, test, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 万能划转（2026-10-05）—— 「交易所账户」页上那个划转弹层用的三条。
+   *
+   * ⚠️⚠️ 这是**真金白银**：币安没有「划转测试接口」（不像下单有 `/order/test`），
+   *    调一次就真动钱。所以：
+   *      · 方向只放行**验过能用**的六种组合（见 `data/exchange-transfer.ts`）
+   *      · `permitsUniversalTransfer` 没开的 Key 在前端就会被拦下来
+   *      · 金额 / 方向由前端二次确认，这里只做参数校验，不替用户做决定
+   */
+  if (p === '/api/exchange/transfer' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const r = await universalTransfer(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        {
+          from: str(body.from, '') as Wallet,
+          to: str(body.to, '') as Wallet,
+          amount: Number(body.amount),
+          asset: body.asset === undefined ? undefined : str(body.asset, 'USDT')
+        }
+      )
+      return sendJson(res, 200, {ok: true, transfer: r, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: (e as Error).message})
+    }
+  }
+
+  /* 某个钱包里 USDT 能划走多少（划转弹层的「全部」按钮 + 余额提示，实时读） */
+  if (p === '/api/exchange/wallet' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const balance = await walletAvailable(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        str(url.searchParams.get('wallet'), 'futures') as Wallet
+      )
+      return sendJson(res, 200, {ok: true, ...balance, error: null})
+    } catch (e) {
+      /* `humanize` 能认出「连不上交易所」那类网络错误 —— 别把 OpenSSL 原文甩给用户 */
+      return sendJson(res, 200, {ok: false, error: humanize(e)})
+    }
+  }
+
+  /*
+   * 这套 Key 的划转权限（`permitsUniversalTransfer`）。
+   * ⚠️ 单独一条：没开这个开关时币安只回通用的 `-2015`，界面上说不清原因 ——
+   *    先问一次就能把「去币安勾上『允许通用划转』」直接摆出来。
+   */
+  if (p === '/api/exchange/permissions' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const permissions = await transferPermissions({
+        exchange: key.exchange,
+        apiKey: key.apiKey,
+        secret: key.secret,
+        password: key.password,
+        marketType: key.marketType,
+        sandbox: key.sandbox
+      })
+      return sendJson(res, 200, {ok: true, permissions, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanize(e)})
     }
   }
 

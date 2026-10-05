@@ -15,6 +15,7 @@
  */
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
 import ExchangeAccountBoard from './ExchangeAccountBoard.vue'
+import TransferSheet from './TransferSheet.vue'
 import {
   exchangeStream,
   fetchExchangeCurve,
@@ -152,6 +153,9 @@ function mergeOverviews(
       positions.push({...pos, keyName: p.key.name})
 
   const anyC2c = list.some(p => p.ov.c2c)
+  /* 现货：**只要有一套报了数**就显示合计（都没报就 null，整块不出现）。
+     老快照没有 spot 字段 ⇒ 那一套按 0 算，跟 `netOf` 的口径一致。 */
+  const anySpot = list.some(p => p.ov.spot)
 
   return {
     account: {
@@ -178,6 +182,7 @@ function mergeOverviews(
           assets: [...c2cMap.values()]
         }
       : null,
+    spot: anySpot ? {usdt: sum(o => o.spot?.usdt ?? 0)} : null,
     stats: {
       longCount: sum(o => o.stats?.longCount ?? 0),
       shortCount: sum(o => o.stats?.shortCount ?? 0),
@@ -479,6 +484,36 @@ function startStreams(): void {
 /* 换跨度（1d / 7d / 30d）只重拉曲线，不动快照 */
 watch(curveRange, () => void loadCurve())
 
+/* ---------------- 划转 ---------------- */
+
+/** 弹层开着没 */
+const transferOpen = ref(false)
+
+/**
+ * 划转针对哪套 Key。
+ *
+ * 「全部」那一格是**合并视图**，没有「一个账户」可划 ⇒ 退回默认那套（后端不传 id
+ * 也是这个行为），用户若想划别套就在弹层里点账户名换（`pickTransferKey`）。
+ */
+const transferKeyId = computed<number | undefined>(() => {
+  if (picked.value !== 'all') {
+    const hit = keys.value.find(k => String(k.id) === picked.value)
+    if (hit) return hit.id
+  }
+  return keys.value.find(k => k.isDefault)?.id ?? keys.value[0]?.id
+})
+
+/** 弹层里换了账户：当成切 tab，让整页跟着换过去（不然数字和弹层说的对不上） */
+function pickTransferKey(id: number): void {
+  picked.value = String(id)
+}
+
+/** 划完了：钱包里的钱换了位置 ⇒ 快照 / 曲线 / 挂单全部重读一遍 */
+function onTransferred(): void {
+  void doRefresh()
+  void loadOrders()
+}
+
 /* ---------------- 换 tab ---------------- */
 
 watch(picked, () => {
@@ -553,6 +588,21 @@ onUnmounted(stopStreams)
       :rate="rate"
       @update:curve-range="curveRange = $event"
       @refresh="doRefresh()"
+      @transfer="transferOpen = true"
+    />
+
+    <!--
+      划转弹层（用户 2026-10-05：「各个里面添加划转功能」）——
+      挂在**容器**这一层：只有它知道当前选的是哪套 Key、一共有几套。
+      ⚠️ 真钱操作（币安没有划转测试接口），权限和「能划走多少」都在弹层里现读。
+    -->
+    <TransferSheet
+      :open="transferOpen"
+      :key-id="transferKeyId"
+      :keys="keys"
+      @close="transferOpen = false"
+      @pick-key="pickTransferKey"
+      @done="onTransferred"
     />
 
     <p v-if="ordersErr" class="dim tiny">挂单查询失败：{{ ordersErr }}</p>

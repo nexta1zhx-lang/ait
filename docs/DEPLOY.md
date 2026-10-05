@@ -233,6 +233,28 @@ curl -s -o /dev/null -w 'http  %{http_code}\n' http://bitcoooin.cn/api/health   
 
 ---
 
+## 服务器上的那个转发代理（`tinyproxy`，2026-10-05）
+
+服务器上多装了一个 **`tinyproxy`**，只为**本地开发**用：让本机的 dev server 从
+服务器 IP 出网（币安 API Key 的 IP 白名单里只有这个 IP，本机出口 IP 会变）。
+
+```
+dev server --HTTP CONNECT--> 127.0.0.1:8888 --(ssh -L)--> 服务器 127.0.0.1:8888 --> fapi.binance.com
+```
+
+- **只 `Listen 127.0.0.1`** ⇒ 公网扫不到、**不用开 Lightsail 规则**、也不需要 BasicAuth；
+  够得着的只有能 SSH 进来的人。配置在 `/etc/tinyproxy/tinyproxy.conf`
+  （原文件备份成 `tinyproxy.conf.orig`），`ConnectPort` 只放 443 / 80。
+- 它**跟线上应用无关**：容器里的应用是直连出网的，不经过它。想彻底停掉：
+  `sudo systemctl disable --now tinyproxy`（本机开发会退回 `-2015`）。
+- 本机用法见 `scripts/dev-proxy.sh`（`--check` 体检 / 不给参数就开隧道），
+  然后 `EXCHANGE_PROXY=http://127.0.0.1:8888 npm run web`。
+
+> ⚠️ 为什么不是 `HTTPS_PROXY` + `NODE_USE_ENV_PROXY`：ccxt 会自己塞一个直连 dispatcher
+> 把环境变量代理整条绕过 —— 细节在 `docs/EXCHANGE.md` 的「本地开发」第 ④ 条。
+
+---
+
 ## 后续更新
 
 **更新 = 本机提交 → 打包 → 上传 → 服务器上重跑 `scripts/deploy.sh`**。

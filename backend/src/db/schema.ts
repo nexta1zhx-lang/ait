@@ -459,6 +459,11 @@ CREATE TABLE IF NOT EXISTS exchange_snapshots (
   -- C2C 钱包（sapi/v1/asset/wallet/balance）—— ⚠️ 接口里它的 walletName 实际叫 Funding
   c2c_total   NUMERIC(24,8),
   c2c_detail  JSONB,
+  -- 现货钱包里的 **USDT**（用户 2026-10-05：「现货统计也加上，只要 usdt 的统计简单化」）
+  -- ⚠️ 只存 USDT 一个数：别的币不折价、也不进净值。全资产估值是另一套东西，
+  --    当年就是因为那套估值不好维护才整块删掉的（见 docs/EXCHANGE.md）。
+  -- NULL = 采集那个时刻还没统计现货（老行），算净值时 coalesce 成 0。
+  spot_usdt   NUMERIC(24,8),
   -- 这一条是谁写的 / 有没有失败
   -- poll | ws | manual（日常）+ bind | boot | shutdown（锚点）+ snapshotApi（补的日点）+ agg（聚合）
   source      TEXT        NOT NULL DEFAULT 'poll',
@@ -505,6 +510,9 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
  * 所以天然幂等 —— 之后每次启动都不再触发。
  */
 export const MIGRATE_SQL = `
+-- 现货钱包（只 USDT）：老库补列（2026-10-05）
+ALTER TABLE IF EXISTS exchange_snapshots ADD COLUMN IF NOT EXISTS spot_usdt NUMERIC(24,8);
+
 -- 模拟判断模式已删除，两边的 mock 列一起清掉
 ALTER TABLE IF EXISTS llm_usage DROP COLUMN IF EXISTS mock;
 ALTER TABLE IF EXISTS analyses  DROP COLUMN IF EXISTS mock;
