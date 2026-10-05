@@ -4700,7 +4700,13 @@ button.badge:disabled {
    *
    * `--bg`(#0d1117) 比面板 `--panel`(#161b22) 暗一档 —— 页边距、栏目缝、
    * tab 行的圆角里只要露出一条，就是用户说的「黑边」。窄屏干脆整页铺 `--panel`。
+   *
+   * ★ `html` 也一起铺（2026-10-05）：打包成 App 后 WebView 是铺满整屏的
+   *   （edge-to-edge），**状态栏背后那一截透出来的就是 html 的 canvas 底色**。
+   *   以前只给 `body` 铺、靠「body 背景向 canvas 传播」那条 CSS 规则间接生效，
+   *   虽然结果一样，但一旦哪天有人给 html 加了背景就断了 —— 显式写死更稳。
    */
+  html,
   body,
   #app {
     background: var(--panel);

@@ -36,6 +36,14 @@ interface CapApp {
     cb: (state: {isActive: boolean}) => void
   ) => void
   getState?: () => Promise<{isActive: boolean}>
+  /** APK 自己的版本号（versionName / versionCode），不是前端版本 */
+  getInfo?: () => Promise<{
+    name: string
+    id: string
+    version: string
+    build: string
+    platform: string
+  }>
 }
 
 /** Capacitor StatusBar 插件里我们用到的那一小块 */
@@ -104,4 +112,100 @@ export function setupNativeShell(): void {
    */
   const st = App.getState?.()
   if (st) void st.then(s => setNativeActive(s.isActive)).catch(() => {})
+
+  // 系统栏那条颜色（`paintStatusBar`）只在这里和 `main.ts` 里管；别在别处再调。
+}
+
+/* ------------------------------------------------------------------
+   「体检单」：排查系统栏 / 安全区问题时用
+   （显示在「我的 → 个人信息 → 账户信息」底部，见 `ProfileView.vue`）
+   ------------------------------------------------------------------ */
+
+/**
+ * 原生壳的体检报告。
+ *
+ * 用户 2026-10-05：「安全区的主题色还是不对，不是我背景的黑色」——
+ * 这个问题**只有原生壳里才有**（网页版没有系统栏），而且成因横跨
+ * 「装了哪一版 APK」/「WebView 版本」/「系统给的 insets 是多少」三层，
+ * 光看截图分不出来。所以把这几项摆到页面上，一眼定位。
+ *
+ * ⚠️ 特别提醒 `version`：我们用了 `server.url` 远程加载（见 `capacitor.config.json`），
+ *    **前端永远是线上最新版，而原生壳可能还是几个月前装的那个** ——
+ *    每次「改了原生代码但看起来没生效」，先看这一项。
+ */
+export interface ShellInfo {
+  /** APK 的 versionName（如 0.2.7）。前端是远程加载的，所以这个才是「壳」的版本 */
+  version: string
+  /** APK 的 versionCode（如 207） */
+  build: string
+  platform: string
+  /**
+   * Android System WebView 主版本号。
+   * ★ **≥140** 时 Capacitor 的 `SystemBars` 才会让 WebView 真铺满整屏
+   *   （状态栏透明 → 透出页面背景）；<140 会退化成「给 decor 加内边距」，
+   *   那时状态栏背后是 **decor 底色**（由 `MainActivity` 负责钉成 #121316）。
+   */
+  webview: string
+  /** 实测 `env(safe-area-inset-top)`，px —— 有值说明系统真给了安全区 */
+  envTop: number
+  envBottom: number
+  /** `SystemBars` 注入的自定义属性（铺满那条路才有）；没注入就是空 */
+  cssTop: string
+  cssBottom: string
+  /** 系统是否深色模式（影响状态栏图标该亮还是该暗） */
+  dark: boolean
+}
+
+/** 量一个方向的 `env(safe-area-inset-*)`：造个零宽元素读它的高度 */
+function measureInset(side: 'top' | 'bottom'): number {
+  const el = document.createElement('div')
+  el.style.cssText =
+    'position:fixed;left:0;top:0;width:0;visibility:hidden;pointer-events:none;' +
+    `height:env(safe-area-inset-${side},0px)`
+  document.body.appendChild(el)
+  const h = el.getBoundingClientRect().height
+  el.remove()
+  return Math.round(h * 100) / 100
+}
+
+/** 取体检报告；非原生壳（网页版）返回 `null` */
+export async function shellInfo(): Promise<ShellInfo | null> {
+  if (!isNativeShell()) return null
+
+  const cap = (globalThis as unknown as {Capacitor?: CapGlobal}).Capacitor
+  const App = cap?.Plugins?.App
+
+  // 版本号拿不到不该让整块板子空掉，逐项 try
+  let version = ''
+  let build = ''
+  let platform = 'android'
+  try {
+    const i = await App?.getInfo?.()
+    if (i) {
+      version = i.version
+      build = i.build
+      platform = i.platform
+    }
+  } catch {
+    /* 插件没注册 / 老壳没这个方法 —— 留空即可 */
+  }
+
+  // Android System WebView 的 UA 里有 `Chrome/<主版本>.<...>`；取主版本就够判断 ≥140
+  const chrome = /Chrome\/(\d+)/.exec(navigator.userAgent)
+
+  const cs = getComputedStyle(document.documentElement)
+
+  return {
+    version: version || '(取不到)',
+    build: build || '-',
+    platform,
+    webview: chrome ? chrome[1] : '(取不到)',
+    envTop: measureInset('top'),
+    envBottom: measureInset('bottom'),
+    cssTop: cs.getPropertyValue('--safe-area-inset-top').trim(),
+    cssBottom: cs.getPropertyValue('--safe-area-inset-bottom').trim(),
+    dark:
+      typeof matchMedia === 'function' &&
+      matchMedia('(prefers-color-scheme: dark)').matches
+  }
 }

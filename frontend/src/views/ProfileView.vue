@@ -27,6 +27,7 @@ import {
 } from '../api'
 import {logout, rename, user} from '../session'
 import {bjTime} from '../format'
+import {shellInfo, type ShellInfo} from '../native'
 import SegTabs from '../comps/SegTabs.vue'
 import ExchangeKeys from '../comps/ExchangeKeys.vue'
 
@@ -233,7 +234,25 @@ onMounted(() => {
   name.value = user.value?.username ?? ''
   void loadSessions()
   void loadTotp()
+  void loadShell()
 })
+
+/* ------------------------- App 体检单 ------------------------- */
+/*
+ * 只在原生壳里有内容（网页版 `shellInfo()` 返回 null，整块不渲染）。
+ * 用途见 `native.ts` 的 `ShellInfo` 注释 —— 简而言之：
+ * 「系统栏那条颜色不对」这类问题，分不出是「壳太旧」还是「WebView 没铺满」，
+ * 把这几项摆在页面上就不用猜了。
+ */
+const shell = ref<ShellInfo | null>(null)
+
+async function loadShell(): Promise<void> {
+  try {
+    shell.value = await shellInfo()
+  } catch {
+    /* 体检单拿不到不该报错给用户看 */
+  }
+}
 
 async function saveName(): Promise<void> {
   nameMsg.value = ''
@@ -537,6 +556,44 @@ async function changePw(): Promise<void> {
       </div>
     </section>
 
+    <section v-if="tab === 'account' && shell" class="panel">
+      <h2>App 信息</h2>
+      <p class="note">
+        这一块是给「状态栏 / 安全区颜色不对」这类问题留的体检单。
+        <br />
+        <b>原生壳版本</b>：我们用的是远程加载（`server.url`），
+        <b>前端永远是线上最新版，而壳可能还是几个月前装的那个</b> ——
+        所以改完原生代码觉得「没生效」时，先看这一项。
+        <br />
+        <b>WebView</b>：≥140 才会让页面铺满整屏（状态栏透明、透出页面背景）；
+        低于 140 时状态栏背后是原生那层底色。
+      </p>
+      <ul class="kvs">
+        <li>
+          <span>原生壳版本</span><b>{{ shell.version }} ({{ shell.build }})</b>
+        </li>
+        <li><span>平台</span><b>{{ shell.platform }}</b></li>
+        <li><span>WebView 主版本</span><b>{{ shell.webview }}</b></li>
+        <li>
+          <span>env(safe-area-inset-top)</span>
+          <b>{{ shell.envTop }} px</b>
+        </li>
+        <li>
+          <span>env(safe-area-inset-bottom)</span>
+          <b>{{ shell.envBottom }} px</b>
+        </li>
+        <li>
+          <span>SystemBars 注入 top</span>
+          <b>{{ shell.cssTop || '（未注入）' }}</b>
+        </li>
+        <li>
+          <span>SystemBars 注入 bottom</span>
+          <b>{{ shell.cssBottom || '（未注入）' }}</b>
+        </li>
+        <li><span>系统深色模式</span><b>{{ shell.dark ? '是' : '否' }}</b></li>
+      </ul>
+    </section>
+
     <section v-if="tab === 'account'" class="panel">
       <h2>退出</h2>
       <div class="row">
@@ -614,6 +671,43 @@ input.code {
   font-family: var(--mono);
   letter-spacing: 2px;
   text-align: center;
+}
+/*
+ * 「App 信息」体检单的键值行。
+ * 左标签 / 右值，值用等宽字体 —— 版本号、像素数这种一眼要比对的东西，
+ * 等宽更好读。窄屏也不折行（min-width:0 + 右对齐）。
+ */
+.kvs {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kvs li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.kvs li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.kvs li span {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.kvs li b {
+  font-weight: var(--fw-mid, 500);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: right;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .row {
   display: flex;

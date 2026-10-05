@@ -18,6 +18,11 @@
       "overlaysWebView": true,
       "style": "DARK",
       "backgroundColor": "#121316"
+    },
+    "SystemBars": {
+      "insetsHandling": "css",
+      "style": "DARK",
+      "initialViewportFitValueHint": "cover"
     }
   }
 }

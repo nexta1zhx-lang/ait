@@ -31,6 +31,8 @@
         -->
         <item name="android:statusBarColor">@color/app_shell</item>
         <item name="android:navigationBarColor">@color/app_shell</item>
+        <!-- 让上面两个 color 真的生效（API 21+）。Android 15+ 上系统忽略它们，见下面 -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
         <!--
           ★★ Android 15+（targetSdk≥35）两条系统栏是**透明**的，颜色一律由
              「背后的内容」决定 —— 改 `statusBarColor`/`navigationBarColor` 或
@@ -44,6 +46,13 @@
            Android 10(API 29) 起，透明导航条 + 浅色内容时系统会叠一层半透明白/
            黑蒙层来保证手势条可见 —— 结果底栏就比页面多一档色差。显式关掉。
            （这两个属性 API 29+ 才有，compileSdk 36 认得，低版本自动忽略。）
+
+           ⚠️⚠️ 它们在 **API 35（Android 15）上已被系统废弃、不再生效** ——
+           所以**光改这里是修不好 Android 15/16 上的灰条的**。
+           15+ 的正解只有一条：让 WebView 真铺满（edge-to-edge），
+           背后那层才跟着是页面背景；万一铺不满，就把 decor 底色钉死 ——
+           见 `MainActivity.java` 的 `paintSystemBarBackdrop()`
+           （那里解释了「灰条」到底是从哪来的）。
         -->
         <item name="android:enforceNavigationBarContrast">false</item>
         <item name="android:enforceStatusBarContrast">false</item>
