@@ -2584,6 +2584,20 @@ body.fixed-viewport .split {
   flex: 1 1 auto;
   height: auto;
   min-height: 260px;
+  /*
+   * 画布**贴卡片边**（用户 2026-10-06：「去掉左右 padding 让图贴卡片边」）——
+   * 把卡片那 8px 左右内边距用负 margin 吃掉，价格轴 / 现价标签 / 右轴百分比
+   * 直接顶到卡片边框，画布也宽了 16px。
+   *
+   * ⚠️ 只让**画布**往外顶，上面 / 下面那些行（周期行 / 指标行 / 下单模块）还留在
+   *    卡片的 8px 内边距上 —— 它们的文字跟图的左边缘照旧对得齐，
+   *    所以不用像原来设想的那样「改 padding 再给每一行补 padding」。
+   * ⚠️ 窄屏（≤900px）要把这两行**还回 0**：那边卡片本身已经通栏
+   *    （`.chart-side.chart-panel` 左右 padding 是 0，见下面窄屏那段），
+   *    再往外顶 8px 会把图挤出卡片。
+   */
+  margin-left: -8px;
+  margin-right: -8px;
 }
 
 /* 折叠后的分析过程：一行，点开恢复 */
@@ -3025,13 +3039,56 @@ body.fixed-viewport .split {
   }
 }
 
-/* 一次性提示（成功 / 失败），点一下就关；**底色不透明** */
+/* ==================== 信息提示（toast）与确认框（dlg） ====================
+ *
+ * 这两样是全站统一的「反馈组件」，规范如下 —— 新代码照着用，别再：
+ *   · 用 `window.alert` / `window.confirm`：系统默认那种改不了样式（手机上还是
+ *     浏览器横幅），跟这套皮肤不搭，也无法出现在 App 的层级里；
+ *   · 各页自己写一份：`AnalyzeView` / `OrderPanel` 曾经各攒了一套 toast。
+ *
+ * 什么时候用哪个：
+ *   · **信息提示（toast）** —— 报结果 / 报错，不需要用户回话：一句话、自己会走。
+ *     入口 `showToast(text, 'ok' | 'bad')`（`src/toast.ts`），画在 `ToastHost.vue`。
+ *   · **确认框（dlg）** —— 动手前问一句「确定吗」，用于**不可撤销**的操作：
+ *     真金白银（下单 / 平仓 / 撤单 / 划转）、删数据（记录 / 案例 / 模板 / 账户 /
+ *     密钥 / 用户）、清理用量。入口 `askConfirm({...})`（`src/confirm.ts`）。
+ *   · **底部弹层（.sheet）** —— 要用户**填东西**（多字段表单），见下面 `.sheet` 那一节。
+ *
+ * 层级（`z-index`，改之前先看这张表，别随手加数字）：
+ *   26~30   图上的标签 / 十字光标
+ *   40      窄屏底栏
+ *   50      币种下拉 / 行情弹层
+ *   60      抽屉
+ *   200     页面级遮罩（登录、提炼）
+ *   300/301 底部弹层 `.sheet-mask` / `.sheet`
+ *   340/341 确认框 `.dlg-mask` / `.dlg` —— **必须压过弹层**（业务里会从弹层里弹确认，
+ *           比如「下单弹层里点一键平仓」，见 `OrderPanel`）
+ *   400     信息提示 `.toast` —— 永远最上层：操作有反应这件事不能被任何东西盖住
+ *
+ * 文案规范（中文）：
+ *   · 标题：**一句话说清要发生什么**，以问号收尾（「撤掉 BTC 这张挂单？」）。
+ *     币种 / 方向这类**短的**参数可以进标题；价格、数量、后果别挤进来。
+ *   · 正文：把**代价 / 不可逆性**讲明白（「撤掉之后这一份平仓保护就没了」），
+ *     能省则省。参数另起一行（`body` 传数组），别写成一大坨。
+ *   · **不写状态符号**：`✅` / `❌` / `⚠️` / `●` / `·` 一律不要（用户 2026-10-06
+ *     「不要加符号提示」）——成 / 败**颜色已经说了**（`.ok` 绿 / `.bad` 红、
+ *     `.dlg-danger` 实心红），文字只讲事实。一行一句话，不用 `·`/`-` 做列表符号。
+ *   · 按钮：确认键写**动作**（「撤单」「平掉」「删除」「下线」），不写「确定」；
+ *     取消键一律「取消」。破坏性的确认键用 `.dlg-danger`（实心红）。
+ * ==================================================================== */
+
+/* -------------------- 信息提示（toast） --------------------
+ *
+ * 位置：顶部中间（`top: 14px`，横向居中）—— 用户 2026-10-05：「提示都放顶部」。
+ * 底色**不透明**：盖在图上 / 弹层上都得看得清。
+ * 点一下立即关；自己走掉的时间见 `toast.ts`（好 4s / 坏 8s）。
+ */
 .toast {
   position: fixed;
   left: 50%;
   top: 14px;
   transform: translateX(-50%);
-  z-index: 220;
+  z-index: 400;
   max-width: min(92vw, 560px);
   padding: 9px 16px;
   border-radius: 10px;
@@ -3042,16 +3099,178 @@ body.fixed-viewport .split {
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
 }
 
+/* 成功 / 中性：绿底绿字（跟全站 `--ok` 一套，但底色是不透明的深绿） */
 .toast.ok {
   background: #123028;
   border: 1px solid #2f8f83;
   color: #8ff0e2;
 }
 
+/* 失败：红底红字 —— 报错才用它，别拿它当「提醒」 */
 .toast.bad {
   background: #33191b;
   border: 1px solid #a8464a;
   color: #ffb3b0;
+}
+
+/*
+ * 窄屏：**占屏幕 80% 宽**（用户 2026-10-05：「手机上字一少就成一小条、
+ * 跳出来看不见」）。全站统一 —— 以前只有下单模块那条这么干。
+ */
+@media (max-width: 900px) {
+  .toast {
+    width: 80vw;
+    max-width: 80vw;
+  }
+}
+
+/* -------------------- 确认框（.dlg，配 `confirm.ts` 的 `askConfirm()`） --------------------
+ *
+ * 结构（`ConfirmDialog.vue`）：
+ *   `.dlg-mask > .dlg > .dlg-head(.dlg-title) + .dlg-body(p…) + .dlg-actions(取消 + 确认)`
+ *
+ * 尺寸：卡片 `min(400px, 100%)`，正文 13px / 行高 1.6，按钮 36px 高。
+ * 交互：点遮罩 = 取消（**不执行**）；Esc = 取消；Enter = 确认；打开后焦点落在确认键。
+ * 动画：140ms（淡入 + 轻微上浮放大）—— 比弹层的 180ms 快一点，确认框本来就该利落。
+ */
+.dlg-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 340;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(2px);
+  animation: dlg-fade 0.14s ease;
+}
+
+.dlg {
+  width: min(400px, 100%);
+  max-height: min(80vh, 560px);
+  overflow: auto;
+  padding: 16px 18px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  animation: dlg-in 0.14s ease;
+}
+
+@keyframes dlg-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dlg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 破坏性操作：标题染红，一眼看出这一下会掉东西 */
+.dlg.danger .dlg-title {
+  color: var(--bad);
+}
+
+.dlg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dlg-title {
+  font-size: 14.5px;
+  font-weight: var(--fw-bold);
+  line-height: 1.4;
+}
+
+.dlg-body {
+  max-height: 46vh;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.dlg-body p {
+  margin: 0;
+}
+
+.dlg-body p + p {
+  margin-top: 6px;
+}
+
+/* 正文里那些**实际的数**（币种 / 价 / 数量）：正文色 + 全站那套数字字体，一眼认出不是套话 */
+.dlg-body p.num {
+  color: var(--text);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 正文里「不可逆」的那半句 */
+.dlg-body p.warn {
+  color: var(--bad);
+}
+
+.dlg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/*
+ * 两颗按钮统一成大一号的 ghost（36px 高 / 13.5px 字）：手指好按，
+ * 也不比 `.sheet` 里的按钮小。取消键靠模板上的 `button.ghost` 拿底色。
+ */
+.dlg-actions button {
+  min-width: 88px;
+  padding: 9px 18px;
+  border-radius: var(--r-sm);
+  font-size: 13.5px;
+}
+
+/*
+ * 破坏性的确认键：实心红 + 白字（`--bad-fill` 是按「白字对比度 ≥ 4.5」挑过的，
+ * 跟 `.toast.bad` 那套深红底一个路子）。
+ * ⚠️ 类名**故意不叫 `.danger`** —— 那是全站那颗小小的「删除」键（`button.danger`）。
+ */
+.dlg-actions button.dlg-danger {
+  background: var(--bad-fill);
+  color: #fff;
+}
+
+@media (hover: hover) {
+  .dlg-actions button.dlg-danger:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+}
+
+/*
+ * 窄屏：卡片铺满减掉两边的 20px；两颗按钮**各占一半**（拇指够得到，
+ * 也避免「确认」和「取消」挤成两个小方块）。
+ */
+@media (max-width: 900px) {
+  .dlg {
+    width: 100%;
+  }
+
+  .dlg-actions button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
 }
 
 /* K 线图下面那一行：左边「看哪一刻」（日历图标） + 中间指标开关 + 右边 A / L */
@@ -3353,6 +3572,77 @@ body.fixed-viewport .split {
 }
 
 /*
+ * 轴上「**自己画的**」那几枚小标签 —— 一套长相：`1px` 边框 + **80% 透明黑**底 +
+ * 11px 粗体数字。三枚：
+ *   · `.cur-label`  现价（贴右轴，跟现价那条虚线齐平）
+ *   · `.cx-price`   十字光标的价格（贴右轴，跟光标的高度齐平）
+ *   · `.cx-time`    十字光标的时间（贴底部时间轴，跟光标的横坐标齐平）
+ *
+ * ⚠️ 为什么不用库自带的：lightweight-charts 那两枚（last value / crosshair label）
+ *    底色是写死的（多空色 / `labelBackgroundColor`）、**没有**加边框的 API ——
+ *    用户 2026-10-06：「k线y轴现价能改为边框 + 80% 透明黑吗」「十字价格标签也自定义」。
+ *    所以库里那几枚全关掉（`lastValueVisible: false`、`crosshair.*.labelVisible: false`），
+ *    位置由 `renderCurLabel()` / `paintCrosshairTags()` 摆。
+ *
+ * 层级 25：压过 `.level-labels`（压力/支撑的百分比）。「光标价离现价多远」那行现在是
+ * 价格标签里的**第一行**（`.cx-price` 里的 `.cx-d`），跟价格同一个框 ⇒ 同一层。
+ */
+.cur-label,
+.cx-tag {
+  position: absolute;
+  z-index: 25;
+  padding: 1px 3px;
+  border: 1px solid rgba(232, 234, 240, 0.62);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.8);
+  color: #e8eaf0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: var(--fw-bold);
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 现价：贴右边缘、跟价格居中对齐（`top` / `width` 由 JS 给） */
+.cur-label {
+  right: 0;
+  top: 0;
+  transform: translateY(-50%);
+}
+
+/* 十字光标的价格：同样贴右轴（`top` / `width` 由 JS 给） */
+/*
+ * 价格框：**两行一个框** —— 上面「离现价 %」（`.cx-d`）、下面「触碰到的价」（`.cx-v`）。
+ * 用户 2026-10-06：「触碰时百分比放上面」→「百分比和触碰的价格放在一个框内」。
+ * `padding` 归零、交给两行各自撑：这样两行之间不会夹出一条底色缝，
+ * `overflow: hidden` 让上面那行的底色贴住圆角。
+ */
+.cx-price {
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.cx-price .cx-v {
+  padding: 1px 3px;
+}
+
+/* 十字光标的时间：贴底部时间轴，横向居中在光标的 x 上（`left` 由 JS 给） */
+.cx-time {
+  bottom: 2px;
+  transform: translateX(-50%);
+}
+
+/* 没在指 / 碰（或者还没数据）时收起来（JS 挂的） */
+.cur-label.off,
+.cx-tag.off {
+  display: none;
+}
+
+/*
  * 左侧标签（仓位 / 挂单，2026-10-06）——
  * 跟右边那套 `.level-labels` 同一套做法，只是贴左边缘：
  * 容器铺满整块图、`pointer-events: none`（不吃手势，图照样能拖），
@@ -3483,6 +3773,11 @@ body.fixed-viewport .split {
   color: var(--muted);
 }
 
+/*
+ * ⚠️ 这两条**只上色，不加框**（用户 2026-10-06：「k线信息加上涨跌幅字，样式和原来一样简单」）——
+ *    我一度给它套了右轴那套「1px 边框 + 80% 透明黑」，被否了：信息栏里这一格
+ *    跟开/高/低/收一样是纯文字，只是给「涨跌幅」也补上字（见 `infoHTML`）。
+ */
 .chart-info .up {
   color: var(--ok);
 }
@@ -3490,28 +3785,45 @@ body.fixed-viewport .split {
   color: var(--bad);
 }
 
-/* 右侧：光标价与当前价的对比 */
-.cursor-delta {
-  position: absolute;
-  right: 0;
-  width: 74px;
-  z-index: 26;
-  pointer-events: none;
-  text-align: center;
-  transform: translateY(-50%);
-  padding: 1px 0;
-  border-radius: 3px;
-  background: rgba(13, 17, 23, 0.9);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: var(--fw-bold);
+/*
+ * 「光标价离现价多远」那一行（%）——
+ * 用户 2026-10-06：「触碰时百分比放上面」「y轴价格百分比和触碰的价格放在一个框内」。
+ *
+ * ⚠️ 它不再是轴上另立的一枚浮层，而是**价格标签 `.cx-price` 里的第一行**：
+ *    两行共用一个 1px 边框、一个底、一个圆角。
+ * ⚠️ 这一行**自己不上底色**（原来是「很暗的底混一档绿/红」）——用户 2026-10-06：
+ *    「原有的价格背景色就去掉吧和百分比统一」⇒ 涨跌色改染在**整个框**上
+ *    （见 `.cx-price.up` / `.cx-price.down`），两行一个底，才像一整套。
+ */
+.cx-price .cx-d {
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1.5;
 }
-
-.cursor-delta.up {
+.cx-price.up .cx-d {
   color: var(--ok);
 }
-.cursor-delta.down {
+.cx-price.down .cx-d {
   color: var(--bad);
+}
+/*
+ * 整个框一个底：按涨跌染（绿 = 光标价在现价上方 / 红 = 下方）。
+ * 拿不到现价参考时 JS 会把 `.up` / `.down` 摘掉 ⇒ 退回 `.cx-tag` 那层中性 80% 黑。
+ */
+.cx-price.up {
+  background: color-mix(in srgb, var(--ok) 22%, rgba(0, 0, 0, 0.8));
+}
+.cx-price.down {
+  background: color-mix(in srgb, var(--bad) 22%, rgba(0, 0, 0, 0.8));
+}
+/*
+ * ⚠️⚠️ 这条以前**根本没写**（那会儿叫 `.cursor-delta.hidden`）：`clearHover()` 一直在加
+ * `hidden`，但样式表里没有任何规则认识它 ⇒ 「没在指 / 没在碰」的时候，右侧那枚 ±%
+ * 还挂着上一次的数不消失（用户 2026-10-06：「再次点屏幕取消…右侧价格和现价差距的百分比不显示」）。
+ * 别删：它就是这一行的「藏」（拿不到现价参考时也靠它收起来）。
+ */
+.cx-price .cx-d.hidden {
+  display: none;
 }
 
 /* 图例 */
@@ -4120,8 +4432,13 @@ body.fixed-viewport .split {
  *    是给「仓位」这种标签用的，但**它也命中这个 wrapper**（同样是个 span），
  *    于是 `flex: 1 1 auto` 被它以 (0,1,1) 压掉，杆子缩成 129px（实测）。
  *    `.ord-field > .ord-bar` 是 (0,2,0) —— 比它重，才长得起来。
+ *
+ * ⚠️ `StopSheet.vue` 那根「平仓比例」滑轨挂在 `.cf-row-bar` 底下（不是 `.ord-field`），
+ *    少写它这一条，wrapper 就退回 `display: inline`：轨道变回系统默认样式，
+ *    刻度（`.ord-ticks` 是 absolute）还会按 `.sheet` 定位、跑到别处去。
  */
-.ord-field > .ord-bar {
+.ord-field > .ord-bar,
+.cf-row-bar > .ord-bar {
   position: relative;
   display: flex;
   flex: 1 1 auto;
@@ -4160,7 +4477,11 @@ body.fixed-viewport .split {
   background: color-mix(in srgb, var(--muted) 45%, var(--panel));
 }
 
-.ord-field input[type='range'] {
+/*
+ * ⚠️ 用 `.ord-bar`（不是 `.ord-field`）当下滑轨的锚：`StopSheet` 里没有 `.ord-field`。
+ *    `<input type=range>` 在这两处都长在 `.ord-bar` 里面，所以这么写两处都命中。
+ */
+.ord-bar input[type='range'] {
   flex: 1 1 auto;
   width: auto;
   min-width: 0;
@@ -4180,7 +4501,7 @@ body.fixed-viewport .split {
   cursor: pointer;
 }
 
-.ord-field input[type='range']::-webkit-slider-runnable-track {
+.ord-bar input[type='range']::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 999px;
   /* 已选那段是主色**半透明**（不是实色块）；没选的是很淡的一条灰线 */
@@ -4195,7 +4516,7 @@ body.fixed-viewport .split {
  * 滑块：**空心圆**（用户 2026-10-05：「不要正方形了」「整体统一」「不要实色」）——
  * 2px 主色描边 + 面板色内芯，跟刻度那 2px 缺口同宽，看着是一套东西。
  */
-.ord-field input[type='range']::-webkit-slider-thumb {
+.ord-bar input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 12px;
   height: 12px;
@@ -4206,19 +4527,19 @@ body.fixed-viewport .split {
   box-shadow: none;
 }
 
-.ord-field input[type='range']::-moz-range-track {
+.ord-bar input[type='range']::-moz-range-track {
   height: 4px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--muted) 18%, transparent);
 }
 
-.ord-field input[type='range']::-moz-range-progress {
+.ord-bar input[type='range']::-moz-range-progress {
   height: 4px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--blue) 55%, transparent);
 }
 
-.ord-field input[type='range']::-moz-range-thumb {
+.ord-bar input[type='range']::-moz-range-thumb {
   width: 12px;
   height: 12px;
   border: 2px solid var(--blue);
@@ -4228,7 +4549,7 @@ body.fixed-viewport .split {
 }
 
 /* 空着的时候（没余额 / 没配 Key）别让滑块看着还能拖 */
-.ord-field input[type='range']:disabled {
+.ord-bar input[type='range']:disabled {
   cursor: default;
   opacity: 0.5;
 }
@@ -4815,16 +5136,6 @@ body.fixed-viewport .split {
   background: var(--blue-soft);
   border-color: var(--accent-line);
   color: var(--blue);
-}
-
-/*
- * 下单模块的提示：借用全站那条 `.toast`（位置就是全站默认的**顶部中间**，
- * 用户 2026-10-05：「提示都放顶部」），只多一件事 ——
- * `z-index` 要**压过弹层**（`.sheet-mask` 300 / `.sheet` 301）：
- * 调杠杆失败时弹层还开着，提示得能看见。
- */
-.toast.ord-toast {
-  z-index: 400;
 }
 
 /* ==================== 币种下拉 ==================== */
@@ -6230,14 +6541,10 @@ button.badge:disabled {
   }
   /*
    * 下单模块在窄屏（用户 2026-10-05）：
-   *   ① 提示占屏幕 80% 宽 —— 全站那条 `.toast` 是「跟着文字长短缩」的，
-   *      手机上字一少就成一小条、跳出来看不见；
+   *   ① 提示占屏幕 80% 宽 —— 那条规则现在跟 `.toast` 一起放在全站规范那一节了
+   *      （见「信息提示（toast）与确认框（dlg）」）；
    *   ② 「做多/做空 + 下单」都在右下角，把宽度让给上面的仓位杆。
    */
-  .toast.ord-toast {
-    width: 80vw;
-    max-width: 80vw;
-  }
   .ord-submit {
     /* 两颗拿这一行平分（上限放开、下限收到 0）：320px 上两颗也放得下，不挤破 */
     flex: 1 1 0;
@@ -6249,6 +6556,9 @@ button.badge:disabled {
     height: auto;
     /* 窄屏上限低一点：头顶有行情条、脚下是下单模块，别把它们顶出面板 */
     min-height: 150px;
+    /* 窄屏卡片本来就是通栏（左右 padding 0），别再用桌面那对负 margin 往外顶 */
+    margin-left: 0;
+    margin-right: 0;
   }
   /*
    * 窄屏的信息栏：**左上角、竖着排、只有触碰时才出现**。

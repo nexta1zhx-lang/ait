@@ -7,7 +7,7 @@ import {
   type AppConfig,
   type Contract
 } from './api'
-import {cny} from './format'
+import {cny, decimalsFor, digitsForTick} from './format'
 
 /** 全局状态：配置、账户（模型列表）、合约列表。三个页面共用。 */
 
@@ -18,6 +18,33 @@ export const configError = ref('')
 export const ready = ref(false)
 
 let loading: Promise<void> | null = null
+
+/**
+ * 合约表里这个币的 tick（`PRICE_FILTER.tickSize`）。
+ * 传「BTC」或「BTCUSDT」都认（合约表里 `base` / `symbol` 两种写法都有）。
+ * 合约表还没到 → `null`。
+ */
+export function tickSizeOf(sym: string): number | null {
+  const s = String(sym || '').trim().toUpperCase()
+  if (!s) return null
+  const base = s.replace(/USDT$/, '')
+  const c = contracts.value.find(x => x.symbol === s || x.base === base)
+  const tick = Number(c?.tickSize)
+  return Number.isFinite(tick) && tick > 0 ? tick : null
+}
+
+/**
+ * 价格该显示几位小数 —— 跟合约 `tickSize` 走（BTC 0.1 → 1 位、DOGE 0.00001 → 5 位）。
+ *
+ * ⚠️ 价格一律用它 + `format.price()`（**补齐**小数位）。别用 `fmt()`：它
+ *    `minimumFractionDigits: 0` 会把整数价格的小数位吃掉，同一行里就出现
+ *    「24h 低 84,910 · 高 86,976.1」（用户 2026-10-06：「精度没统一」）。
+ * `fallback` 是合约表还没到时的兜底价（按它的量级猜位数）。
+ */
+export function priceDigitsOf(sym: string, fallback?: unknown): number {
+  const tick = tickSizeOf(sym)
+  return tick ? digitsForTick(tick) : decimalsFor(fallback)
+}
 
 /** 只加载一次，多个页面共享同一个 Promise */
 export function bootstrap(): Promise<void> {
@@ -67,7 +94,7 @@ export function resetStore(): void {
 /** 启动时该提醒的事（没配 Key / 规则没读到 / 加载失败） */
 export const notices = computed(() => {
   const out: string[] = []
-  if (configError.value) out.push(`⚠️ ${configError.value}`)
+  if (configError.value) out.push(configError.value)
   const c = config.value
   if (!c) return out
   if (!c.hasApiKey) {

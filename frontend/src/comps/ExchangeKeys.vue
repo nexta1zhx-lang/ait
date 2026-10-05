@@ -25,6 +25,7 @@ import {
   type ExchangeCatalogEntry,
   type ExchangeKey
 } from '../api'
+import {askConfirm} from '../confirm'
 
 const keys = ref<ExchangeKey[]>([])
 const catalog = ref<ExchangeCatalogEntry[]>([])
@@ -147,8 +148,13 @@ async function makeDefault(k: ExchangeKey): Promise<void> {
 }
 
 async function remove(k: ExchangeKey): Promise<void> {
-  if (!window.confirm(`删除「${k.name || labelOf(k.exchange)}」这套账户？`))
-    return
+  const ok = await askConfirm({
+    title: `删除「${k.name || labelOf(k.exchange)}」这套账户？`,
+    body: {t: '删掉之后要重新填 API Key / Secret 才能再用。', tone: 'warn'},
+    okText: '删除',
+    danger: true
+  })
+  if (!ok) return
   error.value = ''
   try {
     await deleteExchangeKey(k.id)

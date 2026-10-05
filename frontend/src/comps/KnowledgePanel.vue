@@ -153,7 +153,7 @@ defineExpose({load, loadTags})
       </button>
     </div>
 
-    <div v-if="error" class="error">❌ {{ error }}</div>
+    <div v-if="error" class="error">{{ error }}</div>
 
     <div v-else-if="loading && !cases.length" class="empty">读取中…</div>
 

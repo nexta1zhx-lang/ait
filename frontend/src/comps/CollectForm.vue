@@ -244,7 +244,7 @@ async function collect() {
       </div>
 
       <div v-if="error" class="error" style="margin-top: 10px">
-        ❌ {{ error }}
+        {{ error }}
       </div>
     </section>
 

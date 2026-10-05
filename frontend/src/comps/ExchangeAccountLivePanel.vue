@@ -19,6 +19,8 @@ import TransferSheet from './TransferSheet.vue'
 import ReduceSheet from './ReduceSheet.vue'
 import type {PositionRef} from './ExchangeAccountBoard.vue'
 import {testOrder} from '../settings'
+import {askConfirm} from '../confirm'
+import {showToast} from '../toast'
 import {
   closeTradePositions,
   exchangeStream,
@@ -238,15 +240,15 @@ let curveAt = 0
 
 /* ---------------- 减仓 / 平仓（持仓卡片底部那两颗按钮） ---------------- */
 
-/** 操作结果提示（这一页没有全局 toast，就摆在面板底下，4 秒自己消失） */
-const posMsg = ref('')
-let posMsgTimer: ReturnType<typeof setTimeout> | null = null
-function sayMsg(text: string): void {
-  posMsg.value = text
-  if (posMsgTimer) clearTimeout(posMsgTimer)
-  posMsgTimer = setTimeout(() => {
-    posMsg.value = ''
-  }, 4000)
+/**
+ * 操作结果提示 —— 走全站那一条（`../toast` 的 `showToast`，画在 `App.vue` 的 `ToastHost`）。
+ *
+ * ⚠️ 以前这一页自己攒了一份「面板底下一行小字」（`posMsg` + 4s 定时器）：
+ *    有了全站 toast 之后就该归它，位置 / 停留时间 / 层级都别再各写一套。
+ *    `tone` 缺省是成功（这个方法里多数是「✅ 已平仓」这种）。
+ */
+function sayMsg(text: string, tone: 'ok' | 'bad' = 'ok'): void {
+  showToast(text, tone)
 }
 
 /** 正在提交（两颗按钮一起禁点） */
@@ -303,15 +305,15 @@ async function confirmReduce(pct: number): Promise<void> {
       reduceRow.value = null
       sayMsg(
         res.test
-          ? `✅ 测试减仓通过校验：${baseOf(r.symbol)} ${pct}%（没进撮合）`
-          : `✅ 已减仓 ${baseOf(r.symbol)} ${pct}%`
+          ? `测试减仓通过校验：${baseOf(r.symbol)} ${pct}%（没进撮合）`
+          : `已减仓 ${baseOf(r.symbol)} ${pct}%`
       )
       void doRefresh()
     } else {
-      sayMsg(res.error || '减仓失败')
+      sayMsg(res.error || '减仓失败', 'bad')
     }
   } catch (e) {
-    sayMsg(msg(e))
+    sayMsg(msg(e), 'bad')
   } finally {
     posBusy.value = false
   }
@@ -321,8 +323,16 @@ async function confirmReduce(pct: number): Promise<void> {
 async function closeRow(p: PositionRef): Promise<void> {
   if (posBusy.value) return
   const name = baseOf(p.symbol)
-  const warn = testOrder.value ? '（当前是测试单，只校验、不会真平）' : '，市价全平，真成交。'
-  if (!window.confirm(`平掉 ${name} 这一条持仓？${warn}`)) return
+  const test = testOrder.value
+  const ok = await askConfirm({
+    title: `平掉 ${name} 这一条持仓？`,
+    body: test
+      ? {t: '测试单只发到币安测试接口，不进撮合、不会真平。', tone: 'num'}
+      : {t: '真单：按市价全平这一条，会真的成交。', tone: 'warn'},
+    okText: '平掉',
+    danger: !test
+  })
+  if (!ok) return
   posBusy.value = true
   try {
     const res = await closeTradePositions(
@@ -331,13 +341,13 @@ async function closeRow(p: PositionRef): Promise<void> {
       testOrder.value
     )
     if (res.ok) {
-      sayMsg(res.test ? `✅ 测试平仓通过校验：${name}（没进撮合）` : `✅ 已平仓 ${name}`)
+      sayMsg(res.test ? `测试平仓通过校验：${name}（没进撮合）` : `已平仓 ${name}`)
       void doRefresh()
     } else {
-      sayMsg(res.error || '平仓失败')
+      sayMsg(res.error || '平仓失败', 'bad')
     }
   } catch (e) {
-    sayMsg(msg(e))
+    sayMsg(msg(e), 'bad')
   } finally {
     posBusy.value = false
   }
@@ -744,7 +754,6 @@ onUnmounted(stopStreams)
     />
 
     <p v-if="ordersErr" class="dim tiny">挂单查询失败：{{ ordersErr }}</p>
-    <p v-if="posMsg" class="dim tiny">{{ posMsg }}</p>
   </div>
 </template>
 

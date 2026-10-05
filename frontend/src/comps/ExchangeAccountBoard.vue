@@ -870,7 +870,7 @@ const RANGES = [
               <span class="dim num">{{ money(spot.usdt) }}</span>
             </li>
           </ul>
-          <p class="dim tiny">⚠️ 只统计 USDT，现货里的其他币种不计入净资产</p>
+          <p class="dim tiny">只统计 USDT，现货里的其他币种不计入净资产。</p>
         </template>
       </section>
       </div>

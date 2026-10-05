@@ -25,6 +25,7 @@ import {
   type LlmKey
 } from '../api'
 import {cny, usd} from '../format'
+import {askConfirm} from '../confirm'
 import {refreshConfig} from '../store'
 
 const keys = ref<LlmKey[]>([])
@@ -149,9 +150,12 @@ async function makeDefault(k: LlmKey): Promise<void> {
 }
 
 async function remove(k: LlmKey): Promise<void> {
-  const ok = window.confirm(
-    `确定删除密钥「${k.name}」？\n\n已经产生的用量记录不会删，只是之后不再用它。`
-  )
+  const ok = await askConfirm({
+    title: `确定删除密钥「${k.name}」？`,
+    body: '已经产生的用量记录不会删，只是之后不再用它。',
+    okText: '删除',
+    danger: true
+  })
   if (!ok) return
   error.value = ''
   try {

@@ -32,6 +32,7 @@ import StepsPanel from '../comps/StepsPanel.vue'
 import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
+import {showToast} from '../toast'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
 import {useSwipeTabs} from '../swipe-tabs'
@@ -75,6 +76,7 @@ import {
 import {
   balanceBadge,
   contracts,
+  priceDigitsOf,
   refreshBalance,
   refreshConfig,
   refreshingBalance
@@ -86,6 +88,7 @@ import {
   bjTime,
   fixed,
   fmt,
+  price,
   richText,
   signedPct,
   splitRec
@@ -293,7 +296,6 @@ watch(
 onBeforeUnmount(() => {
   histRO?.disconnect()
   collectClose?.()
-  if (toastTimer) clearTimeout(toastTimer)
 })
 
 /*
@@ -396,19 +398,8 @@ onActivated(() => {
 onDeactivated(() => {
   pageAlive.value = false
 })
-/** 一次性提示（几秒后自己消失，点一下也消失） */
-const toast = ref<{text: string; tone: 'ok' | 'bad'} | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
+/** 一次性提示：走全站那一份（`../toast`，画在 `ToastHost`）—— 这一页不再自己攒一套 */
 let collectClose: (() => void) | null = null
-
-function showToast(text: string, tone: 'ok' | 'bad' = 'ok'): void {
-  toast.value = {text, tone}
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(
-    () => (toast.value = null),
-    tone === 'bad' ? 8000 : 4000
-  )
-}
 
 function toggleCollect(): void {
   collectMode.value = !collectMode.value
@@ -499,6 +490,18 @@ const verdictInfo = computed(
 /** 推荐做法拆成「现在 / 动手 / 别碰」几行（老记录没前缀就一段） */
 const recParts = computed(() => splitRec(judge.value?.recommendation))
 
+/**
+ * 价格小数位 —— 跟行情条 / 图上一个口径（见 `store.priceDigitsOf`）。
+ * ⚠️ 这里的价格原来跟别处一样用 `fmt()`，于是「现价 85,571」旁边站着图上
+ *    右轴那枚「85,571.1」（用户 2026-10-06：「精度没统一」）。
+ */
+const priceDigits = computed(() => priceDigitsOf(symbol.value, result.value?.price))
+
+/** 价格文案 */
+function pxText(v: unknown): string {
+  return price(v, priceDigits.value)
+}
+
 /*
  * 价格位置图（用户 2026-10-04：「纯文字太单调懒得看，能否图示预测」）。
  *
@@ -543,9 +546,9 @@ const levels = computed(() => {
   const off = (v: number) =>
     `${v >= p ? '+' : ''}${(((v - p) / p) * 100).toFixed(2)}%`
   return [
-    {k: b.hiK, v: fmt(b.hi), d: off(b.hi), tone: 'hi'},
-    {k: '现价', v: fmt(p), d: '—', tone: 'now'},
-    {k: b.loK, v: fmt(b.lo), d: off(b.lo), tone: 'lo'}
+    {k: b.hiK, v: pxText(b.hi), d: off(b.hi), tone: 'hi'},
+    {k: '现价', v: pxText(p), d: '—', tone: 'now'},
+    {k: b.loK, v: pxText(b.lo), d: off(b.lo), tone: 'lo'}
   ]
 })
 
@@ -577,7 +580,7 @@ const heatRows = computed(() => {
     k: '24h 振幅',
     v: num(h.amplitude24hPct) === null ? '—' : fixed(h.amplitude24hPct, 2) + '%'
   })
-  rows.push({k: '24h 高 / 低', v: `${fmt(h.high24h)} / ${fmt(h.low24h)}`})
+  rows.push({k: '24h 高 / 低', v: `${pxText(h.high24h)} / ${pxText(h.low24h)}`})
   rows.push({
     k: '24h 成交额',
     v: num(h.quoteVolume24h) === null ? '—' : fmt(h.quoteVolume24h, 0)
@@ -612,7 +615,7 @@ const heatRows = computed(() => {
     <!-- ============ 查询 ============ -->
     <!-- 币种下拉与「AI 分析」按钮都移到右边 K 线的头部了（2026-10-03 用户要求） -->
 
-    <div v-if="error" class="error">❌ {{ error }}</div>
+    <div v-if="error" class="error">{{ error }}</div>
 
     <!-- ============ 左右布局（手机端「K 线」也是这里的一格） ============ -->
     <div
@@ -1030,11 +1033,11 @@ const heatRows = computed(() => {
           @levels="sr = $event"
           @clear:select="clearChartRange"
           @error="onChartError"
-          @note="(t, tone) => (toast = {text: t, tone})"
+          @note="showToast"
         >
           <!-- 顶部：行情条（币种下拉就摆在它左边，跟交易所一个位置） -->
           <template #top>
-            <TickerHead>
+            <TickerHead :symbol="symbol">
               <template #symbol>
                 <!--
                   窄屏：**只显示币种**（用户 2026-10-03：「去掉搜索只显示币种」）——
@@ -1146,16 +1149,7 @@ const heatRows = computed(() => {
       </div>
     </div>
 
-    <!-- 一次性提示：成了 / 失败了都说一声，几秒后自己消失 -->
-    <div
-      v-if="toast"
-      class="toast"
-      :class="toast.tone"
-      title="点一下关掉"
-      @click="toast = null"
-    >
-      {{ toast.text }}
-    </div>
+    <!-- 一次性提示由全局的 `ToastHost` 画（见 App.vue / style.css 那一节） -->
 
     <!-- 配置：从底部弹出来（入口在 K 线头部最右边那颗齿轮） -->
     <SettingsSheet :open="cfgOpen" @close="cfgOpen = false" />

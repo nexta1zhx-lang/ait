@@ -25,6 +25,7 @@ import {
 } from '../api'
 import {user} from '../session'
 import {bjTime} from '../format'
+import {askConfirm} from '../confirm'
 import SegTabs from '../comps/SegTabs.vue'
 import ServerStatusView from './ServerStatusView.vue'
 
@@ -127,10 +128,15 @@ async function savePassword(id: number): Promise<void> {
 }
 
 async function removeUser(u: AdminUser): Promise<void> {
-  const ok = window.confirm(
-    `确定删除「${u.username}」？\n\n⚠️ 他名下的 ${u.stats.analyses} 条预测历史、` +
-      `${u.stats.knowledge} 条知识库和用量记录会**一起删除**，无法恢复。`
-  )
+  const ok = await askConfirm({
+    title: `确定删除用户「${u.username}」？`,
+    body: [
+      {t: `他名下的 ${u.stats.analyses} 条预测历史、${u.stats.knowledge} 条知识库和用量记录会一起删除。`, tone: 'num'},
+      {t: '删掉就恢复不了了。', tone: 'warn'}
+    ],
+    okText: '删除用户',
+    danger: true
+  })
   if (!ok) return
   msg.value = ''
   error.value = ''

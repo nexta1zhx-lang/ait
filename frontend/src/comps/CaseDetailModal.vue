@@ -9,6 +9,7 @@ import {computed, ref, watch} from 'vue'
 import MiniKline from './MiniKline.vue'
 import {deleteCase, reeditCase, updateCase, type KnowledgeCase} from '../api'
 import {bjTime, moveCls, moveText} from '../format'
+import {askConfirm} from '../confirm'
 
 const props = defineProps<{
   open: boolean
@@ -124,15 +125,16 @@ async function save() {
 
 async function reedit() {
   if (!props.data) return
-  if (
-    !confirm(
-      `用这条案例存下的 K 线重新跑一次 AI 提炼？\n\n` +
-        `· 会覆盖现在的走势类型 / 标题 / 经验 / AI 建议标签\n` +
-        `· 不会重新拉行情\n` +
-        `· 花费约 ¥0.02`
-    )
-  )
-    return
+  const ok = await askConfirm({
+    title: '重新跑一次 AI 提炼？',
+    body: [
+      '用这条案例存下的 K 线重新提炼，会覆盖现在的走势类型 / 标题 / 经验 / AI 建议标签。',
+      '不会重新拉行情。',
+      {t: '花费约 ¥0.02', tone: 'num'}
+    ],
+    okText: '重新提炼'
+  })
+  if (!ok) return
   busy.value = true
   error.value = ''
   try {
@@ -150,10 +152,13 @@ async function reedit() {
 
 async function remove() {
   if (!props.data) return
-  if (
-    !confirm(`删除「${props.data.symbol} ${props.data.timeframe}」这条案例？`)
-  )
-    return
+  const ok = await askConfirm({
+    title: `删除「${props.data.symbol} ${props.data.timeframe}」这条案例？`,
+    body: {t: '删掉就找不回来了。', tone: 'warn'},
+    okText: '删除',
+    danger: true
+  })
+  if (!ok) return
   busy.value = true
   try {
     await deleteCase(props.data.id)
@@ -299,7 +304,7 @@ async function remove() {
             </div>
           </details>
 
-          <div v-if="error" class="error">❌ {{ error }}</div>
+          <div v-if="error" class="error">{{ error }}</div>
         </div>
 
         <!-- 底部 -->

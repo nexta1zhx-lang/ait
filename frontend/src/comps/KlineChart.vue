@@ -14,7 +14,7 @@ import {
 import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
-import {setLivePrice} from '../ticker'
+import {livePrice, setLivePrice} from '../ticker'
 import {isForeground, onForegroundChange} from '../live'
 import {
   chartShowHistory,
@@ -23,7 +23,8 @@ import {
   chartShowPosition,
   testOrder
 } from '../settings'
-import {contracts} from '../store'
+import {contracts, priceDigitsOf, tickSizeOf} from '../store'
+import {askConfirm} from '../confirm'
 import {tradeKey} from '../trade-account'
 import {
   baseToExSymbol,
@@ -47,6 +48,7 @@ import {
   bjTime,
   decimalsFor,
   fmt,
+  price,
   usd
 } from '../format'
 
@@ -315,7 +317,20 @@ const levelHost = ref<HTMLElement | null>(null)
 /** 左侧标签容器（仓位 / 挂单那几枚） */
 const ordLabelHost = ref<HTMLElement | null>(null)
 const infoEl = ref<HTMLElement | null>(null)
+/** 价格标签里上面那行：离现价的百分比（跟价格**同一个框**） */
 const deltaEl = ref<HTMLElement | null>(null)
+/** 价格标签里下面那行：触碰到的价 */
+const cxValEl = ref<HTMLElement | null>(null)
+/** 右轴上那枚「现价」标签（自己画的，见 `renderCurLabel`） */
+const curEl = ref<HTMLElement | null>(null)
+/** 十字光标的两枚轴标签（价格 / 时间，自己画的，见 `paintCrosshairTags`） */
+const cxPriceEl = ref<HTMLElement | null>(null)
+const cxTimeEl = ref<HTMLElement | null>(null)
+/** 价格框（含上面那行百分比）的高度；字号 / 缩放不变就量一次缓存 */
+let cxTagH = 0
+/** 时间标签的宽度（只在文字变了时重量一次，别每帧都读 `offsetWidth`） */
+let cxTimeW = 0
+let cxTimeText = ''
 
 const logScale = ref(false)
 
@@ -489,12 +504,22 @@ function ensureChart(): boolean {
     },
     crosshair: {
       mode: LWC.CrosshairMode.Normal,
-      vertLine: {labelBackgroundColor: '#2a3441'},
-      horzLine: {labelBackgroundColor: '#2a3441'}
+      /*
+       * ⚠️ 库自带的那两枚轴标签**关掉**（`labelBackgroundColor` 是库写死的 #2a3441、
+       *    没有边框，跟右轴「现价」那枚「边框 + 80% 透明黑」不是一套）——
+       *    用户 2026-10-06：「十字价格标签也自定义」。改成自己画的：
+       *    见 `paintCrosshairTags()` + `.cx-tag`。
+       *
+       * ⚠️ 顺带省下一段轴宽：库原来给那枚标签预留了宽度（隔离测过 62 → 50）。
+       *    不过现在刻度数字**补齐小数位**（见 `applyPricePrecision`）又宽回来几像素，
+       *    所以整条轴的宽度跟改之前差不多 —— 别以为关掉它轴就一定会变窄。
+       */
+      vertLine: {labelVisible: false},
+      horzLine: {labelVisible: false}
     },
     localization: {
       locale: 'zh-CN',
-      priceFormatter: (p: number) => fmt(p),
+      priceFormatter: (p: number) => price(p, priceDigits.value),
       timeFormatter: (t: number) => bjShort(t)
     }
   })
@@ -509,13 +534,20 @@ function ensureChart(): boolean {
     wickDownColor: '#e35561',
     /*
      * 「当前价格」这条线（用户 2026-10-06：「当前价格…颜色为淡白色虚线」）——
-     * 它就是蜡烛系列**自带**的那条 last price 线（跟着最后一根的收盘价走、
-     * 右轴上也带数值），不用自己再画一条。默认它是「按涨跌染色 + 实线」，
-     * 这里改成淡白虚线：不跟多空绿红抢眼，只当「现价在哪」的参考。
+     * 它就是蜡烛系列**自带**的那条 last price 线（跟着最后一根的收盘价走），
+     * 不用自己再画一条。默认它是「按涨跌染色 + 实线」，这里改成淡白虚线：
+     * 不跟多空绿红抢眼，只当「现价在哪」的参考。
+     *
+     * ⚠️ `lastValueVisible: false`：把库画在右轴上的**那枚现价标签**关掉。
+     *    它的底色 = 蜡烛的多空色，而且库**没有**改底色 / 加边框的 API
+     *    （用户 2026-10-06：「k线y轴现价能改为边框 + 80% 透明黑吗」）——
+     *    所以改成自己挂一个 HTML 的：见 `renderCurLabel()` + `.cur-label`。
+     *    这条虚线照旧由库画（`priceLineVisible` 没关）。
      */
     priceLineColor: 'rgba(232,234,240,0.62)',
     priceLineStyle: LWC.LineStyle.Dashed,
-    priceLineWidth: 1
+    priceLineWidth: 1,
+    lastValueVisible: false
   })
 
   const volume = chart.addSeries(LWC.HistogramSeries, {
@@ -642,7 +674,7 @@ function levelTip(kind: 'res' | 'sup'): string {
   // 是拐点还是「没拐点可用时的退路」，说清楚 —— 不装成拐点
   const how =
     src === 'swing' ? `${from}那根的摆动${side}点` : `这一段图上的最${side}点`
-  return `${what} ${fmt(price)} · ${how}（按图上可见这段自动算）${tail}`
+  return `${what} ${priceText(price)} · ${how}（按图上可见这段自动算）${tail}`
 }
 
 /**
@@ -731,14 +763,14 @@ interface OrderLine {
   /** 实线还是虚线 */
   dashed: boolean
   /**
-   * 左侧标签：**两段**，中间一条实线分割（用户 2026-10-06：
+   * 左侧标签：**几段**，段间一条实线分割（用户 2026-10-06：
    * 「标签都移到左边…描框带透明度中间实线分割」）。
-   *   · 仓位 → `[多] | [−$0.0881]`
-   *   · 强平 → `[强平] | [0.00190]`
-   *   · 挂单 → `[止损] | [−$0.1764 10%]`
+   *   · 仓位 → `[多] | [仓位价值] | [未实现盈亏]`
+   *   · 强平 → `[强平] | [价]`
+   *   · 挂单 → `[止损 价] | [10%]`
    * `null` = 这条线不放标签。
    */
-  label: [string, string] | null
+  label: string[] | null
   labelTitle: string
   /** 左侧标签的颜色（不填跟线同色） */
   labelColor?: string
@@ -815,11 +847,14 @@ function orderTargetPos(o: TradeOpenOrder): TradePositionRow | null {
 }
 
 /**
- * 一个挂单的左侧标签：`止盈 +$0.30 · 50%`（止损 / 委托同理）。
+ * 一个挂单的左侧标签：`止盈 85,123.4 │ 50%`（止损 / 委托同理）。
  *
- * · **预计收益** = 这笔单按它的价成交后的盈亏（`(价 − 开仓均价) × 数量`，多头这么算，
- *    空头反过来）—— 只有**减仓 / 平仓单**才有意义，开仓单（加仓）不写收益
- * · **数量百分比** = 这一单的数量 ÷ 那条持仓的数量（平掉多少比例的仓位）
+ * 用户 2026-10-06：「止盈止损也加上价格，止盈止损百分比放标签旁」——
+ *   · 第一段 = 止盈 / 止损 **+ 触发价**（委托单不带价：那是加仓，价位看右侧轴就够）
+ *   · 第二段 = **平仓百分比**（平掉这条持仓的多少），金额挪进 `title`
+ * 预计收益 / 数量 / 平仓比例这些**明细都在 title 里**（按住标签 / 悬停看），
+ * 标签上只留一眼要用的那两个数。
+ *
  * ⚠️ 不含手续费（两张单两边都要吃一次 taker/maker），所以叫「预计」。
  */
 function orderLabel(
@@ -828,9 +863,10 @@ function orderLabel(
 ): {kind: string; value: string; title: string; color: string} {
   const pos = orderTargetPos(o)
   const kind = orderKind(o)
-  /* 标签第一段：止损 / 止盈 / 委托（短，两个字） */
-  const name = kind === 'profit' ? '止盈' : kind === 'stop' ? '止损' : '委托'
-  const notes: string[] = [`${name} ${fmt(px)}`, `数量 ${fmt(o.amount)}`]
+  const base = kind === 'profit' ? '止盈' : kind === 'stop' ? '止损' : '委托'
+  /* 标签第一段：止盈 / 止损带上触发价；委托（加仓）就光两个字 */
+  const name = kind === 'plain' ? base : `${base} ${priceText(px)}`
+  const notes: string[] = [`${base} ${priceText(px)}`, `数量 ${fmt(o.amount)}`]
   /*
    * 这一单是**平仓**（那才有「预计收益」）：
    *   卖单打多头、买单打空头 = 平仓；反过来的那两种是加仓。
@@ -839,17 +875,18 @@ function orderLabel(
   if (pos && (o.reduceOnly || closing)) {
     const diff = o.side === 'sell' ? px - pos.entryPrice : pos.entryPrice - px
     const pnl = diff * o.amount
-    notes.push(`预计收益 ${money(pnl)}（按开仓均价 ${fmt(pos.entryPrice)} 算，不含手续费）`)
-    let value = money(pnl)
-    if (pos.amount > 0) {
-      const pct = Math.min(100, (o.amount / pos.amount) * 100)
-      value += ` ${pct.toFixed(0)}%`
-      notes.push(`平掉这条持仓的 ${pct.toFixed(1)}%`)
-    }
+    notes.push(`预计收益 ${money(pnl)}（按开仓均价 ${priceText(pos.entryPrice)} 算，不含手续费）`)
     /*
      * 颜色按**赚还是亏**走（绿 / 红）—— 止盈止损一眼看出是保护盈利还是割肉。
      */
-    return {kind: name, value, title: notes.join(' · '), color: pnl >= 0 ? '#5eba89' : '#e35561'}
+    const color = pnl >= 0 ? '#5eba89' : '#e35561'
+    if (pos.amount > 0) {
+      const pct = Math.min(100, (o.amount / pos.amount) * 100)
+      notes.push(`平掉这条持仓的 ${pct.toFixed(1)}%`)
+      /* 第二段只留百分比（用户：「百分比放标签旁」）—— 金额在 title 里 */
+      return {kind: name, value: `${pct.toFixed(0)}%`, title: notes.join(' · '), color}
+    }
+    return {kind: name, value: money(pnl), title: notes.join(' · '), color}
   }
   notes.push('这一单是加仓（不是平仓），不结算盈亏')
   return {
@@ -872,8 +909,11 @@ function orderLineList(): OrderLine[] {
     if (chartShowPosition.value && p.entryPrice > 0) {
       /*
        * 仓位：**多绿空红、实线**（用户 2026-10-06：「空单红色，多单绿色 实线」）。
-       * 左边那枚标签显示的是**这条仓位现在的盈亏**（「标签放左侧显示盈利价值」）——
-       * 不是开仓价（价格在右侧轴上已经有了）。
+       * 左边那枚标签：**方向 │ 仓位价值 │ 未实现盈亏**（用户 2026-10-06：
+       * 「仓位价值放方向旁」→「仓位是方向+价值+盈利额」）——
+       * 开仓价在右侧轴上已经有数了，这里给「这条仓位多大、现在赚亏多少」。
+       * ⚠️ 标签颜色按**盈亏**染（绿赚红亏）—— 所以那个金额一定要露在标签上，
+       *    不然颜色在说什么就看不出来了。数量 / 杠杆仍在 `labelTitle` 里。
        */
       const pnl = p.unrealized
       const pct = p.entryPrice > 0 && p.amount > 0
@@ -884,7 +924,7 @@ function orderLineList(): OrderLine[] {
         color: sideColor(p.side),
         title: `开仓均价 ${who}`,
         dashed: false,
-        label: [who, money(pnl)],
+        label: [who, usd(p.notional), money(pnl)],
         labelColor: pnl >= 0 ? '#5eba89' : '#e35561',
         /* 拖着这条线上下走 = 给这条仓位挂一张止盈 / 止损（见 `ordLabelDown`） */
         drag: {
@@ -896,7 +936,7 @@ function orderLineList(): OrderLine[] {
           posSide: p.side === 'long' ? 'LONG' : 'SHORT'
         },
         labelTitle:
-          `开仓均价 ${fmt(p.entryPrice)} · ${who}单\n` +
+          `开仓均价 ${priceText(p.entryPrice)} · ${who}单\n` +
           `未实现盈亏 ${money(pnl)}` +
           (pct === null ? '' : `（${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%）`) +
           `\n仓位价值 ${usd(p.notional)} · 数量 ${fmt(p.amount)} · ${p.leverage}x`
@@ -911,8 +951,8 @@ function orderLineList(): OrderLine[] {
         dashed: true,
         /* 强平也放左边（用户：「标签都移到左边吧」）—— 价位本来就是右边轴上那个数，
            这里给「强平」两个字，好认是哪条线 */
-        label: ['强平', fmt(p.liquidationPrice)],
-        labelTitle: `强平价 ${fmt(p.liquidationPrice)} · ${who}单`
+        label: ['强平', priceText(p.liquidationPrice)],
+        labelTitle: `强平价 ${priceText(p.liquidationPrice)} · ${who}单`
       })
     }
   }
@@ -1095,9 +1135,8 @@ let ordLabels: {
   color: string
   /** 整颗标签（描框那个盒子） */
   el: HTMLElement
-  /** 两段文字（中间那条竖线是 CSS 的 `i`） */
-  p1: HTMLElement
-  p2: HTMLElement
+  /** 几段文字，段与段之间是 CSS 的 `i`（那条竖分割线） */
+  parts: HTMLElement[]
   drag: DragRef | null
   /** 这条标签对应 `orderLines` 里的第几条（拖动时按它改那条线） */
   lineIdx: number
@@ -1112,13 +1151,20 @@ let cancelShownEl: HTMLElement | null = null
  * 撤一张挂单（用户 2026-10-06：「点击左侧标签出现叉号，点击弹窗确认可撤单」）。
  *
  * ⚠️ 撤单**没有测试版**：撤了就是撤了（跟「测试下单」开关无关），
- *    所以这一步必须问一次 —— 用系统确认框，跟「一键平仓」一个路子。
+ *    所以这一步必须问一次 —— 走全站那个确认框（`askConfirm`），别用 `window.confirm`
+ *    （系统默认那种改不了样式，也压不过图上的东西）。
  */
 async function cancelOrderAsk(id: string, symbol: string, price: number): Promise<void> {
   const name = baseToName(symbol)
-  const ok = window.confirm(
-    `撤掉 ${name} 这张挂单？\n\n委托价 ${fmt(price)}。撤掉之后这一份平仓保护就没了。`
-  )
+  const ok = await askConfirm({
+    title: `撤掉 ${name} 这张挂单？`,
+    body: [
+      {t: `委托价 ${priceText(price)}`, tone: 'num'},
+      {t: '撤掉之后这一份平仓保护就没了。', tone: 'warn'}
+    ],
+    okText: '撤单',
+    danger: true
+  })
   if (!ok) return
   try {
     const r = await cancelTradeOrder(symbol, id, tradeKey.value?.id)
@@ -1126,7 +1172,7 @@ async function cancelOrderAsk(id: string, symbol: string, price: number): Promis
       emit('note', r.error || '撤单失败', 'bad')
       return
     }
-    emit('note', `✅ 已撤单：${name} @ ${fmt(price)}`, 'ok')
+    emit('note', `已撤单：${name} @ ${priceText(price)}`, 'ok')
     void pullOverlay()
   } catch (e) {
     emit('note', (e as Error).message, 'bad')
@@ -1176,7 +1222,11 @@ function renderOrdLabels(lines: OrderLine[]): void {
   /* 标签数 / 有没有「能撤的单」变了就重建（重建后要重新挂手势） */
   const sameShape =
     ordLabels.length === items.length &&
-    items.every((x, k) => !!x.l.cancelId === !!ordLabels[k]!.cancelId)
+    items.every(
+      (x, k) =>
+        !!x.l.cancelId === !!ordLabels[k]!.cancelId &&
+        x.l.label!.length === ordLabels[k]!.parts.length
+    )
   if (!sameShape) {
     host.innerHTML = ''
     cancelShownEl = null
@@ -1184,10 +1234,17 @@ function renderOrdLabels(lines: OrderLine[]): void {
       const el = document.createElement('span')
       el.className = 'olb'
       el.style.color = l.labelColor ?? l.color
-      const p1 = document.createElement('b')
-      const div = document.createElement('i')
-      const p2 = document.createElement('span')
-      el.append(p1, div, p2)
+      /*
+       * 段与段之间插一条竖线（CSS 的 `i`）：`多 │ $3.00 │ +$0.12`。
+       * 段数由数据决定（仓位三段的，挂单两段）。
+       */
+      const parts = l.label!.map((t, j) => {
+        if (j) el.appendChild(document.createElement('i'))
+        const s = document.createElement(j === 0 ? 'b' : 'span')
+        s.textContent = t
+        el.appendChild(s)
+        return s
+      })
       /*
        * 能拖的才有手势（仓位线 / 挂单线）：按住这颗标签上下拖 —— 线本身只有 1px，
        * 手指去按它太苛刻，标签就压在线上、位置一样准。
@@ -1226,8 +1283,7 @@ function renderOrdLabels(lines: OrderLine[]): void {
         price: l.p,
         color: l.labelColor ?? l.color,
         el,
-        p1,
-        p2,
+        parts,
         drag: l.drag ?? null,
         lineIdx: i,
         cancelId: l.cancelId
@@ -1242,9 +1298,10 @@ function renderOrdLabels(lines: OrderLine[]): void {
     item.lineIdx = items[k]!.i
     item.cancelId = lv.cancelId
     const color = lv.labelColor ?? lv.color
-    const [a, b] = lv.label!
-    if (item.p1.textContent !== a) item.p1.textContent = a
-    if (item.p2.textContent !== b) item.p2.textContent = b
+    lv.label!.forEach((t, j) => {
+      const el = item.parts[j]
+      if (el && el.textContent !== t) el.textContent = t
+    })
     if (item.color !== color) {
       item.color = color
       item.el.style.color = color
@@ -1324,12 +1381,40 @@ let dragFromPrice = 0
 /** 正被拖的那条线在 `orderLines` 里的下标（拖动期间冻结，见 `renderOrderLines`） */
 let dragLineIdx = -1
 
-/** 这个合约一个 tick 多大（拖出来的价吸附到它上面；合约表里没有就按价格量级推） */
-function tickOf(symbol: string): number {
-  const spec = contracts.value.find(c => c.symbol === symbol)
-  const tick = Number(spec?.tickSize)
-  if (Number.isFinite(tick) && tick > 0) return tick
-  return 1 / 10 ** decimalsFor(dragFromPrice)
+/**
+ * 这个合约一个 tick 多大（拖出来的价吸附到它上面；合约表里没有就按价格量级推）。
+ * `symbol` 传**交易所符号**（`BTCUSDT`，合约表里那种），不是「BTC」。
+ * `ref` 只在拿不到合约表时用来「按量级猜」，默认用正在拖的价。
+ */
+function tickOf(symbol: string, ref = dragFromPrice): number {
+  return tickSizeOf(symbol) ?? 1 / 10 ** decimalsFor(ref)
+}
+
+/**
+ * 图上价格的**小数位** —— 跟合约 `tickSize` 走（BTC 0.1 → 1 位、DOGE 0.00001 → 5 位）。
+ *
+ * ⚠️ 图上原来每处自己 `fmt()`，而 `fmt` 会把整数价格的小数位吃掉 ⇒ 同一屏里
+ *    「开 85,383.3 / 高 85,615」并排（用户 2026-10-06：「精度没统一」）。
+ *    价钱一律走 `priceText`，包括右轴刻度（见 `applyPricePrecision`）。
+ */
+const priceDigits = computed(() => priceDigitsOf(props.symbol, Number(livePrice.value) || dragFromPrice))
+
+/** 价格文案 */
+function priceText(v: unknown): string {
+  return price(v, priceDigits.value)
+}
+
+/**
+ * 把价格精度落到 LWC 上（右轴刻度数字走的也是 `localization.priceFormatter`）。
+ * 换币 / 合约表到位后 tick 会变，所以要重设一次 —— 值没变就不动，免得白重画一帧。
+ */
+let appliedPriceDigits = -1
+function applyPricePrecision(): void {
+  if (!refs) return
+  const d = priceDigits.value
+  if (d === appliedPriceDigits) return
+  appliedPriceDigits = d
+  refs.chart.applyOptions({localization: {priceFormatter: (p: number) => price(p, d)}})
 }
 
 /** 一像素值多少钱（拿当前价和它上面 1px 的价标定） */
@@ -1405,32 +1490,22 @@ function ordLabelUp(e: PointerEvent): void {
     if (item) toggleCancelX(item)
     return
   }
-  stopSheet.value = {drag: d, price, pct: defaultPct(d)}
+  stopSheet.value = {drag: d, price, pct: DEFAULT_CLOSE_PCT}
 }
 
 /**
- * 这次拖动**默认平掉多少**（用户 2026-10-06：
- * 「优化当有止损止盈时再从仓位上拉就拉剩余的百分比」）。
+ * 拖动止盈 / 止损时，确认弹层里**默认平掉多少** —— **一律整条仓位**。
  *
- *   · 改单（拖的是已经挂着的那张）→ 默认跟它原来一样（只改价、不改量）
- *   · 新挂（拖的是仓位线）→ 默认 = **还没被保护的那部分**（100% − 已有的挂单占比）
+ * 用户 2026-10-06：「每次拖动止盈止损都改为 100% 订单的数量」。
+ * 止盈 / 止损是**二选一**：哪边先到就平哪边，同一个仓位的两张不会同时成交，
+ * 所以每一张都按**整条仓位**报，不必去扣「已经挂了多少没保护」。
+ *
+ * ⚠️ 别改回「100% − 已挂平仓单占比」那套：挂单数量会被交易所按精度**向下取整**
+ *    （挂满 100% 也可能差零点几张没覆盖到），减出来常是 0.1% 这种凑不满一格的值，
+ *    再被 `max(1, …)` 一兜就成了「默认 1%」
+ *    —— 用户 2026-10-06：「（拖动）默认 100%，为什么还会有 1%」。
  */
-function defaultPct(d: DragRef): number {
-  const pos = overlayPositions.value.find(p => p.side === d.side)
-  if (!pos || pos.amount <= 0) return 100
-  if (d.orderId) {
-    const self = overlayOrders.value.find(o => o.id === d.orderId)
-    if (self) return Math.max(1, Math.min(100, Math.round((self.amount / pos.amount) * 100)))
-  }
-  let used = 0
-  for (const o of overlayOrders.value) {
-    const t = orderTargetPos(o)
-    if (!t || t.side !== d.side) continue
-    used += o.amount
-  }
-  const left = 100 - (used / pos.amount) * 100
-  return Math.max(1, Math.min(100, Math.round(left)))
-}
+const DEFAULT_CLOSE_PCT = 100
 
 function ordLabelCancel(): void {
   if (!drag.value) return
@@ -1450,7 +1525,7 @@ function drawDragPreview(): void {
   const long = d.side === 'long'
   const isProfit = (px >= d.entry) === long
   const diff = long ? px - d.entry : d.entry - px
-  const pct = defaultPct(d)
+  const pct = DEFAULT_CLOSE_PCT
   const pnl = diff * (d.amount * pct) / 100
   const t1 = isProfit ? '止盈' : '止损'
   const t2 = `${money(pnl)} ${pct}%`
@@ -1464,8 +1539,8 @@ function drawDragPreview(): void {
   })
   const hit = ordLabels.find(l => l.drag === d)
   if (hit) {
-    if (hit.p1.textContent !== t1) hit.p1.textContent = t1
-    if (hit.p2.textContent !== t2) hit.p2.textContent = t2
+    if (hit.parts[0] && hit.parts[0].textContent !== t1) hit.parts[0].textContent = t1
+    if (hit.parts[1] && hit.parts[1].textContent !== t2) hit.parts[1].textContent = t2
     const color = pnl >= 0 ? '#5eba89' : '#e35561'
     if (hit.color !== color) {
       hit.color = color
@@ -1516,9 +1591,9 @@ async function submitStop(v: {
     emit(
       'note',
       r.test
-        ? `✅ 测试${what}：${name} ${v.pct}% @ ${fmt(v.price)}，币安校验通过${tail}` +
+        ? `测试${what}：${name} ${v.pct}% @ ${priceText(v.price)}，币安校验通过${tail}` +
             '（条件单没有测试接口，没真挂上去）'
-        : `✅ 已挂${what}：${name} ${v.pct}% @ ${fmt(v.price)}${tail}`,
+        : `已挂${what}：${name} ${v.pct}% @ ${priceText(v.price)}${tail}`,
       'ok'
     )
     /* 立刻补一次：新挂的单要马上出现在图上 */
@@ -1795,7 +1870,7 @@ function renderLabels() {
       item.color = lv.color
       item.el.style.color = lv.color
     }
-    const title = `${lv.title} ${fmt(lv.p)}`
+    const title = `${lv.title} ${priceText(lv.p)}`
     if (item.el.title !== title) item.el.title = title
   }
   positionLabels()
@@ -1825,8 +1900,46 @@ function positionLabels() {
     item.el.style.top = y + 'px'
   }
   positionOrdLabels()
+  renderCurLabel()
   // 画好的范围框要跟着视图走
   drawSelection()
+}
+
+/**
+ * 右轴上那枚**现价**标签（自己画的 HTML，不是库那枚 —— 见 `createChart` 里
+ * `lastValueVisible: false` 那段注释）。
+ *
+ * 跟 `.level-labels` / `.ord-labels` 一个做法：绝对定位，`priceToCoordinate()` 换 y，
+ * 宽度按价格轴的实际宽度。长什么样（边框 + 80% 透明黑）在 `style.css` 的 `.cur-label`。
+ *
+ * ⚠️ 现价被拖到**可视区间外**时要收起来（用户拖右轴 / 缩得很小时）——
+ *    库那枚也是这么干的。不收的话它会停在图外面的空白里，看着像坏了。
+ */
+/**
+ * 右轴宽度。标签要跟轴同宽，但**页面在后台时 LWC 的渲染循环是停的**，
+ * 这时量出来是 0 —— 照抄 0 会把标签写成 0 宽（看不见），所以：
+ * 量不到就**别写死宽度**（交给 CSS 按内容自适应），等回到前台再量（见 `visibilitychange`）。
+ */
+function axisWidth(): number {
+  return Math.max(0, refs?.chart.priceScale('right').width() ?? 0)
+}
+
+function renderCurLabel(): void {
+  const el = curEl.value
+  if (!el) return
+  const price = candles.length ? candles[candles.length - 1]!.close : NaN
+  const y = refs && Number.isFinite(price) ? refs.candle.priceToCoordinate(price) : null
+  const paneH = refs?.chart.paneSize?.().height ?? 0
+  const off =
+    y === null || y === undefined || !Number.isFinite(y) || y < 0 || y > paneH
+  el.classList.toggle('off', off)
+  if (off) return
+  el.style.top = `${y}px`
+  const axisW = axisWidth()
+  el.style.width = axisW ? `${axisW}px` : ''
+  /* 位数字跟右轴刻度同一套（`priceText` 就是图的 `priceFormatter`），别自己另定精度 */
+  const text = priceText(price)
+  if (el.textContent !== text) el.textContent = text
 }
 
 /* ---------------- 左上角信息栏 ---------------- */
@@ -1871,11 +1984,13 @@ function infoHTML(
     ? `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`
     : '—'
   return [
-    `<span><span class="k">开</span>${fmt(bar.open)}</span>`,
-    `<span><span class="k">高</span>${fmt(bar.high)}</span>`,
-    `<span><span class="k">低</span>${fmt(bar.low)}</span>`,
-    `<span><span class="k">收</span>${fmt(bar.close)}</span>`,
-    `<span class="${cls}">${chgText}</span>`,
+    `<span><span class="k">开</span>${priceText(bar.open)}</span>`,
+    `<span><span class="k">高</span>${priceText(bar.high)}</span>`,
+    `<span><span class="k">低</span>${priceText(bar.low)}</span>`,
+    `<span><span class="k">收</span>${priceText(bar.close)}</span>`,
+    /* 这一格原来光秃秃一个「+0.18%」，跟开/高/低/收 不是一套 —— 补上「涨跌幅」三个字
+     *（用户 2026-10-06：「k线信息加上涨跌幅字，样式和原来一样简单」）。 */
+    `<span class="${cls}"><span class="k">涨跌幅</span>${chgText}</span>`,
     `<span><span class="k">成交额</span>${fmtQuote(quoteOf(bar, vol))}</span>`
   ].join('')
 }
@@ -1925,7 +2040,9 @@ function paintHover(
   bar: {open: number; high: number; low: number; close: number},
   vol: number,
   cursorPrice: number | null | undefined,
-  cursorY: number
+  cursorX: number,
+  cursorY: number,
+  timeSec: number
 ): void {
   hovering = true
   if (infoEl.value) {
@@ -1937,23 +2054,122 @@ function paintHover(
     infoEl.value.classList.add('on')
   }
 
-  const delta = deltaEl.value
-  if (!delta || !refs) return
-  const refPrice = overlay.refPrice
-  if (
-    !Number.isFinite(refPrice) ||
-    refPrice <= 0 ||
-    !Number.isFinite(cursorPrice)
-  )
-    return delta.classList.add('hidden')
+  /*
+   * ⚠️ 百分比那一行**必须先刷**：它跟价格同一个框，`paintCrosshairTags` 要按
+   *    「框有多高」把它摆到光标上，这一行没内容时量出来的高度是错的。
+   */
+  paintDeltaRow(Number(cursorPrice))
 
-  const vs = ((Number(cursorPrice) - refPrice) / refPrice) * 100
-  delta.style.width = Math.max(0, refs.chart.priceScale('right').width()) + 'px'
-  delta.style.top = cursorY + 14 + 'px'
-  delta.classList.remove('hidden')
-  delta.classList.toggle('up', vs >= 0)
-  delta.classList.toggle('down', vs < 0)
-  delta.textContent = `${vs >= 0 ? '+' : ''}${vs.toFixed(2)}%`
+  paintCrosshairTags(cursorX, cursorY, timeSec, Number(cursorPrice))
+}
+
+/**
+ * 价格标签里上面那一行：这个价离现价多少（%）。
+ *
+ * 用户 2026-10-06：「触碰时百分比放上面」「y轴价格百分比和触碰的价格放在一个框内」——
+ * 所以它不再是轴上另立一枚浮层，而是价格标签里的**第一行**（见模板里的 `.cx-price`）。
+ * 拿不到现价参考（`overlay.refPrice`）就把这一行收起来，只留价格。
+ */
+function paintDeltaRow(cursorPrice: number): void {
+  const row = deltaEl.value
+  const box = cxPriceEl.value
+  if (!row || !box) return
+  const refPrice = overlay.refPrice
+  if (!Number.isFinite(refPrice) || refPrice <= 0 || !Number.isFinite(cursorPrice)) {
+    if (!row.classList.contains('hidden')) {
+      row.classList.add('hidden')
+      /* 没有百分比这一行就不该有涨跌色 —— 整个框退回中性黑底 */
+      box.classList.remove('up', 'down')
+      /* 框少一行 ⇒ 高度缓存作废，下一帧按一行重新量 */
+      cxTagH = 0
+    }
+    return
+  }
+  const vs = ((cursorPrice - refPrice) / refPrice) * 100
+  if (row.classList.contains('hidden')) {
+    row.classList.remove('hidden')
+    cxTagH = 0
+  }
+  /*
+   * 涨跌色染在**整个框**上（用户 2026-10-06：「原有的价格背景色就去掉吧和百分比统一」）——
+   * 所以类挂在框 `.cx-price` 上，不是挂在那一行上。
+   */
+  const up = vs >= 0
+  box.classList.toggle('up', up)
+  box.classList.toggle('down', !up)
+  const text = `${vs >= 0 ? '+' : ''}${vs.toFixed(2)}%`
+  if (row.textContent !== text) row.textContent = text
+}
+
+/**
+ * 十字光标那两枚轴标签：**价格**贴右轴（跟光标的高度对齐）、**时间**贴底部时间轴
+ * （跟光标的横坐标对齐）。
+ *
+ * 用户 2026-10-06：「十字价格标签也自定义」—— 库自带那两枚底色是写死的
+ * （`crosshair.*.labelBackgroundColor`），跟我们这套「1px 边框 + 80% 透明黑」对不上，
+ * 所以在 `createChart` 里把库的关了（`labelVisible: false`），自己画（`.cx-tag`）。
+ *
+ * ⚠️ 贴边要**收进来**（库那两枚也是这么干的）：不夹一下，靠上 / 靠左时半枚标签会
+ *    露到图外面去。
+ * ⚠️ 宽度 / 高度各量一次就缓存：这个函数是悬停时**每帧**跑的，别每帧都读
+ *    `offsetWidth`（那是一次强制重排）。
+ */
+function paintCrosshairTags(
+  x: number,
+  y: number,
+  timeSec: number,
+  price: number
+): void {
+  const pEl = cxPriceEl.value
+  const tEl = cxTimeEl.value
+  const pane = refs?.chart.paneSize?.()
+  const paneW = pane?.width ?? 0
+  const paneH = pane?.height ?? 0
+  if (!pEl || !tEl || !refs || !paneW || !paneH) {
+    pEl?.classList.add('off')
+    tEl?.classList.add('off')
+    return
+  }
+
+  /*
+   * ---- 价格框：贴右轴，整个框**居中在光标的 y 上** ----
+   *
+   * 用户 2026-10-06：「线连接要居中」⇒ 十字光标那条横线要从框的**正中**穿出去，
+   * 所以按整个框（两行）居中，不是按价格那一行居中。
+   * 顶到图顶 / 图底就整体夹进 pane 里（框比 pane 还高时才可能贴边，正常不会）。
+   */
+  /*
+   * ⚠️ **先把价格写进去再量**：量的时候 `.cx-v` 还是空的（只有 padding 的 2px 高），
+   *    缓存下来的高度就偏小、框会整体偏上小半行。
+   */
+  const val = cxValEl.value
+  const pText = Number.isFinite(price) ? priceText(price) : '—'
+  if (val && val.textContent !== pText) val.textContent = pText
+  if (!cxTagH) {
+    /* 量之前得先让它露出来（`.off` 是 `display: none`，量出来是 0） */
+    pEl.classList.remove('off')
+    cxTagH = pEl.offsetHeight
+  }
+  const axisW = axisWidth()
+  pEl.style.width = axisW ? `${axisW}px` : ''
+  /*
+   * ⚠️ `top` 这里**已经减掉了半个框高**，所以 `.cx-price` 的 CSS **不能**再挂
+   *    `translateY(-50%)`（那会再往上顶半框）。
+   */
+  const top = y - cxTagH / 2
+  pEl.style.top = `${Math.min(Math.max(top, 0), Math.max(0, paneH - cxTagH))}px`
+  pEl.classList.remove('off')
+
+  /* ---- 时间：贴底部轴，横向跟光标（贴着图的两边时夹住） ---- */
+  const tText = bjShort(timeSec)
+  if (tText !== cxTimeText) {
+    tEl.classList.remove('off')
+    tEl.textContent = tText
+    cxTimeText = tText
+    cxTimeW = tEl.offsetWidth
+  }
+  tEl.style.left = `${Math.min(Math.max(x, cxTimeW / 2), Math.max(cxTimeW / 2, paneW - cxTimeW / 2))}px`
+  tEl.classList.remove('off')
 }
 
 /** 什么都没指着：信息栏退回「可见窗口最右边那根」、窄屏直接藏起来，右侧 ±% 也藏 */
@@ -1961,6 +2177,8 @@ function clearHover(): void {
   hovering = false
   deltaEl.value?.classList.add('hidden')
   infoEl.value?.classList.remove('on')
+  cxPriceEl.value?.classList.add('off')
+  cxTimeEl.value?.classList.add('off')
   showInfoAt(rightmostVisibleIndex())
 }
 
@@ -1976,7 +2194,9 @@ function updateHover(param: any) {
     bar,
     Number(volObj?.value),
     refs.candle.coordinateToPrice(param.point.y),
-    param.point.y
+    param.point.x,
+    param.point.y,
+    Number(param.time)
   )
 }
 
@@ -1998,6 +2218,16 @@ const TAP_MS = 350
 
 let tapFrom: {x: number; y: number; at: number} | null = null
 
+/**
+ * 十字光标是不是「轻点钉住的」——钉着的时候**再轻点一下 = 收起**
+ * （用户 2026-10-06：「k线点击一次出现k线触碰的效果已有，再次点屏幕取消」）。
+ *
+ * ⚠️ 不能跟着 `clearHover()` 一起重置：真机上轻点之后 LWC 有时会补一个
+ *    「没有 point」的 crosshair 事件，那一下只是把信息收起来，钉住的语义还在
+ *    —— 重置了的话第二下轻点就变成「重新摆一次」而不是「取消」。
+ */
+let tapPinned = false
+
 /** 把十字光标摆到手指那一列，并刷出信息 */
 function showAtPointer(clientX: number, clientY: number): void {
   const host = chartEl.value
@@ -2016,7 +2246,15 @@ function showAtPointer(clientX: number, clientY: number): void {
     Math.floor(c.timestamp / 1000),
     refs.candle
   )
-  paintHover(c, c.volume, price, y)
+  paintHover(c, c.volume, price, x, y, Math.floor(c.timestamp / 1000))
+  tapPinned = true
+}
+
+/** 收起轻点钉住的十字光标 / 信息（再点一下屏幕，或手指拖走了） */
+function clearPinnedPointer(): void {
+  tapPinned = false
+  refs?.chart.clearCrosshairPosition()
+  clearHover()
 }
 
 function onChartPointerDown(e: PointerEvent): void {
@@ -2048,8 +2286,7 @@ function onChartPointerMove(e: PointerEvent): void {
   ) {
     tapFrom = null
     /* 手指拖了 = 在看历史行情，刚才点出来的信息别赖在图上 */
-    refs?.chart.clearCrosshairPosition()
-    clearHover()
+    clearPinnedPointer()
   }
 }
 
@@ -2058,6 +2295,8 @@ function onChartPointerUp(e: PointerEvent): void {
   tapFrom = null
   if (!from || e.pointerType !== 'touch') return
   if (Date.now() - from.at > TAP_MS) return
+  /* 已经钉着 = 这一下是「取消」，不是「再看这一根」 */
+  if (tapPinned) return clearPinnedPointer()
   showAtPointer(e.clientX, e.clientY)
 }
 
@@ -2174,6 +2413,8 @@ function draw(data: Candle[], keepView = false) {
   if (!ensureChart() || !refs) return
   const view = keepView ? refs.chart.timeScale().getVisibleLogicalRange() : null
   candles = data
+  /* 换币 / 合约表到位后价格小数位可能变，落到 LWC 上（右轴刻度数字也走它） */
+  applyPricePrecision()
 
   if (!data.length) {
     refs.candle.setData([])
@@ -2485,6 +2726,8 @@ function applyTail(tail: Candle[]): void {
   }
   // 头部那条行情的「现价」也吃这一口（比 15 秒轮询快得多，价格才能闪得起来）
   setLivePrice(props.symbol, c.close)
+  /* 右轴那枚「现价」标签也得跟着走：它按 `priceToCoordinate(现价)` 摆 */
+  renderCurLabel()
   // 画上的选中框、结束线位置跟着数据长度走
   drawSelection()
 }
@@ -2731,6 +2974,18 @@ function onKeydown(e: KeyboardEvent) {
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+
+/*
+ * 页面被切到后台时 LWC 的渲染循环会停（`priceScale().width()` 停在 0），
+ * 回到前台后它自己会重排重画、但**不会**通知我们 —— 所以清一下 `labelSyncKey`
+ * 逼下一帧重新定位一次标签（宽度/位置都用得上轴宽）。
+ */
+function onVisible(): void {
+  if (document.visibilityState !== 'visible') return
+  labelSyncKey = ''
+}
+onMounted(() => document.addEventListener('visibilitychange', onVisible))
+onBeforeUnmount(() => document.removeEventListener('visibilitychange', onVisible))
 
 /* 宽度变了要重算结束线标签摆哪边 */
 let wrapRo: ResizeObserver | null = null
@@ -3110,10 +3365,21 @@ onBeforeUnmount(() => {
     <div ref="wrapEl" class="chart-wrap" data-no-swipe :class="{fading}">
       <div ref="chartEl" class="chart"></div>
       <div ref="levelHost" class="level-labels"></div>
+      <!-- 右轴上的「现价」标签：库那枚关掉了（改不了底色 / 边框），自己画一个 -->
+      <span ref="curEl" class="cur-label off"></span>
+      <!--
+        十字光标的轴标签（自己画的，见 `paintCrosshairTags`）：
+        价格那枚里**装两行** —— 上面「离现价的百分比」、下面「触碰到的价」，
+        两行在**同一个框**里（用户 2026-10-06：「y轴价格百分比和触碰的价格放在一个框内」）。
+      -->
+      <span ref="cxPriceEl" class="cx-tag cx-price off">
+        <span ref="deltaEl" class="cx-d hidden"></span>
+        <span ref="cxValEl" class="cx-v"></span>
+      </span>
+      <span ref="cxTimeEl" class="cx-tag cx-time off"></span>
       <!-- 左侧标签：仓位的盈亏、挂单的止盈/止损 + 预计收益 + 数量% -->
       <div ref="ordLabelHost" class="ord-labels"></div>
       <div ref="infoEl" class="chart-info"></div>
-      <div ref="deltaEl" class="cursor-delta hidden"></div>
 
       <!-- 画范围 / 放结束线用的透明层：拖的时候接管鼠标，平时不吃事件 -->
       <div

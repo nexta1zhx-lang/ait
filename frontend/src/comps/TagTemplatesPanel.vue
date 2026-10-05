@@ -17,6 +17,7 @@ import {
   renameTagTemplate,
   type TagTemplate
 } from '../api'
+import {askConfirm} from '../confirm'
 
 const emit = defineEmits<{(e: 'changed'): void}>()
 
@@ -100,18 +101,19 @@ async function saveEdit() {
 }
 
 async function remove(t: TagTemplate) {
-  if (t.n > 0) {
-    if (
-      !confirm(
-        `「${t.name}」还有 ${t.n} 条案例在用。\n\n` +
-          `删掉模板不影响那些案例 —— 它们身上的标签会变成「模板外」，\n` +
-          `你可以点开卡片一个个清掉。\n\n确定要删吗？`
-      )
-    )
-      return
-  } else if (!confirm(`删掉模板「${t.name}」？`)) {
-    return
-  }
+  const ok = await askConfirm({
+    title: `删掉模板「${t.name}」？`,
+    body:
+      t.n > 0
+        ? [
+            {t: `还有 ${t.n} 条案例在用这个模板。`, tone: 'num'},
+            '删掉模板不影响那些案例 —— 它们身上的标签会变成「模板外」，你可以点开卡片一个个清掉。'
+          ]
+        : undefined,
+    okText: '删除',
+    danger: true
+  })
+  if (!ok) return
   busy.value = true
   try {
     await deleteTagTemplate(t.id)
@@ -247,7 +249,7 @@ const summary = computed(
       </p>
 
       <p v-if="notice" class="tt-notice">{{ notice }}</p>
-      <p v-if="error" class="error">❌ {{ error }}</p>
+      <p v-if="error" class="error">{{ error }}</p>
     </div>
   </div>
 </template>

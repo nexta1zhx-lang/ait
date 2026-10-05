@@ -10,9 +10,12 @@
  * 数据来自「../ticker」（15 秒刷一次），拿不到就显示「—」，不挡页面。
  */
 import {computed, onBeforeUnmount, ref, watch} from 'vue'
-import {fixed, fmt} from '../format'
+import {fixed, fmt, price} from '../format'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
+import {priceDigitsOf} from '../store'
 import TickerChanges from './TickerChanges.vue'
+
+const props = defineProps<{symbol: string}>()
 
 /** 涨了绿、跌了红 —— 跟图上蜡烛一套 */
 const tone = computed(() => {
@@ -30,7 +33,22 @@ const tone = computed(() => {
  */
 const last = computed(() => freshLivePrice.value ?? ticker.value?.last ?? null)
 
-const lastText = computed(() => fmt(last.value))
+/**
+ * 价格显示几位小数 —— 跟合约 `tickSize` 走（见 `store.priceDigitsOf`）。
+ *
+ * ⚠️ 这里原来直接用 `fmt()`，而 `fmt` 会把整数价格的小数位吃掉 ⇒ 同一行里出现
+ *    「24h 低 84,910 · 高 86,976.1」（用户 2026-10-06：「精度没统一」）。
+ *    现价 / 涨跌额 / 24h 高低一律走下面这个 `pxText`，位数就齐了。
+ * 合约表还没到 → 退回按现价的量级猜（跟 `fmt` 一个口径）。
+ */
+const priceDigits = computed(() => priceDigitsOf(props.symbol, last.value))
+
+/** 价格文案 */
+function pxText(v: unknown): string {
+  return price(v, priceDigits.value)
+}
+
+const lastText = computed(() => pxText(last.value))
 
 /**
  * 价格跳一下。
@@ -75,7 +93,7 @@ const changeAbs = computed(() => {
   const v = ticker.value?.change24h
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
   const n = Number(v)
-  return `${n >= 0 ? '+' : ''}${fmt(n)}`
+  return `${n >= 0 ? '+' : ''}${pxText(n)}`
 })
 
 const changePct = computed(() => {
@@ -101,7 +119,7 @@ const rangePos = computed<number | null>(() => {
 
 const rangeTitle = computed(() => {
   const d = ticker.value
-  return `24h 低 ${fmt(d?.low24h)} · 高 ${fmt(d?.high24h)}`
+  return `24h 低 ${pxText(d?.low24h)} · 高 ${pxText(d?.high24h)}`
 })
 
 /** 成交额：中文量级，别糊一长串数字 */

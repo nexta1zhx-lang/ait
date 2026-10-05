@@ -33,6 +33,7 @@ import {
   tradeKeys,
   tradeKeysErr
 } from '../trade-account'
+import {askConfirm} from '../confirm'
 
 const props = defineProps<{
   open: boolean
@@ -69,16 +70,21 @@ const PRESETS = [0, 1, 5, 10, 50]
  * ⚠️ **关掉的时候必须确认** —— 开关的另一侧是真钱（真开仓 / 真平仓）；
  *    开回来（回到只校验）是往安全那侧走，不用问。
  */
-function toggleTest(): void {
+async function toggleTest(): Promise<void> {
   if (!testOrder.value) {
     testOrder.value = true
     return
   }
-  const ok = window.confirm(
-    '关掉「测试下单」之后，下单和平仓都会发到币安的真实接口：\n\n' +
-      '· 会真开仓、真扣保证金\n' +
-      '· 平仓会真的把持仓平掉\n\n确定要关掉吗？'
-  )
+  const ok = await askConfirm({
+    title: '关掉「测试下单」？',
+    body: [
+      '之后下单和平仓都会发到币安的真实接口：',
+      '会真开仓、真扣保证金；平仓会真的把持仓平掉。',
+      {t: '这两件事都撤不回来。', tone: 'warn'}
+    ],
+    okText: '关掉测试',
+    danger: true
+  })
   if (ok) testOrder.value = false
 }
 
@@ -173,7 +179,7 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
         <div class="sheet-text">
           <b>测试下单</b>
           <p v-if="testOrder">开启时仅校验参数与权限，不会真实成交。</p>
-          <p v-else>⚠️ 已关闭：下单与平仓均为真实成交。</p>
+          <p v-else>已关闭：下单与平仓均为真实成交。</p>
         </div>
         <!--
           ⚠️ 打开/关掉都让用户二次确认 —— 这个开关的另一侧是真钱，

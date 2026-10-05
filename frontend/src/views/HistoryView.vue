@@ -18,6 +18,7 @@ import {
   type AnalysisStats,
   type JudgeResultLike
 } from '../api'
+import {askConfirm} from '../confirm'
 import {
   GRADE_TEXT,
   VERDICT_LABEL,
@@ -291,7 +292,13 @@ function close() {
 /* ---------------- 删除 ---------------- */
 
 async function remove(id: number) {
-  if (!window.confirm(`删除第 ${id} 条分析记录？不可恢复。`)) return
+  const ok = await askConfirm({
+    title: `删除第 ${id} 条分析记录？`,
+    body: {t: '删掉就找不回来了。', tone: 'warn'},
+    okText: '删除',
+    danger: true
+  })
+  if (!ok) return
   try {
     await deleteAnalysis(id)
     if (detail.value?.id === id) close()

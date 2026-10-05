@@ -20,7 +20,7 @@
  *
  * ★ 2026-10-05 第三版（用户）：
  *   · 顶栏**删掉账户昵称和「测试单」那句标签**，整行只剩「开单/仓位 · 杠杆 · 一键平仓」；
- *     「一键平仓」挪到**最右**，点之前 `window.confirm` 二次确认。
+ *     「一键平仓」挪到**最右**，点之前弹全站那个确认框（`askConfirm`）二次确认。
  *   · 账户名 + 可用余额挪到**价格那一行的右侧**：账户是个小标签（`.ktag`），
  *     余额跟在后面 —— 顶栏不再横着拉那么长。
  *   · 「测试单」从页面标签变成「配置 → **测试下单**」里的一个开关
@@ -49,11 +49,13 @@ import {
   type TradePositionRow
 } from '../api'
 import {pickSymbol, prefetchSymbol} from '../analyze'
-import {fmt, usd} from '../format'
+import {fmt, price, usd} from '../format'
 import {isForeground, onForegroundChange} from '../live'
 import {testOrder} from '../settings'
 import {contracts} from '../store'
+import {askConfirm} from '../confirm'
 import {freshLivePrice, ticker} from '../ticker'
+import {showToast} from '../toast'
 import {loadTradeKeys, tradeKey} from '../trade-account'
 import ReduceSheet from './ReduceSheet.vue'
 
@@ -120,22 +122,18 @@ const priceInput = ref('')
 /** 杠杆选值弹层开着没 */
 const levOpen = ref(false)
 
-/* ---------------- 提示（toast）：报错 / 结果一律走这儿，不占内容区 ---------------- */
-
-const TOAST_MS = 3500
-
-const toast = ref<{text: string; tone: 'ok' | 'bad'} | null>(null)
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-
-/** 弹一条提示，3.5 秒后自己关（再弹一条会把计时重置） */
+/* ---------------- 提示（toast）：报错 / 结果一律走这儿，不占内容区 ----------------
+ *
+ * ⚠️ 本组件**不再自己画** toast：走全站那一条（`../toast` 的 `showToast`，
+ *    画在 `App.vue` 的 `ToastHost` 里），层级 / 停留时间都归它管
+ *    （它压在弹层之上，所以「弹层里调杠杆失败」照样看得见）。
+ */
+/** 弹一条提示；默认按失败算（这个模块里多半是报错），跟以前一样 */
 function say(text: string, tone: 'ok' | 'bad' = 'bad'): void {
-  toast.value = {text, tone}
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => (toast.value = null), TOAST_MS)
+  showToast(text, tone)
 }
 
 onBeforeUnmount(() => {
-  if (toastTimer) clearTimeout(toastTimer)
   if (posTimer) clearInterval(posTimer)
   posTimer = null
   stopForeground?.()
@@ -484,13 +482,13 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
     if (r.ok && r.order) {
       const o = r.order
       const dir = o.side === 'BUY' ? '做多' : '做空'
-      const px = o.type === 'LIMIT' ? `限价 ${fmt(o.price)}` : '市价'
+      const px = o.type === 'LIMIT' ? `限价 ${price(o.price, pricePrecision.value)}` : '市价'
       const body = `${dir} ${o.quantity} ${base.value} · ${px}`
       buzz(12)
       say(
         o.test
-          ? `✅ 测试单通过校验：${body}（没进撮合、没真开仓）`
-          : `✅ 已下单：${body}` +
+          ? `测试单通过校验：${body}（没进撮合、没真开仓）`
+          : `已下单：${body}` +
               (o.orderId ? ` · 单号 ${o.orderId}` : ''),
         'ok'
       )
@@ -611,7 +609,7 @@ function posTitle(p: TradePositionRow): string {
   return (
     `${baseOf(p.symbol)} ${sideText(p)} ${p.leverage}x\n` +
     `开仓数量 ${posQty(p)}\n` +
-    `开仓价 ${fmt(p.entryPrice)}\n` +
+    `开仓价 ${price(p.entryPrice, pricePrecision.value)}\n` +
     `仓位价值 ${usd(p.notional)}\n` +
     `未实现盈亏 ${pnlText(p.unrealized)}`
   )
@@ -643,8 +641,8 @@ async function confirmReduce(pct: number): Promise<void> {
       const q = ((p.amount * pct) / 100).toFixed(Math.min(12, amountPrecision.value))
       say(
         r.test
-          ? `✅ 测试减仓通过校验：${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）—— 没进撮合`
-          : `✅ 已减仓 ${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）`,
+          ? `测试减仓通过校验：${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）—— 没进撮合`
+          : `已减仓 ${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）`,
         'ok'
       )
       void loadPositions()
@@ -744,9 +742,9 @@ async function closeOne(p: TradePositionRow): Promise<void> {
       buzz(12)
       say(
         r.test
-          ? `✅ 测试平仓单通过校验：${baseOf(p.symbol)} ${sideText(p)} ` +
+          ? `测试平仓单通过校验：${baseOf(p.symbol)} ${sideText(p)} ` +
               `${posQty(p)}（没进撮合、没真平仓）`
-          : `✅ 已提交平仓：${baseOf(p.symbol)} ${sideText(p)} ${posQty(p)}` +
+          : `已提交平仓：${baseOf(p.symbol)} ${sideText(p)} ${posQty(p)}` +
               (n ? `（${n} 笔）` : ''),
         'ok'
       )
@@ -771,13 +769,21 @@ async function closeOne(p: TradePositionRow): Promise<void> {
  */
 async function closeAll(): Promise<void> {
   if (busy.value || levBusy.value) return
-  const ok = window.confirm(
-    testOrder.value
-      ? '一键平仓（测试单）：把账户里有持仓的**全部**平一遍。\n\n' +
-          '测试单只发到币安测试接口，不进撮合、不会真平。\n\n继续吗？'
-      : '⚠️ 一键平仓（真单）：把账户里有持仓的**全部**平掉，会真的成交、真的没仓位了。\n\n' +
-          '确定吗？'
-  )
+  const test = testOrder.value
+  const ok = await askConfirm({
+    title: test ? '一键平仓（测试单）？' : '一键平仓（真单）？',
+    body: test
+      ? [
+          '把账户里有持仓的币种全部平一遍。',
+          {t: '测试单只发到币安测试接口，不进撮合、不会真平。', tone: 'num'}
+        ]
+      : [
+          '把账户里有持仓的币种全部平掉，会真的成交、真的没仓位了。',
+          {t: '这一步不可撤销。', tone: 'warn'}
+        ],
+    okText: '一键平仓',
+    danger: !test
+  })
   if (!ok) return
   busy.value = true
   try {
@@ -787,8 +793,8 @@ async function closeAll(): Promise<void> {
       buzz(12)
       say(
         r.test
-          ? `✅ 一键平仓测试单通过校验：${n} 笔（没进撮合、没真平仓）`
-          : `✅ 已提交一键平仓：${n} 笔`,
+          ? `一键平仓测试单通过校验：${n} 笔（没进撮合、没真平仓）`
+          : `已提交一键平仓：${n} 笔`,
         'ok'
       )
       void loadPositions()
@@ -1327,18 +1333,5 @@ onMounted(async () => {
       @close="reduceRow = null"
       @confirm="confirmReduce"
     />
-
-    <!-- 提示：3.5 秒自己关；点一下也关。⚠️ z-index 要压过弹层（见 style.css） -->
-    <Teleport to="body">
-      <div
-        v-if="toast"
-        class="toast ord-toast"
-        :class="toast.tone"
-        title="点一下关掉"
-        @click="toast = null"
-      >
-        {{ toast.text }}
-      </div>
-    </Teleport>
   </div>
 </template>

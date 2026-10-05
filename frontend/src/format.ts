@@ -21,6 +21,36 @@ export function fmt(n: unknown, digits?: number): string {
   })
 }
 
+/**
+ * 合约一个 tick 要几位小数（`tickSize` 0.1 → 1 位、0.0001 → 4 位、0.25 → 2 位）。
+ *
+ * ⚠️ 别用 `-Math.log10(tick)` 取整：0.25 这种「不是 10 的幂」的 tick 会少算一位。
+ *    这里靠字符串数小数位，`1e-5` 这种科学计数法的也能算对。
+ */
+export function digitsForTick(tick: unknown): number {
+  const t = Number(tick)
+  if (!Number.isFinite(t) || t <= 0) return 2
+  const s = t.toFixed(12).replace(/0+$/, '')
+  const dot = s.indexOf('.')
+  return Math.max(0, Math.min(12, dot < 0 ? 0 : s.length - dot - 1))
+}
+
+/**
+ * 价格：按合约精度**补齐**小数位（`84,910.0` / `86,976.1`）。
+ *
+ * ⚠️ 价格别用 `fmt()` —— 它的 `minimumFractionDigits: 0` 会把整数价格的小数位吃掉，
+ *    同一屏里就出现「24h 低 84,910 · 高 86,976.1」这种位数不齐
+ *    （用户 2026-10-06：「精度没统一」）。价格一律走这个函数。
+ */
+export function price(n: unknown, digits: number): string {
+  if (n === null || n === undefined || !Number.isFinite(Number(n))) return '—'
+  const d = Math.max(0, Math.min(12, Math.round(digits)))
+  return Number(n).toLocaleString('en-US', {
+    minimumFractionDigits: d,
+    maximumFractionDigits: d
+  })
+}
+
 export function usd(v: unknown): string {
   const n = Number(v)
   if (!Number.isFinite(n) || n === 0) return '$0'

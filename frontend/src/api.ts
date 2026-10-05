@@ -487,6 +487,8 @@ export interface AppConfig {
 export interface Contract {
   base: string
   symbol: string
+  /** `PRICE_FILTER.tickSize` —— 价格必须是它的整数倍，也决定价格显示几位小数（见 `digitsForTick`） */
+  tickSize?: number
 }
 
 export const fetchConfig = () => get<AppConfig>('/api/config')

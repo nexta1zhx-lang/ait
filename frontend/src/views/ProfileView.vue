@@ -27,6 +27,7 @@ import {
 } from '../api'
 import {logout, rename, user} from '../session'
 import {bjTime} from '../format'
+import {askConfirm} from '../confirm'
 import {shellInfo, type ShellInfo} from '../native'
 import SegTabs from '../comps/SegTabs.vue'
 import ExchangeKeys from '../comps/ExchangeKeys.vue'
@@ -87,10 +88,14 @@ function seenText(iso: string): string {
 async function kick(s: DeviceSession): Promise<void> {
   if (sessBusy.value) return
   const label = s.current ? '本机' : s.device
-  const ask = s.current
-    ? '这就是你现在这台，退出后要重新登录。确定吗？'
-    : '那台设备下次操作时要重新登录。确定吗？'
-  if (!window.confirm(`让「${label}」下线？\n\n${ask}`)) return
+  const ok = await askConfirm({
+    title: `让「${label}」下线？`,
+    body: s.current
+      ? '这就是你现在这台，退出后要重新登录。'
+      : '那台设备下次操作时要重新登录。',
+    okText: '下线'
+  })
+  if (!ok) return
   sessBusy.value = true
   sessMsg.value = ''
   sessErr.value = ''
@@ -112,7 +117,11 @@ async function kick(s: DeviceSession): Promise<void> {
 
 async function kickOthers(): Promise<void> {
   if (sessBusy.value) return
-  if (!window.confirm('除本机以外的所有设备都下线？')) return
+  const ok = await askConfirm({
+    title: '除本机以外的所有设备都下线？',
+    okText: '全部下线'
+  })
+  if (!ok) return
   sessBusy.value = true
   sessMsg.value = ''
   sessErr.value = ''

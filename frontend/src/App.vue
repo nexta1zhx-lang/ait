@@ -2,6 +2,8 @@
 import {computed, KeepAlive, onMounted, watch} from 'vue'
 import {RouterLink, RouterView, useRoute} from 'vue-router'
 import AccountBar from './comps/AccountBar.vue'
+import ConfirmDialog from './comps/ConfirmDialog.vue'
+import ToastHost from './comps/ToastHost.vue'
 import LoginView from './views/LoginView.vue'
 import {authReady, initAuth, user} from './session'
 import {authToken} from './api'
@@ -177,6 +179,15 @@ watch(authToken, t => {
       </KeepAlive>
     </RouterView>
   </template>
+
+  <!--
+    ⚠️ 这两个摆在最外层（**不在上面那个 `v-if` 分支里**）：
+    登录页也要能弹提示 / 确认（登录失败、退出登录确认），
+    放进 `<template v-else>` 里的话没登录就一次都用不上。
+    ⚠️ 全站各一份，别在页面里再写 —— 见 `toast.ts` / `confirm.ts` 顶部说明。
+  -->
+  <ToastHost />
+  <ConfirmDialog />
 </template>
 
 <style scoped>

@@ -6,7 +6,7 @@
  *   币安的下单有 `/fapi/v1/order/test`（只校验不成交），划转**没有**对应物，
  *   点下去钱就真的换了钱包。所以这个弹层里：
  *     · 顶部常驻一条红色警示（不是可关的 toast，是标题下面一直挂着）
- *     · 提交前 `window.confirm` 复述「哪套账户 / 从哪到哪 / 多少」
+ *     · 提交前弹全站那个确认框（`askConfirm`）复述「哪套账户 / 从哪到哪 / 多少」
  *     · 没开「允许通用划转」的 Key **直接禁用提交**（先问一次权限，见下）
  *
  * ★ 支持的钱包对（后端只放行验过能用的六种，见 `data/exchange-transfer.ts`）：
@@ -26,6 +26,7 @@ import {
   type TransferWallet
 } from '../api'
 import {fmt} from '../format'
+import {askConfirm} from '../confirm'
 
 const props = defineProps<{
   open: boolean
@@ -158,7 +159,7 @@ watch(from, () => {
 })
 
 /**
- * 提交 —— 先 confirm 复述一遍再发。
+ * 提交 —— 先确认（**复述一遍**）再发。
  * ⚠️ 措辞要带上**账户名 / 方向 / 金额**：这一步点错就是真丢钱，
  *    不能只写「确定吗？」。
  */
@@ -167,13 +168,17 @@ async function submit(): Promise<void> {
   const label = (w: TransferWallet) =>
     WALLETS.find(x => x.value === w)?.label ?? w
   const name = currentKey.value?.name ?? '当前账户'
-  const ok = window.confirm(
-    `确认划转（真钱，没有测试接口）：\n\n` +
-      `账户：${name}\n` +
-      `${label(from.value)} → ${label(to.value)}\n` +
-      `金额：${amountNum.value} USDT\n\n` +
-      '划出去就真的换钱包了，确定吗？'
-  )
+  const ok = await askConfirm({
+    title: '确认划转？',
+    body: [
+      {t: `账户：${name}`, tone: 'num'},
+      {t: `${label(from.value)} → ${label(to.value)}`, tone: 'num'},
+      {t: `金额：${amountNum.value} USDT`, tone: 'num'},
+      {t: '划转没有测试接口，划出去就真的换钱包了。', tone: 'warn'}
+    ],
+    okText: '确认划转',
+    danger: true
+  })
   if (!ok) return
 
   busy.value = true
@@ -187,7 +192,7 @@ async function submit(): Promise<void> {
     if (r.ok && r.transfer) {
       amount.value = ''
       doneMsg.value =
-        `✅ 已划转：${label(from.value)} → ${label(to.value)} ` +
+        `已划转：${label(from.value)} → ${label(to.value)} ` +
         `${r.transfer.amount} USDT` +
         (r.transfer.tranId ? `（单号 ${r.transfer.tranId}）` : '')
       /* 让外面把快照 / 曲线重读一遍 —— 钱包里的钱换了，数字立刻要跟着变 */
