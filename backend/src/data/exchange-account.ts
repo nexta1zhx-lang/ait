@@ -124,8 +124,42 @@ export async function wsAgent(): Promise<Agent | undefined> {
   return wsAgentCache
 }
 
+/** 实例缓存：key = 交易所|市场类型|沙盒|apiKey（见 `createExchange` 里那段） */
+const instanceCache = new Map<string, {at: number; ex: any}>()
+/** markets 表多久重新加载一次（币安上新 / 下架合约之后要能跟上） */
+const INSTANCE_TTL_MS = 30 * 60 * 1000
+/** 缓存上限，纯保险（正常就几套 Key） */
+const INSTANCE_CACHE_MAX = 20
+
 /** 认得出的交易所实例 */
 export function createExchange(c: ExchangeCredentials): any {
+  /*
+   * ★★ 实例缓存（2026-10-05 加。用户原话：「关于合约交易的开单平，订单获取等等
+   *    接口响应太慢了怎么回事」）。
+   *
+   * 为什么非加不可：`fetchPositions` / `fetchOpenOrders` / `createOrder` 这些 ccxt 方法
+   * **内部都会先 `loadMarkets()`**，而 markets 是**每个 ccxt 实例各存一份**的。
+   * 以前这里每次调用都 `new Ctor(...)` ⇒ **每个请求都要重下 1.5MB 的 exchangeInfo**。
+   * 实测（本地，经出口隧道）：
+   *     新实例 + 持仓 `fetchPositions`   5312ms
+   *     新实例 + 挂单 `fetchOpenOrders` 3477ms
+   *     全新实例光 `loadMarkets`        3339ms   （服务器侧同一个动作只要 330ms）
+   * 缓存之后这些只剩一条真正的业务调用（服务器侧 ~60ms/条）。
+   *
+   * ⚠️ 缓存键**必须带 apiKey**：不同 Key 是不同账户（权限 / IP 白名单 / 双向持仓
+   *    都可能不一样），共用实例会串号。凭据换了（apiKey 变了）自然换新实例。
+   * ⚠️ 给 markets 一个 TTL：币安上新 / 下架合约之后要能重新加载（30 分钟）。
+   * ⚠️ 一个实例也就几 MB（markets 表），但保险起见超过 `INSTANCE_CACHE_MAX` 就整体清掉。
+   */
+  const cacheKey = [
+    c.exchange,
+    c.marketType,
+    c.sandbox ? 'demo' : 'live',
+    c.apiKey
+  ].join('|')
+  const hit = instanceCache.get(cacheKey)
+  if (hit && Date.now() - hit.at < INSTANCE_TTL_MS) return hit.ex
+
   const Ctor = CCXT[c.exchange]
   if (!Ctor)
     throw new Error(`不支持的交易所「${c.exchange}」（ccxt 里没有这个 id）`)
@@ -173,6 +207,8 @@ export function createExchange(c: ExchangeCredentials): any {
       }
     }
   }
+  if (instanceCache.size >= INSTANCE_CACHE_MAX) instanceCache.clear()
+  instanceCache.set(cacheKey, {at: Date.now(), ex})
   return ex
 }
 
