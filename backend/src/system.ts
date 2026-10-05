@@ -351,14 +351,23 @@ async function portsPart(): Promise<ServiceGroup> {
     const rows = String(stdout)
       .split('\n')
       .slice(1)
-      .map(l => l.split(/\s+/))
+      .map(l => l.trim().split(/\s+/))
       .filter(c => c.length >= 5)
+      /*
+       * ⚠️⚠️ **本机地址是第 3 列（`c[3]`），第 4 列是对端** —— 原来两处都写的 `c[4]`，
+       * 于是页面上显示的是 `0.0.0.0:*` / `*:*` 这种对端地址，等于没显示端口。
+       * 这个 bug 一直没被看见，是因为**这条 Linux 分支从没真跑过**：Mac 上走 lsof，
+       * 线上容器里没有 `ss`（2026-10-05 装 iproute2 之后才第一次真跑）——
+       * 典型的「没端到端跑过的分支里躺着错」。
+       */
+      // 127.0.0.11 是 Docker 内嵌 DNS，每个容器都有，跟「服务在听什么」无关
+      .filter(c => !c[3].startsWith('127.0.0.11:'))
     return {
       ok: true,
       items: dedupe(
         rows.map(c => ({
-          key: c[4],
-          item: {name: c[4], detail: `队列 ${c[1]}`, status: 'LISTEN', up: true}
+          key: c[3],
+          item: {name: c[3], detail: `队列 ${c[1]}`, status: 'LISTEN', up: true}
         }))
       )
     }
