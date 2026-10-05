@@ -13,6 +13,7 @@
     "web": "tsx backend/src/server.ts",
     "web:start": "NODE_ENV=production node backend/dist/server.js",
     "ui:dev": "vite --config frontend/vite.config.ts",
+    "ui:dev:cloud": "API_TARGET=https://bitcoooin.cn vite --config frontend/vite.config.ts",
     "ui:build": "vite build --config frontend/vite.config.ts",
     "build:all": "npm run build && npm run ui:build",
     "typecheck": "tsc -p backend/tsconfig.json --noEmit",

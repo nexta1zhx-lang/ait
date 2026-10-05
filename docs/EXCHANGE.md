@@ -325,28 +325,40 @@ K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
   `testnet/sandbox mode is not supported for futures anymore`，它把旧的
   `testnet.binancefuture.com` 摘了）—— 别再往回改。
 
-**② 本地只跑前端，接口走线上后端 —— 推荐（要看真账户真数据就用这个）**
+**② 本地只跑前端，接口走线上后端 —— 零 Key、零白名单**
 
 ```bash
-VITE_API_BASE=https://bitcoooin.cn npm run web    # 本地页面照样是 localhost:8787
+npm run ui:dev:cloud        # = API_TARGET=https://bitcoooin.cn npm run ui:dev
+# 打开 http://localhost:5173（Vite 独立前端，本地不用起后端）
 ```
 
-交易所请求由**已经在白名单里的服务器**发出去，本地一个 Key 都不用配、白名单也不用动。
-前提线上已经放行本机来源：`server.ts` 的 `CORS_ORIGIN_RE` 里带着
-`http://localhost:*`（认证走 `Authorization` 头，不是 Cookie，所以放行也不引入 CSRF）。
-实测用 `PORT=8099 VITE_API_BASE=… ` 起一遍，Vite 会把
-`import.meta.env.VITE_API_BASE = "https://bitcoooin.cn"` 注进 `api.ts` ✓。
-⚠️ 这时候本地这个后端的「交易所」相关接口不会被用到（页面全都打线上），
-但资产快照 / KeyStream 还是会按本地库里的 Key 去连 —— 不想看那串 -2015 重连日志的话，
-本地库里的 Key 可以删掉或改成模拟盘的。
+`frontend/vite.config.ts` 里那条 `/api` 代理把请求转发到线上，
+所以**交易所调用是服务器发出去的**（服务器 IP 已经在白名单里）——
+本地一个 Key 都不用配，也不涉及 CORS（浏览器看是同源）。
+
+实测：`/api/contracts` 200（真数据）、`/api/exchange/trade` 不带 token 回**线上**的
+`{"error":"请先登录"}`、带 token 时 `/api/exchange/overview` 200（服务器读真账户 OK）。
+
+> ⚠️ **线上跑的是哪个版本决定你能调到什么**：本机实测
+> `GET /api/exchange/trade` 在线上是 **404**（M6 那三条还没部署，见「部署」那节），
+> 所以「本地前端 + 线上后端」现在只能调**已经上线**的接口；
+> 要连带下单模块一起调，得先 `npm run deploy`，或者退回方案 ① 在本地跑。
 
 **③ 把本机 IP 也填进白名单（空格分隔）—— 想真连本机就这个**
 
 适合「本机出口 IP 相对稳定」的情况（比如公司固定出口）。IP 变了就再改一次：
 把新 IP 追加进去、把旧的删掉。要一劳永逸就固定出口（静态 IP 的家宽 / 固定节点）。
 
+> ⚠️ **`/fapi/v1/order/test` 不绕白名单** —— 它只是「不进撮合」，签名 / 权限 /
+> IP 校验一样要过，2026-10-05 用真 Key 实测回的是同一句
+> `-2015 Invalid API-key, IP, or permissions for action, request ip: 157.254.20.163`。
+> 所以「反正只打测试单」并不能免掉白名单（读余额那步也过不去）。
+
 > 域名可用环境变量换：`FAPI_BASE`（线上，默认 `https://fapi.binance.com`）、
-> `FAPI_DEMO_BASE`（模拟盘，默认 `https://demo-fapi.binance.com`）。
+> `FAPI_DEMO_BASE`（模拟盘，默认 `https://demo-fapi.binance.com`）；
+> 前端也可以直接 `VITE_API_BASE=https://bitcoooin.cn npm run web`（走线上 CORS，
+> 已放行 `http://localhost:*`），不过那样本地后端还在跑、还会拿本地 Key 去开
+> listenKey，日志会一直刷 `-2015`，所以更推荐上面的 `ui:dev:cloud`。
 
 ---
 
