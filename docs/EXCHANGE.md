@@ -274,7 +274,7 @@ K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
 | POST | `/api/exchange/trade/leverage?id=` | `POST /fapi/v1/leverage` | 调这个交易对的杠杆（有持仓 / 挂单时交易所会拒，原样翻出来） |
 | POST | `/api/exchange/trade/order?id=` | **`POST /fapi/v1/order/test`** | 下单（**测试单**：只校验，不进撮合、不真开仓） |
 
-⚠️ 三个实测踩到的坑（都是真 Key 打出来的）：
+⚠️ 四个实测踩到的坑（都是真 Key 打出来的）：
 
 1. **`/fapi/v1/positionRisk` 已经下线** —— 直接 404，而且回的是币安那张 HTML 错误页
    （不翻中文的话界面上就是一坨 HTML）。要用 **v2**。
@@ -283,6 +283,11 @@ K 线页底部那个下单模块用的三条（`data/exchange-trade.ts`）：
 3. **`-2015` 别当「Key 不对」** —— 它是 `Invalid API-key, IP, or permissions for action, request ip: x.x.x.x`，
    实测绝大多数是 **IP 白名单**没放行。`humanize()` 里这条必须**最先**判，
    不然会被前面那条 `invalid api-key` 抢走，提示成「API Key / Secret 不对」，怎么查都查不出来。
+4. **`-4192 Trade forbidden due to Cooling-off Period` 也不是白名单 / 权限问题** ——
+   实测（2026-10-05，线上真账户）：读余额、读杠杆都正常，**一下单**就被这条拦，
+   MARKET / LIMIT 都一样。这是币安那边的「冷静期」限制（新 Key / 刚开合约权限常见），
+   代码里认不出来就只能说「没有权限」，会把人往白名单上引。所以 `humanizeTrade()` 里
+   专门有一条 `-4192` → 直说「币安在冷静期，过一阵再试」。
 
 **数量 / 精度**：不走 ccxt 的 `loadMarkets()`（它会顺手调一个**私有**的 `fetchCurrencies`，
 对只有合约权限的 Key 是多余的请求、还慢一倍），而是直接读公开的 `GET /fapi/v1/exchangeInfo`，
