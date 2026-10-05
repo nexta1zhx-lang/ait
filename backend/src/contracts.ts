@@ -141,6 +141,13 @@ export interface ContractsFreshness {
   count: number
   /** 说人话的原因（打日志用） */
   reason: string
+  /**
+   * 「该刷但刷失败了，继续用旧的」。
+   * ⚠️ 单独标出来是因为它和「库里本来就是新的、不用刷」**都不能靠 `refreshed` 区分**
+   *    —— 而这两种情况一个要告警、一个不用。2026-10-05 用户问「我不是有逻辑要刷新
+   *    本地币种吗」，查下来就是这条失败分支在日志里**完全静默**（只打了成功那条）。
+   */
+  failed: boolean
 }
 
 /**
@@ -173,7 +180,8 @@ export async function ensureContractsFresh(
     return {
       refreshed: false,
       count: stored.store.count,
-      reason: `数据库里是新的（${Math.round(ageMs / 3600_000)} 小时前）`
+      reason: `数据库里是新的（${Math.round(ageMs / 3600_000)} 小时前）`,
+      failed: false
     }
   }
 
@@ -185,14 +193,16 @@ export async function ensureContractsFresh(
       count: store.count,
       reason: stored
         ? `已自动刷新（上次 ${Math.round(ageMs / 3600_000)} 小时前）`
-        : '已自动刷新（库里原来没有）'
+        : '已自动刷新（库里原来没有）',
+      failed: false
     }
   } catch (e) {
     if (stored) {
       return {
         refreshed: false,
         count: stored.store.count,
-        reason: `刷新失败（继续用旧的 ${stored.store.count} 个）：${(e as Error).message}`
+        reason: `刷新失败（继续用旧的 ${stored.store.count} 个）：${(e as Error).message}`,
+        failed: true
       }
     }
     throw e

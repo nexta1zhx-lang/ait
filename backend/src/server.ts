@@ -3813,7 +3813,14 @@ async function main(): Promise<void> {
   const kickContracts = () => {
     void ensureContractsFresh()
       .then(r => {
-        if (r.refreshed) console.log(`  币种表  ${r.reason} → ${r.count} 个`)
+        /*
+         * ⚠️ 三种结果都要看得见：**刷成功了**、**该刷但失败了**、**库里还新所以没刷**。
+         * 原来只打成功那条 —— 于是「本地币种表一直是旧的」在日志里**完全静默**，
+         * 用户 2026-10-05 就是这么问的：「我不是有逻辑要刷新本地币种吗」。
+         */
+        if (r.failed) console.warn(`  币种表  ⚠️  ${r.reason}`)
+        else if (r.refreshed) console.log(`  币种表  ${r.reason} → ${r.count} 个`)
+        else console.log(`  币种表  ${r.reason}`)
       })
       .catch(e => console.warn(`  币种表  ⚠️  ${(e as Error).message}`))
   }
