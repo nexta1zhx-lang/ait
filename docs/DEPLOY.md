@@ -3,7 +3,7 @@
 **线上地址：<https://bitcoooin.cn>**
 
 ```text
-服务器   57.181.38.200（用户 ubuntu）
+服务器   52.194.6.144（用户 ubuntu）
 密钥     ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem
 代码     /opt/crypto-advisor
 域名     bitcoooin.cn（A 记录已指向该 IP，NS 在阿里云）
@@ -73,11 +73,11 @@ tar czf /tmp/ca.tgz --exclude='node_modules' --exclude='.git' --exclude='.env' \
   --exclude='./android' --exclude='./downloads/*.apk' -C . .
 
 scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.tgz \
-  ubuntu@57.181.38.200:/tmp/
+  ubuntu@52.194.6.144:/tmp/
 
 # 服务器（⚠️ 必须先 chown 成 ubuntu：`sudo mkdir` 建出来是 root 所有，
 #   而 scripts/release.sh 是**非 sudo** 解包 —— 文件得归 ubuntu，不 chown 后面会解压失败）
-ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200 \
+ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@52.194.6.144 \
   'sudo mkdir -p /opt/crypto-advisor && sudo chown ubuntu:ubuntu /opt/crypto-advisor \
    && cd /opt/crypto-advisor && tar xzf /tmp/ca.tgz'
 ```
@@ -99,7 +99,7 @@ ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200 \
 ### 2. 一键部署
 
 ```bash
-ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200
+ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@52.194.6.144
 cd /opt/crypto-advisor
 sudo bash scripts/deploy.sh
 ```
@@ -183,10 +183,10 @@ ls -lh /tmp/ca.dump
 
 # ② 传上去
 scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem /tmp/ca.dump \
-  ubuntu@57.181.38.200:/tmp/
+  ubuntu@52.194.6.144:/tmp/
 
 # ③ 服务器：先备份「现在这份」，再整份替换
-ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200
+ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@52.194.6.144
 cd /opt/crypto-advisor
 sudo docker compose -f docker-compose.prod.yml stop app
 sudo docker exec ca-postgres pg_dump -U ca -d crypto_advisor -Fc \
@@ -211,7 +211,7 @@ curl -s localhost:8787/api/health
 - **回滚**：
   `sudo docker exec -i ca-postgres pg_restore -U ca -d crypto_advisor --clean --if-exists --no-owner ~/server-db-before-*.dump`
 - ⚠️ 本机 SSH 被代理劫持时（`dig bitcoooin.cn` 回 **`198.18.x.x`**）第 ②③ 步会连不上，
-  先在代理里**关掉 TUN**（或给 `57.181.38.200` 加直连规则）。
+  先在代理里**关掉 TUN**（或给 `52.194.6.144` 加直连规则）。
 
 ### 5. 验收
 
@@ -331,7 +331,7 @@ bash scripts/release.sh -y       # 打包上传 + 重建 caddy 容器
 ## 常用命令
 
 ```bash
-ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@57.181.38.200
+ssh -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem ubuntu@52.194.6.144
 cd /opt/crypto-advisor
 
 sudo docker compose -f docker-compose.prod.yml ps             # 状态

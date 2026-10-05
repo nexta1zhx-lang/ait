@@ -186,7 +186,7 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 - `dig bitcoooin.cn` 返回 **198.18.x.x**（RFC 2544 假 IP 段，代理的 fake-IP）
 - `nc -z <任意IP> <任意端口>` **全部"成功"**（结果是伪造的，别信）
 
-**关掉代理的 TUN（或给 `57.181.38.200` 加一条直连规则）再跑 `scripts/release.sh`。**
+**关掉代理的 TUN（或给 `52.194.6.144` 加一条直连规则）再跑 `scripts/release.sh`。**
 
 ### 安装提示
 

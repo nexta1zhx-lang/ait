@@ -157,7 +157,7 @@ cat <<'EOF'
     确认有这三条：SSH 22 / HTTP 80 / HTTPS 443
     （缺 80 和 443 的话，Caddy 申请不到证书，https 打不开）
 
- ② 域名 bitcoooin.cn 的 A 记录已确认指向 57.181.38.200 ✔
+ ② 域名 bitcoooin.cn 的 A 记录已确认指向 52.194.6.144 ✔
     等 1~2 分钟，浏览器打开 https://bitcoooin.cn 即可
 
 常用命令：

@@ -22,7 +22,7 @@ set -euo pipefail
 # 和 `bash /abs/path/scripts/release.sh` 两种调法都能正确定位。
 cd "$(dirname "$0")/.."
 
-HOST="${HOST:-57.181.38.200}"
+HOST="${HOST:-52.194.6.144}"
 SSH_USER="${SSH_USER:-ubuntu}"
 KEY="${KEY:-$HOME/.ssh/LightsailDefaultKey-ap-northeast-1.pem}"
 APP_DIR="${APP_DIR:-/opt/crypto-advisor}"

@@ -4,7 +4,7 @@
 # 证书存在 caddy-data 卷里，容器重建不会重新申请，不会触发 Let's Encrypt 限流。
 #
 # 前置条件：
-#   ① DNS：bitcoooin.cn 的 A 记录 → 57.181.38.200（已确认配好）
+#   ① DNS：bitcoooin.cn 的 A 记录 → 52.194.6.144（已确认配好）
 #   ② Lightsail 防火墙放行 80 / 443（控制台 → Networking → IPv4 Firewall）
 
 bitcoooin.cn {
@@ -50,7 +50,7 @@ bitcoooin.cn {
 
 # ---------------------------------------------------------------- 监控（可选）
 # 起监控：docker compose -f docker-compose.prod.yml --profile monitor up -d
-# 然后①在阿里云 DNS 加下面两条 A 记录（都指向 57.181.38.200）
+# 然后①在阿里云 DNS 加下面两条 A 记录（都指向 52.194.6.144）
 # ②把下面这两段取消注释 ③docker compose -f docker-compose.prod.yml restart caddy
 #
 # ⚠️ 先加 DNS 再取消注释：域名解析不到，Caddy 申请证书会一直失败刷日志。
