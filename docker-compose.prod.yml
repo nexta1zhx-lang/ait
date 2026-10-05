@@ -68,6 +68,14 @@ services:
       # 线上 `/dl/*` 本身由 caddy 发，不走本进程；这里只读，不写。
       # ⚠️ 两边必须挂**同一个宿主机目录**，不然页面上列的和实际能下的对不上。
       - ./downloads:/app/downloads:ro
+      # 「服务器监测」页要看宿主机上有哪些容器（2026-10-05 加）——
+      # 容器里的 `docker` CLI 靠这个 socket 连宿主机 daemon。
+      # ⚠️⚠️ 这等于把本容器的权限提到**宿主机 root 那一档**：socket 是读写通道，
+      #      `:ro` 只是表明意图（挡不住 `docker stop/rm/exec` 这类 API 调用）。
+      #      当时的权衡：自用单管理员、三个容器都在同一套 compose 里，
+      #      而且应用本来就攥着交易所只读 key 和大模型 key —— 边际风险可接受。
+      #      以后要给别的东西开这个容器，先把这条拿掉。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       # 只监听本机，方便在服务器上 curl 调试；对外一律走 Caddy。
       - '127.0.0.1:8787:8787'

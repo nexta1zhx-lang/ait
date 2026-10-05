@@ -26,6 +26,13 @@ RUN npm run build:all
 FROM node:22-alpine AS runtime
 WORKDIR /app
 
+# 「服务器监测」页要能从容器里看到宿主机上的容器 / 监听端口（2026-10-05）：
+#   · docker-cli —— 容器里得有 `docker` 这个可执行文件（Alpine 包，约 32MB）
+#   · iproute2   —— 提供 `ss`，用来读监听端口（busybox 只带 netstat，没有 ss）
+# ⚠️ 光装 CLI 不够：还得在 compose 里把 `/var/run/docker.sock` 挂进来，
+#    否则 `docker ps` 会报 Cannot connect to the Docker daemon。
+RUN apk add --no-cache docker-cli iproute2
+
 ENV NODE_ENV=production \
     PORT=8787
 

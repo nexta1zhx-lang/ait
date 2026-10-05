@@ -277,11 +277,17 @@ function dedupe(rows: {key: string; item: ServiceItem}[]): ServiceItem[] {
 /**
  * docker 容器。
  *
- * ⚠️⚠️ **线上 app 自己跑在容器里**（`ca-app`），容器内既没 `docker` 命令、
- * 也够不到宿主机的 daemon ⇒ 线上这里会返回 `ok:false`、页面上写「在容器里看不到」。
- * 要在线上也看到容器，得给 `app` 服务挂 `/var/run/docker.sock` + 装 `docker-cli`
- *（没做 —— 那等于把宿主机 root 权限交给应用，得先想清楚）。
- * 本机（macOS + Docker Desktop）直接就能跑。
+ * ⚠️ 这段代码在**两种环境**下跑，行为不一样：
+ *   · 本机（macOS + Docker Desktop）：直接用宿主机的 `docker` ✓
+ *   · 线上：app 自己**跑在容器里**（`ca-app`），默认既没 `docker` 命令、
+ *     也够不到宿主机的 daemon。所以 **2026-10-05 起**两边都补上了：
+ *     镜像里 `apk add docker-cli iproute2`、compose 给 app 挂了
+ *     `/var/run/docker.sock`（见 `Dockerfile` / `docker-compose.prod.yml`）。
+ *
+ * ⚠️⚠️ 挂 socket 等于把这个容器提到**宿主机 root 那一档**（socket 是读写通道，
+ * compose 里那个 `:ro` 只表明意图，挡不住 API 调用）。当时的权衡：自用单管理员、
+ * 三个容器同一套 compose、应用本来就攥着交易所只读 key 和大模型 key ——
+ * 边际风险可接受；但**以后要给别的东西开这个容器，得先把那条挂载拿掉**。
  */
 async function dockerPart(): Promise<ServiceGroup> {
   try {
