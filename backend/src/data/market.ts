@@ -1,5 +1,5 @@
 import ccxt from 'ccxt'
-import {ccxtProxyOptions} from './exchange-account'
+import {ccxtBaseOptions} from './exchange-account'
 import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
 import {describeSeries} from '../analysis/describe'
 import {ema42Of} from '../analysis/ema'
@@ -333,9 +333,8 @@ async function getExchange(
     throw new Error(`未知交易所：${exchangeId}（请检查 --exchange 参数）`)
 
   const exchange = new Ctor({
-    enableRateLimit: true,
-    // 行情这条也走代理，理由同 `exchange-account.ts` 的 `ccxtProxyOptions()`
-    ...ccxtProxyOptions(),
+    // 限流间隔 + 出口代理，见 `exchange-account.ts` 的 `ccxtBaseOptions()`
+    ...ccxtBaseOptions(),
     options: marketOptions(marketType)
   })
   if (apiBase) applyApiBase(exchange, apiBase)

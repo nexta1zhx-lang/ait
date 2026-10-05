@@ -89,6 +89,37 @@ export function ccxtProxyOptions(): {httpProxy?: string} {
   return proxy ? {httpProxy: proxy} : {}
 }
 
+/**
+ * ccxt 的**限流间隔**（毫秒）—— 用户 2026-10-05 选「调小」这条路。
+ *
+ * ★ 为什么调：币安在 ccxt 里的默认 `rateLimit` 是 **50ms**，意思是「两次请求之间
+ *   至少隔 50ms」，而且**并发调用会被它排成 50ms 一档**。服务器上实测（东京 → 币安，
+ *   同一个 `/fapi/v1/ping`）：
+ *     裸 fetch               4~19ms
+ *     ccxt 关限流            2~10ms       ← ccxt 本身几乎不花时间
+ *     ccxt 默认（50ms）      53~61ms/条，**3 条并发 153ms**
+ *   面板那条接口正好是 3 条并发（余额 / 持仓 / 杠杆）⇒ 白等 150ms。
+ *
+ * ★ 为什么是 15ms 而不是关掉：这个限流是**防跑飞**用的 —— 万一将来哪个循环出 bug
+ *   狂发请求，有节流在最多 66 次/秒；关掉就是裸奔，币安会直接封 IP（418）。
+ *   权重预算心里有数：币安上限 2400 权重/分钟，我们最猛的一处是启动预热
+ *   （122 条 K 线 × 权重 5 ≈ 610 权重），怎么都够。
+ */
+export const CCXT_RATE_LIMIT_MS = 15
+
+/** 所有 ccxt 实例共用的基础配置（限流间隔 + 出口代理） */
+export function ccxtBaseOptions(): {
+  enableRateLimit: boolean
+  rateLimit: number
+  httpProxy?: string
+} {
+  return {
+    enableRateLimit: true,
+    rateLimit: CCXT_RATE_LIMIT_MS,
+    ...ccxtProxyOptions()
+  }
+}
+
 /** 同一个代理地址，给**裸 WebSocket** 用（没有就返回 undefined） */
 let wsAgentCache: Agent | undefined
 let wsAgentTried = false
@@ -167,12 +198,10 @@ export function createExchange(c: ExchangeCredentials): any {
     throw new Error('这套账户还没填 API Key / Secret')
 
   const ex = new Ctor({
-    enableRateLimit: true,
+    ...ccxtBaseOptions(),
     apiKey: c.apiKey,
     secret: c.secret,
     ...(c.password ? {password: c.password} : {}),
-    // 走代理（本地开发用，见上面 `ccxtProxyOptions()` 那段）
-    ...ccxtProxyOptions(),
     options: {
       ...marketOptionsFor(c),
       /*
