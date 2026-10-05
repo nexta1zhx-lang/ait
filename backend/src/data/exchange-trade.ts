@@ -146,15 +146,23 @@ interface SymbolSpec {
 interface SpecsCache {
   at: number
   bySymbol: Map<string, SymbolSpec>
+  /**
+   * 「有这么个合约、但**现在不能交易**」的：符号 → 币安给的状态。
+   * 下架 / 交割中的合约（`SETTLING`）就是这一档 —— 它们还能在公开的
+   * `exchangeInfo` 里查到（所以列表里可能还留着），但下不了单。
+   * 留着它是为了**把话说准**：用户 2026-10-05 就是拿着这样的币来问的
+   * （本地那份币种表是前一天同步的，交割中的币还没剔掉）。
+   */
+  off: Map<string, string>
 }
 const SPECS_TTL = 6 * 60 * 60 * 1000
 const specsCache = new Map<string, SpecsCache>()
 
-async function loadSpecs(c: ExchangeCredentials): Promise<Map<string, SymbolSpec>> {
+async function loadSpecs(c: ExchangeCredentials): Promise<SpecsCache> {
   /* 环境也算进 key：demo 和线上的规格不一样（见 `fapiBase`） */
   const key = `${c.exchange}|${c.marketType}|${c.sandbox ? 'demo' : 'live'}`
   const hit = specsCache.get(key)
-  if (hit && Date.now() - hit.at < SPECS_TTL) return hit.bySymbol
+  if (hit && Date.now() - hit.at < SPECS_TTL) return hit
 
   const url = `${fapiBase(c)}/fapi/v1/exchangeInfo`
   const res = await fetch(url, {
@@ -164,13 +172,23 @@ async function loadSpecs(c: ExchangeCredentials): Promise<Map<string, SymbolSpec
   const json = (await res.json()) as {symbols?: Array<Record<string, any>>}
 
   const bySymbol = new Map<string, SymbolSpec>()
+  const off = new Map<string, string>()
   for (const s of json.symbols ?? []) {
-    if (s.contractType !== 'PERPETUAL' || s.status !== 'TRADING') continue
-    if (s.quoteAsset !== 'USDT') continue
+    if (s.contractType !== 'PERPETUAL' || s.quoteAsset !== 'USDT') continue
+    const sym = String(s.symbol).toUpperCase()
+    const status = String(s.status ?? '')
+    /*
+     * 不是 TRADING 的（下架 / 交割中 `SETTLING` / `PENDING_TRADING`…）
+     * 记进 `off`：它们**还在** exchangeInfo 里，光说「没这个交易对」是错的。
+     */
+    if (status !== 'TRADING') {
+      off.set(sym, status)
+      continue
+    }
     const filters: Array<Record<string, any>> = s.filters ?? []
     const f = (type: string) => filters.find(x => x.filterType === type) ?? {}
-    bySymbol.set(String(s.symbol).toUpperCase(), {
-      symbol: String(s.symbol).toUpperCase(),
+    bySymbol.set(sym, {
+      symbol: sym,
       base: String(s.baseAsset ?? ''),
       stepSize: n(f('LOT_SIZE').stepSize),
       minQty: n(f('LOT_SIZE').minQty),
@@ -178,8 +196,9 @@ async function loadSpecs(c: ExchangeCredentials): Promise<Map<string, SymbolSpec
       minNotional: n(f('MIN_NOTIONAL').notional)
     })
   }
-  specsCache.set(key, {at: Date.now(), bySymbol})
-  return bySymbol
+  const fresh: SpecsCache = {at: Date.now(), bySymbol, off}
+  specsCache.set(key, fresh)
+  return fresh
 }
 
 /** 前端给的是币安原始符号（`BTCUSDT`） */
@@ -188,10 +207,20 @@ async function specFor(
   raw: string
 ): Promise<SymbolSpec> {
   const want = String(raw ?? '').trim().toUpperCase()
-  const specs = await loadSpecs(c)
-  const spec = specs.get(want)
-  if (!spec) throw new Error(`币安的合约列表里没有「${want}」这个交易对`)
-  return spec
+  const {bySymbol, off} = await loadSpecs(c)
+  const spec = bySymbol.get(want)
+  if (spec) return spec
+  /*
+   * 分两种说法，别混成一句「没这个交易对」——
+   * 交割中 / 已下架的币**确实还在**币安的列表里，只是不能下单了
+   *（币种表是每天同步的，最快也要一天才会把它剔掉）。
+   */
+  const status = off.get(want)
+  if (status)
+    throw new Error(
+      `币安那边「${want}」已经不能交易了（${status === 'SETTLING' ? '正在交割 / 已下架' : `状态 ${status}`}），换一个币种`
+    )
+  throw new Error(`币安的合约列表里没有「${want}」这个交易对`)
 }
 
 /** 步长（0.001）→ 小数位（3）。交易所给的 `stepSize` 是**值**不是位数。 */
