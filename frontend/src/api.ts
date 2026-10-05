@@ -1135,6 +1135,15 @@ export const fetchTradeHistory = (symbol: string, id?: number, limit = 100) =>
       (id ? `&id=${id}` : '')
   )
 
+/**
+ * 撤一张挂单（**真动作**，没有测试版 —— 撤了就是撤了，调用前自己确认）。
+ */
+export const cancelTradeOrder = (symbol: string, orderId: string, id?: number) =>
+  post<{ok: boolean; orderId?: string; error: string | null}>(
+    `/api/exchange/trade/cancel-order${id ? `?id=${id}` : ''}`,
+    {symbol, orderId}
+  )
+
 /** 美元 → 人民币汇率（「交易所账户」USDT / CNY 切换用，跟用量页同一个源） */
 export const fetchRate = () => get<{usdCny: number}>('/api/rate')
 

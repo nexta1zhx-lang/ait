@@ -900,7 +900,20 @@ export async function listOpenOrders(
 ): Promise<OpenOrderRow[]> {
   assertTradable(c)
   const ex = createExchange(c)
-  const raw: any[] = (await ex.fetchOpenOrders(symbol)) ?? []
+  /*
+   * ⚠️ 币安把「条件单」（止盈 / 止损）搬到了 **Algo Order** 那套接口之后，
+   *    `GET /fapi/v1/openOrders` **看不到它们**（实测：真挂了一张 STOP_MARKET，
+   *    普通挂单列表回空数组）。ccxt 用 `params.conditional = true` 分流到
+   *    `GET /fapi/v1/openAlgoOrders`，所以这里**两套都要拉、合起来**。
+   *    条件单那一路失败（权限 / 接口没有）就当没有，别把普通挂单也带崩。
+   */
+  const [normal, algo] = await Promise.all([
+    ex.fetchOpenOrders(symbol).catch(() => [] as any[]),
+    ex
+      .fetchOpenOrders(symbol, undefined, undefined, {conditional: true})
+      .catch(() => [] as any[])
+  ])
+  const raw: any[] = [...((normal as any[]) ?? []), ...((algo as any[]) ?? [])]
   const out: OpenOrderRow[] = []
   for (const o of raw) {
     const id = String(o?.id ?? '')
@@ -912,7 +925,14 @@ export async function listOpenOrders(
       id,
       symbol: sym,
       side: String(o?.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy',
-      type: String(o?.info?.type ?? o?.type ?? '').toUpperCase(),
+      /*
+       * ⚠️ 条件单（algo）那个接口回的字段是 **`orderType`**（不是 `type`），
+       *    而 ccxt 归一后的 `o.type` 会变成 `market` —— 两个都读不到「STOP_MARKET」
+       *    的话，K 线上那张止盈 / 止损会被标成「委托」。实测踩过。
+       */
+      type: String(
+        o?.info?.orderType ?? o?.info?.type ?? o?.type ?? ''
+      ).toUpperCase(),
       posSide: String(o?.info?.positionSide ?? 'BOTH').toUpperCase(),
       price: nullish(o?.price),
       stopPrice: nullish(o?.stopPrice),
@@ -1100,7 +1120,7 @@ export async function placeStopOrder(
 
   let canceled: string | undefined
   if (input.orderId) {
-    await ex.cancelOrder(input.orderId, symbol)
+    await cancelAnyOrder(ex, symbol, input.orderId)
     canceled = input.orderId
   }
 
@@ -1133,5 +1153,50 @@ export async function placeStopOrder(
     orderId: r?.id === undefined ? undefined : String(r.id),
     status: r?.status === undefined ? undefined : String(r.status),
     canceled
+  }
+}
+
+/**
+ * 撤一张挂单（用户 2026-10-06：「挂单…可拖动改」配套）。
+ *
+ * 改单（`placeStopOrder` 带 `orderId`）内部就用它；单独暴露出来是因为
+ * 拖出来的那些止盈 / 止损单**总得有个地方撤** —— 不然用户只能跑去币安 App 撤。
+ *
+ * ⚠️ 撤单是**真动作**，没有测试版：撤了就是撤了。所以前端要它之前先确认一下。
+ */
+export async function cancelTradeOrder(
+  c: ExchangeCredentials,
+  symbol: string,
+  orderId: string
+): Promise<{orderId: string; symbol: string}> {
+  assertTradable(c)
+  if (!orderId) throw new Error('缺单号')
+  const ex = createExchange(c)
+  const spec = await specFor(c, symbol)
+  await cancelAnyOrder(ex, spec.symbol, orderId)
+  return {orderId, symbol: spec.symbol}
+}
+
+/**
+ * 撤一张单 —— **普通单和条件单在币安是两套接口**（见 `listOpenOrders` 那段说明）。
+ *
+ * 先按普通单撤；撤不到（回「未知订单」那类）再按条件单（`conditional: true`
+ * → `DELETE /fapi/v1/algoOrder`）撤。两条都不行就把**第一条**的错抛出去
+ * （通常那个信息更有用：「未知订单」说明单号不对，而不是「不支持」）。
+ */
+async function cancelAnyOrder(
+  ex: any,
+  symbol: string,
+  orderId: string
+): Promise<void> {
+  try {
+    await ex.cancelOrder(orderId, symbol)
+    return
+  } catch (e) {
+    try {
+      await ex.cancelOrder(orderId, symbol, {conditional: true})
+    } catch {
+      throw e
+    }
   }
 }

@@ -104,6 +104,7 @@ import {
   humanize
 } from './data/exchange-account'
 import {
+  cancelTradeOrder,
   closePositions,
   collectTradeInfo,
   humanizeTrade,
@@ -3465,6 +3466,41 @@ async function route(
           /* 同下单：`test !== false` 才是测试单，漏传一律当测试单 */
           test: body.test !== false
         }
+      )
+      return sendJson(res, 200, {ok: true, ...r, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+    }
+  }
+
+  /*
+   * 撤一张挂单。
+   *
+   * ⚠️ 撤单**没有测试版**：发了就是真撤。前面那个「测试下单」开关管不到它 ——
+   *    前端在撤之前得自己确认一次（见 `OrderPanel` / `KlineChart`）。
+   */
+  if (p === '/api/exchange/trade/cancel-order' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const r = await cancelTradeOrder(
+        {
+          exchange: key.exchange,
+          apiKey: key.apiKey,
+          secret: key.secret,
+          password: key.password,
+          marketType: key.marketType,
+          sandbox: key.sandbox
+        },
+        str(body.symbol, 'BTCUSDT'),
+        str(body.orderId, '')
       )
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
