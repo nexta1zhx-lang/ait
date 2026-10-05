@@ -1,4 +1,5 @@
 import {createExchange, humanize, type ExchangeCredentials} from './exchange-account'
+import {loadContracts} from '../contracts'
 
 /**
  * 合约下单（2026-10-05）。
@@ -167,6 +168,21 @@ async function loadSpecs(c: ExchangeCredentials): Promise<SpecsCache> {
   const hit = specsCache.get(key)
   if (hit && Date.now() - hit.at < SPECS_TTL) return hit
 
+  /*
+   * ① 先读**本地那份合约表**（`contract_store`，服务每天自动刷一次，规格也在里面
+   *    —— 2026-10-05 加的，见 `contracts.ts` 的 `ContractInfo`）。用户问过
+   *    「合约表不是保存在本地吗 一天更新一次」：对，所以下单没必要每次都去问币安。
+   *    ⚠️ 沙盒（demo）不走这条 —— 模拟盘的合约集跟线上不一样。
+   */
+  if (!c.sandbox) {
+    const local = await specsFromLocalStore()
+    if (local) {
+      specsCache.set(key, local)
+      return local
+    }
+  }
+
+  /* ② 本地那份还没有规格（这次改动之前同步的老数据）→ 联网拉一次（原来那条路） */
   const url = `${fapiBase(c)}/fapi/v1/exchangeInfo`
   const res = await fetch(url, {
     headers: {'User-Agent': 'crypto-entry-advisor'}
@@ -216,6 +232,54 @@ async function loadSpecs(c: ExchangeCredentials): Promise<SpecsCache> {
   const fresh: SpecsCache = {at: Date.now(), bySymbol, off}
   specsCache.set(key, fresh)
   return fresh
+}
+
+/**
+ * 从**本地合约表**拼出规格（不下网）。
+ *
+ * ⚠️ 返回 `null` 的两种情况：库里是老数据（改这次之前同步的，`ContractInfo` 里没有
+ *    规格字段）、或者读取失败 —— 两种都交给调用方走联网那条路，行为跟以前一样。
+ * ⚠️ 只收 `status === 'TRADING'` 的；其余（下架 / 交割中）记进 `off`，
+ *    这样报错时能说准「是下架了」而不是「没这个交易对」。
+ */
+async function specsFromLocalStore(): Promise<SpecsCache | null> {
+  try {
+    const store = await loadContracts()
+    const rows = store?.contracts ?? []
+    if (!rows.length) return null
+
+    const bySymbol = new Map<string, SymbolSpec>()
+    const off = new Map<string, string>()
+    let withSpecs = 0
+    for (const r of rows) {
+      const sym = String(r.symbol ?? '').toUpperCase()
+      if (!sym) continue
+      if (r.status !== 'TRADING') {
+        off.set(sym, String(r.status ?? ''))
+        continue
+      }
+      const stepSize = Number(r.stepSize)
+      const tickSize = Number(r.tickSize)
+      /* 规格缺任何一个都不算数（宁可回退到下网那条路，也别拿 0 去算数量） */
+      if (!(stepSize > 0) || !(tickSize > 0)) continue
+      withSpecs++
+      bySymbol.set(sym, {
+        symbol: sym,
+        base: String(r.base ?? ''),
+        stepSize,
+        minQty: Number(r.minQty) || 0,
+        tickSize,
+        minNotional: Number(r.minNotional) || 0
+      })
+    }
+    if (!withSpecs) return null
+    return {at: Date.now(), bySymbol, off}
+  } catch (e) {
+    console.warn(
+      `[specs] 读本地合约表失败，改用联网：${(e as Error).message.slice(0, 120)}`
+    )
+    return null
+  }
 }
 
 /** 前端给的是币安原始符号（`BTCUSDT`） */

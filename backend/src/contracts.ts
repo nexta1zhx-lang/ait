@@ -18,6 +18,24 @@ export interface ContractInfo {
   display: string
   contractType: string
   status: string
+  /*
+   * ↓ 下单规格（2026-10-05 加）。
+   *
+   * 用户问：「合约表不是保存在本地吗 一天更新一次」—— 说得对，但以前这份表**只有符号**，
+   * 下单要的「一次最少多少张 / 最小名义 / 价格精度」不在里面，所以下单那条路还得自己
+   * 去拉 1.5MB 的 `exchangeInfo`（内存缓存 6 小时）。现在规格一起存进来，
+   * `data/exchange-trade.ts` 的 `loadSpecs()` 直接读库 ⇒ 下单这条路不再联网。
+   *
+   * ⚠️ 可选：老数据（这次改动之前同步的）里没有，读不到就自动退回联网拉一次。
+   */
+  /** `LOT_SIZE.stepSize` —— 数量必须是它的整数倍 */
+  stepSize?: number
+  /** `LOT_SIZE.minQty` */
+  minQty?: number
+  /** `PRICE_FILTER.tickSize` —— 价格必须是它的整数倍 */
+  tickSize?: number
+  /** `MIN_NOTIONAL.notional`（币安 U 本位永续是 5 USDT） */
+  minNotional?: number
 }
 
 export interface ContractStore {
@@ -31,6 +49,12 @@ export interface ContractStore {
 
 export const DATA_DIR = path.join(ROOT_DIR, 'data')
 export const CONTRACTS_FILE = path.join(DATA_DIR, 'contracts.json')
+
+/** 币安返回的 filter 值：拿不到就 `undefined`（别存 NaN —— JSON 里会变成 null） */
+const numOrUndef = (v: unknown): number | undefined => {
+  const x = Number(v)
+  return Number.isFinite(x) ? x : undefined
+}
 
 /** Binance U 本位合约接口 */
 const FAPI_BASE = process.env.FAPI_BASE ?? 'https://fapi.binance.com'
@@ -55,6 +79,10 @@ export async function fetchBinanceContracts(): Promise<ContractStore> {
       const base = String(s.baseAsset)
       const quote = String(s.quoteAsset)
       const settle = String(s.marginAsset ?? quote)
+      /* 规格从 filters 里摊平出来（`loadSpecs()` 以前是联网自己解析的，见上面注释） */
+      const filters = (s.filters ?? []) as Array<Record<string, unknown>>
+      const f = (type: string) =>
+        filters.find(x => x.filterType === type) ?? {}
       return {
         symbol: String(s.symbol),
         base,
@@ -62,7 +90,11 @@ export async function fetchBinanceContracts(): Promise<ContractStore> {
         ccxt: `${base}/${quote}:${settle}`,
         display: `${base}/${quote}`,
         contractType: String(s.contractType),
-        status: String(s.status)
+        status: String(s.status),
+        stepSize: numOrUndef(f('LOT_SIZE').stepSize),
+        minQty: numOrUndef(f('LOT_SIZE').minQty),
+        tickSize: numOrUndef(f('PRICE_FILTER').tickSize),
+        minNotional: numOrUndef(f('MIN_NOTIONAL').notional)
       }
     })
     .sort((a, b) => a.display.localeCompare(b.display))
