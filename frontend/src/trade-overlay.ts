@@ -235,6 +235,39 @@ export interface OrphanSweep {
   symbols: string[]
   /** 没撤成功的原因（有就说明「看着还在」） */
   error: string | null
+  /** 这轮被节流跳过了（不到点）—— 不是出错，界面上什么都不用说 */
+  skipped?: boolean
+}
+
+/** 账户级盘点的最小间隔（跟 K 线那个定时器同一个数，见 `ORPHAN_SWEEP_MS`） */
+export const ORPHAN_SWEEP_MS = 300_000
+/**
+ * 上一次「账户级盘点」是什么时候（**跨标签页**，所以放 localStorage）。
+ *
+ * ⚠️ 为什么不能只记在内存里（2026-10-06 实测踩到）：不带交易对查挂单在币安那边
+ *    **每条 40 权重**（带交易对才 1），一次盘点 = 80 权重；本地开着好几个标签页 /
+ *    反复刷新时，每个页面挂载都会立刻盘一次 —— 几轮下来**整个 IP** 就被
+ *    `-1003 Way too many requests` 封了（实测封了 8 分钟，本地开发和生产同一个出口）。
+ *    所以这里按「跨标签页的时间戳」节流。
+ */
+const SWEEP_KEY = 'ca-orphan-sweep-at'
+
+function sweepDue(): boolean {
+  try {
+    const last = Number(localStorage.getItem(SWEEP_KEY) || 0)
+    return !Number.isFinite(last) || last <= 0 || Date.now() - last >= ORPHAN_SWEEP_MS
+  } catch {
+    /* 无痕模式读不了 localStorage：那就每次都盘（当没有节流） */
+    return true
+  }
+}
+
+function markSweep(): void {
+  try {
+    localStorage.setItem(SWEEP_KEY, String(Date.now()))
+  } catch {
+    /* 存不了就算了，下次顶多多盘一次 */
+  }
 }
 
 /**
@@ -263,11 +296,13 @@ async function cleanOrphans(symbol?: string, keyId?: number): Promise<OrphanSwee
 }
 
 /**
- * 整个账户扫一遍「没仓位的残留平仓单」（进 K 线页时来一次，之后每分钟一次）。
+ * 整个账户扫一遍「没仓位的残留平仓单」（进 K 线页时来一次，之后每 5 分钟一次）。
  *
  * 为什么要有这一路：上面那次是**跟着 K 线这个币**走的（只在看着某个币时清它），
  * 别的币（比如刚平掉的那条）得等切到它的图才轮到；这一路一次把账户清干净。
  */
 export async function sweepOrphanOrders(keyId?: number): Promise<OrphanSweep> {
+  if (!sweepDue()) return {cancelled: 0, symbols: [], error: null, skipped: true}
+  markSweep()
   return cleanOrphans(undefined, keyId)
 }

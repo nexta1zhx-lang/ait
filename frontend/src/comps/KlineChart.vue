@@ -34,6 +34,7 @@ import {
   overlayOrders,
   overlayPositions,
   overlaySymbol,
+  ORPHAN_SWEEP_MS,
   refreshTradeOverlay,
   sweepOrphanOrders
 } from '../trade-overlay'
@@ -1624,12 +1625,16 @@ let overlayTimer: ReturnType<typeof setInterval> | null = null
 let stopOverlayForeground: (() => void) | null = null
 
 /*
- * 「没仓位的残留平仓单」每分钟盘一次账户（用户 2026-10-06：仓位平了、单还挂着）。
+ * 「没仓位的残留平仓单」定时盘一遍账户（用户 2026-10-06：仓位平了、单还挂着）。
  *
  * 跟 K 线那 15 秒一轮分开：那一轮只清**当前这个币**（手上刚好有数据，不多打接口），
  * 别的币得等切过去才轮到；这一轮一次把账户清干净。
+ *
+ * ⚠️ 这一轮**重**（不带交易对查挂单是 40 权重/条，两套 = 80）且**跨标签页节流**，
+ *    详细原因见 `trade-overlay.ts` 的 `ORPHAN_SWEEP_MS` —— 2026-10-06 就是这么把
+ *    出口 IP 弄进币安 `-1003` 黑名单 8 分钟的。
  */
-const ORPHAN_MS = 60_000
+const ORPHAN_MS = ORPHAN_SWEEP_MS
 let orphanTimer: ReturnType<typeof setInterval> | null = null
 
 /** 盘一遍残留平仓单，撤到了就说一声（没撤到就不打扰） */
