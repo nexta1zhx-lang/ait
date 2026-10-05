@@ -924,8 +924,12 @@ export interface TradeOpenOrder {
   /** 币安原始符号（1000BONKUSDT） */
   symbol: string
   side: 'buy' | 'sell'
-  /** 订单类型（照币安原样：`LIMIT` / `STOP_MARKET` …） */
+  /** 币安原始订单类型（`LIMIT` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` …） */
   type: string
+  /** 币安原始持仓方向（`LONG` / `SHORT` / `BOTH`） */
+  posSide: string
+  /** 币安原始持仓方向（`LONG` / `SHORT` / `BOTH`） */
+  posSide: string
   /** 委托价（市价 / 条件单没有 ⇒ `null`，**别当 0 画**） */
   price: number | null
   /** 触发价 */

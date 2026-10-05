@@ -524,30 +524,49 @@ let posFetching = false
 const posErr = ref('')
 
 /**
- * 持仓列表的**排序方式**（用户 2026-10-06：「仓位界面…显示排序方式 点击切换 盈利/价值」）。
+ * 持仓列表的**排序方式**（用户 2026-10-06）。
  *
- * · `pnl`（默认）→ 按**未实现盈亏**从大到小
- * · `value`     → 按**仓位价值**从大到小
+ * 第一版是顶栏一颗「按盈利 / 按价值」二态切换，用户随后改成：
+ * 「不再点击切换改为点击底部弹窗可选择 按价值升序降序 或者 按盈利升序降序」——
+ * 所以现在是**四选一**：`字段 + 方向`，从底部弹出来选。
  *
- * 只存在内存里（没落 localStorage）：这是个「这会儿想先看哪一批」的临时视角，
- * 刷新页面回到默认的「按盈利」。
+ * 只存在内存里（没落 localStorage）：这是「这会儿想先看哪一批」的临时视角，
+ * 刷新页面回到默认的「按盈利 · 从大到小」。
  */
-const posSort = ref<'pnl' | 'value'>('pnl')
+type PosSort = 'value-desc' | 'value-asc' | 'pnl-desc' | 'pnl-asc'
 
-const posSortText = computed(() => (posSort.value === 'pnl' ? '盈利' : '价值'))
+const posSort = ref<PosSort>('pnl-desc')
+/** 排序弹层开着没 */
+const sortOpen = ref(false)
 
-function toggleSort(): void {
-  posSort.value = posSort.value === 'pnl' ? 'value' : 'pnl'
+/** 顶栏那颗按钮上的字：`价值 ↓`（短，别把顶栏撑高） */
+const posSortText = computed(() => {
+  const [field, dir] = posSort.value.split('-') as ['value' | 'pnl', 'desc' | 'asc']
+  return `${field === 'pnl' ? '盈利' : '价值'} ${dir === 'desc' ? '↓' : '↑'}`
+})
+
+function pickSort(v: PosSort): void {
+  posSort.value = v
+  sortOpen.value = false
   buzz(8)
 }
 
-/** 排完序的持仓（列表按它渲染）。**从大到小**，两种都是。 */
+/** 排完序的持仓（列表按它渲染） */
 const sortedPositions = computed(() => {
   const arr = [...positions.value]
-  const by = posSort.value
-  arr.sort((a, b) => (by === 'pnl' ? b.unrealized - a.unrealized : b.notional - a.notional))
+  const [field, dir] = posSort.value.split('-') as ['value' | 'pnl', 'desc' | 'asc']
+  const sign = dir === 'desc' ? -1 : 1
+  arr.sort((a, b) => sign * ((field === 'pnl' ? a.unrealized - b.unrealized : a.notional - b.notional)))
   return arr
 })
+
+/** 弹层里那四行（顺序就是弹层里的顺序） */
+const SORT_OPTIONS: {v: PosSort; label: string; hint: string}[] = [
+  {v: 'pnl-desc', label: '按盈利 · 降序', hint: '赚得多的排前面'},
+  {v: 'pnl-asc', label: '按盈利 · 升序', hint: '亏得多的排前面'},
+  {v: 'value-desc', label: '按价值 · 降序', hint: '仓位价值大的排前面'},
+  {v: 'value-asc', label: '按价值 · 升序', hint: '仓位价值小的排前面'}
+]
 
 /**
  * 点持仓里的**币种** → 上面那张 K 线切到这只币（用户 2026-10-06：「k线联动」
@@ -900,18 +919,21 @@ onMounted(async () => {
         {{ lev }}x
       </button>
       <!--
-        排序方式（用户 2026-10-06：「显示排序方式 点击切换 盈利/价值」）——
-        跟杠杆那颗同位置、同版式，只在「仓位」那一格出现：点一下在
-        「按未实现盈亏」和「按仓位价值」之间换，都是**从大到小**。
+        排序方式（用户 2026-10-06）——跟杠杆那颗同位置、同版式，只在「仓位」那一格出现。
+        点一下**从底部弹出**四选一（按价值 / 按盈利 × 升序 / 降序），
+        按钮上是箭头图标 + 当前这一种（「不再点击切换」）。
       -->
       <button
         v-else
         type="button"
         class="ghost tiny ord-sort"
-        :title="`排序方式：按${posSortText}（从大到小）—— 点一下换成另一种`"
-        @click="toggleSort"
+        :title="`排序方式：${posSortText} —— 点一下换一种`"
+        @click="sortOpen = true"
       >
-        按{{ posSortText }}
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ord-sort-ico">
+          <path d="M8 4v16M8 20l-3.4-3.4M8 20l3.4-3.4M16 20V4M16 4l-3.4 3.4M16 4l3.4 3.4" />
+        </svg>
+        {{ posSortText }}
       </button>
       <!--
         ⚠️ 真单章：**只在「配置 → 测试下单」关掉时出现**。
@@ -1261,6 +1283,35 @@ onMounted(async () => {
           </template>
           <template v-else> · 还没读到交易所当前的杠杆，下单前会先设成它</template>
         </p>
+      </section>
+    </Teleport>
+
+    <!-- 排序弹层：四选一（用户 2026-10-06：「点击底部弹窗可选择…升序降序」） -->
+    <Teleport to="body">
+      <div v-if="sortOpen" class="sheet-mask" @click="sortOpen = false" />
+      <section v-if="sortOpen" class="sheet" role="dialog" aria-label="排序方式">
+        <header class="sheet-head">
+          <b>排序方式</b>
+          <button type="button" class="ghost tiny" title="关掉" @click="sortOpen = false">
+            ✕
+          </button>
+        </header>
+        <div class="ord-sort-list">
+          <button
+            v-for="o in SORT_OPTIONS"
+            :key="o.v"
+            type="button"
+            class="ord-sort-item"
+            :class="{on: posSort === o.v}"
+            :title="o.hint"
+            @click="pickSort(o.v)"
+          >
+            <b>{{ o.label }}</b>
+            <em>{{ o.hint }}</em>
+            <span v-if="posSort === o.v" class="ord-sort-tick">✓</span>
+          </button>
+        </div>
+        <p class="sheet-foot">影响「仓位」那一格的持仓列表怎么排。</p>
       </section>
     </Teleport>
 

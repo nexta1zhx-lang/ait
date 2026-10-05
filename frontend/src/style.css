@@ -3352,6 +3352,37 @@ body.fixed-viewport .split {
   white-space: nowrap;
 }
 
+/*
+ * 左侧标签（仓位 / 挂单，2026-10-06）——
+ * 跟右边那套 `.level-labels` 同一套做法，只是贴左边缘：
+ * 容器铺满整块图、`pointer-events: none`（不吃手势，图照样能拖），
+ * 每行一个 `<span>`，`top` 由 JS 按 `priceToCoordinate()` 摆。
+ */
+.ord-labels {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 26;
+}
+
+.ord-labels span {
+  position: absolute;
+  left: 5px;
+  transform: translateY(-50%);
+  padding: 1px 6px;
+  border-radius: 3px;
+  /* 比底色实一点：它压在 K 线上 */
+  background: rgba(11, 15, 20, 0.82);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: var(--fw-bold);
+  white-space: nowrap;
+}
+
 /* 左上角信息栏（币安风格，悬停时更新） */
 .chart-info {
   position: absolute;
@@ -4475,15 +4506,76 @@ body.fixed-viewport .split {
 }
 
 /*
- * 「仓位」那一格顶栏那颗**排序方式**（用户 2026-10-06：「点击切换 盈利/价值」）——
+ * 「仓位」那一格顶栏那颗**排序方式**（用户 2026-10-06）——
  * 跟杠杆那颗同位置、同高度（`padding` / `font-size` 对齐，不然顶栏会高 1~2px，
- * 下面的 K 线跟着跳）。文字是中文，所以不套 mono 字体。
+ * 下面的 K 线跟着跳）。文字是中文，所以不套 mono 字体；图标是那对上下箭头。
  */
 .ord-head .ord-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 4px 9px;
   font-size: 11px;
   font-weight: var(--fw-mid);
   color: var(--text);
+}
+
+.ord-head .ord-sort-ico {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
+}
+
+/* 排序弹层里那四行：一行一条，选中那条高亮 */
+.ord-sort-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+
+.ord-sort-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  text-align: left;
+  font-weight: 400;
+}
+
+.ord-sort-item b {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: var(--fw-bold);
+}
+
+.ord-sort-item em {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.ord-sort-item.on {
+  border-color: var(--accent-line);
+  background: var(--blue-soft);
+}
+
+.ord-sort-tick {
+  flex: 0 0 auto;
+  color: var(--blue);
+  font-weight: var(--fw-bold);
 }
 
 .ord-head .ord-lev.set {

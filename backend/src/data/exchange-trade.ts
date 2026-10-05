@@ -861,8 +861,16 @@ export interface OpenOrderRow {
   /** 币安原始符号（BTCUSDT） */
   symbol: string
   side: 'buy' | 'sell'
-  /** 订单类型（`LIMIT` / `STOP_MARKET` …，界面上不翻译，照币安的原样） */
+  /**
+   * 币安原始订单类型（`LIMIT` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` …）。
+   *
+   * ⚠️ 取 `info.type` 而不是 ccxt 那个 `type`：ccxt 会把它**归一**成
+   *    `limit` / `market`，`STOP_MARKET` 和 `TAKE_PROFIT_MARKET` 到那儿就分不出来了
+   *    （K 线上那条线要按这个标「止损 / 止盈」）。
+   */
   type: string
+  /** 币安原始持仓方向（`LONG` / `SHORT` / `BOTH`）——配仓位算「这个单平的是哪条」 */
+  posSide: string
   /** 委托价（市价单没有，给 `null`） */
   price: number | null
   /** 触发价（止损 / 止盈那类条件单才有） */
@@ -901,7 +909,8 @@ export async function listOpenOrders(
       id,
       symbol: sym,
       side: String(o?.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy',
-      type: String(o?.type ?? '').toUpperCase(),
+      type: String(o?.info?.type ?? o?.type ?? '').toUpperCase(),
+      posSide: String(o?.info?.positionSide ?? 'BOTH').toUpperCase(),
       price: nullish(o?.price),
       stopPrice: nullish(o?.stopPrice),
       amount: n(o?.amount),

@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import * as LWC from 'lightweight-charts'
-import {fetchCandles, klineStream, type Candle, type LevelSR} from '../api'
+import {
+  fetchCandles,
+  klineStream,
+  type Candle,
+  type LevelSR,
+  type TradeOpenOrder,
+  type TradePositionRow
+} from '../api'
 import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
@@ -33,7 +40,8 @@ import {
   bjShort,
   bjTime,
   decimalsFor,
-  fmt
+  fmt,
+  usd
 } from '../format'
 
 /**
@@ -296,6 +304,8 @@ const legendEl = ref<HTMLElement | null>(null)
 
 const chartEl = ref<HTMLElement | null>(null)
 const levelHost = ref<HTMLElement | null>(null)
+/** 左侧标签容器（仓位 / 挂单那几枚） */
+const ordLabelHost = ref<HTMLElement | null>(null)
 const infoEl = ref<HTMLElement | null>(null)
 const deltaEl = ref<HTMLElement | null>(null)
 
@@ -488,7 +498,16 @@ function ensureChart(): boolean {
     borderUpColor: '#5eba89',
     borderDownColor: '#e35561',
     wickUpColor: '#5eba89',
-    wickDownColor: '#e35561'
+    wickDownColor: '#e35561',
+    /*
+     * 「当前价格」这条线（用户 2026-10-06：「当前价格…颜色为淡白色虚线」）——
+     * 它就是蜡烛系列**自带**的那条 last price 线（跟着最后一根的收盘价走、
+     * 右轴上也带数值），不用自己再画一条。默认它是「按涨跌染色 + 实线」，
+     * 这里改成淡白虚线：不跟多空绿红抢眼，只当「现价在哪」的参考。
+     */
+    priceLineColor: 'rgba(232,234,240,0.62)',
+    priceLineStyle: LWC.LineStyle.Dashed,
+    priceLineWidth: 1
   })
 
   const volume = chart.addSeries(LWC.HistogramSeries, {
@@ -664,38 +683,170 @@ function sameLevels(a: Levels, b: Levels): boolean {
  *
  * 用户：「配置界面可以配置订单设置，1.仓位 2.订单历史 3.仓位委托 4.强平价格」
  *      「是控制和 k 线联动的价格或历史是否显示在 k 线上」。
+ *      之后又定了线的样式（2026-10-06 晚）：
+ *        · 当前价格 —— **淡白色虚线**、贴 y 轴（就是蜡烛系列自带那条 last price 线）
+ *        · 仓位     —— **多绿 / 空红、实线**，左侧标签显示**盈利价值**
+ *        · 挂单     —— **多绿 / 空红虚线**，左侧标签显示**止损 / 止盈 + 预计收益 + 数量%**
  *
  * 四样**各画各的**，跟上面「压力 / 支撑」那两条线**分开存**（`orderLines`）——
- * 那两条是「按可见窗口现算」的、跟着平移每帧重画；这四条是账户数据，
+ * 那两条是「按可见窗口现算」的、跟着平移每帧重画；这几条是账户数据，
  * 15 秒才变一次。混在一个数组里，两边的「就地改价」逻辑会互相踩。
  *
- * 颜色特意避开图上已有的：压力橙 / 支撑青 / EMA 琥珀 / 蜡烛红绿 →
- * 开仓均价用**淡紫**、强平用**亮红**、委托用**蓝**。
+ * 颜色：仓位 / 挂单**按多空分绿红**（用户点名要的），跟蜡烛同一对绿红 ——
+ * 靠**线型**分开（仓位实线、挂单虚线、强平红虚线）；强平的红比仓位那根更扎眼。
  */
-const LINE_POSITION = '#b39ddb'
+/** 多（买）绿 / 空（卖）红 —— 跟蜡烛同一对色，全站「多绿空红」一套 */
+const SIDE_COLOR = {long: '#5eba89', short: '#e35561'} as const
+/** 强平：红虚线。⚠️ 比上面那个红**亮**，短仓的仓位线也是红的，别混 */
 const LINE_LIQ = '#ff5252'
-const LINE_ORDER = '#64b5f6'
+/** 当前价格线：淡白 */
+const LINE_LAST = 'rgba(232,234,240,0.62)'
 /** 成交点（买 / 卖）—— 比蜡烛亮一档，压在蜡烛里也找得着 */
 const MARKER_BUY = '#7ee787'
 const MARKER_SELL = '#ff7b72'
 
+/**
+ * 一条要画的价格线（仓位 / 强平 / 挂单）。
+ *
+ * `label` 是**左侧**那枚标签的文字（`null` = 这条线的左边不放东西）；
+ * `labelTitle` 是它的 `title`（手指按住 / 悬停看细节）。
+ */
+interface OrderLine {
+  p: number
+  color: string
+  /** 右侧价格轴上的小字 */
+  title: string
+  /** 实线还是虚线 */
+  dashed: boolean
+  /** 左侧标签（仓位 = 盈利价值；挂单 = 止损/止盈 + 预计收益 + 数量%） */
+  label: string | null
+  labelTitle: string
+  /** 左侧标签的颜色（不填跟线同色） */
+  labelColor?: string
+}
+
 let orderLines: any[] = []
 let orderMarkers: ReturnType<typeof LWC.createSeriesMarkers> | null = null
 
+/** 涨跌色的 CSS 变量值（跟 `--ok` / `--bad` 同一对） */
+function sideColor(side: 'long' | 'short'): string {
+  return SIDE_COLOR[side]
+}
+
+/** `+$0.52` / `−$0.12`（带正负号和 $，跟「仓位」那一格一个写法） */
+function money(v: number): string {
+  return `${v >= 0 ? '+' : '−'}${usd(Math.abs(v))}`
+}
+
+/**
+ * 这条挂单是**止损**、**止盈**还是普通委托。
+ *
+ * ⚠️ 只能看币安原始类型（`info.type`）：ccxt 会把 `STOP_MARKET` /
+ *    `TAKE_PROFIT_MARKET` 都归一成 `market`，到那儿就分不出来了（见后端 `OpenOrderRow`）。
+ */
+function orderKind(o: TradeOpenOrder): 'stop' | 'profit' | 'plain' {
+  const t = String(o.type).toUpperCase()
+  if (t.includes('TAKE_PROFIT')) return 'profit'
+  if (t.includes('STOP')) return 'stop'
+  return 'plain'
+}
+
+/**
+ * 一张挂单「平的是哪条持仓」。
+ *
+ * 双向持仓模式下币安直接告诉你（`positionSide`）；单向模式（`BOTH`）只能按方向猜：
+ * 卖出单平的是多单、买入单平的是空单。
+ */
+function orderTargetPos(o: TradeOpenOrder): TradePositionRow | null {
+  const list = overlayPositions.value
+  if (!list.length) return null
+  if (o.posSide === 'LONG') return list.find(p => p.side === 'long') ?? null
+  if (o.posSide === 'SHORT') return list.find(p => p.side === 'short') ?? null
+  const want = o.side === 'sell' ? 'long' : 'short'
+  return list.find(p => p.side === want) ?? null
+}
+
+/**
+ * 一个挂单的左侧标签：`止盈 +$0.30 · 50%`（止损 / 委托同理）。
+ *
+ * · **预计收益** = 这笔单按它的价成交后的盈亏（`(价 − 开仓均价) × 数量`，多头这么算，
+ *    空头反过来）—— 只有**减仓 / 平仓单**才有意义，开仓单（加仓）不写收益
+ * · **数量百分比** = 这一单的数量 ÷ 那条持仓的数量（平掉多少比例的仓位）
+ * ⚠️ 不含手续费（两张单两边都要吃一次 taker/maker），所以叫「预计」。
+ */
+function orderLabel(o: TradeOpenOrder, px: number): {text: string; title: string; color: string} {
+  const pos = orderTargetPos(o)
+  const kind = orderKind(o)
+  const name = kind === 'profit' ? '止盈' : kind === 'stop' ? '止损' : '委托'
+  const parts = [name]
+  const notes: string[] = [`${name} ${fmt(px)}`, `数量 ${fmt(o.amount)}`]
+  let color: string
+  /*
+   * 这一单是**平仓**（那才有「预计收益」）：
+   *   卖单打多头、买单打空头 = 平仓；反过来的那两种是加仓。
+   */
+  const closing = !!pos && (o.side === 'sell') === (pos.side === 'long')
+  if (pos && (o.reduceOnly || closing)) {
+    const diff = o.side === 'sell' ? px - pos.entryPrice : pos.entryPrice - px
+    const pnl = diff * o.amount
+    parts.push(money(pnl))
+    notes.push(`预计收益 ${money(pnl)}（按开仓均价 ${fmt(pos.entryPrice)} 算，不含手续费）`)
+    if (pos.amount > 0) {
+      const pct = Math.min(100, (o.amount / pos.amount) * 100)
+      parts.push(`${pct.toFixed(0)}%`)
+      notes.push(`平掉这条持仓的 ${pct.toFixed(1)}%`)
+    }
+    color = pnl >= 0 ? '#5eba89' : '#e35561'
+  } else {
+    notes.push('这一单是加仓（不是平仓），不结算盈亏')
+    color = sideColor(o.side === 'buy' ? 'long' : 'short')
+  }
+  return {text: parts.join(' '), title: notes.join(' · '), color}
+}
+
 /** 这张图现在该画哪几条线（数据不是这个币的一律不画） */
-function orderLineList(): {p: number; color: string; title: string}[] {
-  const out: {p: number; color: string; title: string}[] = []
+function orderLineList(): OrderLine[] {
+  const out: OrderLine[] = []
   if (!overlaySymbol.value || overlaySymbol.value !== baseToExSymbol(props.symbol)) {
     return out
   }
   for (const p of overlayPositions.value) {
-    const who = p.side === 'long' ? '多' : '空'
+    const long = p.side === 'long'
+    const who = long ? '多' : '空'
     if (chartShowPosition.value && p.entryPrice > 0) {
-      out.push({p: p.entryPrice, color: LINE_POSITION, title: `开仓均价 ${who}`})
+      /*
+       * 仓位：**多绿空红、实线**（用户 2026-10-06：「空单红色，多单绿色 实线」）。
+       * 左边那枚标签显示的是**这条仓位现在的盈亏**（「标签放左侧显示盈利价值」）——
+       * 不是开仓价（价格在右侧轴上已经有了）。
+       */
+      const pnl = p.unrealized
+      const pct = p.entryPrice > 0 && p.amount > 0
+        ? (pnl / (p.entryPrice * p.amount)) * 100
+        : null
+      out.push({
+        p: p.entryPrice,
+        color: sideColor(p.side),
+        title: `开仓均价 ${who}`,
+        dashed: false,
+        label: `${who} ${money(pnl)}`,
+        labelColor: pnl >= 0 ? '#5eba89' : '#e35561',
+        labelTitle:
+          `开仓均价 ${fmt(p.entryPrice)} · ${who}单\n` +
+          `未实现盈亏 ${money(pnl)}` +
+          (pct === null ? '' : `（${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%）`) +
+          `\n仓位价值 ${usd(p.notional)} · 数量 ${fmt(p.amount)} · ${p.leverage}x`
+      })
     }
     /* 强平价只有币安真给了才画（逐仓 / 没持仓时是 null） */
     if (chartShowLiq.value && p.liquidationPrice && p.liquidationPrice > 0) {
-      out.push({p: p.liquidationPrice, color: LINE_LIQ, title: `强平 ${who}`})
+      out.push({
+        p: p.liquidationPrice,
+        color: LINE_LIQ,
+        title: `强平 ${who}`,
+        dashed: true,
+        label: null,
+        labelTitle: ''
+      })
     }
   }
   if (chartShowOrders.value) {
@@ -703,10 +854,16 @@ function orderLineList(): {p: number; color: string; title: string}[] {
       /* 市价 / 条件单没有委托价 → 退回触发价；两个都没有就不画 */
       const px = o.price ?? o.stopPrice
       if (!px || px <= 0) continue
+      const lab = orderLabel(o, px)
       out.push({
         p: px,
-        color: LINE_ORDER,
-        title: o.reduceOnly ? '平仓委托' : '开仓委托'
+        /* 挂单：**多（买）绿、空（卖）红，虚线**（用户 2026-10-06） */
+        color: sideColor(o.side === 'buy' ? 'long' : 'short'),
+        title: `${lab.text.split(' ')[0]} ${o.side === 'buy' ? '多' : '空'}`,
+        dashed: true,
+        label: lab.text,
+        labelColor: lab.color,
+        labelTitle: lab.title
       })
     }
   }
@@ -789,6 +946,9 @@ function dropOrderLines(): void {
   }
   orderLines = []
   orderMarkers?.setMarkers([])
+  /* 标签也一起清掉（这里是「什么都不画」，不是重算） */
+  if (ordLabelHost.value) ordLabelHost.value.innerHTML = ''
+  ordLabels = []
 }
 
 /**
@@ -800,10 +960,12 @@ function renderOrderLines(): void {
   const list = orderLineList()
   if (orderLines.length === list.length) {
     for (let i = 0; i < list.length; i++) {
+      const lv = list[i]!
       orderLines[i]?.applyOptions({
-        price: list[i]!.p,
-        color: list[i]!.color,
-        title: list[i]!.title
+        price: lv.p,
+        color: lv.color,
+        title: lv.title,
+        lineStyle: lv.dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid
       })
     }
   } else {
@@ -819,14 +981,69 @@ function renderOrderLines(): void {
         price: lv.p,
         color: lv.color,
         lineWidth: 1,
-        /* 订单那几条一律**虚线**：跟压力/支撑一样是参考位，不是价格本身 */
-        lineStyle: LWC.LineStyle.Dashed,
+        lineStyle: lv.dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
         axisLabelVisible: true,
         title: lv.title
       })
     )
   }
+  renderOrdLabels()
   renderOrderMarkers()
+}
+
+/* ---------------- 左侧标签（仓位 / 挂单） ----------------
+ *
+ * 用户 2026-10-06：「仓位…标签放左侧显示盈利价值」「挂单…左侧显示止损或者止盈
+ * 加预计止损止盈后收益 加止盈数量百分比」——
+ * 这几样都挂在**图左边**（右侧轴已经被价格占了，压力/支撑的百分比也在那边）。
+ *
+ * 实现跟右边那套百分比标签一模一样：一个绝对定位的容器 + 每行一个 `<span>`，
+ * `priceToCoordinate()` 把价位换成 y 像素。⚠️ 尽量**复用** `<span>`（平移时每帧都
+ * 要摆位置），只在「条数变了」时重建。
+ */
+let ordLabels: {price: number; color: string; el: HTMLElement}[] = []
+
+function renderOrdLabels(): void {
+  const host = ordLabelHost.value
+  if (!host) return
+  const list = refs ? orderLineList().filter(l => l.label) : []
+  if (ordLabels.length !== list.length) {
+    host.innerHTML = ''
+    ordLabels = list.map(lv => {
+      const el = document.createElement('span')
+      el.style.color = lv.labelColor ?? lv.color
+      host.appendChild(el)
+      return {price: lv.p, color: lv.labelColor ?? lv.color, el}
+    })
+  }
+  for (let i = 0; i < list.length; i++) {
+    const lv = list[i]!
+    const item = ordLabels[i]!
+    item.price = lv.p
+    const color = lv.labelColor ?? lv.color
+    const text = lv.label!
+    if (item.el.textContent !== text) item.el.textContent = text
+    if (item.color !== color) {
+      item.color = color
+      item.el.style.color = color
+    }
+    if (item.el.title !== lv.labelTitle) item.el.title = lv.labelTitle
+  }
+  positionOrdLabels()
+}
+
+/** 平移 / 缩放 / 价格轴动过之后，把左侧标签摆到对应的 y 上 */
+function positionOrdLabels(): void {
+  if (!refs) return
+  for (const item of ordLabels) {
+    const y = refs.candle.priceToCoordinate(item.price)
+    if (y === null || y === undefined || !Number.isFinite(y)) {
+      item.el.style.display = 'none'
+      continue
+    }
+    item.el.style.display = ''
+    item.el.style.top = y + 'px'
+  }
 }
 
 /* ---------------- 订单信息：什么时候去拉 ---------------- */
@@ -1086,6 +1303,7 @@ function positionLabels() {
     item.el.style.display = ''
     item.el.style.top = y + 'px'
   }
+  positionOrdLabels()
   // 画好的范围框要跟着视图走
   drawSelection()
 }
@@ -2299,6 +2517,7 @@ onBeforeUnmount(() => {
   /* ⚠️ 这两个引用的是**已经拆掉的图**，不清掉的话下次挂载会往死对象上 setMarkers */
   orderLines = []
   orderMarkers = null
+  ordLabels = []
 })
 </script>
 
@@ -2341,6 +2560,8 @@ onBeforeUnmount(() => {
     <div ref="wrapEl" class="chart-wrap" data-no-swipe :class="{fading}">
       <div ref="chartEl" class="chart"></div>
       <div ref="levelHost" class="level-labels"></div>
+      <!-- 左侧标签：仓位的盈亏、挂单的止盈/止损 + 预计收益 + 数量% -->
+      <div ref="ordLabelHost" class="ord-labels"></div>
       <div ref="infoEl" class="chart-info"></div>
       <div ref="deltaEl" class="cursor-delta hidden"></div>
 
