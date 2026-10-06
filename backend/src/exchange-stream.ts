@@ -12,11 +12,12 @@
  *      （**必须带 `/private`**：少了它连接照样 101 + 回 ping，但一个业务帧都不推，
  *        见 `streamUrl()` 的注释）。
  *      listenKey 的增删改用 ccxt 的隐式方法（已验证可用），WS 用 `ws` 包。
- *   ② **WS 不能替代 REST**：断线期间事件会丢，而这是钱 ⇒
- *      · 连上（含重连成功）后立刻 REST 拉一次对账；
- *      · 另外每 5 分钟还有一次全量采样（`startSnapshotSampler`）——**那次就是兜底对账**，
- *        所以不用再单独搞一个 15 分钟的对账任务。
- *   ③ **C2C 钱包没有 WS 事件**（用户数据流只覆盖合约）⇒ C2C 只能靠 5 分钟轮询。
+ *   ② **WS 负责实时，REST 只管兜底**（2026-10-06 第二轮订正，见 docs 第 27 节）：
+ *      · 连上（含重连成功）后立刻 REST 拉一次对账 —— **这是真正确定的补账点**（断线期间的事件币安不补发）；
+ *      · 平时成交 / 挂单 / 账本 / 快照**各 1 小时**一轮（空转 2 小时、睡着 4 小时），
+ *        只当「防我们自己出 bug」的安全网；余额采样守 1 小时（曲线要连续）。
+ *      · ⚠️ 流降级时自动退回正常档（见 `tierNow`）。
+ *   ③ **C2C 钱包没有 WS 事件**（用户数据流只覆盖合约）⇒ C2C 只能靠那条 1 小时采样。
  *
  * ⚠️ 单实例假设：多副本会重复订阅同一个 key（要分布式锁 / 指定主副本），见 docs。
  */
@@ -99,8 +100,12 @@ const KEEPALIVE_MS = 25 * 60 * 1000
  *    一秒来 5 条 `ACCOUNT_UPDATE` 就是 5 发 REST（每发 21 权重）。
  *    现在事件里带的数据**当场就用**（见 `applyAccountUpdate`），REST 只补它没有的
  *    汇总口径，并且**真的按这个间隔拦请求**。
+ *
+ * ★ 2026-10-06 第三轮（路径修好之后，事件真的会来了）：20 秒 → **180 秒**。
+ *    余额 / 持仓在事件里就更新完了（0 权重），快照只为「可用余额 / 保证金余额 /
+ *    资产明细 / C2C / 现货」这些**事件里没有的汇总字段**，以及曲线 —— 三分钟一次足够。
  */
-const WS_SNAPSHOT_GAP_SEC = 20
+const WS_SNAPSHOT_GAP_SEC = 180
 /**
  * **兜底的基准节奏**（有仓 / 有单 / 刚有动静的账户）。
  *
@@ -122,9 +127,23 @@ const WS_SNAPSHOT_GAP_SEC = 20
  *   · **挂单 10 分钟** —— 40 权重是全场最贵的一发；挂单的**变动** WS 会推，这里纯兜底；
  *   · **钱账本 30 分钟** —— 资金费 8 小时才结一次，勤也没用。
  */
-const FILL_RECONCILE_MS = 5 * 60 * 1000
-const ORDERS_RECONCILE_MS = 10 * 60 * 1000
-const INCOME_RECONCILE_MS = 30 * 60 * 1000
+/*
+ * ★★ 2026-10-06 第二轮（用户数据流的路径修好之后）用户拍的口径：
+ *   「更激进：前三个都拉到 1 小时，只留『重连 + 写操作 + 页面打开』」。
+ *
+ * 为什么敢：
+ *   · 实时数据现在**真的走 WS**（`/private/ws/`，成交 18 毫秒落库，实测）；
+ *   · 历史上那些「WS 丢事件」的实证，其实全是**路径错**（见 docs 第 26 节）——
+ *     「偶发丢帧」很可能根本不存在；
+ *   · 真正确定的丢事件场景只有**断线**，而 `reconcile('ws')` 在重连后立刻补一次。
+ *
+ * ⚠️ 所以这三条只当「防我们自己出 bug 的安全网」，不再是实时性的来源。
+ * ⚠️ 但**余额曲线**（`sample`）不跟着拉长：C2C 钱包没有 WS 事件、汇总口径也只有 REST 有，
+ *    曲线稀疏了就不好看了（用户明确要「余额要管、曲线不能断」）⇒ 睡觉的账户也照 1 小时采。
+ */
+const FILL_RECONCILE_MS = 60 * 60 * 1000
+const ORDERS_RECONCILE_MS = 60 * 60 * 1000
+const INCOME_RECONCILE_MS = 60 * 60 * 1000
 /**
  * 打开页面时「数据旧到这个程度」就顺手补一次（用户：「只有没数据才请求」）。
  *
@@ -160,11 +179,11 @@ const FILL_SAFETY_MS = 24 * 3600 * 1000
  * ⚠️ **私有 WS 和 listenKey 照旧连着**，所以「突然来一张新挂单 / 新成交」还是秒级
  *    （币安会推 `ORDER_TRADE_UPDATE`）—— 降频降的是**对账**，不是实时性。
  */
-const ORDERS_RECONCILE_MS_IDLE = 30 * 60 * 1000
-const INCOME_RECONCILE_MS_IDLE = 60 * 60 * 1000
-const FILL_RECONCILE_MS_IDLE = 10 * 60 * 1000
+const ORDERS_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
+const INCOME_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
+const FILL_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
 /** 空转时全量快照的间隔（它是**钱包 / C2C 唯一的取数路**，但空账户的钱不会变） */
-const SAMPLE_IDLE_MS = 30 * 60 * 1000
+const SAMPLE_IDLE_MS = 60 * 60 * 1000
 /** 多久没动静才算「空转」（刚下过单 / 刚平过仓的不算） */
 const IDLE_MS = 10 * 60 * 1000
 /**
@@ -421,7 +440,7 @@ export function subscribeExchange(
    *   （见 `KeyStream.wake`）。放在**加完订阅**之后：唤醒里会 `emit` 快照，
    *   这一条订阅得先在里面，不然刚连上这一下看不到新数。
    */
-  streams.get(id)?.wake('有人打开页面')
+  streams.get(id)?.wakeOnView('有人打开页面')
   return () => {
     bucket.delete(fn)
     if (!bucket.size) listenerSets.delete(id)
@@ -467,9 +486,10 @@ const TIER_GAPS: Record<
     sample: SAMPLE_IDLE_MS
   },
   asleep: {
-    fill: ASLEEP_MS,
-    orders: ASLEEP_MS,
-    income: ASLEEP_MS,
+    fill: 4 * 60 * 60 * 1000,
+    orders: 4 * 60 * 60 * 1000,
+    income: 4 * 60 * 60 * 1000,
+    /* ⚠️ 余额**不跟着睡觉**：曲线要连续（用户明确要求），而且 C2C 只有 REST 有 */
     sample: ASLEEP_MS
   }
 }
@@ -1132,6 +1152,15 @@ class KeyStream {
    * ⚠️ **不看有没有人在线** —— 见 `Tier` 那段（用户 2026-10-06 明确否掉在线档）。
    */
   private tierNow(): Tier {
+    /*
+     * ★ 流降级（`deaf`：连 ping 都收不到）时必须用**正常档**兜底。
+     *
+     * ⚠️ 为什么：低频档的前提是「事件由 WS 实时维护，对账只是安全网」。
+     *    流一哑，这个前提就没了 —— 而且哑的时候正好是「再没有事件来告诉我们账户有动静」，
+     *    `lastActivityAt` 也不会更新 ⇒ 会一直停在空转/沉睡档，对账拉到 4 小时一轮，
+     *    账本能滞后 4 小时。这条耦合别拆。
+     */
+    if (this.deaf) return 'normal'
     if (!this.isIdle()) return 'normal'
     return Date.now() - this.lastActivityAt > HIBERNATE_MS ? 'asleep' : 'idle'
   }
@@ -1142,9 +1171,10 @@ class KeyStream {
     const from = this.tier
     this.tier = tier
     const text: Record<Tier, string> = {
-      normal: '正常档 → 成交 5 分钟 / 挂单 10 分钟 / 账本 30 分钟 / 快照 5 分钟',
-      idle: '空转（无仓无单 10 分钟没动静）→ 成交 10 分钟 / 挂单 30 分钟 / 账本 60 分钟 / 快照 30 分钟',
-      asleep: '睡着（空转 2 小时）→ 成交/挂单/账本全 1 小时，余额照 1 小时采（曲线不断）'
+      normal:
+        '正常档 → 实时靠 WS 推送；对账只当安全网：成交/挂单/账本全 1 小时，余额 1 小时（曲线）',
+      idle: '空转（无仓无单 10 分钟没动静）→ 对账全 2 小时，余额照 1 小时采',
+      asleep: '睡着（空转 2 小时）→ 对账全 4 小时，余额照 1 小时采（曲线不断）'
     }
     console.log(`${this.tag} 档位 ${from} → ${tier}：${text[tier]}`)
   }
@@ -1168,6 +1198,7 @@ class KeyStream {
       skipOrders?: boolean
       skipSnapshot?: boolean
       skipIncome?: boolean
+      skipFills?: boolean
       force?: boolean
     } = {}
   ): void {
@@ -1175,7 +1206,8 @@ class KeyStream {
       skipOrders = false,
       force = false,
       skipSnapshot = false,
-      skipIncome = false
+      skipIncome = false,
+      skipFills = false
     } = opts
     this.lastActivityAt = Date.now()
     const now = Date.now()
@@ -1210,7 +1242,7 @@ class KeyStream {
         ? `${this.tag} 醒（${reason}）：补一轮沉睡期间可能漏掉的账`
         : `${this.tag} 补账（${reason}${force ? '·无视节流' : '·数据旧了'}）`
     )
-    this.runWake({skipOrders, skipSnapshot, skipIncome, force})
+    this.runWake({skipOrders, skipSnapshot, skipIncome, skipFills, force})
   }
 
   /**
@@ -1222,6 +1254,7 @@ class KeyStream {
     skipOrders: boolean
     skipSnapshot: boolean
     skipIncome: boolean
+    skipFills: boolean
     force: boolean
   }): void {
     this.wakeBusy = true
@@ -1239,8 +1272,11 @@ class KeyStream {
         await this.snapshot('poll', o.force ? 0 : WS_SNAPSHOT_GAP_SEC)
       }
       this.lastSampleAt = Date.now()
-      this.lastFillReconcileAt = Date.now()
-      await this.backfillFills()
+      /* `skipFills`：页面打开那条轻量路 —— 成交由 WS 实时进账本，不用再扫交易所 */
+      if (!o.skipFills) {
+        this.lastFillReconcileAt = Date.now()
+        await this.backfillFills()
+      }
       /*
        * 写操作这条路（`skipIncome`）**不再单独跑 30 权重那一发**：成交对账
        * （`backfillFills` → `saveTrade`）已经把这一笔的已实现盈亏 / 手续费写进钱账本了
@@ -1267,6 +1303,7 @@ class KeyStream {
           skipOrders: true,
           skipSnapshot: false,
           skipIncome: true,
+          skipFills: false,
           force: true
         })
       })
@@ -1297,6 +1334,25 @@ class KeyStream {
     } catch {
       /* 读不到就当「刚有动静」，不影响正确性 */
     }
+  }
+
+  /**
+   * 有人打开页面 ⇒ 按需补一次（**轻量版**）。
+   *
+   * ★ 2026-10-06（WS 路径修好之后）：余额 / 持仓 / 成交 / 挂单现在都由事件**实时**维护
+   *   （余额和持仓甚至 0 权重就地更新，见 `applyAccountUpdate`）⇒ 打开页面时
+   *   **只有「汇总口径 + 资产曲线」需要 REST**。
+   *   原来这里跑的是全量（快照 25 + 成交 ≤40 + 账本 30 + 挂单 40 ≈ 100+ 权重），
+   *   一台机器上开几个页面就能叠出好几轮（启动那一刻实测 5 轮，直接把 IP 打进 `-1003`）。
+   *
+   * ⚠️ **流降级（`deaf`）时退回全量** —— 那时候事件可能真丢了，页面打开正是补账的机会。
+   */
+  wakeOnView(reason: string): void {
+    if (this.deaf) {
+      this.wake(`${reason}·流降级`)
+      return
+    }
+    this.wake(reason, {skipOrders: true, skipIncome: true, skipFills: true})
   }
 
   /** 给写操作用（`reconcileKeyOrders`）—— 同一个动作，只是对外的口子 */
