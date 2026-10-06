@@ -396,6 +396,18 @@ export interface PositionRow {
   unrealizedPnl: number
   /** 相对保证金的收益率 %（ccxt 给） */
   percentage: number | null
+  /**
+   * **维持保证金**（币安 `maintenanceMargin`）—— 爆仓线就是它占满保证金余额。
+   * 2026-10-06 加：用户要「MM 合约保证金率」，就是 Σ 这个 ÷ 保证金余额。
+   */
+  maintMargin: number
+  /**
+   * **维持保证金率**（币安 `maintenanceMarginPercentage`，如 0.004 = 0.4%）。
+   * ⚠️ 有它才能**本地重算**：价格一动，名义价值就动，维持保证金跟着动 ⇒
+   *    保证金率能像币安界面那样随行情实时变，而不是等下一次 REST 快照。
+   * 它是**分档**的（仓位越大费率越高），所以只在 REST 快照里更新。
+   */
+  mmr: number
 }
 
 /*
@@ -421,7 +433,9 @@ export function mapPosition(p: any): PositionRow {
     liquidationPrice: nullish(p?.liquidationPrice),
     leverage: n(p?.leverage),
     unrealizedPnl: n(p?.unrealizedPnl ?? p?.info?.unRealizedProfit),
-    percentage: nullish(p?.percentage)
+    percentage: nullish(p?.percentage),
+    maintMargin: n(p?.maintenanceMargin ?? p?.info?.maintMargin),
+    mmr: n(p?.maintenanceMarginPercentage ?? p?.info?.maintenanceMarginPercentage)
   }
 }
 

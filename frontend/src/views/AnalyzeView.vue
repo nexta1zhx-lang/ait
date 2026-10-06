@@ -31,6 +31,7 @@ import CollectForm from '../comps/CollectForm.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
 import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
+import MarginRateBadge from '../comps/MarginRateBadge.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import {showToast} from '../toast'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
@@ -1082,6 +1083,12 @@ const heatRows = computed(() => {
                     ✕
                   </button>
                 </template>
+                <!--
+                  MM 合约保证金率（用户 2026-10-06：「再配置旁加个显示 mm 合约保证金率」）——
+                  摆在「配置」这颗齿轮**左边**。数据来自共享持仓 store（跟下单模块同一份），
+                  随标记价实时重算；没有仓位时它自己不渲染。
+                -->
+                <MarginRateBadge />
                 <!-- 最右边：配置（点开从底部弹出来） -->
                 <button
                   class="ghost tiny tk-cfg"

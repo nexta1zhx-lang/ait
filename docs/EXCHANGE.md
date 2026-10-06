@@ -1444,3 +1444,59 @@ if (e === 'ACCOUNT_UPDATE') {
 
 设计如此：**本地负责「立刻对」，REST 负责「权威」**。资产那条「几分钟前」的标签
 也就是这么来的 —— 现在成交 / 划转 / 资金费能让它当帧刷新，而不用等一个来回。
+
+---
+
+## 21. 「MM 合约保证金率」挂在配置齿轮旁边（2026-10-06）
+
+用户：「再配置旁加个显示 mm 合约保证金率」→「样式改一下根据风险来变色」。
+
+### 口径（跟币安界面同一个）
+
+```
+保证金率 = Σ 维持保证金 ÷ 保证金余额          （到 100% 就是强平）
+         = Σ(名义价值 × 该币档位费率) ÷ (钱包 + 浮盈)
+```
+
+实测这一套账户：`维持保证金 1.1154 ÷ 保证金余额 9.4902 = 11.65%`
+（RLC 名义 20.1、费率 1.5%；**AIN 费率 5%**、1000BONK 1%）。
+
+### 数据链路（关键：**本地重算，所以是实时的**）
+
+| 层 | 改动 |
+|---|---|
+| `exchange-account.ts` `mapPosition` | 多带 `maintenanceMargin` / `maintenanceMarginPercentage`（ccxt 的 `positionRisk` 里本来就有） |
+| `exchange-overview.ts` | 持仓带 `maintMargin`/`mmr`；账户带 `maintMargin`（`totalMaintMargin`，缺了按持仓求和） |
+| **`position-cache.withMark`** | **`maintMargin = 名义价值 × mmr`** —— 价格一动就重算 ⇒ 保证金率跟着行情走，不用等 REST |
+| `position-cache.statsOf` | 统计里多一个 `maintMargin`（Σ），随 SSE `positions` 增量一起推 |
+| `db/exchange-store.latestSnapshot` | 库里没单开列（持仓那份 jsonb 里每条都带着），读的时候按持仓求和 |
+| `/api/exchange/trade/positions` | 顺带回 `wallet/unrealized/margin/maintMargin`（兜底路径也要能显示） |
+| `frontend/positions.ts` | store 存下这四个数，导出 `accountRiskOf(keyId)` |
+| `frontend/comps/MarginRateBadge.vue`（新） | 齿轮左边那枚标签 |
+
+### 颜色：按风险四档（用户：「根据风险来变色」）
+
+| 档 | 阈值 | 颜色 | 实测取到的值 |
+|---|---|---|---|
+| 正常 | < 30% | 绿（`--ok`） | `rgb(94,186,137)` |
+| 注意 | 30~60% | 黄（`--warn`） | `rgb(240,180,41)` |
+| 偏高 | 60~85% | 橙（黄红之间） | `color(srgb 0.913 0.501 0.282)` |
+| 危险 | ≥ 85% | 红（`--bad`）+ 轻微呼吸（`prefers-reduced-motion` 下不闪） | `rgb(227,85,97)` |
+
+标签底下还有一根**细条**，长度就是保证金率本身（离强平还剩多少一眼看出）。
+`title` 里写着公式和两个原始数（`1.1154 ÷ 9.4902 = 11.65%`）。
+
+⚠️ 踩到的坑：绑定**必须跟着 `tradeKey` 走**（`watch(..., {immediate: true})`）——
+Key 列表是异步来的，`onMounted` 那一刻 `tradeKey` 还是 `null`，只绑一次就永远没数据。
+另外 `watch` 回调里用到的 `tick` 必须先声明（我第一版写在后面 ⇒ TDZ，Vue 只在
+console 报一行 `Unhandled error during execution of watcher callback`，标签干脆不出现）。
+
+### 实测
+
+```
+MM11.65%   class="mm lv1"   绿
+title: MM 合约保证金率（正常）= 维持保证金 ÷ 保证金余额
+       维持保证金 1.1056 ÷ 保证金余额 9.4902 = 11.65%
+       到 100% 就是强平。随标记价实时重算，不用等刷新。
+12 秒内 8 次采样：11.65% → 11.61%（跟着标记价在动）
+```

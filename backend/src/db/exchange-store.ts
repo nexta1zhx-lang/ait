@@ -508,6 +508,14 @@ export async function latestSnapshot(
   )
   const longCount = positions.filter(p => p.side !== 'short').length
 
+  /*
+   * 总维持保证金：库里**没有单独一列**（持仓那份 jsonb 里每条都带着），
+   * 所以读的时候按持仓加起来 —— 跟写库时 `fetchExchangeOverview` 的口径一致。
+   * ⚠️ 这个改动**之前**存的老行没有 `maintMargin` 字段 ⇒ 和为 0 ⇒ 前端那枚
+   *    「MM」标签会先不显示，下一次采样就正常了（比显示一个假的 0% 强）。
+   */
+  const maintMargin = positions.reduce((sum, p) => sum + (p.maintMargin || 0), 0)
+
   const overview: ExchangeOverview = {
     // account 由调用方用 key 补上（库里只存 key_id，不存名字这类展示字段）
     account: {exchange: '', name: '', sandbox: false, marketType: 'swap'},
@@ -518,6 +526,7 @@ export async function latestSnapshot(
       margin: num(row.margin),
       available: num(row.available),
       used: r8(Math.max(num(row.margin) - num(row.available), 0)),
+      maintMargin: r8(maintMargin),
       assets: (row.assets ?? []) as ExchangeOverview['futures']['assets'],
       positions
     },

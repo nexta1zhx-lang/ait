@@ -722,6 +722,10 @@ export interface FuturesPosition {
   unrealizedPnl: number
   /** ROE %（相对保证金） */
   percentage: number | null
+  /** 维持保证金（USDT）—— 2026-10-06 加，账户级「MM 保证金率」的分子 */
+  maintMargin?: number
+  /** 维持保证金率（0.004 = 0.4%），前端按它随标记价重算 */
+  mmr?: number
   /**
    * **币安原始符号**（`BTCUSDT`）—— 2026-10-06 改造 P1 加。
    *
@@ -980,6 +984,12 @@ export interface PositionsPatch {
     shortCount: number
     notional: number
     unrealized: number
+    /**
+     * **Σ 维持保证金**（2026-10-06 加，用户要「MM 合约保证金率」）：
+     * 保证金率 = 这个数 ÷ `margin`，**到 100% 就是强平**。
+     * 后端随标记价本地重算过 ⇒ 它一秒都在动，不用等 REST 快照。
+     */
+    maintMargin?: number
   }
   positions: FuturesPosition[]
 }
@@ -1326,7 +1336,17 @@ export const closeTradePositions = (
 
 /** 账户里**所有**持仓（面板「仓位」那一格列的列表） */
 export const fetchTradePositions = (id?: number, fresh = false) =>
-  get<{ok: boolean; positions?: TradePositionRow[]; error: string | null}>(
+  get<{
+    ok: boolean
+    positions?: TradePositionRow[]
+    /** 账户级那几个数（算「MM 保证金率」要用）；没有常驻流时是 null */
+    wallet?: number | null
+    unrealized?: number | null
+    margin?: number | null
+    maintMargin?: number | null
+    live?: boolean
+    error: string | null
+  }>(
     `/api/exchange/trade/positions${id ? `?id=${id}` : ''}` +
       (fresh ? `${id ? '&' : '?'}fresh=1` : '')
   )

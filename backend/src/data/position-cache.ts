@@ -33,7 +33,13 @@ import {takeWeight} from '../util/rate-budget'
 import type {ExchangeCredentials} from './exchange-account'
 import type {ExchangeOverview, FuturesPosition as OverviewPosition} from './exchange-overview'
 
-type Stats = ExchangeOverview['stats']
+/**
+ * 前端拿到的统计口径。
+ * ⚠️ 在 `ExchangeOverview['stats']` 基础上**多一个 `maintMargin`** ——
+ *    它是**实时**算出来的（Σ 持仓的维持保证金，随标记价动），
+ *    而总览那条 REST 路径上的 `futures.maintMargin` 是账户级汇总口径。
+ */
+type Stats = ExchangeOverview['stats'] & {maintMargin: number}
 
 /** 一条持仓：ccxt 统一符号（给板子）+ 币安原始符号（给 K 线叠加 / 下单页） */
 export interface LivePosition extends OverviewPosition {
@@ -141,7 +147,14 @@ export function withMark<T extends OverviewPosition>(
     markPrice: mark,
     unrealizedPnl: r8(unrealized),
     notional: r8(notional),
-    percentage: margin > 0 ? r8((unrealized / margin) * 100) : p.percentage
+    percentage: margin > 0 ? r8((unrealized / margin) * 100) : p.percentage,
+    /*
+     * ★ 维持保证金**跟着名义价值走**（2026-10-06，为「MM 保证金率」加的）：
+     *   币安那个 `maintenanceMargin` 就是 `名义价值 × 档位费率`，价格一动它就动。
+     *   费率（`mmr`）只在 REST 快照里更新，所以这里用它本地重算 ——
+     *   于是账户保证金率能像币安界面那样**随行情实时变**，而不是等下一次采样。
+     */
+    maintMargin: p.mmr > 0 ? r8(notional * p.mmr) : p.maintMargin
   }
 }
 
@@ -149,16 +162,19 @@ function statsOf(positions: LivePosition[]): Stats {
   let longCount = 0
   let notional = 0
   let unrealized = 0
+  let maintMargin = 0
   for (const p of positions) {
     if (p.side !== 'short') longCount++
     notional += p.notional
     unrealized += p.unrealizedPnl
+    maintMargin += p.maintMargin || 0
   }
   return {
     longCount,
     shortCount: positions.length - longCount,
     notional: r8(notional),
-    unrealized: r8(unrealized)
+    unrealized: r8(unrealized),
+    maintMargin: r8(maintMargin)
   }
 }
 
@@ -264,6 +280,8 @@ function toRow(p: LivePosition): FuturesPositionRow {
     markPrice: p.markPrice,
     unrealized: p.unrealizedPnl,
     notional: p.notional,
+    maintMargin: p.maintMargin ?? 0,
+    mmr: p.mmr ?? 0,
     leverage: p.leverage,
     liquidationPrice: p.liquidationPrice
   }

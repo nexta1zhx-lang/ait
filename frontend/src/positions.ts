@@ -39,6 +39,15 @@ interface KeyRows {
   at: number
   live: boolean
   rows: TradePositionRow[]
+  /**
+   * 账户级那几个数（2026-10-06 加，为「MM 保证金率」）：
+   * 保证金率 = `maintMargin` ÷ `margin`，到 100% 就是强平。
+   * ⚠️ 只有 SSE 的 `positions` 增量里才有（REST 兜底那发后端也回，见 `load`）。
+   */
+  wallet: number
+  unrealized: number
+  margin: number
+  maintMargin: number
 }
 
 /** keyId → 那套账户的持仓 */
@@ -80,6 +89,27 @@ export const positionsAt = computed(() => {
   for (const k of Object.values(perKey.value)) if (k.at > at) at = k.at
   return at
 })
+
+/**
+ * **某套账户的风险读数**（2026-10-06，用户要「配置旁显示 MM 合约保证金率」）。
+ *
+ * · `maintMargin` = Σ 维持保证金（后端随标记价重算过 ⇒ 一秒都在动）
+ * · `margin` = 保证金余额 = 钱包 + 浮盈
+ * · `ratio` = 保证金率 %，**到 100 就是强平**（跟币安界面同一个口径）
+ *
+ * 没有任何仓位 / 还没拿到数 ⇒ `null`（界面**不显示**，别摆一个假的 0%）。
+ */
+export function accountRiskOf(keyId: number | undefined): {
+  maintMargin: number
+  margin: number
+  ratio: number | null
+} | null {
+  if (typeof keyId !== 'number' || keyId <= 0) return null
+  const k = perKey.value[keyId]
+  if (!k) return null
+  const ratio = k.margin > 0 ? (k.maintMargin / k.margin) * 100 : null
+  return {maintMargin: k.maintMargin, margin: k.margin, ratio}
+}
 
 /** 某个交易对现在的持仓（原始符号；没有就是空数组） */
 export function positionsOf(rawSymbol: string): TradePositionRow[] {
@@ -148,13 +178,21 @@ async function load(keyId: number, fresh = false): Promise<void> {
       return
     }
     positionsErr.value = ''
+    const rows = (r.positions ?? []).map(p => ({
+      ...p,
+      symbol: String(p.symbol ?? '').toUpperCase()
+    }))
     apply(keyId, {
       at: startedAt,
-      live: false,
-      rows: (r.positions ?? []).map(p => ({
-        ...p,
-        symbol: String(p.symbol ?? '').toUpperCase()
-      }))
+      live: Boolean(r.live),
+      rows,
+      wallet: Number(r.wallet ?? 0),
+      unrealized: Number(r.unrealized ?? 0),
+      margin: Number(r.margin ?? 0),
+      /* 后端没回（没有常驻流）就按持仓逐条加起来 —— 口径一样 */
+      maintMargin: Number(
+        r.maintMargin ?? rows.reduce((sum, p) => sum + (p.maintMargin ?? 0), 0)
+      )
     })
   } catch (e) {
     positionsErr.value = e instanceof Error ? e.message : String(e)
@@ -170,6 +208,11 @@ function start(keyId: number): void {
       positions: (p: PositionsPatch) => {
         positionsErr.value = ''
         apply(keyId, {
+          /* 账户级那几个数（算保证金率要用）—— 每次持仓推送都会带上 */
+          wallet: Number(p.wallet ?? 0),
+          unrealized: Number(p.unrealized ?? 0),
+          margin: Number(p.margin ?? 0),
+          maintMargin: Number(p.stats?.maintMargin ?? 0),
           /*
            * ⚠️ 用**本地收到的时间**排队，不解析服务端的 `p.at` ——
            *    两边钟差一点的话，服务端时间戳会让「新旧判断」整个反过来。

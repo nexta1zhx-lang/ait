@@ -67,6 +67,19 @@ export interface FuturesPosition {
   unrealizedPnl: number
   /** ROE %（相对保证金） */
   percentage: number | null
+  /**
+   * **维持保证金** 和 **维持保证金率**（币安 `maintenanceMargin` /
+   * `maintenanceMarginPercentage`）。
+   *
+   * ★ 2026-10-06 加（用户：「再配置旁加个显示 mm 合约保证金率」）：
+   *   保证金率 = 维持保证金 ÷ 保证金余额，**到 100% 就是强平** —— 币安界面上
+   *   每一行仓位旁边都有这个数，是持仓最要紧的风险刻度。
+   *   带上 `mmr` 是为了**本地随行情重算**（见 `position-cache` 的 `withMark`）：
+   *   价格一动名义价值就动、维持保证金跟着动，不用等下一次 REST 快照。
+   */
+  maintMargin: number
+  /** 维持保证金率（0.004 = 0.4%），**分档**的，只在 REST 快照里更新 */
+  mmr: number
 }
 
 /**
@@ -97,6 +110,12 @@ export interface ExchangeOverview {
     available: number
     /** 占用 = margin − available（接口没直接给，推导） */
     used: number
+    /**
+     * **总维持保证金**（币安 `totalMaintMargin`）—— 账户级的风险分子：
+     * `保证金率 = maintMargin / margin`，**到 100% 就是强平**。
+     * ★ 2026-10-06 加（用户：「再配置旁加个显示 mm 合约保证金率」）。
+     */
+    maintMargin: number
     assets: FuturesAsset[]
     positions: FuturesPosition[]
   }
@@ -350,13 +369,23 @@ export async function fetchExchangeOverview(
       liquidationPrice: p.liquidationPrice,
       leverage: p.leverage,
       unrealizedPnl: p.unrealizedPnl,
-      percentage: p.percentage
+      percentage: p.percentage,
+      maintMargin: p.maintMargin,
+      mmr: p.mmr
     }))
     .sort((a, b) => Math.abs(b.notional) - Math.abs(a.notional))
 
   /* C2C / 现货 已经在上面那四路并发里取回来了（失败当 null，不拖垮整页） */
 
   const longCount = positions.filter(p => p.side !== 'short').length
+  /*
+   * 总维持保证金：**优先用账户级那个数**（币安自己汇总的，含逐仓那部分）；
+   * 老接口万一没给，就按持仓逐条加起来（同一口径）。
+   */
+  const maintMargin =
+    n(acc?.totalMaintMargin) ||
+    positions.reduce((sum, p) => sum + (p.maintMargin || 0), 0)
+
   return {
     account: {
       exchange: c.exchange,
@@ -371,6 +400,7 @@ export async function fetchExchangeOverview(
       margin: r8(margin),
       available: r8(available),
       used: r8(Math.max(margin - available, 0)),
+      maintMargin,
       assets,
       positions
     },

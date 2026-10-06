@@ -905,7 +905,11 @@ class KeyStream {
           symbol: unified,
           liquidationPrice: null as number | null,
           leverage: 0,
-          percentage: null as number | null
+          percentage: null as number | null,
+          /* ⚠️ 事件里没有维持保证金（那是分档费率算出来的）⇒ 新仓位先 0，
+             调用方会因为 `newSymbols` 立刻去要一次 REST 快照补上 */
+          maintMargin: 0,
+          mmr: 0
         }),
         side: signed < 0 ? 'short' : 'long',
         amount,

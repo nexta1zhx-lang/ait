@@ -399,6 +399,13 @@ export interface FuturesPosition {
   unrealized: number
   /** 名义价值（USDT） */
   notional: number
+  /**
+   * **维持保证金** + **维持保证金率**（2026-10-06 加，用户要「MM 合约保证金率」）。
+   * 保证金率 = 维持保证金 ÷ 保证金余额，100% 即强平。
+   * `mmr` 带着是为了本地随标记价重算（见 `position-cache` 的 `withMark`）。
+   */
+  maintMargin: number
+  mmr: number
   /** 这个交易对的杠杆 */
   leverage: number
   /**
@@ -435,6 +442,9 @@ function positionFromRow(row: any): FuturesPosition | null {
     markPrice: Number.isFinite(markPrice) ? markPrice : 0,
     unrealized: n(row.unRealizedProfit),
     notional: Number.isFinite(markPrice) ? Math.abs(amt) * markPrice : 0,
+    /* 维持保证金 / 它的费率：币安 raw 字段就是这两个（v2 的 `maintMargin`） */
+    maintMargin: n(row.maintMargin ?? row.maintenanceMargin),
+    mmr: n(row.maintenanceMarginPercentage),
     leverage: Math.floor(n(row.leverage)) || 0,
     /* 强平价：`0` / 空 / 非数一律当「没有」（别画一条 0 的线） */
     liquidationPrice: (() => {

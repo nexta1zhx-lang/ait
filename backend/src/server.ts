@@ -3560,7 +3560,22 @@ async function route(
         exchangeCredsOf(key),
         fresh ? {force: true} : {}
       )
-      return sendJson(res, 200, {ok: true, positions, error: null})
+      /*
+       * ★ 2026-10-06：顺带把**账户级**那几个数回给前端 —— 保证金率（MM）要
+       *   维持保证金 ÷ 保证金余额，只有持仓列表的话前端算不出来。
+       *   都取自常驻流内存里的那一份（**不打交易所**），没有就是 null。
+       */
+      const live = liveStateOf(key.id)
+      return sendJson(res, 200, {
+        ok: true,
+        positions,
+        wallet: live?.wallet ?? null,
+        unrealized: live?.unrealized ?? null,
+        margin: live?.margin ?? null,
+        maintMargin: live?.stats.maintMargin ?? null,
+        live: live?.live ?? false,
+        error: null
+      })
     } catch (e) {
       return sendJson(res, 200, {
         ok: false,
