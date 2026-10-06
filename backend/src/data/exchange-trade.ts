@@ -915,12 +915,31 @@ export async function listOpenOrders(
    *    （同一时刻带 symbol 查就查得到）。带上 symbol 时不用传（market 里自带）。
    */
   const sub = symbol ? {} : {subType: 'linear'}
-  const [normal, algo] = await Promise.all([
-    ex.fetchOpenOrders(symbol, undefined, undefined, {...sub}).catch(() => [] as any[]),
-    ex
-      .fetchOpenOrders(symbol, undefined, undefined, {conditional: true, ...sub})
-      .catch(() => [] as any[])
+  /*
+   * ⚠️ 这两条**不能都吞成空数组**（2026-10-06 实测踩到）：本地经出口隧道时
+   *    条件单那一路会**超时**，`.catch(() => [])` 把它变成「账户里一条条件单都没有」——
+   *    跟真的没有**长得一模一样**，用户看到的就是「我挂的止盈止损不见了」。
+   *    所以用 `allSettled` 把两边的成败都留着，两个都失败才抛
+   *    （那才肯定是错，不是「真的没有」）。
+   */
+  const [normalRes, algoRes] = await Promise.allSettled([
+    ex.fetchOpenOrders(symbol, undefined, undefined, {...sub}),
+    ex.fetchOpenOrders(symbol, undefined, undefined, {conditional: true, ...sub})
   ])
+  const normal: any[] = normalRes.status === 'fulfilled' ? (normalRes.value ?? []) : []
+  const algo: any[] = algoRes.status === 'fulfilled' ? (algoRes.value ?? []) : []
+  if (algoRes.status === 'rejected') {
+    console.warn(
+      `[exch] 条件单（止盈/止损）没取到：${humanizeTrade(algoRes.reason).slice(0, 120)}` +
+        ' —— 挂单列表里可能少了这几张'
+    )
+  }
+  if (normalRes.status === 'rejected' && algoRes.status === 'rejected') {
+    throw new Error(
+      `挂单没取到：${humanizeTrade(normalRes.reason).slice(0, 120)}` +
+        `（条件单那一路也失败：${humanizeTrade(algoRes.reason).slice(0, 80)}）`
+    )
+  }
   const raw: any[] = [...((normal as any[]) ?? []), ...((algo as any[]) ?? [])]
   const out: OpenOrderRow[] = []
   for (const o of raw) {

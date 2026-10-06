@@ -623,12 +623,15 @@ type OpenOrderLite = OpenOrderRow
  *    （带 symbol 才 1）。而「交易所账户」页每切一次账户就打一次，
  *    两套账户点几下就是几百权重 —— 限流又是按**出口 IP** 算、全服务器共用一份预算。
  *
- * TTL 只有 **10 秒**（比这个页面原来 15 秒的轮询还紧），
- * 而且下单 / 撤单 / 清理残留单都会 `bump()` 立刻作废 ——
- * 不会出现「刚撤掉的单还画在图上」。
+ * TTL **30 秒**（2026-10-06 从 10 秒放宽）：挂单是**用户自己动手**才会变的
+ * （下单 / 撤单都会 `bump()`），30 秒里被别的东西改掉的可能性很小，
+ * 而不带 symbol 查一次是 40 权重 + 经代理一个来回。
+ * 过期后走 **stale-while-revalidate**（见路由那里）：先回旧的、后台换新的，
+ * 所以放宽 TTL 不会让界面变僵。
  */
+const OPEN_ORDERS_TTL_MS = 30_000
 const openOrdersCache = createTtlCache<OpenOrderLite[]>({
-  ttlMs: 10_000,
+  ttlMs: OPEN_ORDERS_TTL_MS,
   tag: 'openOrders'
 })
 
@@ -3297,7 +3300,12 @@ async function route(
   /*
    * 当前挂单 —— **按需打交易所**，不进快照：
    * 挂单是秒级变化的东西，存下来只会是过期数据（方案里的「实时层」）。
-   * 慢接口（~1s），所以失败也回 200 + `error`，不让整页空着（跟老接口同一个风格）。
+   *
+   * ★ 2026-10-06 加 **stale-while-revalidate**（用户："我点击交易所界面，订单过 2 秒才出来"）：
+   *   手上有旧的（哪怕刚过期）就**立刻回旧的**，同时后台刷一发，响应里带 `stale: true`
+   *   让前端过一秒再问一次（那时缓存已经是新的，命中即返回）。
+   *   ⇒ 冷启动那一发还是要打交易所（这个躲不掉），**之后每次点开都是秒出**。
+   *   失败也回 200 + `error`，不让整页空着（跟老接口同一个风格）。
    */
   if (p === '/api/exchange/open-orders' && method === 'GET') {
     const idRaw = num(url.searchParams.get('id'))
@@ -3311,16 +3319,33 @@ async function route(
         error: '这一套还没填 API Key'
       })
     }
+    /* 拉一发的动作（`load()` 给缓存和后台刷新共用） */
+    const load = async (): Promise<OpenOrderLite[]> => {
+      /* 40 权重只在这一发里付（TTL 内重复请求全部命中缓存） */
+      await chargeExchange(40, 'openOrders')
+      return listOpenOrders(exchangeCredsOf(key))
+    }
     try {
-      const rows = await openOrdersCache.get(key.id, async () => {
-        /* 40 权重只在这一发里付（TTL 内重复请求全部命中缓存） */
-        await chargeExchange(40, 'openOrders')
-        return listOpenOrders(exchangeCredsOf(key))
-      })
-      return sendJson(res, 200, {openOrders: rows, error: null})
+      const cached = openOrdersCache.peek(key.id)
+      if (cached) {
+        const age = Date.now() - cached.at
+        if (age >= OPEN_ORDERS_TTL_MS) {
+          /* 过期了：后台刷（`get` 内部有单飞，同时来几个请求也只会打一发） */
+          console.log(`[exch:${key.id}] 挂单用旧值先回（${Math.round(age / 1000)} 秒前），后台刷新`)
+          void openOrdersCache.get(key.id, load).catch(() => undefined)
+        }
+        return sendJson(res, 200, {
+          openOrders: cached.value,
+          stale: age >= OPEN_ORDERS_TTL_MS,
+          error: null
+        })
+      }
+      const rows = await openOrdersCache.get(key.id, load)
+      return sendJson(res, 200, {openOrders: rows, stale: false, error: null})
     } catch (e) {
       return sendJson(res, 200, {
         openOrders: null,
+        stale: false,
         error: e instanceof RateBudgetError ? e.message : humanize(e)
       })
     }

@@ -157,6 +157,11 @@ export async function wsAgent(): Promise<Agent | undefined> {
 
 /** 实例缓存：key = 交易所|市场类型|沙盒|apiKey（见 `createExchange` 里那段） */
 const instanceCache = new Map<string, {at: number; ex: any}>()
+/**
+ * markets 正在后台刷新的实例（key 同上）。
+ * ⚠️ 没有它的话，几百个并发请求会各踢一次 `loadMarkets()`（每次 1.5MB）。
+ */
+const refreshing = new Set<string>()
 /** markets 表多久重新加载一次（币安上新 / 下架合约之后要能跟上） */
 const INSTANCE_TTL_MS = 30 * 60 * 1000
 /** 缓存上限，纯保险（正常就几套 Key） */
@@ -189,7 +194,36 @@ export function createExchange(c: ExchangeCredentials): any {
     c.apiKey
   ].join('|')
   const hit = instanceCache.get(cacheKey)
-  if (hit && Date.now() - hit.at < INSTANCE_TTL_MS) return hit.ex
+  if (hit) {
+    const age = Date.now() - hit.at
+    if (age < INSTANCE_TTL_MS) return hit.ex
+    /*
+     * ★ 过期了**也照样先把它交出去**，只把重新加载 markets 放到后台（2026-10-06）。
+     *
+     * ⚠️ 为什么不能在这一行「过期就重建」：重建之后 ccxt 要重新 `loadMarkets()`，
+     *    而那是**两条**请求（`exchangeInfo` + `currencies`，1.5MB 那个），
+     *    本地经出口隧道实测 **3.3~10.5 秒**。也就是说每 30 分钟就有一次
+     *    「点开交易所页面，挂单要等十几秒才出来」。
+     *    过期只是「markets 可能有点旧」（上新 / 下架要跟上），**不是数据不能用** ——
+     *    挂单 / 持仓 / 下单跟 markets 新旧几乎无关（只用来做符号换算和精度校验）。
+     *    所以：立刻用旧的，后台换新的，谁也等不着。
+     */
+    if (!refreshing.has(cacheKey)) {
+      refreshing.add(cacheKey)
+      const ex = hit.ex
+      void Promise.resolve()
+        .then(() => ex.loadMarkets())
+        .then(() => {
+          hit.at = Date.now()
+        })
+        .catch((e: Error) => {
+          /* 刷新失败就用旧的顶着，30 秒后再说（别把 at 推上去，否则要等一整轮） */
+          console.warn(`[exch] markets 后台刷新失败：${e.message.slice(0, 100)}`)
+        })
+        .finally(() => refreshing.delete(cacheKey))
+    }
+    return hit.ex
+  }
 
   const Ctor = CCXT[c.exchange]
   if (!Ctor)

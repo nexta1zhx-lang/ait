@@ -221,7 +221,7 @@ function realizedOf(p: FuturesPosition): number | null {
   for (const r of rows) {
     if (pairOf(r.symbol) !== pairOf(p.symbol)) continue
     if (p.keyName && r.keyName && r.keyName !== p.keyName) continue
-    sum += Number(r.income ?? 0)
+    sum += Number(r.amount ?? 0)
     hit = true
   }
   return hit ? sum : null
@@ -330,21 +330,6 @@ function orderAction(c: ExchangePositionCycle, o: ExchangePositionOrder, i: numb
   if (!o.reduce) return '加仓'
   if (c.closed && i === c.orders.length - 1) return '平仓'
   return '减仓'
-}
-
-/** 钱账本类型 → 中文 */
-const INCOME_LABELS: Record<string, string> = {
-  REALIZED_PNL: '已实现',
-  COMMISSION: '手续费',
-  COMMISSION_REBATE: '手续费返还',
-  FUNDING_FEE: '资金费',
-  TRANSFER: '划转',
-  INSURANCE_CLEAR: '保险清算',
-  REFERRAL_KICKBACK: '推荐返佣'
-}
-
-function incomeLabel(t: string): string {
-  return INCOME_LABELS[t] ?? t
 }
 
 /* ---------------- 格式化 ---------------- */

@@ -65,10 +65,10 @@ const WS_SNAPSHOT_GAP_SEC = 20
  * **定期 REST 对账成交**的间隔（2026-10-06 加）。
  *
  * ⚠️ 为什么非加不可：原来补成交**只在连上/重连时**跑一次。而本地网络下
- *    用户数据流经常「连上了却一帧不推」（假 IP，见 `kline-stream.ts` 头部），
- *    于是**成交永远补不回来** —— 用户实测：11:02 减仓那笔（已实现 -0.1299）
- *    一直到 11:07 都不在账本里，盈亏因此差了 6 倍。
- *    ⇒ 不能把「钱记得对不对」押在一条 WS 上，REST 得定期兜。
+ *    用户实测：11:02 减仓那笔（已实现 −0.1299）一直到 11:07 都不在账本里，
+ *    盈亏因此差了 6 倍，而**当时看不到任何「事件到没到」的证据**。
+ *    ⇒ 不能把「钱记得对不对」押在一条 WS 上：丢事件有重连空档 / listenKey 失效 /
+ *      进程重启 / 上游偶发丢帧好几种真实原因，REST 得定期兜底。
  */
 const FILL_RECONCILE_MS = 60 * 1000
 /** 每次定期对账往前看多久（重叠靠 `unique(key_id, trade_id)` 去重） */
@@ -83,12 +83,17 @@ const INCOME_RECONCILE_MS = 10 * 60 * 1000
 /** 钱账本每次回看的跨度（币安只给最近 7 天） */
 const INCOME_LOOKBACK_MS = 7 * 24 * 3600 * 1000
 /**
- * 用户数据流多久没推任何帧就当**它哑了**。
+ * 用户数据流多久**毫无动静**（数据帧和 ping 都没有）就当它哑了。
+ *
+ * ⚠️ 必须**大于币安的 ping 周期（3 分钟）**：币安每 3 分钟发一个 ping 帧，
+ *    所以「4 分钟没动静」才算异常。第一版写的 2 分钟会在一段安静期里
+ *    把健康的流误报成降级（2026-10-06 我自己就被这个误判带偏过 ——
+ *    真正的结论是「空闲时本来就没有数据帧」）。
  *
  * 用途：告诉前端「这套账户现在是降级的，你那边该自己兜底刷」——
- * 前端就不用猜（它只看得到我们这条 SSE，看不到上游那条）。
+ * 前端不用猜（它只看得到我们这条 SSE，看不到上游那条）。
  */
-const WS_DEAF_MS = 2 * 60 * 1000
+const WS_DEAF_MS = 4.5 * 60 * 1000
 /** 多久检查一次「哑了没」 */
 const WS_HEALTH_MS = 30 * 1000
 /** 重连补成交：最多盯几个交易对（每个一次 fetchMyTrades，权重 5） */
@@ -231,12 +236,21 @@ class KeyStream {
   /** 标记价攒批的定时器（见 `MARK_BATCH_MS`） */
   private markTimer: NodeJS.Timeout | null = null
   /**
-   * 上游最后推**任何一帧**的时间（0 = 还没推过）。
-   *
-   * ⚠️ 这是判断「流是不是哑了」的唯一依据 —— `open` 事件只能证明连上了，
-   *    假 IP 那种情况连得上却一帧不推（见 `checkHealth`）。
+   * 上游最后推**数据帧**的时间（0 = 还没推过）。
+   * ⚠️ 别拿它判死活：币安**只在有事件时推数据**，账户空闲就是长时间零帧。
    */
   private lastFrameAt = 0
+  /**
+   * 上游最后**任何动静**的时间 —— 数据帧**或**协议级 ping 都算。
+   *
+   * ⚠️ 判死活只能用它：币安每 3 分钟一个 ping 帧（控制帧，不进 `message` 回调）。
+   *    只看数据帧会把「空闲」误判成「哑了」（2026-10-06 我就这么误判过一次）。
+   */
+  private lastAliveAt = 0
+  /** 收到过几个 ping（排查用：0 = 连上了但连心跳都没收到） */
+  private pings = 0
+  /** 收到过几帧解析不了的（排查用，见 `onMessage`） */
+  private badFrames = 0
   /** 当前是否处于「哑了」状态（用来只在翻转时发一次通知） */
   private deaf = false
   /** 定期对账的两个水位 */
@@ -279,9 +293,10 @@ class KeyStream {
       }
       /*
        * ★ 定期对账 + 健康检查（2026-10-06 加）。
-       * ⚠️ 必须**无条件**起，不能等 `open` —— 假 IP 情况下 `open` 会触发
-       *    （所以看起来一切正常），但一帧都不推，原来只在连上时对账一次，
-       *    成交就永远补不回来了。
+       * ⚠️ 必须**无条件**起，不能等 `open`：`open` 只证明连上了，
+       *    证明不了**事件一定都会到**。丢事件有好几种真实原因
+       *    （重连空档、listenKey 失效、进程重启、上游偶发丢帧），
+       *    而原来只在连上时对账一次 ⇒ 丢一笔就永远补不回来。
        */
       if (!this.reconTimer) {
         /*
@@ -297,8 +312,9 @@ class KeyStream {
         )
       }
       if (!this.healthTimer) {
-        // ⚠️ lastFrameAt 从起流算起 —— 否则刚起流就被判定成「哑了」
+        // ⚠️ 从起流算起 —— 否则刚起流就被判定成「哑了」
         this.lastFrameAt = Date.now()
+        this.lastAliveAt = Date.now()
         this.healthTimer = setInterval(() => this.checkHealth(), WS_HEALTH_MS)
       }
     } catch (e) {
@@ -327,6 +343,23 @@ class KeyStream {
       void this.reconcile(isReconnect ? 'ws' : 'boot')
     })
     ws.on('message', (d: Buffer) => void this.onMessage(String(d)))
+    /*
+     * ★ 协议级 ping（2026-10-06 加）—— 这是**判断流死活**的唯一可靠信号。
+     *
+     * ⚠️ 我一开始把「没有数据帧」当成「流哑了」，那是**错的**：
+     *    币安的用户数据流**只在有事件时推数据**，账户半天不动就是一个数据帧都没有。
+     *    它真正的心跳是**协议级 ping**（币安每 3 分钟一个 ping 帧，10 分钟收不到 pong 才断），
+     *    而 ping 是**控制帧**，`ws` 不会把它交给 `message` 回调 ——
+     *    所以只数 `message` 会把「空闲但健康」误判成「哑了」。
+     */
+    ws.on('ping', () => {
+      this.lastAliveAt = Date.now()
+      this.pings++
+      /* 头几个 ping 打出来，好确认这条连接到底有没有在收心跳 */
+      if (this.pings <= 3) {
+        console.log(`${this.tag} WS 收到第 ${this.pings} 个 ping（连接是活的）`)
+      }
+    })
     ws.on('error', (e: Error) =>
       console.warn(`${this.tag} WS 错误：${e.message.slice(0, 140)}`)
     )
@@ -483,20 +516,32 @@ class KeyStream {
   }
 
   private async onMessage(raw: string): Promise<void> {
-    // 收到任何一帧就算「流活着」—— 健康检查靠它（见 `checkHealth`）
+    /* 数据帧：两条时间都推（`lastAliveAt` 才是判死活的） */
     this.lastFrameAt = Date.now()
+    this.lastAliveAt = Date.now()
     let ev: any
     try {
       ev = JSON.parse(raw)
     } catch {
+      /*
+       * ★ 解析失败**不能静默**（2026-10-06 加）：经出口隧道时帧有可能被截断 / 拼坏，
+       *   而「解析失败 → 直接 return」看起来跟「事件没来」**一模一样**，
+       *   排查时能白找一整天。把前 120 个字符打出来（限流，别刷屏）。
+       */
+      this.badFrames++
+      if (this.badFrames <= 5) {
+        console.warn(
+          `${this.tag} 上游推了一帧解析不了的（第 ${this.badFrames} 次，长度 ${raw.length}）：` +
+            raw.slice(0, 120)
+        )
+      }
       return
     }
     const e = String(ev?.e ?? '')
     if (e === 'ORDER_TRADE_UPDATE') {
       await this.onOrder(ev?.o ?? {})
       return
-    }
-    if (e === 'ACCOUNT_UPDATE') {
+    }    if (e === 'ACCOUNT_UPDATE') {
       // 余额/仓位变了 → 事件里**没有** totalMarginBalance 这种汇总字段，
       // 所以拉一次完整的（节流 20s，一天最多几千次也够便宜）
       await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
@@ -517,6 +562,17 @@ class KeyStream {
   private async onOrder(o: any): Promise<void> {
     const tradeId = String(o?.t ?? '')
     const lastQty = Number(o?.l ?? 0)
+    /*
+     * ★ 一行把「这个事件到底长什么样」记全（2026-10-06 加）。
+     *
+     * 为什么值得：11:02 那笔减仓没进账本时，我手上**没有任何证据**说
+     * 「事件到没到服务端」—— 只能靠猜（还猜错了，见 `checkHealth`）。
+     * 订单事件本来就不多（用户自己下单才有），全记下来不影响日志量，
+     * 下次再漏就是一行就能定位的事。
+     */
+    console.log(
+      `${this.tag} 订单事件 s=${o?.s} x=${o?.x} X=${o?.X} t=${tradeId} l=${o?.l}`
+    )
     if (!tradeId || tradeId === '0' || !(lastQty > 0)) return
 
     const fill: FillInput = {
@@ -670,13 +726,19 @@ class KeyStream {
    */
   private checkHealth(): void {
     if (this.stopped) return
-    const deaf = Date.now() - this.lastFrameAt > WS_DEAF_MS
+    /*
+     * ⚠️ 判据是「**任何动静**都没有」（数据帧或 ping），不是「没有数据帧」——
+     *    空闲的账户本来就不推数据。
+     */
+    const silentMs = Date.now() - this.lastAliveAt
+    const deaf = silentMs > WS_DEAF_MS
     if (deaf === this.deaf) return
     this.deaf = deaf
     console.warn(
       deaf
-        ? `${this.tag} 用户数据流 ${WS_DEAF_MS / 1000} 秒没推帧 —— 标记为降级（改用 REST 兜底）`
-        : `${this.tag} 用户数据流恢复了`
+        ? `${this.tag} 用户数据流 ${Math.round(silentMs / 1000)} 秒连 ping 都没有 ` +
+            `（收到过 ${this.pings} 个）—— 标记为降级（改用 REST 兜底）`
+        : `${this.tag} 用户数据流恢复了（累计 ${this.pings} 个 ping）`
     )
     emit(this.row.id, {type: 'health', deaf})
   }

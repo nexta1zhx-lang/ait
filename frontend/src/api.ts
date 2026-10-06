@@ -642,14 +642,27 @@ export const fetchExchangeCurve = (id?: number, range = '1d') =>
  * 已实现盈亏那种「一条一条」的形状（新版「盈亏」tab 用）。
  * ⚠️ 数据来自**成交账本的 `realized`**，不是交易所的 income 接口（M3 起）。
  */
+/**
+ * 钱账本的一行 —— **字段名跟后端逐字对齐**（`db/exchange-store.ts` 的 `IncomeRow`）。
+ *
+ * ⚠️ 别在这里改名字（以前叫 `income` / `time` / `type`）：后端回的是
+ *    `amount` / `datetime` / `incomeType`，两边不一致时 `Number(undefined)` 会变成
+ *    **`NaN`** —— 界面上「已结」会显示成 `+$0.00`，看着像「没赚没亏」，
+ *    其实是真的算错了（2026-10-06 踩过一次）。
+ */
 export interface ExchangeIncomeRow {
+  id: string
+  /** 去重键（成交类就是成交号 + 资产，见后端 `incomeDedupeKey`） */
+  tradeId: string
+  /** `REALIZED_PNL` / `COMMISSION` / `FUNDING_FEE` / `TRANSFER` … */
+  incomeType: string
+  symbol: string
+  asset: string
+  /** 正数进钱、负数出钱 */
+  amount: number
+  datetime: string
   /** 哪套 Key 的（只有「全部」那一格会带） */
   keyName?: string
-  symbol: string
-  income: number
-  time: string | null
-  /** 钱账本的类型（`REALIZED_PNL` / `COMMISSION` / `FUNDING_FEE` …） */
-  type: string
 }
 
 export const fetchExchangeKeys = () =>
@@ -989,9 +1002,15 @@ export const fetchExchangeFills = (id?: number, limit = 60) =>
  * 失败时 `openOrders` 是 null、`error` 有原因 —— 别把失败当成「没有挂单」。
  */
 export const fetchExchangeOpenOrders = (id?: number) =>
-  get<{openOrders: ExchangeOpenOrder[] | null; error: string | null}>(
-    `/api/exchange/open-orders${id ? `?id=${id}` : ''}`
-  )
+  get<{
+    openOrders: ExchangeOpenOrder[] | null
+    /**
+     * 后端回的是**旧值**（它同时在后台刷新）—— 上层过一秒再问一次。
+     * ⚠️ 别把它当「数据有问题」：这是为了让点开的瞬间就有东西看。
+     */
+    stale?: boolean
+    error: string | null
+  }>(`/api/exchange/open-orders${id ? `?id=${id}` : ''}`)
 
 /**
  * 订阅「交易所资产」实时推送（SSE）。

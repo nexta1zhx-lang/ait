@@ -282,6 +282,11 @@ function rebuild(): void {
 const openOrders = ref<ExchangeOpenOrder[]>([])
 const ordersErr = ref('')
 const loadingOrders = ref(false)
+/**
+ * 拿到「旧值」之后补发一次的定时器（见 `loadOrders`）。
+ * ⚠️ 要有它：不加的话每次 `stale` 都会排一个补发，切几下 tab 就能攒出一串请求。
+ */
+let ordersRetryTimer: ReturnType<typeof setTimeout> | null = null
 
 const fills = ref<ExchangeTrade[]>([])
 
@@ -617,32 +622,55 @@ async function loadIncome(): Promise<void> {
     }
   }
   rows.sort((a, b) =>
-    String(b.time ?? '').localeCompare(String(a.time ?? ''))
+    String(b.datetime ?? '').localeCompare(String(a.datetime ?? ''))
   )
   incomeTotals.value = any ? total : null
   income.value = rows.slice(0, INCOME_MAX)
 }
 
-/** 挂单：几套合起来（多套时每条标出是哪套的），失败原因也带上账户名 */async function loadOrders(): Promise<void> {
+/**
+ * 挂单：几套合起来（多套时每条标出是哪套的），失败原因也带上账户名。
+ *
+ * ★ 2026-10-06 改两处（用户：「我点击交易所界面，订单过 2 秒才出来」）：
+ *   ① **几套并发拉**，不再一套一套串（以前 2 套 = 2 个来回叠加，
+ *      而这是经出口隧道打币安，一个来回就一秒上下）；
+ *   ② 后端可能回的是**旧值**（`stale: true`，它同时在后台刷新的那份）——
+ *      这种情况过 1.2 秒再问一次，那时缓存已经是新的、命中即回。
+ *      ⇒ 界面上永远是「立刻有东西看」，不是白等一个转圈。
+ */
+async function loadOrders(): Promise<void> {
   const list = activeTargets.value
   const many = multi.value
   loadingOrders.value = true
   ordersErr.value = ''
+  const res = await Promise.all(
+    list.map(k =>
+      fetchExchangeOpenOrders(k.id).catch(e => {
+        if (isAuthError(e)) throw e
+        return {openOrders: null, stale: false, error: msg(e)}
+      })
+    )
+  )
   const out: ExchangeOpenOrder[] = []
   const errs: string[] = []
-  for (const k of list) {
-    try {
-      const r = await fetchExchangeOpenOrders(k.id)
-      if (r.error) errs.push(many ? `${k.name}：${r.error}` : r.error)
-      for (const o of r.openOrders ?? [])
-        out.push(many ? {...o, keyName: k.name} : o)
-    } catch (e) {
-      if (!isAuthError(e)) errs.push(many ? `${k.name}：${msg(e)}` : msg(e))
-    }
-  }
+  let stale = false
+  list.forEach((k, i) => {
+    const r = res[i]
+    if (!r) return
+    if (r.error) errs.push(many ? `${k.name}：${r.error}` : r.error)
+    if (r.stale) stale = true
+    for (const o of r.openOrders ?? []) out.push(many ? {...o, keyName: k.name} : o)
+  })
   openOrders.value = out
   ordersErr.value = errs.join('；')
   loadingOrders.value = false
+  /* 拿到的是旧值 ⇒ 后台那份刷新完了再取一次（只补一发，不循环） */
+  if (stale && !ordersRetryTimer) {
+    ordersRetryTimer = setTimeout(() => {
+      ordersRetryTimer = null
+      void loadOrders()
+    }, 1200)
+  }
 }
 
 /**
@@ -964,6 +992,8 @@ onUnmounted(() => {
   stopStreams()
   if (snapTimer) clearInterval(snapTimer)
   snapTimer = null
+  if (ordersRetryTimer) clearTimeout(ordersRetryTimer)
+  ordersRetryTimer = null
 })
 </script>
 
