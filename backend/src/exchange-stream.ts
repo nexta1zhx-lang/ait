@@ -110,17 +110,54 @@ const ORDERS_RECONCILE_MS = 2 * 60 * 1000
  *    一个几个月没登录、没有任何仓位的账户，不该跟正在交易的账户花一样多。
  *
  * 判据（`isIdle()`）：**没持仓 + 没挂单 + 最近也没动静**。
- * 空转时把两类对账降到 30 分钟一轮（≈1.3 权重/分钟/套，降了 20 倍）。
+ * 空转时把三类对账降到 30 分钟一轮（≈7 权重/分钟/套）。
+ *
+ * ⚠️ 2026-10-06 补了一档（原来漏了）：**成交对账也必须一起降**。
+ *    第一版只降了挂单 / 钱账本 / 快照，`backfillFills` 还是 60 秒一轮，
+ *    而它按「最近 30 天交易过的币 ∪ 持仓」逐币查（`fetchMyTrades` 权重 5/币，
+ *    最多 8 个币 = 40 权重）—— **空转账户身上最贵的一项恰恰是它**
+ *    （≤40/分钟，比挂单那 40/2分钟 还高一倍）。空转账户没有仓位，
+ *    真来了新成交靠私有 WS 那条路就够，所以降到 10 分钟一轮。
  *
  * ⚠️ **私有 WS 和 listenKey 照旧连着**，所以「突然来一张新挂单 / 新成交」还是秒级
  *    （币安会推 `ORDER_TRADE_UPDATE`）—— 降频降的是**对账**，不是实时性。
  */
 const ORDERS_RECONCILE_MS_IDLE = 30 * 60 * 1000
 const INCOME_RECONCILE_MS_IDLE = 30 * 60 * 1000
+const FILL_RECONCILE_MS_IDLE = 10 * 60 * 1000
 /** 空转时全量快照的间隔（它是**钱包 / C2C 唯一的取数路**，但空账户的钱不会变） */
 const SAMPLE_IDLE_MS = 30 * 60 * 1000
 /** 多久没动静才算「空转」（刚下过单 / 刚平过仓的不算） */
 const IDLE_MS = 10 * 60 * 1000
+/**
+ * **睡着**——比空转再降一档（2026-10-06，用户：「长时间用户不在线就不用管和合约和订单，
+ * 余额要管要做曲线图」）。
+ *
+ * 判据（`isAsleep()`）：已空转 **且没人订阅**（`listenerCount() === 0`，就是「不在线」）
+ * **且**连着 `HIBERNATE_MS` 没动静。睡着之后：
+ *
+ *   · 成交 / 挂单 / 钱账本三类对账 —— **全部降到 `ASLEEP_MS` 一轮**
+ *     （合约和订单不用管了；真来了单子 WS 会推，`onOrder` 会把账户叫醒）；
+ *   · **余额照管**：全量快照也 `ASLEEP_MS` 一轮（`sampleIfDue`），资产曲线不断档；
+ *   · **私有 WS 照旧连着** —— 降的是「我们自己主动去问」的频率，不是实时性。
+ *
+ * 各档一小时的总权重（一套 Key）：
+ *
+ * | 档 | 成交 | 挂单 | 钱账本 | 快照 | 合计 | 每分钟 |
+ * |---|---|---|---|---|---|---|
+ * | 活跃（有仓 / 有单） | ≤2400 | 1200 | 180 | 252 | ≈4000 | ≈67 |
+ * | 空转 | 240 | 80 | 60 | 42 | ≈420 | ≈7 |
+ * | 睡着 | 40 | 40 | 30 | 21 | ≈131 | ≈2.2 |
+ *
+ * ⚠️ 为什么**余额必须留下**：`exchange_snapshots` 是资产曲线**唯一**的源，而且曲线是
+ *    分档归档的（5m→1h→1d，见 `exchange-archive.ts`）—— 睡着期间断采，
+ *    曲线上就会留一段假的空洞（用户明确要求「余额要管」）。
+ *    余额其实只有资金费（8 小时一次）会动，1 小时采一次已经很富余；
+ *    真嫌贵可以按资金费周期拉到 4 小时，成本再降 4 倍。
+ */
+const ASLEEP_MS = 60 * 60 * 1000
+/** 空转多久、又没人看着，才算「睡着」 */
+const HIBERNATE_MS = 2 * 60 * 60 * 1000
 /**
  * **定期对账钱账本**（`/fapi/v1/income`）的间隔。
  *
@@ -166,12 +203,15 @@ interface KeyRow {
   password: string
   market_type: string
   sandbox: boolean
+  /** 这套 Key 什么时候建的（`seedActivity` 拿它当「这辈子最早的动静」） */
+  created_at: Date
 }
 
 /** 要盯的 key：填了凭据的**合约**账户（现货 USDT 只是顺带统计，主体仍是合约，见方案） */
 async function listKeys(): Promise<KeyRow[]> {
   const rows = await query<Record<string, unknown>>(
-    `SELECT id, user_id, exchange, name, api_key, secret, password, market_type, sandbox
+    `SELECT id, user_id, exchange, name, api_key, secret, password, market_type, sandbox,
+            created_at
        FROM user_exchange_keys
       WHERE api_key <> '' AND secret <> '' AND market_type = 'swap'
       ORDER BY id`
@@ -191,7 +231,9 @@ async function listKeys(): Promise<KeyRow[]> {
     secret: String(r.secret ?? ''),
     password: String(r.password ?? ''),
     market_type: String(r.market_type ?? ''),
-    sandbox: r.sandbox === true
+    sandbox: r.sandbox === true,
+    /* ⚠️ `timestamptz` 出来就是 `Date`；真缺了当 0（epoch），别让 `toISOString()` 抛 */
+    created_at: r.created_at instanceof Date ? r.created_at : new Date(0)
   }))
 }
 
@@ -269,6 +311,17 @@ function keyOf(keyId: number | string): number {
   return Number(keyId)
 }
 
+/**
+ * 这套 key 现在有几个 SSE 订阅者。
+ *
+ * 「有没有人看」是「用户在不在这」的**唯一**可靠信号（前端只要有人开着这个账户的
+ * 页面就一直挂着 SSE，见 `ExchangeAccountLivePanel.startStreams()`）——
+ * 沉睡那一档（见 `ASLEEP_MS`）就靠它：有人在看就绝不省他那一份。
+ */
+function listenerCount(keyId: number | string): number {
+  return listenerSets.get(keyOf(keyId))?.size ?? 0
+}
+
 function emit(keyId: number | string, ev: ExchangeEvent): void {
   const set = listenerSets.get(keyOf(keyId))
   if (!set?.size) return
@@ -299,6 +352,12 @@ export function subscribeExchange(
   }
   const bucket = set
   bucket.add(fn)
+  /*
+   * ★ 「有人来了」—— 睡着过的账户立刻醒：把沉睡期间可能漏掉的账补一次
+   *   （见 `KeyStream.wake`）。放在**加完订阅**之后：唤醒里会 `emit` 快照，
+   *   这一条订阅得先在里面，不然刚连上这一下看不到新数。
+   */
+  streams.get(id)?.wake('有人订阅')
   return () => {
     bucket.delete(fn)
     if (!bucket.size) listenerSets.delete(id)
@@ -351,10 +410,23 @@ class KeyStream {
   private lastOrdersReconcileAt = 0
   /** 库里现在挂着几条单（判断空转用，见 `isIdle`） */
   private openOrderCount = 0
-  /** 最后一次「有动静」的时间（WS 收到帧 / 成交 / 挂单变动 / 对账成功） */
+  /**
+   * 最后一次**账户里真有动静**的时间 —— 空转 / 沉睡两档的判据就是它。
+   *
+   * ⚠️⚠️ **只许记「真的发生了什么」**（WS 数据帧 / 成交 / 挂单变动 / 用户下单订阅），
+   *    **绝不能记「我们自己发起的那一发轮询」**（快照、挂单对账）。
+   *    2026-10-06 抓到的实证：`snapshot()` 每轮都把它顶到「现在」，而采样定时器
+   *    5 分钟就采一次 ⇒ `Date.now() - lastActivityAt` 永远 < `IDLE_MS`（10 分钟）
+   *    ⇒ **空转那一档从来没生效过**（`f94cd99` 那个 commit 是空转的），
+   *    新加的沉睡档更是永远进不去。自己问自己「有没有动静」，答案永远是有。
+   */
   private lastActivityAt = Date.now()
   /** 当前是不是空转（只在翻转时打日志） */
   private idle = false
+  /** 当前是不是睡着（见 `isAsleep`；只在翻转时打日志） */
+  private asleep = false
+  /** activity 时钟有没有从库里种过一次（见 `seedActivity`） */
+  private seededActivity = false
   /** 上一次全量采样的时间（空转时按 30 分钟拦） */
   private lastSampleAt = 0
   /** 定期对账 / 健康检查的定时器 */
@@ -412,6 +484,11 @@ class KeyStream {
           () => void this.reconcileTick(),
           FILL_RECONCILE_MS
         )
+        /*
+         * ⚠️ 只在**第一次**起流时把 activity 时钟种一下（重启不该把睡着的账户叫醒，
+         *    见 `seedActivity`）—— 放在定时器之后，播种是异步的，别挡着起流。
+         */
+        void this.seedActivity()
       }
       if (!this.healthTimer) {
         // ⚠️ 从起流算起 —— 否则刚起流就被判定成「哑了」
@@ -622,6 +699,8 @@ class KeyStream {
       upsertFill(this.row.user_id, this.row.id, fill),
       this.writeIncomeFromFill(fill).catch(() => undefined)
     ])
+    /* 真记进来一笔新成交 = 账户里有动静（帐还没算完的账户别急着降频） */
+    if (isNew) this.lastActivityAt = Date.now()
     return isNew
   }
 
@@ -722,17 +801,103 @@ class KeyStream {
    *    但正因为挂单现在有 WS 那条路，这里本来就只需要兜底。
    */
   /**
-   * 全量采样（外层那个 5 分钟定时器调）。
-   * ⚠️ 空转时按 `SAMPLE_IDLE_MS` 拦一道：空账户的钱不会变，没必要 5 分钟拉一次
-   *    （一次 `fetchExchangeOverview` ≈ 21 权重，是空转里第二大的一项）。
+   * 全量采样（外层那个 5 分钟定时器调）——**曲线的源，也是钱包 / C2C 唯一的取数路**。
+   *
+   * 三档（`fetchExchangeOverview` ≈ 21 权重）：
+   *   · 活跃 —— 5 分钟一次（外层定时器的节奏，这里不拦）；
+   *   · 空转 —— `SAMPLE_IDLE_MS`（空账户的钱不会变）；
+   *   · 睡着 —— `ASLEEP_MS`（**照采**，用户要求「余额要管要做曲线图」，断采曲线就断档）。
    */
   async sampleIfDue(): Promise<void> {
-    if (this.isIdle() && Date.now() - this.lastSampleAt < SAMPLE_IDLE_MS) return
+    const gap = this.isAsleep() ? ASLEEP_MS : this.isIdle() ? SAMPLE_IDLE_MS : 0
+    if (gap && Date.now() - this.lastSampleAt < gap) return
     this.lastSampleAt = Date.now()
     await this.snapshot('poll')
   }
 
-  /** 给写操作用的（`reconcileKeyOrders`）—— 同一个动作，只是对外的口子 */
+  /**
+   * 这套账户是不是**睡着**了：空转 + 没人订阅 + 连着 `HIBERNATE_MS` 没动静。
+   *
+   * ⚠️ 判据里的「没人订阅」就是用户说的**不在线** —— 前端只要有人开着这个账户的
+   *    页面就一直挂着 SSE（`ExchangeAccountLivePanel.startStreams()`），
+   *    所以有订阅 = 有人在看，那一份绝不能省。
+   */
+  isAsleep(): boolean {
+    if (!this.isIdle()) return false
+    if (listenerCount(this.row.id) > 0) return false
+    return Date.now() - this.lastActivityAt > HIBERNATE_MS
+  }
+
+  /** 睡着 / 醒 翻转时打一行 —— 不然「到底有没有在省」完全看不见 */
+  private noteAsleep(): void {
+    const now = this.isAsleep()
+    if (now === this.asleep) return
+    this.asleep = now
+    console.log(
+      now
+        ? `${this.tag} 睡着（空转 + 没人看）→ 成交/挂单/钱账本全停，余额照 1 小时采一次（曲线不断）`
+        : `${this.tag} 醒着 → 对账恢复（活跃 1 分钟 / 空转 10 分钟一轮）`
+    )
+  }
+
+  /**
+   * 有人回来了（订阅了这套 key / 刚写过单子）—— 睡着过的立刻醒过来。
+   *
+   * ⚠️ 光把 `asleep` 置回 false 不够：沉睡期间**一笔账都没对**，
+   *    而那时账户里可能真有过变化（用户在自己手机上开过仓 / 币安丢过事件）。
+   *    所以醒的同时立刻补一轮：快照 + 成交 + 钱账本（+ 挂单，除非调用方马上自己要问一次）。
+   *
+   * `skipOrders`：写操作那条路（`reconcileKeyOrders`）紧接着就会对一次挂单，
+   * 别白问两遍那 40 权重。
+   */
+  wake(reason: string, skipOrders = false): void {
+    this.lastActivityAt = Date.now()
+    if (!this.asleep) return
+    this.asleep = false
+    console.log(`${this.tag} 醒（${reason}）：补一轮沉睡期间可能漏掉的账`)
+    void (async () => {
+      /* ⚠️ 快照要节流（20 秒）：SSE 反复重连时会连着调这里 */
+      await this.snapshot('poll', WS_SNAPSHOT_GAP_SEC)
+      this.lastFillReconcileAt = Date.now()
+      await this.backfillFills()
+      this.lastIncomeReconcileAt = Date.now()
+      await this.reconcileIncome()
+      if (skipOrders) return
+      this.lastOrdersReconcileAt = Date.now()
+      await this.reconcileOrders('wake')
+    })().catch((e: Error) =>
+      console.warn(`${this.tag} 唤醒对账失败：${e.message.slice(0, 140)}`)
+    )
+  }
+
+  /**
+   * 从库里种一次 activity 时钟（只种一次，见 `seededActivity`）。
+   *
+   * ⚠️ 为什么需要：`lastActivityAt` 是**内存里的**，进程一重启就变成「现在」——
+   *    一个几个月没人用的账户会重新被当成活跃账户，等满 `HIBERNATE_MS` 才肯睡。
+   *    取两样里**更晚**的那个当「上次动静」：
+   *      · 账本里最后一笔成交（交易过才有）；
+   *      · 这套 Key 的**创建时间**（从没交易过的账户，就是「建完就没动过」）。
+   *    读不到就当「刚有动静」，不省这一档。
+   */
+  private async seedActivity(): Promise<void> {
+    if (this.seededActivity) return
+    this.seededActivity = true
+    try {
+      const row = await queryOne<{t: string | null}>(
+        `SELECT max(ts) AS t FROM exchange_fills WHERE key_id = $1`,
+        [this.row.id]
+      )
+      const lastFill = row?.t ? new Date(row.t).getTime() : 0
+      const created = this.row.created_at.getTime()
+      const t = Math.max(lastFill, created)
+      if (t > 0 && t < this.lastActivityAt) this.lastActivityAt = t
+    } catch {
+      /* 读不到就当「刚有动静」，不影响正确性 */
+    }
+  }
+
+  /** 给写操作用（`reconcileKeyOrders`）—— 同一个动作，只是对外的口子 */
   async reconcileOrdersForced(): Promise<void> {
     await this.reconcileOrders('write')
   }
@@ -761,7 +926,8 @@ class KeyStream {
         list
       )
       this.openOrderCount = list.length
-      this.lastActivityAt = Date.now()
+      /* 真的多了 / 少了单子才算「账户里有动静」；对了一遍发现没变化不算 */
+      if (added || removed) this.lastActivityAt = Date.now()
       if (added || removed) {
         console.log(
           `${this.tag} 挂单对账（${reason}）：+${added} -${removed}，现存 ${list.length} 条`
@@ -938,14 +1104,22 @@ class KeyStream {
     if (this.stopped) return
     const now = Date.now()
     try {
-      if (now - this.lastFillReconcileAt >= FILL_RECONCILE_MS) {
+      /* ⚠️ 先判档再干活：`this.idle` / `this.asleep` 是下面几个 gap 的依据 */
+      this.noteIdle()
+      this.noteAsleep()
+      /*
+       * 睡着（空转 + 没人看）⇒ 这一轮**什么都不对**，只留 `sampleIfDue` 那一路
+       * （余额曲线）。四类水位**故意不推进** —— 醒过来那一轮会把它们一次补上。
+       */
+      if (this.asleep) return
+      const idle = this.idle
+      const fillGap = idle ? FILL_RECONCILE_MS_IDLE : FILL_RECONCILE_MS
+      const incGap = idle ? INCOME_RECONCILE_MS_IDLE : INCOME_RECONCILE_MS
+      const ordGap = idle ? ORDERS_RECONCILE_MS_IDLE : ORDERS_RECONCILE_MS
+      if (now - this.lastFillReconcileAt >= fillGap) {
         this.lastFillReconcileAt = now
         await this.backfillFills(now - FILL_SAFETY_MS)
       }
-      this.noteIdle()
-      const idle = this.idle
-      const incGap = idle ? INCOME_RECONCILE_MS_IDLE : INCOME_RECONCILE_MS
-      const ordGap = idle ? ORDERS_RECONCILE_MS_IDLE : ORDERS_RECONCILE_MS
       if (now - this.lastIncomeReconcileAt >= incGap) {
         this.lastIncomeReconcileAt = now
         await this.reconcileIncome()
@@ -1137,7 +1311,10 @@ class KeyStream {
        */
       this.syncMarks()
       this.pushLive(false)
-      this.lastActivityAt = Date.now()
+      /*
+       * ⚠️ 这里**故意不碰** `lastActivityAt` —— 见那个字段的注释：
+       *    我们自己拉快照不算「账户里有动静」，算了就永远进不了空转 / 沉睡。
+       */
       if (wrote) {
         const net = ov.futures.margin + (ov.c2c?.totalUsdt ?? 0)
         console.log(`${this.tag} 快照已写（${source}）净资产 ${net}`)
@@ -1266,6 +1443,11 @@ export function startExchangeStreams(): void {
 export async function reconcileKeyOrders(keyId: number): Promise<void> {
   const s = streams.get(Number(keyId))
   if (!s) return
+  /*
+   * ⚠️ 写操作 = 「这套账户有人在用」⇒ 顺手把它从沉睡里叫醒（`skipOrders`：
+   *    下面这句马上就要对一次挂单，别白问两遍那 40 权重）。
+   */
+  s.wake('写操作', true)
   await s.reconcileOrdersForced()
 }
 
@@ -1297,10 +1479,16 @@ export async function stopExchangeStreams(): Promise<void> {
 }
 
 /** 调试用：现在盯了几条流 / 有几个 SSE 订阅者 */
-export function exchangeStreamStatus(): {keys: number; listeners: number} {
+export function exchangeStreamStatus(): {
+  keys: number
+  listeners: number
+  asleep: number
+} {
   let listeners = 0
   for (const set of listenerSets.values()) listeners += set.size
-  return {keys: streams.size, listeners}
+  let asleep = 0
+  for (const s of streams.values()) if (s.isAsleep()) asleep++
+  return {keys: streams.size, listeners, asleep}
 }
 
 /**
