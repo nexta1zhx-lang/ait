@@ -19,6 +19,12 @@
  *      · ⚠️ 流降级时自动退回正常档（见 `tierNow`）。
  *   ③ **C2C 钱包没有 WS 事件**（用户数据流只覆盖合约）⇒ C2C 只能靠那条 1 小时采样。
  *
+ * 生命周期（2026-10-06 补全，用户：「不能只有启动没有终止」）：
+ *   · 起：进程启动 `startExchangeStreams()` 逐套 key 写启动锚点 + 连 WS（错开 1 秒）；
+ *   · 止：**只有两种** —— ① 进程退出（写关闭锚点 + DELETE listenKey）；
+ *     ② **没人看 + 空仓无挂单**够久（`WS_SLEEP_AFTER_MS`）⇒ 只断连接，
+ *     listenKey 照续、随时连回来（见 `sleepWs` / `wakeWs`）。
+ *
  * ⚠️ 单实例假设：多副本会重复订阅同一个 key（要分布式锁 / 指定主副本），见 docs。
  */
 import {WebSocket} from 'ws'
@@ -178,6 +184,8 @@ const FILL_SAFETY_MS = 24 * 3600 * 1000
  *
  * ⚠️ **私有 WS 和 listenKey 照旧连着**，所以「突然来一张新挂单 / 新成交」还是秒级
  *    （币安会推 `ORDER_TRADE_UPDATE`）—— 降频降的是**对账**，不是实时性。
+ *    （⚠️ 例外：**空仓 + 无挂单 + 没人看**够久了，那条 WS 会主动断开省连接，
+ *      见 `WS_SLEEP_AFTER_MS`；一有人来 / 一有敞口立刻连回去。）
  */
 const ORDERS_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
 const INCOME_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
@@ -196,7 +204,8 @@ const IDLE_MS = 10 * 60 * 1000
  *   · 成交 / 挂单 / 钱账本三类对账 —— **全部降到 `ASLEEP_MS` 一轮**
  *     （合约和订单不用管了；真来了单子 WS 会推，`onOrder` 会把账户叫醒）；
  *   · **余额照管**：全量快照也 `ASLEEP_MS` 一轮（`sampleIfDue`），资产曲线不断档；
- *   · **私有 WS 照旧连着** —— 降的是「我们自己主动去问」的频率，不是实时性。
+ *   · **私有 WS 只在「空仓无挂单」时才断**（`WS_SLEEP_AFTER_MS`，见下面那段终止流程）——
+ *     这一档降的是「我们自己主动去问」的频率，不是实时性。
  *
  * 各档一小时的总权重（一套 Key）：
  *
@@ -229,6 +238,43 @@ const INCOME_LOOKBACK_MS = 7 * 24 * 3600 * 1000
  * 前端不用猜（它只看得到我们这条 SSE，看不到上游那条）。
  */
 const WS_DEAF_MS = 4.5 * 60 * 1000
+
+/**
+ * ★ **上游 WS 的终止流程**（2026-10-06，用户：「不能只有启动没有终止，也要看用户在不在线」）。
+ *
+ * 条件（全满足才断）：**没人看**（`listenerCount() === 0`）+ **空仓且无挂单** +
+ * 安静（账户没动静、也没人来过）超过 `WS_SLEEP_AFTER_MS` ⇒ 关掉到币安的那条 WS。
+ *
+ * 断的是什么、不断的是什么：
+ *   · 断 —— 只是那条 WebSocket 连接（以及跟着它的标记价订阅）；
+ *   · **不断** —— listenKey **照旧 25 分钟续一次**（`KEEPALIVE_MS`）。理由两条：
+ *     ① 续期只要 1 次/25 分钟，几乎零成本；② 币安一个账户的 listenKey 是**共享**的，
+ *     我们停续会让它在 60 分钟后过期，顺手把用户自己那个量化程序的流也踢下线。
+ *     留着 key ⇒ 醒来时**一次 REST 都不用打**，直接 `open()` 连回去。
+ *
+ * ⚠️ 为什么「有持仓 / 有挂单」就**不许**断（用户选的方案）：持仓期间的消息
+ *    （止损触发、强平提醒、部分成交）是真要看的 —— 赌「反正有 REST 1 小时兜底」
+ *    意味着用户不在线时账本会漂最多 1 小时。空仓无单时没有任何东西可错过，才敢断。
+ *
+ * 代价就是一条空闲 TCP：WS **不吃权重**（权重只算 REST），币安侧只有
+ * 300 次握手 / 5 分钟 / IP 的限制，稳态连着不花钱 —— 所以断的是「整洁」，
+ * 不是「省钱」。真金白银的省在 REST 那三档（见 `TIER_GAPS`）。
+ */
+const WS_SLEEP_AFTER_MS = Number(
+  process.env.EXCHANGE_WS_SLEEP_MS ?? 10 * 60 * 1000
+)
+
+/**
+ * `deaf`（连 ping 都收不到）持续这么久 ⇒ 认定是**半开连接**，强制重连一次。
+ *
+ * ⚠️ 为什么要（2026-10-06 补）：NAT / 代理 / 负载均衡会**静默**吞掉连接 ——
+ *    TCP 还以为活着，我们既不收事件也不收 ping，而 `close` 事件永远不来。
+ *    只靠 `deaf` 标记只是「改用 REST 兜底」，那条死连接会一直挂到进程重启，
+ *    用户不在线时正好是最需要它自愈的时候。
+ */
+const WS_DEAF_RESTART_MS = Number(
+  process.env.EXCHANGE_WS_DEAF_RESTART_MS ?? 10 * 60 * 1000
+)
 
 /**
  * 条件单（`ALGO_UPDATE` 的 `o.X`）里哪些状态表示「这张单已经不在场上了」。
@@ -405,6 +451,13 @@ function listenerCount(keyId: number | string): number {
   return listenerSets.get(keyOf(keyId))?.size ?? 0
 }
 
+/** 毫秒 → 「10 分钟 / 45 秒」这种给人看的写法（日志 / 断流原因用） */
+function humanMs(ms: number): string {
+  return ms >= 60_000
+    ? `${Math.round(ms / 60_000)} 分钟`
+    : `${Math.round(ms / 1000)} 秒`
+}
+
 function emit(keyId: number | string, ev: ExchangeEvent): void {
   const set = listenerSets.get(keyOf(keyId))
   if (!set?.size) return
@@ -548,6 +601,16 @@ class KeyStream {
   private wakeAgain = false
   /** 当前是否处于「哑了」状态（用来只在翻转时发一次通知） */
   private deaf = false
+  /**
+   * 上游 WS 是不是被我们**主动断开**了（见 `WS_SLEEP_AFTER_MS`）。
+   * ⚠️ 跟「断了在等重连」不是一回事：这个状态下**不要**判 deaf、**不要**自动重连，
+   *    只在「有人来 / 账户又有敞口」时才连回去（`wakeWs`）。
+   */
+  private wsSleeping = false
+  /** 最近一次「没人订阅」的开始时刻（0 = 现在有人看）—— 断流条件的计时起点 */
+  private offlineSince = 0
+  /** 最近一次因为 `deaf` 强制重连的时刻（防重连风暴） */
+  private lastDeafRestartAt = 0
   /** 定期对账的三个水位 */
   private lastFillReconcileAt = 0
   private lastIncomeReconcileAt = 0
@@ -608,6 +671,13 @@ class KeyStream {
         console.log(`${this.tag} listenKey 就绪（${this.listenKey.length} 位）`)
       }
       setStreamActive(this.row.id, true)
+      /* 要连回去了 ⇒ 不再是「睡着的流」（见 `WS_SLEEP_AFTER_MS`） */
+      this.wsSleeping = false
+      /*
+       * 「没人看」的计时从起流这一刻算 —— 否则要等第一轮健康检查（30 秒后）
+       * 才会记下这个起点，断流条件白等一个周期。
+       */
+      if (!listenerCount(this.row.id)) this.offlineSince = Date.now()
       void this.open()
       if (!this.keepTimer) {
         this.keepTimer = setInterval(() => void this.keepAlive(), KEEPALIVE_MS)
@@ -863,7 +933,7 @@ class KeyStream {
       this.writeIncomeFromFill(fill).catch(() => undefined)
     ])
     /* 真记进来一笔新成交 = 账户里有动静（帐还没算完的账户别急着降频） */
-    if (isNew) this.lastActivityAt = Date.now()
+    if (isNew) this.noteActivity()
     return isNew
   }
 
@@ -871,7 +941,7 @@ class KeyStream {
     /* 数据帧：两条时间都推（`lastAliveAt` 才是判死活的） */
     this.lastFrameAt = Date.now()
     this.lastAliveAt = Date.now()
-    this.lastActivityAt = Date.now()
+    this.noteActivity()
     let ev: any
     try {
       ev = JSON.parse(raw)
@@ -1079,7 +1149,7 @@ class KeyStream {
    *    不然「部分成交」那种高频事件会把前端刷爆。
    */
   private async syncOrderFromEvent(o: any): Promise<void> {
-    this.lastActivityAt = Date.now()
+    this.noteActivity()
     const orderId = String(o?.i ?? '')
     const status = String(o?.X ?? '').toUpperCase()
     if (!orderId || !status) return
@@ -1148,6 +1218,14 @@ class KeyStream {
   }
 
   /**
+   * 上游 WS 是不是**被我们主动断开**了（省连接，见 `WS_SLEEP_AFTER_MS`）。
+   * ⚠️ 跟「断线在等重连」不是一回事：这个状态下不该判 `deaf`，也不该自动重连。
+   */
+  wsIsSleeping(): boolean {
+    return this.wsSleeping
+  }
+
+  /**
    * 现在按哪一档（见 `Tier` / `TIER_GAPS`）。
    * ⚠️ **不看有没有人在线** —— 见 `Tier` 那段（用户 2026-10-06 明确否掉在线档）。
    */
@@ -1210,6 +1288,8 @@ class KeyStream {
       skipFills = false
     } = opts
     this.lastActivityAt = Date.now()
+    /* ★ 有人回来了（打开页面 / 手动刷新 / 写操作）⇒ 睡着的上游 WS 立刻连回去 */
+    this.wakeWs(reason)
     const now = Date.now()
     if (force) {
       /* 连点几下别把这一套账户的权重全花在一秒里（前端另有防抖） */
@@ -1385,7 +1465,7 @@ class KeyStream {
       )
       this.openOrderCount = list.length
       /* 真的多了 / 少了单子才算「账户里有动静」；对了一遍发现没变化不算 */
-      if (added || removed) this.lastActivityAt = Date.now()
+      if (added || removed) this.noteActivity()
       if (added || removed) {
         console.log(
           `${this.tag} 挂单对账（${reason}）：+${added} -${removed}，现存 ${list.length} 条`
@@ -1440,7 +1520,7 @@ class KeyStream {
     const orderId = String(o?.aid ?? '')
     const status = String(o?.X ?? '').toUpperCase()
     if (!orderId || !status) return
-    this.lastActivityAt = Date.now()
+    this.noteActivity()
     if (!this.algoStatuses.has(status)) {
       this.algoStatuses.add(status)
       console.log(`${this.tag} 条件单事件：${o?.s} ${o?.o} → ${status}`)
@@ -1595,7 +1675,17 @@ class KeyStream {
    * 都靠唯一键幂等，重叠扫同一段不会重复记账。
    */
   /**
-   * 这套账户是不是**空转**：没持仓、没挂单、最近也没动静。
+   * 这套账户现在**有没有敞口**：有持仓或有挂单。
+   *
+   * 用途：断流条件之一（见 `WS_SLEEP_AFTER_MS`）—— 有敞口时 **不许**断，
+   * 因为那正是「一个事件都不能错过」的时候。
+   */
+  private hasExposure(): boolean {
+    const hasPos = (this.lastOverview?.futures.positions?.length ?? 0) > 0
+    return hasPos || this.openOrderCount > 0
+  }
+
+  /** 这套账户是不是**空转**：没持仓、没挂单、最近也没动静。
    * 空转 ⇒ 对账降频（见 `ORDERS_RECONCILE_MS_IDLE`）。WS 不动。
    */
   private isIdle(): boolean {
@@ -1688,9 +1778,27 @@ class KeyStream {
    *
    * ⚠️ 前端只能看到**我们这条 SSE**（心跳一直有），看不到上游那条 ——
    *    所以「SSE 活着」不等于「数据在动」，这个判断必须在后端做。
+   *
+   * 顺带承担两件**生命周期**的事（都是 2026-10-06 加的，跑在这里是因为它本来
+   * 就是唯一的 30 秒心跳）：
+   *   · **终止流程** —— 没人看 + 空仓无挂单够久 ⇒ `sleepWs()` 断掉上游 WS；
+   *   · **半开连接自愈** —— `deaf` 持续够久 ⇒ 强制重连一次（`close` 事件可能永远不来）。
    */
   private checkHealth(): void {
     if (this.stopped) return
+    /* 有人看吗 —— 断流 / 唤醒都靠这个信号（SSE 订阅 = 用户在线） */
+    const watchers = listenerCount(this.row.id)
+    if (watchers > 0) this.offlineSince = 0
+    else if (!this.offlineSince) this.offlineSince = Date.now()
+    if (this.wsSleeping) {
+      /*
+       * 我们**故意**断的：不判 deaf、不打统计（免得 5 分钟一行 0 帧刷屏）。
+       * 一有人来 / 账户重新有敞口就立刻连回去（REST 1 小时兜底期间发现的也算）。
+       */
+      if (watchers > 0) this.wakeWs('有人打开页面')
+      else if (this.hasExposure()) this.wakeWs('账户重新有持仓 / 挂单')
+      return
+    }
     /*
      * ⚠️ 判据是「**任何动静**都没有」（数据帧或 ping），不是「没有数据帧」——
      *    空闲的账户本来就不推数据。
@@ -1717,15 +1825,113 @@ class KeyStream {
           `收 ${kb} KB（连上 ${upMin} 分钟，已解析不了 ${this.badFrames}）`
       )
     }
-    if (deaf === this.deaf) return
-    this.deaf = deaf
-    console.warn(
-      deaf
-        ? `${this.tag} 用户数据流 ${Math.round(silentMs / 1000)} 秒连 ping 都没有 ` +
-            `（收到过 ${this.pings} 个）—— 标记为降级（改用 REST 兜底）`
-        : `${this.tag} 用户数据流恢复了（累计 ${this.pings} 个 ping）`
+    if (deaf !== this.deaf) {
+      this.deaf = deaf
+      console.warn(
+        deaf
+          ? `${this.tag} 用户数据流 ${Math.round(silentMs / 1000)} 秒连 ping 都没有 ` +
+              `（收到过 ${this.pings} 个）—— 标记为降级（改用 REST 兜底）`
+          : `${this.tag} 用户数据流恢复了（累计 ${this.pings} 个 ping）`
+      )
+      emit(this.row.id, {type: 'health', deaf})
+    }
+    if (deaf) this.restartIfStuck()
+    if (this.shouldSleepWs()) this.sleepWs()
+  }
+
+  /* ---------------- 上游 WS 的终止 / 唤醒（生命周期） ---------------- */
+
+  /**
+   * 现在该不该**断掉**上游 WS —— 见 `WS_SLEEP_AFTER_MS` 的四条判据。
+   *
+   * ⚠️ 安静计时取「账户最后有动静」和「最后一个人离开」里**更晚**的那个：
+   *    用户刚关页面但账户 1 分钟前才平过仓，两边都不该立刻断。
+   */
+  private shouldSleepWs(): boolean {
+    if (this.stopped || this.wsSleeping || !this.ws) return false
+    if (listenerCount(this.row.id) > 0) return false
+    /*
+     * ⚠️ **没拿到过快照就不许断**：`hasExposure()` 靠 `lastOverview` 判「空仓」，
+     *    它为空说明我们**根本不知道**有没有持仓（启动时那一发被限流挡了、或者一直失败）。
+     *    不知道就不动 —— 断流的代价是「持仓期间的事件全丢」，不能靠猜。
+     */
+    if (!this.lastOverview) return false
+    if (this.hasExposure()) return false
+    const quietFrom = Math.max(this.lastActivityAt, this.offlineSince)
+    return Date.now() - quietFrom > WS_SLEEP_AFTER_MS
+  }
+
+  /**
+   * 断掉上游 WS（**只断连接**，listenKey 照旧续期 —— 理由见 `WS_SLEEP_AFTER_MS`）。
+   *
+   * ⚠️ `removeAllListeners()` 必须在 `close()` 之前：不然我们自己那个
+   *    `close` 处理函数会把它当成「意外断开」→ `retryLater()` → 白重连一次。
+   */
+  private sleepWs(): void {
+    this.wsSleeping = true
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    /* 空仓 + 没人看 ⇒ 标记价（每秒 1 条/币）也没有意义了 */
+    this.stopMarks()
+    /* 流不再是「持仓的权威来源」⇒ 让 REST 别拿缓存里的旧持仓顶事（见 position-cache） */
+    setStreamActive(this.row.id, false)
+    try {
+      this.ws?.removeAllListeners()
+      this.ws?.close()
+    } catch {
+      /* 关不干净无所谓 */
+    }
+    this.ws = null
+    this.deaf = false
+    console.log(
+      `${this.tag} 上游 WS 断开（没人看 + 空仓无挂单 ${humanMs(
+        WS_SLEEP_AFTER_MS
+      )}；listenKey 照续，页面一开就重连）`
     )
-    emit(this.row.id, {type: 'health', deaf})
+  }
+
+  /**
+   * 有人回来了 / 账户又有敞口 ⇒ 立刻把上游 WS 连回来。
+   *
+   * 不用 `restart()`：那样会把对账 / 健康 / 续期三个定时器全拆了重建
+   * （顺带把水位清零、多打一轮 income）。这里只要那条连接，
+   * 连上之后 `open()` 里挂的 `on('open')` 会自己 `reconcile('ws')` 把断线期间的账补上。
+   */
+  private wakeWs(reason: string): void {
+    if (!this.wsSleeping || this.stopped) return
+    this.wsSleeping = false
+    this.lastAliveAt = Date.now()
+    this.healthTick = 0
+    setStreamActive(this.row.id, true)
+    console.log(`${this.tag} 上游 WS 重连（${reason}）`)
+    void this.open()
+  }
+
+  /**
+   * `deaf` 太久 ⇒ 强制重连一次（半开连接自愈，见 `WS_DEAF_RESTART_MS`）。
+   * 重连**复用 listenKey**（`restart(false)`），不打 POST。
+   */
+  private restartIfStuck(): void {
+    if (Date.now() - Math.max(this.lastDeafRestartAt, this.lastAliveAt) < WS_DEAF_RESTART_MS)
+      return
+    this.lastDeafRestartAt = Date.now()
+    this.lastAliveAt = Date.now()
+    console.warn(
+      `${this.tag} 上游 ${Math.round(WS_DEAF_RESTART_MS / 60000)} 分钟毫无动静，` +
+        `多半是半开连接 —— 强制重连一次`
+    )
+    this.restart(false)
+  }
+
+  /**
+   * 「账户里真有动静」的统一入口 —— **只许在真有事时调**（见 `lastActivityAt` 的告警）。
+   * 睡着的流被它叫醒：REST 兜底期间发现的成交 / 挂单变动也算动静。
+   */
+  private noteActivity(): void {
+    this.lastActivityAt = Date.now()
+    this.wakeWs('账户有动静')
   }
 
   /* ---------------- 持仓实时重算（改造 P4） ---------------- */
@@ -1875,6 +2081,25 @@ class KeyStream {
       if (typeof this.ex?.fapiPrivatePutListenKey !== 'function') return
       await this.ex.fapiPrivatePutListenKey({listenKey: this.listenKey})
     } catch (e) {
+      /*
+       * ★ 睡着的流（`wsSleeping`，见 `WS_SLEEP_AFTER_MS`）只**换一把新 key**，
+       *   别顺手把连接连回来 —— 那会把「没人看就断」的决定白做一遍。
+       *   key 也不能不管：它是共享的，过期了会连带踢掉用户的量化程序。
+       */
+      if (this.wsSleeping) {
+        console.warn(
+          `${this.tag} 续期失败（${(e as Error).message.slice(0, 100)}），` +
+            `流是睡着的 ⇒ 只重建 listenKey，不连回去`
+        )
+        try {
+          this.listenKey = String(
+            (await this.ex?.fapiPrivatePostListenKey())?.listenKey ?? ''
+          )
+        } catch {
+          /* 拿不到就等下一次续期再试 */
+        }
+        return
+      }
       console.warn(
         `${this.tag} 续期失败（${(e as Error).message.slice(0, 100)}），重建流`
       )
@@ -2047,12 +2272,18 @@ export function exchangeStreamStatus(): {
   keys: number
   listeners: number
   asleep: number
+  /** 上游 WS 被主动断开的条数（没人看 + 空仓，见 `WS_SLEEP_AFTER_MS`） */
+  sleeping: number
 } {
   let listeners = 0
   for (const set of listenerSets.values()) listeners += set.size
   let asleep = 0
-  for (const s of streams.values()) if (s.isAsleep()) asleep++
-  return {keys: streams.size, listeners, asleep}
+  let sleeping = 0
+  for (const s of streams.values()) {
+    if (s.isAsleep()) asleep++
+    if (s.wsIsSleeping()) sleeping++
+  }
+  return {keys: streams.size, listeners, asleep, sleeping}
 }
 
 /**
