@@ -21,7 +21,7 @@
  * ⚠️ 顶部的「几分钟前」是**架构的一部分**：先渲染上一份快照、后台再刷新，
  *    所以界面上必须让用户看到「这份数据有多旧」，而不是空等一个 loading。
  */
-import {computed, defineAsyncComponent, ref} from 'vue'
+import {computed, defineAsyncComponent, onUnmounted, ref} from 'vue'
 import {
   type CurvePoint,
   type ExchangeIncomeRow,
@@ -148,11 +148,27 @@ function pctOf(v: number): number {
   return netValue.value > 0 ? (v / netValue.value) * 100 : 0
 }
 
-/** 「几分钟前」——快照架构下这是关键信息（先看旧的，后台再刷） */
+/*
+ * 合约那一块（钱包余额 / 浮盈 / 保证金余额 = 净资产里最大的一块）是**推送**来的：
+ * 币安 `ACCOUNT_UPDATE` 带 `wb`（钱包余额）和 `up`（未实现盈亏），我们**0 权重**就地更新，
+ * 浮盈还会跟着每秒标记价重算 —— 也就是说它跟「几分钟前」那颗标签**没关系**。
+ *
+ * ⚠️ 这两个时间戳必须分开显示（用户 2026-10-06 问「资产旁边时间几分钟前是什么意思」）：
+ *    原来只有一个标签，有持仓时它显示「刚刚更新」（被秒级推送顶着），
+ *    可旁边的 C2C / 现货其实可能是**一小时前**的 —— 一颗标签在替所有数字报喜。
+ */
+/** 这个页面自己的小钟（5 秒一跳）—— 没有它，「实时 / 几分钟前」会一直冻着不动 */
+const liveClock = ref(Date.now())
+const liveTimer = setInterval(() => (liveClock.value = Date.now()), 5_000)
+onUnmounted(() => clearInterval(liveTimer))
+
+/** 「几分钟前」——**整份快照**（现货 / C2C / 可用余额 / 资产明细）的时间 */
 const ageText = computed(() => {
+  /* ⚠️ 用一下这个小钟：不然界面静止时（没有推送、没人动）这个标签会一直冻着 */
   const t = props.data?.takenAt
+  const now = liveClock.value
   if (!t) return ''
-  const ms = Date.now() - new Date(t).getTime()
+  const ms = now - new Date(t).getTime()
   if (!Number.isFinite(ms) || ms < 0) return ''
   const min = Math.floor(ms / 60000)
   if (min < 1) return '刚刚更新'
@@ -160,33 +176,56 @@ const ageText = computed(() => {
   const h = Math.floor(min / 60)
   return h < 24 ? `${h} 小时前` : `${Math.floor(h / 24)} 天前`
 })
+const liveAgeSec = computed(() => liveClock.value && props.data?.liveAt
+  ? Math.round((liveClock.value - new Date(props.data.liveAt).getTime()) / 1000)
+  : null)
+/** 推送还在（30 秒内）才敢说「实时」；超了就照实说几秒/几分钟前 */
+const liveText = computed(() => {
+  const s = liveAgeSec.value
+  if (s === null) return ''
+  if (s < 30) return '合约 实时'
+  if (s < 120) return `合约 ${s} 秒前`
+  return `合约 ${Math.round(s / 60)} 分钟前`
+})
+/** 那颗小绿点只在真的活着时亮 */
+const liveOn = computed(() => {
+  const s = liveAgeSec.value
+  return s !== null && s < 30
+})
 /**
  * 「这份快照有点老了」的提示阈值。
  *
- * ⚠️ 2026-10-06 从 5 分钟提到 **35 分钟**（用户问「资产旁边时间几分钟前是什么意思」）。
- *    原因：后台对账已经分档了（有人看/没人看的账户采样间隔不同，最长 **30 分钟**，
- *    睡着档 60 分钟），5 分钟这个阈值会让一个**完全健康但闲着**的账户一直黄着 ——
- *    而它显示的持仓 / 盈亏其实是 WS 推送 + 本地标记价算的，一秒都在动。
- *    35 分钟 = 「连着 4 轮以上都没采到」，那才是真该看一眼的。
+ * ⚠️ 2026-10-06：**75 分钟**（原来是 35 分钟）。
+ *    这一版把 `takenAt` 的语义定死成「整份快照（现货 / C2C / 可用余额 / 资产明细）」——
+ *    合约那块有自己的 `liveAt` 标签，不在这里报。而整份快照的节奏就是**1 小时一轮**
+ *    （见 `TIER_GAPS` 的余额采样，三档都不降）⇒ 75 分钟 = 「连着 1 轮以上都没采到」，
+ *    那才是真出事了（采样失败 / 流降级 / 后端不在），而不是「人家本来就闲着」。
+ *    35 分钟那个值是按旧的 30 分钟采样周期定的，现在不成立了。
  */
-const STALE_AFTER_MS = 35 * 60 * 1000
+const STALE_AFTER_MS = 75 * 60 * 1000
 const stale = computed(() => {
   const t = props.data?.takenAt
   if (!t) return false
-  return Date.now() - new Date(t).getTime() > STALE_AFTER_MS
+  return liveClock.value - new Date(t).getTime() > STALE_AFTER_MS
 })
 
 /**
  * 「几分钟前」这颗标签的说明 —— **说清楚它到底指的是什么**，
  * 不然很容易被当成「这个页面是几分钟前的」（用户就是这么问的）。
+ *
+ * ⚠️ 2026-10-06 改成两个时间戳之后，这里要把**谁实时、谁不是**讲明白：
+ *    合约那三项（钱包 / 浮盈 / 保证金）是推送的，现货 / C2C / 可用余额只能靠低频问。
  */
 const ageTitle = computed(() => {
   const t = props.data?.takenAt
   if (!t) return ''
+  const live = props.data?.liveAt
   return (
     `余额快照采集于 ${bjTime(t)}\n` +
-    '持仓 / 盈亏 / 成交是推送的，实时；这个时间只是「余额这几项」最后一次问交易所的时间。\n' +
-    '手机上可以下拉刷新（立刻重采一次）。'
+    '合约那三项（钱包余额 / 浮盈 / 保证金余额）是币安推送的，实时更新，不靠这个时间；\n' +
+    '现货 / C2C / 可用余额 / 资产明细只能问交易所，北京时间上面这个时刻问过一次' +
+    (live ? `（合约那块最后一帧推送：${bjTime(live)}）` : '') +
+    '。\n手机上可以下拉刷新（立刻重采一次）。'
   )
 })
 
@@ -474,6 +513,14 @@ const RANGES = [
           >
             划转
           </button>
+          <span
+            v-if="liveText"
+            class="live"
+            :class="{on: liveOn}"
+            :title="ageTitle"
+          >
+            <i class="dot" />{{ liveText }}
+          </span>
           <span class="age" :class="{stale}" :title="ageTitle">
             {{ ageText }}
           </span>
@@ -1069,6 +1116,26 @@ const RANGES = [
 }
 .age.stale {
   color: var(--warn, #f0b429);
+}
+/* 「合约 实时」——绿点 + 一行小字，跟快照时间并列（见 `liveText` 那段说明） */
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.live .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.live.on {
+  color: var(--ok, #2ecc71);
+}
+.live.on .dot {
+  background: var(--ok, #2ecc71);
 }
 .rf {
   padding: 2px 8px;

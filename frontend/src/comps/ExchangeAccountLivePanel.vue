@@ -235,6 +235,13 @@ function mergeOverviews(
     },
     /* 取**最旧**那份的时间：合并视图的「几分钟前」按最差的说，别报喜不报忧 */
     takenAt: list.map(p => p.ov.takenAt).sort()[0] ?? new Date().toISOString(),
+    /*
+     * 合约那一块的「活」时间同样按**最差**的说：只要有一套没收到过推送，
+     * 合并视图就不敢说自己是实时的（宁可说旧，也别把一套死的藏起来）。
+     */
+    liveAt: list.every(p => p.ov.liveAt)
+      ? list.map(p => p.ov.liveAt!).sort()[0]
+      : undefined,
     futures: {
       wallet: sum(o => o.futures?.wallet ?? 0),
       unrealized: sum(o => o.futures?.unrealized ?? 0),
@@ -576,7 +583,8 @@ async function doRefresh(auto = false): Promise<void> {
       }
       const {k, r} = item.value
       if (r.overview) {
-        next[k.id] = r.overview
+        /* 用户手动刷新拿到的新数据 ⇒ 合约那块也是刚问过的（同上） */
+        next[k.id] = {...r.overview, liveAt: new Date().toISOString()}
         delete nextReason[k.id]
         snapAt = {...snapAt, [k.id]: Date.now()}
       } else if (r.reason) {
@@ -805,7 +813,11 @@ function startStreams(): void {
             nextReason[k.id] = r.reason ?? '这个账户暂时没有数据'
             delete next[k.id]
           } else if (r.overview) {
-            next[k.id] = r.overview
+            /*
+             * 后端主动推来的快照 = 新鲜数据 ⇒ 合约那块也算「活的」
+             * （`takenAt` 用它自己的采集时间，`liveAt` 记我们收到的时间）。
+             */
+            next[k.id] = {...r.overview, liveAt: new Date().toISOString()}
             delete nextReason[k.id]
             snapAt = {...snapAt, [k.id]: Date.now()}
           }
@@ -830,7 +842,17 @@ function startStreams(): void {
             ...parts.value,
             [k.id]: {
               ...cur,
-              takenAt: p.at,
+              /*
+               * ★ 2026-10-06：这里**只盖 `liveAt`，不碰 `takenAt`**。
+               *
+               * ⚠️ 原来写的是 `takenAt: p.at`，于是那颗「几分钟前」的标签在**有持仓**
+               *    的账户上永远显示「刚刚更新」—— 因为持仓/浮盈每秒都在推。
+               *    可它旁边那几项（C2C / 现货 / 可用余额）其实还是上一份快照的，
+               *    最长可能一小时前 —— 标签在**替它们报喜**（用户就是这么被绕进去的）。
+               *    现在拆成两个时间：`liveAt` = 合约那块（WS，秒级），
+               *    `takenAt` = 整份快照（现货 / C2C / 可用余额）。
+               */
+              liveAt: p.at,
               futures: {
                 ...cur.futures,
                 positions: p.positions,

@@ -146,10 +146,31 @@ const WS_SNAPSHOT_GAP_SEC = 180
  * ⚠️ 所以这三条只当「防我们自己出 bug 的安全网」，不再是实时性的来源。
  * ⚠️ 但**余额曲线**（`sample`）不跟着拉长：C2C 钱包没有 WS 事件、汇总口径也只有 REST 有，
  *    曲线稀疏了就不好看了（用户明确要「余额要管、曲线不能断」）⇒ 睡觉的账户也照 1 小时采。
+ *
+ * ★ 2026-10-06 第三轮（用户拍板「挂单/成交/income 三条兜底拉到 4~8 小时」）：
+ *   三条**各按自己的冗余度**定，不再一刀切 1 小时 ——
+ *
+ *   | 项 | 现在 | 为什么敢给这么长 |
+ *   |---|---|---|
+ *   | 挂单对账（40 权重/次） | **6 小时** | 有**两条**事件流实时维护（`ORDER_TRADE_UPDATE` + `ALGO_UPDATE`），外加写操作后强制对平 + 重连对平 —— 冗余度最高的一项 |
+ *   | 成交对账（≤40 权重/次） | **4 小时** | 事件覆盖，但它是**账本**（`exchange_fills` 是盈亏的来源）⇒ 保守一档 |
+ *   | 钱账本 income（30 权重/次） | **8 小时** | 只为补资金费**明细**，而资金费本身 8 小时才结一次 |
+ *
+ *   ⚠️ 它们**不是实时性的来源**：重连后 `reconcile('ws')`、写操作后强制对平、
+ *   页面打开 / 下拉刷新 —— 三条兜底一个都没动。真要出账目问题，
+ *   这四个入口里任何一个都会把账拉回来。
  */
-const FILL_RECONCILE_MS = 60 * 60 * 1000
-const ORDERS_RECONCILE_MS = 60 * 60 * 1000
-const INCOME_RECONCILE_MS = 60 * 60 * 1000
+const FILL_RECONCILE_MS = 4 * 60 * 60 * 1000
+const ORDERS_RECONCILE_MS = 6 * 60 * 60 * 1000
+const INCOME_RECONCILE_MS = 8 * 60 * 60 * 1000
+/**
+ * 对账 tick 的节拍 —— 只是「到点了吗」的判断，**本身一次交易所都不打**。
+ *
+ * ⚠️ 别拿某一条的周期当 tick（原来是 `FILL_RECONCILE_MS`）：三条的周期现在不一样
+ *    （4/6/8 小时），拿最长的当 tick 会让「6 小时那一档」实际变成 8 小时才轮到一次。
+ *    30 分钟一跳，任何一条到点后最多晚 30 分钟被处理，代价是几十次比较。
+ */
+const RECON_TICK_MS = 30 * 60 * 1000
 /**
  * 打开页面时「数据旧到这个程度」就顺手补一次（用户：「只有没数据才请求」）。
  *
@@ -186,10 +207,14 @@ const FILL_SAFETY_MS = 24 * 3600 * 1000
  *    （币安会推 `ORDER_TRADE_UPDATE`）—— 降频降的是**对账**，不是实时性。
  *    （⚠️ 例外：**空仓 + 无挂单 + 没人看**够久了，那条 WS 会主动断开省连接，
  *      见 `WS_SLEEP_AFTER_MS`；一有人来 / 一有敞口立刻连回去。）
+ *
+ * ⚠️⚠️ 空转档必须**比正常档更慢**（2026-10-06 差点写成反的）：正常档从 1 小时拉到
+ *    4/6/8 小时之后，这里如果还留着老的 2 小时，空转账户反而比活跃账户问得勤 ——
+ *    按「正常档 ×2」定：8 / 12 / 16 小时。
  */
-const ORDERS_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
-const INCOME_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
-const FILL_RECONCILE_MS_IDLE = 2 * 60 * 60 * 1000
+const FILL_RECONCILE_MS_IDLE = 8 * 60 * 60 * 1000
+const ORDERS_RECONCILE_MS_IDLE = 12 * 60 * 60 * 1000
+const INCOME_RECONCILE_MS_IDLE = 16 * 60 * 60 * 1000
 /** 空转时全量快照的间隔（它是**钱包 / C2C 唯一的取数路**，但空账户的钱不会变） */
 const SAMPLE_IDLE_MS = 60 * 60 * 1000
 /** 多久没动静才算「空转」（刚下过单 / 刚平过仓的不算） */
@@ -539,6 +564,11 @@ const TIER_GAPS: Record<
     sample: SAMPLE_IDLE_MS
   },
   asleep: {
+    /*
+     * ⚠️ 这三项**目前用不到** —— `reconcileTick` 睡着时直接 `return`（一条都不对，
+     *    水位也不推进，醒来那一轮一次补上）。留着是为了「以后想放开」时有个明确的落点，
+     *    别以为把这里改小/改大就能生效。
+     */
     fill: 4 * 60 * 60 * 1000,
     orders: 4 * 60 * 60 * 1000,
     income: 4 * 60 * 60 * 1000,
@@ -636,6 +666,15 @@ class KeyStream {
   private lastForcedAt = 0
   /** 上一次因为 `ACCOUNT_UPDATE` 去问 REST 快照的时间（**真的拦请求**，见那个常量） */
   private lastWsSnapshotAt = 0
+  /**
+   * 事件触发的快照：打了几发 / 因为什么跳过 —— **一分钟一行摘要**。
+   *
+   * ⚠️ 为什么需要（2026-10-06 用户要求「放在进程里校验」）：
+   *    `快照已写（ws）` 只在**真的写库**时打一行；被 180 秒节流（或者按新规则「没人看」跳过）时
+   *    日志里**一个字都没有** —— 从外面看跟「压根没触发」完全一样，排查时只能翻库。
+   *    有这行就能只看进程日志回答：REST 到底打没打、跳过是因为没人看还是刚写过。
+   */
+  private evSnap = {taken: 0, skipNoViewer: 0, skipFresh: 0, loggedAt: 0}
   /** activity 时钟有没有从库里种过一次（见 `seedActivity`） */
   private seededActivity = false
   /** 上一次全量采样的时间（空转时按 30 分钟拦） */
@@ -691,17 +730,19 @@ class KeyStream {
        */
       if (!this.reconTimer) {
         /*
-         * ⚠️ 两个水位都置 **0**（不是 `Date.now()`）：这样第一轮 tick（60 秒后）
-         *    就会把成交和钱账本都各对一次 —— 等 10 分钟才第一次拉 income
-         *    意味着页面刚打开那几分钟「盈亏」是空的。
+         * ★ 水位不再置 0（2026-10-06 第三轮）：三条兜底拉到 4/6/8 小时之后，
+         *   如果水位还是 0，第一轮 tick 就会把它们**各打一遍**（成交 ≤40 + income 30 + 挂单 40），
+         *   而这几件事**起流那会儿刚做过**（`reconcile('boot')` 补快照 + 成交 + 挂单）。
+         *   代价从 110 权重变成 40 + 一次性的 income 30（见 `reconcile` 里 boot 那一发）。
+         *
+         * ⚠️ 「盈亏」那本账（income）**不能等到 8 小时**：新装/新绑的账户不拉一次，
+         *    页面上的「盈亏」tab 会空着。所以它挪到 `reconcile(source==='boot')` 里，
+         *    每个进程每套 key **只打一次**（30 权重），仍然比原来（每小时一发）便宜 8 倍。
          */
-        this.lastFillReconcileAt = 0
-        this.lastIncomeReconcileAt = 0
-        this.lastOrdersReconcileAt = 0
-        this.reconTimer = setInterval(
-          () => void this.reconcileTick(),
-          FILL_RECONCILE_MS
-        )
+        this.lastFillReconcileAt = Date.now()
+        this.lastIncomeReconcileAt = Date.now()
+        this.lastOrdersReconcileAt = Date.now()
+        this.reconTimer = setInterval(() => void this.reconcileTick(), RECON_TICK_MS)
         /*
          * ⚠️ 只在**第一次**起流时把 activity 时钟种一下（重启不该把睡着的账户叫醒，
          *    见 `seedActivity`）—— 放在定时器之后，播种是异步的，别挡着起流。
@@ -795,6 +836,17 @@ class KeyStream {
   private async reconcile(source: 'boot' | 'ws'): Promise<void> {
     await this.snapshot(source, WS_SNAPSHOT_GAP_SEC)
     await this.backfillFills()
+    /* 刚才补过成交了 ⇒ 水位跟上，别让 30 分钟的 tick 再白打一遍（≤40 权重） */
+    this.lastFillReconcileAt = Date.now()
+    /*
+     * ★ 起流那一发**顺带把「盈亏」那本账也拉一次**（2026-10-06 第三轮）。
+     *   income 只有 30 权重、每个进程每套 key 一次；不拉的话新账户的「盈亏」tab 会空着，
+     *   而它自己的兜底周期已经拉到 8 小时（资金费就是 8 小时结一次）。
+     */
+    if (source === 'boot') {
+      await this.reconcileIncome()
+      this.lastIncomeReconcileAt = Date.now()
+    }
     /*
      * 挂单也要对一次：断线那段 / 进程没起来那段的挂单变动是收不到的
      * （WS 事件只在连着的时候有）。⚠️ 放在最后 —— 它 40 权重，别挡着快照和成交。
@@ -1006,13 +1058,29 @@ class KeyStream {
          * 事件里**没有**的是汇总口径：可用余额 / 保证金余额 / 资产明细 / C2C / 现货。
          * 那些仍然要靠 REST，但**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
          * 例外：出现了**没见过的**仓位 ⇒ 立刻要一次，否则那一行会缺杠杆/强平价。
+         *
+         * ★ 2026-10-06 再收一刀（用户：「没必要每次都请求采集吧」）：**没人看就不打**。
+         *   那一发 25 权重纯粹是为了**给人看**的展示字段（可用余额 / 资产明细 / C2C / 现货）；
+         *   钱包余额、持仓、浮盈这几项上面已经**就地从事件里改对了**，一秒都不差。
+         *   没人看的时候不补展示字段，DB 曲线由 1 小时采样负责；
+         *   人一打开页面，`wake()` 会因为「数据旧了（> 60 秒）」当场补一份。
+         *   ⚠️ 新仓（`newSymbols`）不算在这里 —— 那一行缺杠杆/强平价是**数据错误**，
+         *   与我们看不看无关，照样立刻补。
          */
+        const watching = listenerCount(this.row.id) > 0
         const due = Date.now() - this.lastWsSnapshotAt > WS_SNAPSHOT_GAP_SEC * 1000
-        if (newSymbols.length || due) {
+        if (newSymbols.length || (due && watching)) {
           this.lastWsSnapshotAt = Date.now()
           /* 本地已经更新过了 ⇒ 顺手把采样时钟也推一下，别让 5 分钟采样立刻再来一发 */
           this.lastSampleAt = Date.now()
+          this.noteEvSnap('taken')
           await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+        } else if (!newSymbols.length) {
+          /*
+           * 跳过也要留痕（见 `noteEvSnap`）：`due=false` = 刚问过（180 秒内），
+           * `due=true` 且没人看 = 按新规则省掉那一发 25 权重。
+           */
+          this.noteEvSnap(due ? 'skipNoViewer' : 'skipFresh')
         }
         return
       }
@@ -1932,6 +2000,34 @@ class KeyStream {
   private noteActivity(): void {
     this.lastActivityAt = Date.now()
     this.wakeWs('账户有动静')
+  }
+
+  /**
+   * 事件触发的快照计数 +**一分钟一行摘要**（见 `evSnap` 的说明）。
+   *
+   * ⚠️「打」= REST 那一发**确实发出去了**；它到了 `snapshot()` 里还可能因为
+   *    「180 秒内刚写过库」而不落库（那种情况不会打 `快照已写`，但权重已经花了）。
+   *    所以这一行 + `快照已写` 两行合起来才是完整故事：
+   *    · 只看到这一行 ⇒ 打了 REST、没写库（数据仍然推给前端了）；
+   *    · 两行都有 ⇒ 打了也写了；
+   *    · 只有「跳过」⇒ 一发都没打。
+   */
+  private noteEvSnap(kind: 'taken' | 'skipNoViewer' | 'skipFresh'): void {
+    const c = this.evSnap
+    if (kind === 'taken') c.taken++
+    else if (kind === 'skipNoViewer') c.skipNoViewer++
+    else c.skipFresh++
+    const now = Date.now()
+    if (now - c.loggedAt < 60_000) return
+    c.loggedAt = now
+    if (!c.taken && !c.skipNoViewer && !c.skipFresh) return
+    console.log(
+      `${this.tag} 事件快照：REST 打 ${c.taken} 发 / 跳过 ${c.skipNoViewer + c.skipFresh} 次` +
+        `（没人看 ${c.skipNoViewer}、刚写过 ${c.skipFresh}）`
+    )
+    c.taken = 0
+    c.skipNoViewer = 0
+    c.skipFresh = 0
   }
 
   /* ---------------- 持仓实时重算（改造 P4） ---------------- */
