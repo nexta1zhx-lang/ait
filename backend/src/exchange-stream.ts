@@ -8,7 +8,9 @@
  *
  * ⚠️⚠️ 三个实测/设计上的硬约束（别改）：
  *   ① **ccxt 社区版做不了**（`watchOrders()` 抛 "not supported yet"，ccxt.pro 才有）
- *      ⇒ 自己连裸 WS：`POST /fapi/v1/listenKey` + `wss://fstream.binance.com/ws/<key>`。
+ *      ⇒ 自己连裸 WS：`POST /fapi/v1/listenKey` + `wss://fstream.binance.com/private/ws/<key>`
+ *      （**必须带 `/private`**：少了它连接照样 101 + 回 ping，但一个业务帧都不推，
+ *        见 `streamUrl()` 的注释）。
  *      listenKey 的增删改用 ccxt 的隐式方法（已验证可用），WS 用 `ws` 包。
  *   ② **WS 不能替代 REST**：断线期间事件会丢，而这是钱 ⇒
  *      · 连上（含重连成功）后立刻 REST 拉一次对账；
@@ -208,6 +210,21 @@ const INCOME_LOOKBACK_MS = 7 * 24 * 3600 * 1000
  * 前端不用猜（它只看得到我们这条 SSE，看不到上游那条）。
  */
 const WS_DEAF_MS = 4.5 * 60 * 1000
+
+/**
+ * 条件单（`ALGO_UPDATE` 的 `o.X`）里哪些状态表示「这张单已经不在场上了」。
+ *
+ * ⚠️ 币安的条件单事件字段是 `aid`（不是普通单的 `i`）、状态在 `X` 里：
+ *    实测见过 `CANCELED`（撤单）；`TRIGGERED` 表示**已经触发**（接下来会是真正的
+ *    订单进场，由 `ORDER_TRADE_UPDATE` 接管）。其余状态（`NEW` 等）当作「还挂着」。
+ */
+const ALGO_GONE = new Set([
+  'CANCELED',
+  'EXPIRED',
+  'REJECTED',
+  'FINISHED',
+  'TRIGGERED'
+])
 /** 多久检查一次「哑了没」 */
 const WS_HEALTH_MS = 30 * 1000
 /** 重连补成交：最多盯几个交易对（每个一次 fetchMyTrades，权重 5） */
@@ -277,10 +294,28 @@ function credsOf(r: KeyRow): ExchangeCredentials {
   }
 }
 
-/** 用户数据流的 WS 地址（沙盒是另一台主机） */
+/**
+ * 用户数据流的 WS 地址（沙盒是另一台主机）。
+ *
+ * ★★ 2026-10-06 实测（真账户 + 真事件）：**必须带 `/private`**。
+ *
+ * ⚠️ `/ws/<listenKey>` 是个**陷阱**：它会正常返回 101、还会回 ping，
+ *    但**一个业务帧都不推** —— 看起来跟「账户没动静」完全一样。
+ *    这个坑我们查了一整轮：两个出口 IP、两台机器、两个账户、五条路径、
+ *    伪造 listenKey 对照（伪造 key 与真 key 表现一模一样，所以「连上+有 ping」不能作为证据）、
+ *    关 permessage-deflate / 换浏览器 UA …… 全都没用，真相就是**少了 `/private`**。
+ *
+ * 对照实测（同一个 key、同一秒、同一个连接参数）：
+ *   `/ws/<lk>`           → 0 帧 / 0.3 KB（只有握手）
+ *   `/private/ws/<lk>`   → 收到 `ACCOUNT_UPDATE`（划转的 WITHDRAW / DEPOSIT 两条都到了）
+ *   `/pm/ws/`、`/pm-classic/ws/`、`/stream?streams=` → 都是 0 帧
+ *
+ * ⚠️ 公共行情（`/market/ws`）用的是**另一个** path，别混：那个没有 `/private`。
+ * ⚠️ 沙盒（testnet）这台主机没验证过，保持原来的写法。
+ */
 function streamUrl(listenKey: string, sandbox: boolean): string {
   const host = sandbox ? 'wss://stream.binancefuture.com' : 'wss://fstream.binance.com'
-  return `${host}/ws/${listenKey}`
+  return sandbox ? `${host}/ws/${listenKey}` : `${host}/private/ws/${listenKey}`
 }
 
 /* ==================================================================
@@ -481,6 +516,8 @@ class KeyStream {
   private dataFrames = 0
   /** 见过哪些事件类型（没见过的那种记一行，别刷屏） */
   private readonly seenEventTypes = new Set<string>()
+  /** 见过的条件单状态（第一次见记一笔，供以后扩充） */
+  private readonly algoStatuses = new Set<string>()
   /** 健康检查跑了几轮（只用来决定统计那一行多久打一次） */
   private healthTick = 0
   /** 这条 WS 是什么时候连上的（统计里报「连上几分钟」） */
@@ -850,6 +887,16 @@ class KeyStream {
         await this.onOrder(ev?.o ?? {})
         return
       }
+      if (e === 'ALGO_UPDATE') {
+        await this.onAlgoUpdate(ev?.o ?? {})
+        return
+      }
+      /*
+       * `TRADE_LITE`：2026-10-06 实测同一次成交会**先**推它、紧接着推
+       * `ORDER_TRADE_UPDATE`（字段少：`s/S/l/L/t/i`，没有手续费和已实现盈亏）。
+       * 成交的完整信息走后者 ⇒ 这里**不处理**，但要让它别再落进「没见过的类型」那条日志。
+       */
+      if (e === 'TRADE_LITE') return
       if (e === 'ACCOUNT_UPDATE') {
         /*
          * ★ 2026-10-06（用户贴了币安文档问「有用到这个吗」）：**用上事件里带的数据**。
@@ -1313,6 +1360,65 @@ class KeyStream {
   private resyncAfterFill(): void {
     if (this.stopped) return
     void this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+  }
+
+  /**
+   * `ALGO_UPDATE` —— **条件单（止盈 / 止损）**的生命周期。
+   *
+   * ★ 2026-10-06 加：WS 路径修好（`/private/ws/`）之后**第一天就抓到**的第二个坑 ——
+   *   币安把条件单搬到了 Algo Order 那套接口，它的事件类型是 **`ALGO_UPDATE`**，
+   *   字段在 `o` 里、用 **`aid`**（不是普通单的 `i`）：
+   *
+   *   ```json
+   *   {"e":"ALGO_UPDATE","o":{"aid":3000002234581230,"o":"TAKE_PROFIT_MARKET","s":"RLCUSDT",
+   *     "S":"SELL","q":"17","tp":"1.5","X":"CANCELED","R":true,"wt":"MARK_PRICE","ps":"BOTH"}}
+   *   ```
+   *
+   *   ⚠️ 原来只认 `ORDER_TRADE_UPDATE` ⇒ **撤掉的条件单一直留在界面的挂单列表里**
+   *   （只能等 2 分钟一轮的 REST 挂单对账清掉，而 `openAlgoOrders` 那一路是 40 权重）。
+   *
+   * ⚠️ 条件单没有「成交」概念：`q` 是委托量、`filled` 记 0；真正触发之后是**另一张真单**
+   *    进场，由 `ORDER_TRADE_UPDATE` 接管（那时这张条件单已经从场上消失）。
+   */
+  private async onAlgoUpdate(o: any): Promise<void> {
+    const orderId = String(o?.aid ?? '')
+    const status = String(o?.X ?? '').toUpperCase()
+    if (!orderId || !status) return
+    this.lastActivityAt = Date.now()
+    if (!this.algoStatuses.has(status)) {
+      this.algoStatuses.add(status)
+      console.log(`${this.tag} 条件单事件：${o?.s} ${o?.o} → ${status}`)
+    }
+    try {
+      if (ALGO_GONE.has(status)) {
+        if (await deleteOpenOrder(this.row.id, orderId)) {
+          this.openOrderCount = Math.max(0, this.openOrderCount - 1)
+          emit(this.row.id, {type: 'orders', reason: `algo:${status}`})
+        }
+        return
+      }
+      await upsertOpenOrder(this.row.user_id, this.row.id, {
+        orderId,
+        symbol: String(o?.s ?? '').toUpperCase(),
+        side: String(o?.S ?? '').toLowerCase(),
+        type: String(o?.o ?? '').toUpperCase(),
+        posSide: String(o?.ps ?? 'BOTH').toUpperCase(),
+        price: numOrNull(o?.p),
+        /* ⚠️ 条件单的触发价在 `tp`（`sp` 是普通单那套的字段） */
+        stopPrice: numOrNull(o?.tp),
+        amount: Number(o?.q ?? 0),
+        filled: 0,
+        reduceOnly: o?.R === true,
+        time: Number(o?.T ?? 0) || Date.now(),
+        raw: o
+      })
+      this.openOrderCount++
+      emit(this.row.id, {type: 'orders', reason: `algo:${status}`})
+    } catch (e) {
+      console.warn(
+        `${this.tag} 更新条件单失败（先不动本地那张）：${(e as Error).message.slice(0, 140)}`
+      )
+    }
   }
 
   private async onOrder(o: any): Promise<void> {

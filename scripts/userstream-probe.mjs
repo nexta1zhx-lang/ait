@@ -96,8 +96,10 @@ async function main() {
    */
   const urls = [
     ['A /ws/', `wss://fstream.binance.com/ws/${lk}`],
-    ['B /pm/ws/', `wss://fstream.binance.com/pm/ws/${lk}`],
-    ['C /stream?streams=', `wss://fstream.binance.com/stream?streams=${lk}`]
+    ['B /private/ws/', `wss://fstream.binance.com/private/ws/${lk}`],
+    ['C /pm/ws/', `wss://fstream.binance.com/pm/ws/${lk}`],
+    ['D /pm-classic/ws/', `wss://fstream.binance.com/pm-classic/ws/${lk}`],
+    ['E /stream?streams=', `wss://fstream.binance.com/stream?streams=${lk}`]
   ]
   for (const [name, url] of urls) {
     const w = new WebSocket(url, {agent: ag})

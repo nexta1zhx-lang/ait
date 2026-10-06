@@ -102,7 +102,11 @@ async function main(): Promise<void> {
 
 
   // 合约用户数据流：主网是 fstream.binance.com（不是 stream.binance.com）
-  const url = `wss://fstream.binance.com/ws/${listenKey}`
+  // ⚠️⚠️ 必须带 `/private`！`/ws/<listenKey>` 会 101 + 回 ping 但**一个业务帧都不推**，
+  //     2026-10-06 这个路径坑了我们一整轮排查（见 `exchange-stream.ts` 的 `streamUrl()`）。
+  //     而且这个脚本原来把「0 条事件」当正常（"账户没动静就是 0 条"）—— 它不造事件，
+  //     所以永远验不出「收不到推送」这件事。真要用它验，先在账户里造个动静。
+  const url = `wss://fstream.binance.com/private/ws/${listenKey}`
   console.log(`[2] 连 ${url.replace(listenKey, '<listenKey>')}`)
 
   let opened = 0
