@@ -1747,3 +1747,24 @@ API_KEY=… API_SECRET=… node scripts/userstream-probe.mjs
 `listenKey` will be returned and its validity will be extended for 60 minutes"*）——
 所以「再加一把 API Key 给本地用」**拿到的还是同一把 key**（本轮实测：新 key 读到同一个钱包 9.9877、
 POST 回同一把 `1maoUqh8…`）⇒ **独立流只能靠独立账户（子账户）**。
+
+### 逐项排除表（把「不可能的原因」全部钉死，供工单/以后回看）
+
+| 变量 | 试过什么 | 结果 |
+|---|---|---|
+| 是不是 ccxt | WS 全用裸 `ws` + Node socket（探针脚本不碰业务代码）；ccxt 只用来建 key（地址/续期/删除都符合文档） | 排除 |
+| 谁持有 listenKey | `DELETE` → 建**全新** key（没人抢）→ 只连我们两条 | 0 帧，排除 |
+| 同一个 listenKey 多连接 | 两条连接同时连；伪造 key 表现与真 key **完全一致** | 排除（「连上+有 ping」不构成证据） |
+| URL 写法 | `/ws/<lk>`、`/pm/ws/<lk>`、`/stream?streams=<lk>` | 三条都 0 帧 |
+| 出口 IP | 本地经 SSH 隧道（`52.194.6.144`）与 Clash（`157.254.20.163`）**两个不同出口**；AWS 服务器直连（无代理） | 全都 0 帧 |
+| 机器 / 网络栈 | 本机 macOS + 线上 Ubuntu（`docker exec` 里跑同一个探针） | 都 0 帧 |
+| 账户 | 账户 7（钱包 ≈9.99）与**另一个独立账户** 9（钱包 5.00），各自建自己的 key | 都 0 帧 |
+| 握手姿势 | 默认 / `perMessageDeflate: false` / 浏览器 UA / 两者都来（握手响应里 `sec-websocket-extensions` 都正常协商） | 都 0 帧 |
+| 权限 | `GET /sapi/v1/account/apiRestrictions`：`enableReading:true enableFutures:true permitsUniversalTransfer:true ipRestrict:true`；**没有**「USER_STREAM」这种字段 | 排除权限不足 |
+| 地区 / IP 封禁 | REST：`api.binance.com/api/v3/time` 与 `fapi.binance.com/fapi/v1/time` 两个环境都 **200** | 排除 |
+| 事件真的发生 | 真实成交（`8381646990 status=closed`）+ 反复的免费划转（每次都有 `tranId` 回执） | 事件存在 |
+| 币安到底推没推 | 同一 host / 同一客户端：`/market/ws` **654 帧 / 75.1 KB**；`/ws/<listenKey>` **0 帧 / 0.3 KB** | 公共推送正常，**账户事件推送不到我们** |
+| 我们有没有吞掉 | 无 `badFrames`、无未捕获异常；`listenKeyExpired` 在删 key 时**也没收到** | 排除 |
+
+⇒ **结论：合约账户事件的推送（`/ws/<listenKey>`）在我们的所有出口/机器/账户上都收不到，
+而同一 host 的公共行情推送完全正常。这条只能从币安侧解决（工单），我们这侧已经无解。**

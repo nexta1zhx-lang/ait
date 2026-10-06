@@ -25,11 +25,17 @@ import ccxt from 'ccxt'
 const log = (...a) => console.log(...a)
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
+/** REST 用的代理（要走 IP 白名单里那个出口，否则 -2015） */
 const PROXY = process.env.EXCHANGE_PROXY || process.env.HTTPS_PROXY || ''
-async function agent() {
-  if (!PROXY) return undefined
+/*
+ * ★ WS 可以单独走另一个出口（`WS_PROXY`）—— 排查「是不是这个出口 IP 收不到推送」用的：
+ *   REST 仍走白名单出口，只把 WebSocket 换一条路。两个都不给就是直连。
+ */
+const WS_PROXY = process.env.WS_PROXY || PROXY
+async function agent(p = WS_PROXY) {
+  if (!p) return undefined
   const {HttpsProxyAgent} = await import('https-proxy-agent')
-  return new HttpsProxyAgent(PROXY)
+  return new HttpsProxyAgent(p)
 }
 
 async function creds() {
@@ -74,7 +80,8 @@ async function main() {
     /* 只能给一个代理（ccxt 同时给 http/https 会直接拒） */
     ...(PROXY ? {httpProxy: PROXY} : {})
   })
-  if (PROXY) log(`走代理：${PROXY}`)
+  if (PROXY) log(`REST 走代理：${PROXY}`)
+  if (WS_PROXY && WS_PROXY !== PROXY) log(`WS 单独走代理：${WS_PROXY}`)
   await ex.loadMarkets()
 
   const lk = String((await ex.fapiPrivatePostListenKey())?.listenKey ?? '')
