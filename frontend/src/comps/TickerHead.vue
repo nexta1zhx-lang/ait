@@ -200,6 +200,12 @@ const rows = computed(() => {
           <span class="tk-delta">{{ changeAbs }}</span>
           <b>{{ changePct }}</b>
         </span>
+        <!--
+          价格这一行的**最右边**（谁给内容由外层插槽决定，这个组件本身不认得具体徽章）——
+          2026-10-07 用户：「mm放在 下面最右侧和价格那一排」：MM 保证金率就摆这儿。
+          ⚠️ 位置是 `.tk-price` 的右端（`margin-left: auto`），不是币种那一行。
+        -->
+        <slot name="price-end" />
       </div>
       <div v-if="rangePos !== null" class="tk-range" :title="rangeTitle">
         <span class="tk-range-label">24h</span>

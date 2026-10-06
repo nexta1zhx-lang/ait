@@ -61,6 +61,8 @@ export const overlayOrders = ref<TradeOpenOrder[]>([])
 export const overlayFills = ref<TradeFill[]>([])
 /** 取数出错的原因（界面上不弹，只用来判断「这次没拿到」） */
 export const overlayErr = ref('')
+/** 这几条挂单线是最近一次对账的快照（最多滞后 2 分钟），不是实时读到的 */
+export const overlayStale = ref(false)
 
 /**
  * 币种（`1000BONK`）→ 币安原始符号（`1000BONKUSDT`）。
@@ -92,6 +94,7 @@ export function clearTradeOverlay(): void {
   overlayOrders.value = []
   overlayFills.value = []
   overlayErr.value = ''
+  overlayStale.value = false
 }
 
 /* ---------------- 持仓：绑到共享 store（改造 P1） ---------------- */
@@ -156,6 +159,7 @@ export async function refreshTradeOverlay(
     overlaySymbol.value = symbol
     overlayOrders.value = []
     overlayFills.value = []
+    overlayStale.value = false
   }
   /* 持仓走共享 store（见 `overlayPositions`），这里只拉挂单和成交 */
   const wantOrd = chartShowOrders.value
@@ -172,6 +176,8 @@ export async function refreshTradeOverlay(
             err = r.error || '读不到挂单'
             return
           }
+          /* 快照也照画，但要标出来（见 `.ord-note`），别让人拿旧价去改单 */
+          overlayStale.value = !!r.stale
           overlayOrders.value = (r.orders ?? []).filter(
             o => String(o.symbol).toUpperCase() === symbol
           )
@@ -182,6 +188,7 @@ export async function refreshTradeOverlay(
     )
   } else if (overlaySymbol.value === symbol) {
     overlayOrders.value = []
+    overlayStale.value = false
   }
 
   if (wantFill) {

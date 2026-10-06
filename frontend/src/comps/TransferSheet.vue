@@ -5,9 +5,15 @@
  * ★⚠️ 这是全站**唯一一处真金白银、且没有测试接口**的操作：
  *   币安的下单有 `/fapi/v1/order/test`（只校验不成交），划转**没有**对应物，
  *   点下去钱就真的换了钱包。所以这个弹层里：
- *     · 顶部常驻一条红色警示（不是可关的 toast，是标题下面一直挂着）
  *     · 提交前弹全站那个确认框（`askConfirm`）复述「哪套账户 / 从哪到哪 / 多少」
+ *       ⚠️ 2026-10-07 用户：「提示去掉」—— 弹层顶部那条常驻红色警示**删了**，
+ *         这条保护现在只剩下确认框里那一行（`tone: 'warn'`）+ 没法测的红色按钮，
+ *         别再往弹层里加回常驻提示。
  *     · 没开「允许通用划转」的 Key **直接禁用提交**（先问一次权限，见下）
+ *
+ * ★ 2026-10-07 另一处：从 / 到那两个原生 `<select>` 换成自定义下拉
+ *   （`SelectPick`）—— 用户：「划转的下拉框换成自定义样式」。
+ *   原生那个在安卓 WebView 里是系统控件，跟这一页的胶囊 / 面板完全不是一套。
  *
  * ★ 支持的钱包对（后端只放行验过能用的六种，见 `data/exchange-transfer.ts`）：
  *   现货 / 资金（C2C）/ USDTⓈ 合约 —— 三者两两互转。
@@ -27,6 +33,7 @@ import {
 } from '../api'
 import {fmt} from '../format'
 import {askConfirm} from '../confirm'
+import SelectPick from './SelectPick.vue'
 
 const props = defineProps<{
   open: boolean
@@ -218,12 +225,6 @@ async function submit(): Promise<void> {
         <button class="ghost tiny" title="关掉" @click="emit('close')">✕</button>
       </header>
 
-      <!-- 常驻警示：这不是可关的 toast，是标题下面一直挂着的一句 -->
-      <p class="tr-warn">
-        ⚠️ 划转是<b>真钱</b>操作 —— 币安没有「划转测试接口」，点下去就真的换钱包了。
-        合约之间不能互转，真正的 C2C 账户也不在万能划转里。
-      </p>
-
       <!-- 账户：多套 Key 时才给选 -->
       <div v-if="multiKey" class="sheet-row col">
         <div class="sheet-text"><b>账户</b></div>
@@ -244,16 +245,20 @@ async function submit(): Promise<void> {
         账户：<b>{{ currentKey.name }}</b>
       </p>
 
-      <!-- 方向 -->
+      <!--
+        方向：从 [?] ⇅ 到 [?]。
+        ⚠️ 这两个是**自定义下拉**（`SelectPick`），不是原生 `<select>`（用户 2026-10-07：
+        「划转的下拉框换成自定义样式」）—— 原生那个在安卓 WebView 里弹的是系统控件。
+      -->
       <div class="tr-dir">
-        <label class="tr-side">
+        <div class="tr-side">
           <span>从</span>
-          <select v-model="from">
-            <option v-for="w in WALLETS" :key="w.value" :value="w.value">
-              {{ w.label }}
-            </option>
-          </select>
-        </label>
+          <SelectPick
+            v-model="from"
+            :options="WALLETS"
+            aria-label="转出钱包"
+          />
+        </div>
         <button
           type="button"
           class="ghost tiny tr-swap"
@@ -262,14 +267,10 @@ async function submit(): Promise<void> {
         >
           ⇅
         </button>
-        <label class="tr-side">
+        <div class="tr-side">
           <span>到</span>
-          <select v-model="to">
-            <option v-for="w in WALLETS" :key="w.value" :value="w.value">
-              {{ w.label }}
-            </option>
-          </select>
-        </label>
+          <SelectPick v-model="to" :options="WALLETS" aria-label="转入钱包" />
+        </div>
       </div>
 
       <!-- 金额 -->

@@ -22,5 +22,9 @@ logs/
 *.log
 .DS_Store
 
+# 币种图标的落盘缓存（backend 自己写的运行产物，见 server.ts 的「图标落盘」那段；
+# `data/contracts.json` 是**要提交**的那份基准名单，别一起忽略）
+data/icons/
+
 # 编辑器本地配置（每个人那份不一样，不进仓库）
 .vscode/

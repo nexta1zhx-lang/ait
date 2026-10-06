@@ -19,19 +19,14 @@ import {
 import {RouterLink} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import MarketPanel from '../comps/MarketPanel.vue'
-/*
- * 交易所账户：真数据容器（M3，2026-10-05）—— 先读库里的快照渲染、
- * 旧了后台刷、并订阅 SSE 实时更新。详见 `comps/ExchangeAccountLivePanel.vue`。
- */
-import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
 import SettingsSheet from '../comps/SettingsSheet.vue'
+import MarginRateBadge from '../comps/MarginRateBadge.vue'
 import SegTabs from '../comps/SegTabs.vue'
 import CollectForm from '../comps/CollectForm.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
 import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
-import MarginRateBadge from '../comps/MarginRateBadge.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import {showToast} from '../toast'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
@@ -192,9 +187,11 @@ const tabs = computed(() => {
  *    把「K 线」那一格**整格关掉**了滑动。用户 2026-10-05：
  *    「应该是除了 k 线图 其余位置都能滑动切换」。
  *
- * 现在挂到 `.split`（含右栏），只把**图表本体**（`KlineChart` 的 `.chart-wrap`，
- * 上面标了 `data-no-swipe`）排除掉 —— 图上横划是拖动图表看历史行情，
- * 其余位置（tab 行 / 行情条 / 周期行 / 图下工具行 / 下单模块）都能滑动切 tab。
+ * 现在挂到 `.split`（含右栏），只把两处**自己吃横向手势**的排除掉：
+ *   ① 图表本体（`KlineChart` 的 `.chart-wrap`）—— 图上横划是拖动图表看历史行情；
+ *   ② 下单模块（`OrderPanel` 的 `.ord`）—— 横划是切它自己的「开单 / 仓位」
+ *      （用户 2026-10-06：「底部开单和仓位可滑动切换，注意不要滑动切换一级 tab 了」）。
+ * 其余位置（tab 行 / 行情条 / 周期行 / 图下工具行）都能滑动切 tab。
  *
  * 用户 2026-10-04：「一级 tab（底下一小段线那种）可滑动切换」。
  * 调参与避让规则都在 `../swipe-tabs`，这里只负责接线。
@@ -652,7 +649,7 @@ const heatRows = computed(() => {
 
             用户 2026-10-04：「移动端 在开单分析顶部 tab栏最右侧加上 模型余额 fixed 固定」。
             手机上顶栏整块收起来了（`.topbar { display: none }`），余额原先只在
-            「我的 → 模型配置」里看得到 —— 这里补一颗，点一下刷新（跟顶栏那颗同一个 store）。
+            「我的 → 个人信息 → 模型配置」里看得到 —— 这里补一颗，点一下刷新（跟顶栏那颗同一个 store）。
             「固定」靠的是**这一行不参与内容滚动**（内容在下面的 `.scroll-body` 里自己滚），
             所以它一直看得见，不需要 `position: fixed`。
             宽屏不露（顶栏已经有账号区了）。
@@ -903,13 +900,6 @@ const heatRows = computed(() => {
           </div>
         </template>
 
-        <!-- ② 交易所资产：净资产（合约 + C2C）/ 走势曲线 / 仓位统计 / 持仓·挂单·盈亏·成交
-             （用户 2026-10-05：「只统计 USDT 合约 + C2C，不算现货」）
-             数据是真快照：先渲染库里那份、旧了后台刷、有变动走 SSE 推过来。 -->
-        <div v-else-if="leftTab === 'exchange'" class="scroll-body">
-          <ExchangeAccountLivePanel />
-        </div>
-
         <!-- ② 历史分析：只在切到这个 tab 时显示 -->
         <div v-else-if="leftTab === 'history'" class="scroll-body">
           <section class="panel hist-panel">
@@ -927,7 +917,7 @@ const heatRows = computed(() => {
                   （以前只挂在结论文字上，那文字又没配色，整行看上去是灰的）。
                 -->
                 <RouterLink
-                  :to="`/history?id=${h.id}`"
+                  :to="`/me?p=replay&id=${h.id}`"
                   :class="
                     h.verdict ? (VERDICT_TEXT[h.verdict]?.[1] ?? '') : 'dim'
                   "
@@ -990,8 +980,8 @@ const heatRows = computed(() => {
             </div>
 
             <div v-if="historyTotal > history.length" class="hist-more">
-              <RouterLink :to="`/history?symbol=${symbol}`">
-                去「历史」页看全部 {{ historyTotal }} 条 →
+              <RouterLink :to="`/me?p=replay&symbol=${symbol}`">
+                去「复盘」页看全部 {{ historyTotal }} 条 →
               </RouterLink>
             </div>
           </section>
@@ -1052,6 +1042,13 @@ const heatRows = computed(() => {
                   @submit="onRun"
                 />
               </template>
+              <!--
+                大字价格那一行的最右端（用户 2026-10-07：「mm放在 下面最右侧和价格那一排」）——
+                MM 合约保证金率跟着**下单账户**走，摆在价格行右端；币种那一行不再放它。
+              -->
+              <template #price-end>
+                <MarginRateBadge class="tk-mm" />
+              </template>
               <!-- 最右侧那组：＋ / 添加案例 / 配置 -->
               <template #actions>
                 <!--
@@ -1084,11 +1081,10 @@ const heatRows = computed(() => {
                   </button>
                 </template>
                 <!--
-                  MM 合约保证金率（用户 2026-10-06：「再配置旁加个显示 mm 合约保证金率」）——
-                  摆在「配置」这颗齿轮**左边**。数据来自共享持仓 store（跟下单模块同一份），
-                  随标记价实时重算；没有仓位时它自己不渲染。
+                  ⚠️ MM 合约保证金率 2026-10-07 **挪到「大字价格」那一行的最右端**了
+                  （用户：「mm放在 下面最右侧和价格那一排」＋「右侧」）——
+                  币种那一行不放它了，见下面 `#price-end` 插槽。
                 -->
-                <MarginRateBadge />
                 <!-- 最右边：配置（点开从底部弹出来） -->
                 <button
                   class="ghost tiny tk-cfg"

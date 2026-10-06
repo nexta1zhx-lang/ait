@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 服务器监测（「我的 → 服务器」）。
+ * 服务器监测（「我的 → 管理 → 服务器」）。
  *
  * 数据来自 `GET /api/server-status`（见 `backend/src/system.ts`）——
  * 后端只给**当下这一瞬**，曲线是这里按秒轮询、自己攒出来的（只留最近 3 分钟）。

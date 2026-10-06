@@ -15,7 +15,8 @@
  *     市价降级成开单页里的一个开关 —— **开着 = 市价单（价格框禁用不能改）**，
  *     关掉 = 可以填价格，填的就是限价单。
  *   · 「仓位」那格：**列出账户里所有币的持仓**（一个可滚动列表），
- *     每条自带一颗「平仓」；顶栏的「一键平仓」一颗全平。
+ *     每条自带「平仓 / 全平」两颗（2026-10-07 改口径：只平一部分叫**平仓**、
+ *     整条平掉叫**全平**）；顶栏的「一键平仓」把账户里有持仓的全平一遍。
  *   · **「补仓」整块删掉**（用户：「没有补仓」）。
  *
  * ★ 2026-10-05 第三版（用户）：
@@ -63,6 +64,7 @@ import {askConfirm} from '../confirm'
 import {freshLivePrice, ticker} from '../ticker'
 import {showToast} from '../toast'
 import {loadTradeKeys, tradeKey} from '../trade-account'
+import {useSwipeTabs} from '../swipe-tabs'
 import ReduceSheet from './ReduceSheet.vue'
 
 const props = defineProps<{
@@ -105,6 +107,17 @@ const levConfirmed = ref(false)
  * 原来那两颗「市价 / 限价」换成了这两格；市价/限价降级成开单页里的一个开关。
  */
 const tab = ref<'open' | 'position'>('open')
+
+/**
+ * 顶部两格的顺序 —— **也是左右滑动切换的顺序**。
+ *
+ * 用户 2026-10-06：「底部开单和仓位可滑动切换，注意不要滑动切换一级 tab 了」。
+ * 所以在 `.ord` 上：① 挂自己的滑动手势（见下面 `useSwipeTabs`）；
+ * ② 标 `data-no-swipe`，让「开单分析」那一级 tab 的滑动别把它抢走
+ * （`swipe-tabs.ts` 那条「标了 `data-no-swipe` 的元素不抢」）。
+ */
+const TABS = [{value: 'open' as const}, {value: 'position' as const}]
+
 /**
  * 市价开关（开单页）：**开着 = 市价单**，左边价格框禁用不能改；
  * **关掉 = 可填价格**，那就是限价单。
@@ -669,9 +682,13 @@ function posTitle(p: TradePositionRow): string {
   )
 }
 
-/* ---------------- 减仓（用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」） ---------------- */
+/*
+ * 平仓（只平一部分）—— 用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」，
+ * 2026-10-07 改口径：「减仓换成平仓，平仓换成全平」（按钮上的字见模板）。
+ * 弹层（`ReduceSheet`）里选百分比，提交走同一个 close 接口。
+ */
 
-/** 正在减仓的那一条（null = 弹层关着） */
+/** 正在平仓的那一条（null = 弹层关着） */
 const reduceRow = ref<TradePositionRow | null>(null)
 
 function openReduce(p: TradePositionRow): void {
@@ -695,14 +712,14 @@ async function confirmReduce(pct: number): Promise<void> {
       const q = ((p.amount * pct) / 100).toFixed(Math.min(12, amountPrecision.value))
       say(
         r.test
-          ? `测试减仓通过校验：${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）—— 没进撮合`
-          : `已减仓 ${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）`,
+          ? `测试平仓通过校验：${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）—— 没进撮合`
+          : `已平仓 ${baseOf(p.symbol)} ${sideText(p)} ${pct}%（约 ${q}）`,
         'ok'
       )
       void loadPositions()
     } else {
       buzz([20, 60, 20])
-      say(r.error || '减仓失败')
+      say(r.error || '全平失败')
     }
   } catch (e) {
     say((e as Error).message)
@@ -715,7 +732,7 @@ async function confirmReduce(pct: number): Promise<void> {
  * 拉一次持仓列表。
  *
  * ★ 改造后持仓由共享 store 持有，这里只是让它**绕过后端缓存**立刻拉一次 ——
- *   下单 / 平仓 / 减仓之后用，不然要等常驻流下一次推（最多 20 秒）。
+ *   下单 / 平仓 / 全平之后用，不然要等常驻流下一次推（最多 20 秒）。
  */
 async function loadPositions(): Promise<void> {
   refreshPositions([keyId.value])
@@ -749,7 +766,7 @@ function syncPosTimer(): void {
 let stopForeground: (() => void) | null = null
 
 /**
- * 平掉**这一条**持仓。
+ * 全平：**这一条**持仓整个平掉。
  *
  * 数量由后端按真实持仓算（不填数，免得手滑）；`side` 一起带上 ——
  * 双向持仓模式下同一个币有两条（多 / 空），不带方向会平错那条。
@@ -770,9 +787,9 @@ async function closeOne(p: TradePositionRow): Promise<void> {
       buzz(12)
       say(
         r.test
-          ? `测试平仓单通过校验：${baseOf(p.symbol)} ${sideText(p)} ` +
+          ? `测试全平通过校验：${baseOf(p.symbol)} ${sideText(p)} ` +
               `${posQty(p)}（没进撮合、没真平仓）`
-          : `已提交平仓：${baseOf(p.symbol)} ${sideText(p)} ${posQty(p)}` +
+          : `已提交全平：${baseOf(p.symbol)} ${sideText(p)} ${posQty(p)}` +
               (n ? `（${n} 笔）` : ''),
         'ok'
       )
@@ -873,6 +890,31 @@ watch(marketOn, on => {
   if (!on && !(priceNum.value > 0)) prefillPrice()
 })
 
+/* ---------------- 窄屏：左右滑动切换「开单 / 仓位」 ---------------- */
+
+/**
+ * 手势区 = **整块下单模块**（模板里 `.ord` 那个 `ref`）。
+ *
+ * 用户 2026-10-06：「底部开单和仓位可滑动切换，注意不要滑动切换一级 tab 了」。
+ *
+ * ⚠️ `.ord` 上必须同时有 `data-no-swipe`（模板里那个属性）：
+ *    「开单分析」页把一级 tab 的滑动手势铺在整个 `.split` 上，不加这个，
+ *    在这里横划会先被它接走、切成别的 tab（用户明确要求不要）。
+ *    注意 `.ord` 在下单区里、**不在** `KlineChart` 那个 `.chart-wrap`
+ *    （`data-no-swipe`）范围内 —— 图那个属性盖不到它。
+ * ⚠️ 调参与避让规则（输入框 / 横向可滚元素不抢）都在 `../swipe-tabs`；
+ *    默认只在窄屏（≤900px）生效，跟一级 tab 的手感对齐。
+ */
+const rootRef = ref<HTMLElement | null>(null)
+const {onTouchStart, onTouchMove, onTouchEnd} = useSwipeTabs<'open' | 'position'>(
+  {
+    host: () => rootRef.value,
+    list: () => TABS,
+    current: () => tab.value,
+    set: v => (tab.value = v)
+  }
+)
+
 /*
  * 换了「下单账户」（配置弹层里切的）：余额 / 杠杆 / 持仓全是那套 Key 的，
  * 整块作废重读 —— 不重读的话界面上还挂着上一个账户的数。
@@ -910,7 +952,20 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="ord">
+  <!--
+    ⚠️ `data-no-swipe`：窄屏「开单分析」一级 tab 的左右滑动把手势区铺在整个 `.split` 上，
+    这里得自己吃下横向手势 —— 横划是切「开单 / 仓位」（见下面 `useSwipeTabs`），
+    不能被当成「切一级 tab」（用户 2026-10-06：「注意不要滑动切换一级 tab 了」）。
+  -->
+  <div
+    ref="rootRef"
+    class="ord"
+    data-no-swipe
+    @touchstart.passive="onTouchStart"
+    @touchmove.passive="onTouchMove"
+    @touchend.passive="onTouchEnd"
+    @touchcancel.passive="onTouchEnd"
+  >
     <div class="ord-head">
       <!--
         两格：开单 / 仓位（用户 2026-10-05）。
@@ -1082,7 +1137,7 @@ onMounted(async () => {
             :class="{empty: ready && available <= 0}"
             :title="
               ready && available <= 0
-                ? '合约账户没有可用余额 —— 先去「交易所账户 → 划转」把 USDT 划到合约钱包，或在「配置 → 下单账户」换一套 Key'
+                ? '合约账户没有可用余额 —— 先去「我的 → 交易所账户 → 划转」把 USDT 划到合约钱包，或在「配置 → 下单账户」换一套 Key'
                 : undefined
             "
           >
@@ -1182,7 +1237,7 @@ onMounted(async () => {
     <div class="ord-page" :class="{off: tab !== 'position'}">
       <!--
         持仓列表（用户 2026-10-05：「平仓是针对每一个仓位的，没有补仓」）：
-        账户里**所有币**的持仓，**一行一条**，各自带「减仓 / 平仓」。
+        账户里**所有币**的持仓，**一行一条**，各自带「平仓 / 全平」。
 
         ⚠️ 列表**高度封顶、超出自己滚，但滚动条不画出来** —— 下单区整体高度是钉死的
            （用户：「下单区域高度固定」），这么窄的格子里再占掉 6px 滚动条不划算，
@@ -1201,7 +1256,7 @@ onMounted(async () => {
           <!--
             单行（用户 2026-10-05：「列表单行显示…币种 方向 杠杆标签 仓位价值
             未实现盈利 按钮」）：
-              币种 · 方向 · 杠杆 · 仓位价值 …… 未实现盈亏 · 减仓 / 平仓
+              币种 · 方向 · 杠杆 · 仓位价值 …… 未实现盈亏 · 平仓 / 全平
             开仓数量 / 开仓价单行塞不下（窄屏会截断），挪进 `title` —— 要核对
             数量时手指按住这一行就看见了。
             ⚠️ 币种是一颗**按钮**（用户 2026-10-06：「点击仓位中币种可以切换到该k线」）：
@@ -1239,23 +1294,23 @@ onMounted(async () => {
               type="button"
               class="op-act op-reduce"
               :disabled="busy || levBusy"
-              :title="`减仓（只平掉一部分）`"
+              :title="`平仓（只平掉一部分）`"
               @click="openReduce(p)"
             >
-              减仓
+              平仓
             </button>
             <button
               type="button"
               class="op-act op-close"
               :disabled="busy || levBusy"
               :title="
-                `平掉 ${baseOf(p.symbol)} 这一条持仓（` +
+                `全平：把 ${baseOf(p.symbol)} 这一条持仓整个平掉（` +
                 (testOrder ? '测试单，只校验、不真平' : '真单') +
                 '）'
               "
               @click="closeOne(p)"
             >
-              平仓
+              全平
             </button>
           </div>
         </li>
@@ -1346,7 +1401,7 @@ onMounted(async () => {
       </section>
     </Teleport>
 
-    <!-- 减仓弹层：选百分比（只平一部分），提交走同一个 close 接口 -->
+    <!-- 平仓弹层：选百分比（只平一部分），提交走同一个 close 接口 -->
     <ReduceSheet
       :open="!!reduceRow"
       :name="reduceRow ? baseOf(reduceRow.symbol) : ''"

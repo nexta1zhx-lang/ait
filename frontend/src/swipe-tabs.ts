@@ -33,7 +33,7 @@ const MOBILE_QUERY = '(max-width: 900px)'
  *  · 输入框 / 可编辑区：手指横划是在选文字、挪光标（不是切 tab）
  *  · `[data-no-swipe]`：留给以后要自己吃横向手势的组件（图上画范围那种）
  *  · **自己能横向滚的元素**：那是滚动，不是切 tab ——
- *    「我的」那排一级 tab（`me-tabs`）、宽表格、下拉列表全靠这一条挡下来。
+ *    「我的 / 复盘」那排一级 tab（`PaneShell` 的 `tabpane-tabs`）、宽表格、下拉列表全靠这一条挡下来。
  *    ⚠️ 判据必须是「`overflow-x` 是 auto/scroll **并且真滚得动**」：
  *    只判 `overflow-x: auto` 会误伤「设了 auto 但其实放得下」的容器
  *    （那种情况下用户横划就是想切 tab）。
@@ -62,9 +62,9 @@ export interface SwipeTabsOptions<T extends string> {
    *
    * ⚠️ 开单分析页挂的是**整个 `.split`**（左栏 tab 行 + 内容 + 窄屏「K 线」那格的
    *    右栏），因为窄屏「K 线」时图在右栏、`.col` 只剩 tab 行那 40px（那样划到哪都
-   *    不生效）。所以**必须**把图上那块横划手势自己吃掉的东西标上 `[data-no-swipe]`
-   *    （`KlineChart` 的 `.chart-wrap` 就是这么干的）—— 否则图上拖动看历史行情会被
-   *    当成「切 tab」。
+   *    不生效）。所以**必须**把「横划手势要自己吃掉」的东西标上 `[data-no-swipe]`：
+   *    `KlineChart` 的 `.chart-wrap`（图上拖动看历史行情）、`OrderPanel` 的 `.ord`
+   *    （横划切它自己的「开单 / 仓位」）—— 否则都会被当成「切 tab」。
    */
   host: () => HTMLElement | null
   /** tab 的顺序 —— 按它挪一格 */

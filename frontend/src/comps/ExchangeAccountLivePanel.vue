@@ -14,16 +14,28 @@
  *    每次都要现拉；这个首屏只读库，慢的东西（挂单）拆开按需查。
  */
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
+import {useRouter} from 'vue-router'
 import ExchangeAccountBoard from './ExchangeAccountBoard.vue'
 import TransferSheet from './TransferSheet.vue'
 import ReduceSheet from './ReduceSheet.vue'
+import TpSlSheet from './TpSlSheet.vue'
+import OrderEditSheet from './OrderEditSheet.vue'
 import type {PositionRef} from './ExchangeAccountBoard.vue'
+import {pickSymbol, prefetchSymbol} from '../analyze'
+import {bindLastPrices, lastPrices} from '../last-price'
+import {
+  closeSideOf,
+  type OrderEditTarget,
+  type TpSlAction,
+  type TpSlTarget
+} from '../tpsl'
 import {usePullRefresh} from '../pull-refresh'
 import {testOrder} from '../settings'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
 import {isForeground} from '../live'
 import {
+  cancelTradeOrder,
   closeTradePositions,
   exchangeStream,
   fetchExchangeCurve,
@@ -35,6 +47,8 @@ import {
   fetchExchangeOverview,
   fetchRate,
   isAuthError,
+  modifyTradeOrder,
+  placeStopOrder,
   refreshExchangeOverview,
   type CurvePoint,
   type ExchangeIncomeRow,
@@ -68,6 +82,18 @@ const INCOME_MAX = 200
 const CYCLES_MAX = 50
 
 const keys = ref<ExchangeKey[]>([])
+
+/**
+ * 这一格现在是不是「用户正在看的」。
+ *
+ * ★ 2026-10-06 加了缓存（用户：「该页面要做缓存」）：`MeView` 现在把它**留着不卸载**
+ *   （`v-show`），所以切到别的格只是「看不见」，组件还活着 —— 那两条 SSE、兜底定时器
+ *   得自己按这个开关停/开，不能在没人看的时候还挂着。
+ *   默认 `true`（独立使用时不传也对）。
+ */
+const props = defineProps<{active?: boolean}>()
+const live = computed(() => props.active !== false)
+
 
 /**
  * 选中的那一格：`'all'` = **全部**（多套 Key 加起来看），否则是某个 key 的 id（字符串）。
@@ -107,12 +133,6 @@ const activeTargets = computed<ExchangeKey[]>(() => {
 /** 看的是**多套**（合并视图）—— 单套时不合并、也不打 key 标签，跟以前一模一样 */
 const multi = computed(() => activeTargets.value.length > 1)
 
-/**
- * **全部** Key（跟 `activeTargets` 的区别：那个是当前 tab 选中的）。
- * ⚠️ 盈亏汇总要算全部账户 —— 只算选中的那套，切 tab 时「净盈亏」会跳来跳去。
- */
-const listAll = computed<ExchangeKey[]>(() => keys.value)
-
 /** board 顶部那排 tab 的选项：`全部` + 每套的名字（只有一套时不摆 tab） */
 const accountOptions = computed(() => {
   const list = keys.value.map(k => ({value: String(k.id), label: k.name}))
@@ -151,6 +171,40 @@ function streamAlive(keyId: number): boolean {
   return Date.now() - (streamAt[keyId] ?? 0) < STREAM_ALIVE_MS
 }
 
+/*
+ * ★ 2026-10-06：**刚打开页面时别急着判定「流死了」**。
+ *
+ * 用户反馈：「怎么感觉刷新后进入该页面就会请求」——他看对了。
+ * 打开页面那一瞬间 `streamAt` 还是 0（SSE 才刚发出去，还没收到第一帧），
+ * 而库里那份快照是 5 分钟采样写一次（早就旧过 15 秒）⇒
+ * `!streamAlive && age > 15s` 成立 ⇒ **每次进页面都白打一轮交易所**（实测：
+ * 进页面 483ms 时就并发发出两条 `POST /api/exchange/refresh?auto=1`，
+ * 每条约 2 秒 / 25 权重，还会撞上出口超时弹「刷新失败」）。
+ *
+ * 但后端内存里就有最新那份快照、握手后立刻推过来（同一时刻的流完全正常）——
+ * 所以给「刚打开 + 还没收到任何一帧」一段宽限期：
+ *   · 宽限期内收到帧 ⇒ `streamAt` 有值 ⇒ 不再算旧，**一次交易所都不打**；
+ *   · 宽限期过了还是没人推（真断线）⇒ 重判一次，照旧走兜底刷（只晚 2.5 秒）。
+ * ⚠️ 这段宽限**不会**变成轮询：只是「开机后重判一次」。
+ */
+/*
+ * 宽限期上限 8 秒、每 1.2 秒重判一次（重判只是**再读一次库**，毫秒级、零交易所权重）。
+ *
+ * ⚠️ 为什么不是「等 2.5 秒就下结论」：后端在订阅那一刻会 `wakeOnView` ——
+ *    数据旧过它自己的 `FRESH_MS`(60s) 时它**先自己去对平一轮再 emit**，
+ *    经这条出口隧道实测要 2~4 秒才送第一帧。宽限期短于它，就会两头同时打交易所
+ *    （实测 2.5 秒的版本在 3.4 秒时照样发了 refresh，等于白等）。
+ */
+const STREAM_GRACE_MS = 8000
+const STREAM_GRACE_STEP_MS = 1200
+let openedAt = 0
+let graceTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 现在算不算「刚打开、SSE 还在握手」（这段时间不许判定流死了） */
+function streamWarming(keyId: number): boolean {
+  return !streamAlive(keyId) && Date.now() - openedAt < STREAM_GRACE_MS
+}
+
 /**
  * keyId → 后端报告「上游用户数据流哑了」。
  *
@@ -166,14 +220,33 @@ const deaf = ref<Record<number, boolean>>({})
 /**
  * 把几套快照**加总**成一份（「全部」那一格用）。
  *
- * ⚠️ 只有一套时**原样返回** —— 保留 `account.name`、也不给行打 key 标签，
+ * ⚠️ 只有一套时**不加总、也不给行打 `keyName` 标签** —— 保留 `account.name`，
  *    单账户的界面跟以前完全一样。
+ * ⚠️⚠️ 但**必须给每条持仓补上 `keyId`**（只是不写 `keyName`）：
+ *    2026-10-07 实测的 bug —— 选了「币安」再点「一键平仓 / 平仓 / 全平」，
+ *    请求里**没有 `?id=`**（`row.keyId` 是 undefined），后端 `idRaw` 为空就落到
+ *    `getDefaultExchangeKey`（`ORDER BY is_default DESC, id` ⇒ 默认那套是**最早配的**
+ *    「测试」），于是平的是**另一个账户**的仓。
+ *    原来这里直接 `return list[0].ov`（一行 `keyId` 都不带），所以单套视图下
+ *    那几颗真钱按钮全都只能给 `undefined`。
  */
 function mergeOverviews(
   list: {key: ExchangeKey; ov: ExchangeOverview}[]
 ): ExchangeOverview | null {
   if (!list.length) return null
-  if (list.length === 1) return list[0]!.ov
+
+  if (list.length === 1) {
+    const {key, ov} = list[0]!
+    const fs = ov.futures
+    if (!fs) return ov
+    return {
+      ...ov,
+      futures: {
+        ...fs,
+        positions: (fs.positions ?? []).map(p => ({...p, keyId: key.id}))
+      }
+    }
+  }
 
   const sum = (f: (o: ExchangeOverview) => number): number =>
     list.reduce((a, p) => a + (Number(f(p.ov)) || 0), 0)
@@ -218,7 +291,7 @@ function mergeOverviews(
   const positions: FuturesPosition[] = []
   for (const p of list)
     for (const pos of p.ov.futures?.positions ?? [])
-      /* `keyId` 是给「减仓 / 平仓」用的（要知道拿哪套凭据去下单） */
+      /* `keyId` 是给「平仓 / 全平」用的（要知道拿哪套凭据去下单） */
       positions.push({...pos, keyName: p.key.name, keyId: p.key.id})
 
   const anyC2c = list.some(p => p.ov.c2c)
@@ -305,7 +378,11 @@ const curveBucketSec = ref(300)
 /** 上次取曲线的时间 —— SSE 事件来得勤，靠它节流（别每个快照都拉一遍） */
 let curveAt = 0
 
-/* ---------------- 减仓 / 平仓（持仓卡片底部那两颗按钮） ---------------- */
+/*
+ * 平仓 / 全平（持仓卡片底部那两颗按钮）。
+ * ⚠️ 2026-10-07 用户改口径：「减仓换成平仓，平仓换成全平」——只改**显示的字**，
+ *    函数名（`confirmReduce` / `closeRow`）和接口没动。
+ */
 
 /**
  * 操作结果提示 —— 走全站那一条（`../toast` 的 `showToast`，画在 `App.vue` 的 `ToastHost`）。
@@ -321,8 +398,109 @@ function sayMsg(text: string, tone: 'ok' | 'bad' = 'ok'): void {
 /** 正在提交（两颗按钮一起禁点） */
 const posBusy = ref(false)
 
-/** 正在减仓的那一条（null = 弹层关着） */
+/** 正在平仓（只平一部分）的那一条（null = 弹层关着） */
 const reduceRow = ref<PositionRef | null>(null)
+
+/**
+ * 正在看止盈止损的那一条（null = 弹层关着）。
+ *
+ * ⚠️ 存的是**板子点按钮时给的那一坨**（`TpSlTarget`：开仓价 / 标记价 / 数量 /
+ *    已有的那两张单），不是 `PositionRef` —— 弹层要用这些算「预计收益」和改单，
+ *    而它拿不到（持仓列表只在板子那儿）。代价是弹层开着时数据变新了它不知道，
+ *    但**这正是我们要的**：人正在填的价不能被推送顶掉。
+ */
+const tpslTarget = ref<TpSlTarget | null>(null)
+
+/* ---------------- 改挂单（「挂单」列表点一行，2026-10-06） ---------------- */
+
+/**
+ * 正在改的那张挂单（null = 弹层关着）。
+ *
+ * ⚠️ 跟 `tpslTarget` 一个道理：存板子点行时给的那一坨（`OrderEditTarget`），
+ *    弹层只管填和校验，提交是这里的事（只有容器拿得到接口和 Key）。
+ */
+const editTarget = ref<OrderEditTarget | null>(null)
+/** 改单 / 撤单正在提交（弹层那两颗按钮一起禁点） */
+const orderBusy = ref(false)
+
+/**
+ * 这一坨数据（持仓 / 挂单）该用哪套 Key 去下单。
+ *
+ * 顺序：数据自己带的 `keyId`（现在**单套视图里也有**，见 `mergeOverviews`）→
+ * 按 `keyName` 在**当前视图**里找 → 当前就选中一套时就是它 → 最后兜底第一套。
+ *
+ * ⚠️⚠️ **绝不能返回 `undefined` 就交上去** —— 后端 `?id=` 空 = `getDefaultExchangeKey`
+ *    （默认那套是「最早配的」，不一定是人正在看的这套，2026-10-07 的 bug）。
+ *    所以这里一定会给出一个具体的 id。
+ */
+function resolveKeyId(keyId?: number, keyName?: string): number | undefined {
+  if (keyId) return keyId
+  const list = activeTargets.value
+  if (keyName) return list.find(k => k.name === keyName)?.id ?? list[0]?.id
+  if (picked.value !== 'all') {
+    const hit = list.find(k => String(k.id) === picked.value)
+    if (hit) return hit.id
+  }
+  return list[0]?.id
+}
+
+/**
+ * 这一张挂单该用哪套 Key 去改。
+ *
+ * ⚠️ 「全部」那一格挂单里带 `keyName`，所以找得到；单套时挂单里没有名字，走前面那条。
+ */
+function keyIdOfOrder(t: OrderEditTarget): number | undefined {
+  return resolveKeyId(t.keyId, t.keyName)
+}
+
+function openOrderEdit(t: OrderEditTarget): void {
+  if (orderBusy.value) return
+  editTarget.value = {...t, keyId: keyIdOfOrder(t)}
+}
+
+/** 改这张单（价格 / 数量）—— 后端按类型分流：限价单改单、条件单撤旧挂新 */
+async function saveOrderEdit(v: {price: number; amount: number}): Promise<void> {
+  const t = editTarget.value
+  if (!t || orderBusy.value) return
+  orderBusy.value = true
+  try {
+    const r = await modifyTradeOrder(
+      {symbol: t.raw, orderId: t.id, price: v.price, quantity: v.amount},
+      t.keyId
+    )
+    sayMsg(
+      r.via === 'replace'
+        ? `${t.name} 已改：撤旧挂新，新触发价 ${v.price}`
+        : `${t.name} 已改：委托价 ${v.price}`,
+      'ok'
+    )
+    editTarget.value = null
+  } catch (e) {
+    /* 失败**留着弹层**：人还能改个价重试（跟止盈止损那边一个处理） */
+    sayMsg(`改单失败：${msg(e)}`, 'bad')
+  } finally {
+    orderBusy.value = false
+    /* 挂单列表刷新（真单那条路后端也会推 `orders` 事件，这里再补一次本地读） */
+    void loadOrders()
+  }
+}
+
+/** 撤这张单（弹层里点两次才算数，见 `OrderEditSheet.onCancel`） */
+async function cancelOrderEdit(): Promise<void> {
+  const t = editTarget.value
+  if (!t || orderBusy.value) return
+  orderBusy.value = true
+  try {
+    await cancelTradeOrder(t.raw, t.id, t.keyId)
+    sayMsg(`${t.name} 已撤单`, 'ok')
+    editTarget.value = null
+  } catch (e) {
+    sayMsg(`撤单失败：${msg(e)}`, 'bad')
+  } finally {
+    orderBusy.value = false
+    void loadOrders()
+  }
+}
 
 /** 那条持仓现在多大（从当前视图里找；找不到就 0，弹层只是少显示一行估算） */
 const reducePos = computed<FuturesPosition | null>(() => {
@@ -356,7 +534,7 @@ function openReduce(p: PositionRef): void {
   reduceRow.value = p
 }
 
-/** 减仓：市价 reduceOnly 只平一部分（真单，⚠️ 会真成交） */
+/** 平仓：市价 reduceOnly **只平一部分**（真单，⚠️ 会真成交） */
 async function confirmReduce(pct: number): Promise<void> {
   const r = reduceRow.value
   if (!r || posBusy.value) return
@@ -364,7 +542,8 @@ async function confirmReduce(pct: number): Promise<void> {
   try {
     const res = await closeTradePositions(
       {symbol: r.symbol, side: r.side, pct},
-      r.keyId,
+      /* ⚠️ **必须落到一个具体的 id**：不传就是后端拿默认 Key（另一套账户）去平 */
+      resolveKeyId(r.keyId, r.keyName),
       /* ⚠️ 跟「配置 → 测试下单」保持一致：开着测试单就只校验，不然这里会真成交 */
       testOrder.value
     )
@@ -372,12 +551,12 @@ async function confirmReduce(pct: number): Promise<void> {
       reduceRow.value = null
       sayMsg(
         res.test
-          ? `测试减仓通过校验：${baseOf(r.symbol)} ${pct}%（没进撮合）`
-          : `已减仓 ${baseOf(r.symbol)} ${pct}%`
+          ? `测试平仓通过校验：${baseOf(r.symbol)} ${pct}%（没进撮合）`
+          : `已平仓 ${baseOf(r.symbol)} ${pct}%`
       )
       void doRefresh()
     } else {
-      sayMsg(res.error || '减仓失败', 'bad')
+      sayMsg(res.error || '全平失败', 'bad')
     }
   } catch (e) {
     sayMsg(msg(e), 'bad')
@@ -386,17 +565,17 @@ async function confirmReduce(pct: number): Promise<void> {
   }
 }
 
-/** 平仓：整条市价全平（真单） */
+/** 全平：**整条**市价全平（真单） */
 async function closeRow(p: PositionRef): Promise<void> {
   if (posBusy.value) return
   const name = baseOf(p.symbol)
   const test = testOrder.value
   const ok = await askConfirm({
-    title: `平掉 ${name} 这一条持仓？`,
+    title: `全平 ${name} 这一条持仓？`,
     body: test
       ? {t: '测试单只发到币安测试接口，不进撮合、不会真平。', tone: 'num'}
       : {t: '真单：按市价全平这一条，会真的成交。', tone: 'warn'},
-    okText: '平掉',
+    okText: '全平',
     danger: !test
   })
   if (!ok) return
@@ -404,17 +583,229 @@ async function closeRow(p: PositionRef): Promise<void> {
   try {
     const res = await closeTradePositions(
       {symbol: p.symbol, side: p.side},
-      p.keyId,
+      /* ⚠️ 同上：不传 id = 后端拿默认那套 Key（不是人正在看的这套） */
+      resolveKeyId(p.keyId, p.keyName),
       testOrder.value
     )
     if (res.ok) {
-      sayMsg(res.test ? `测试平仓通过校验：${name}（没进撮合）` : `已平仓 ${name}`)
+      sayMsg(res.test ? `测试全平通过校验：${name}（没进撮合）` : `已全平 ${name}`)
       void doRefresh()
     } else {
       sayMsg(res.error || '平仓失败', 'bad')
     }
   } catch (e) {
     sayMsg(msg(e), 'bad')
+  } finally {
+    posBusy.value = false
+  }
+}
+
+/**
+ * 一键平仓：把**当前全部**持仓市价平掉（用户 2026-10-07：
+ * 「右侧加一键平仓 需二次弹窗确认」）。
+ *
+ * ⚠️ 真钱动作（除非「配置 → 测试下单」开着）⇒ 先弹一次确认，弹窗里写明**哪套账户**、
+ *    有几条、分别是哪些币；确认后**逐条串行**提交（一条失败不影响后面），最后报一条汇总。
+ * ⚠️ 一条都不许「静默跳过」：失败的币名和原因都塞进那条汇总里。
+ * ⚠️ 交上来的是板子那侧的**全部**持仓（不是屏幕上铺出来的那几条），别在这儿再切一次。
+ * ⚠️ **用哪套 Key 只认 `resolveKeyId`**，别把 `row.keyId` 直接交出去 ——
+ *    2026-10-07 的 bug 就是单套视图里 `keyId` 是空的，后端兜到默认那套「测试」。
+ */
+async function closeAllRows(rows: PositionRef[]): Promise<void> {
+  if (posBusy.value || !rows.length) return
+  const test = testOrder.value
+  const names = rows.map(r => baseOf(r.symbol)).join(' / ')
+  /*
+   * ⚠️「全部」那一屏的持仓可能来自**好几套 Key** ⇒ 按 Key 去重后**各平一次**。
+   *
+   * ⚠️⚠️ **一律用 `resolveKeyId` 换成一个具体的 id**（单套视图也一样，2026-10-07）：
+   *    交 `undefined` 出去 = 后端拿**默认那套** Key 去平 —— 人明明在看「币安」，
+   *    平的却是「测试」。这里再也不许出现「不带 id 就发出去」。
+   */
+  const ids = [
+    ...new Set(rows.map(r => resolveKeyId(r.keyId, r.keyName)).filter(k => !!k))
+  ] as number[]
+  /* 理论上到不了（页面只有在有 Key 时才渲染这颗按钮）；真到了就**别猜**，直接不发 */
+  if (!ids.length) {
+    sayMsg('不知道该用哪套账户去平 —— 先切一下账户再试', 'bad')
+    return
+  }
+  const nameOf = (id: number): string =>
+    keys.value.find(k => k.id === id)?.name ?? `key ${id}`
+  /*
+   * 标题里带上**账户**（用户 2026-10-07 报的正是「平的不是选择的账户」）——
+   * 只写条数的话，人没法从弹窗上核对这一下要动的是哪套。
+   */
+  const scope = ids.length === 1 ? nameOf(ids[0]!) : `${ids.length} 套账户`
+  const ok = await askConfirm({
+    title: `平掉「${scope}」全部 ${rows.length} 条持仓？`,
+    body: [
+      test
+        ? {t: '测试单只发到币安测试接口，不进撮合、不会真平。', tone: 'num'}
+        : {t: `真单：${names} 全部按市价平掉，会真的成交。`, tone: 'warn'},
+      ...(ids.length > 1 ? [`分 ${ids.length} 套账户各平一次`] : [])
+    ],
+    okText: test ? '测试一遍' : '全部平掉',
+    danger: !test
+  })
+  if (!ok) return
+  posBusy.value = true
+  let done = 0
+  const failed: string[] = []
+  try {
+    for (const id of ids) {
+      /*
+       * ⚠️ **不传 `symbol`** —— 那是后端「把这个账户里所有持仓全平」那条路：
+       *    它自己从交易所读持仓（币安原始符号 + 双向持仓的 `positionSide`），
+       *    比前端逐条报符号再平更准（2026-10-07 实测：前端报的符号是 ccxt 写法
+       *    `1000000MOG/USDT:USDT`，逐条平会被规格表顶回来）。
+       */
+      const res = await closeTradePositions(undefined, id, test)
+      const n = res.orders?.length ?? 0
+      if (res.ok) done += n
+      else failed.push(`${nameOf(id)}（${res.error || '失败'}）`)
+    }
+    if (failed.length) sayMsg(`平掉 ${done} 条，失败：${failed.join('、')}`, 'bad')
+    else
+      sayMsg(
+        test ? `测试平仓通过校验：${done} 条（没进撮合）` : `已全部平仓：${done} 条`
+      )
+    void doRefresh()
+  } catch (e) {
+    sayMsg(msg(e), 'bad')
+  } finally {
+    posBusy.value = false
+  }
+}
+
+/* ---------------- 点币种标题行 → 看这个币的 K 线（2026-10-06） ---------------- */
+
+const router = useRouter()
+
+/**
+ * 点持仓卡的币种标题行 = 选中这个币 + 去「开单分析」看图。
+ *
+ * ⚠️ 跟「合约」页点一行（`ContractsView.onPickMarket`）**逐字同一条路**：
+ *    `prefetchSymbol` 先把 K 线暖好（命中即返回，不然就是一次白拉）、
+ *    `pickSymbol` 换掉分析页那套全局币种（会清掉上一只币的结论 + 重拉历史）、
+ *    最后才跳页 —— 顺序不能反，反了会看到上一只币的结论闪一下。
+ */
+function openChart(base: string): void {
+  if (!base) return
+  prefetchSymbol(base)
+  pickSymbol(base)
+  void router.push('/analyze')
+}
+
+/* ---------------- 止盈 / 止损（持仓卡片上那颗按钮，2026-10-06） ---------------- */
+
+/**
+ * 点开某一行的「止盈/止损」。
+ *
+ * 弹层的所有输入都来自板子给的那一坨（`TpSlTarget`），这里**不回头推** ——
+ * 板子那边才知道开仓均价 / 标记价 / 数量 / 已有的条件单（见 `tpsl.ts`）。
+ */
+function openTpSl(t: TpSlTarget): void {
+  if (posBusy.value) return
+  /*
+   * ⚠️ 跟平仓那边同一条规矩：`keyId` **必须落成一个具体的 id** ——
+   *    空着去挂条件单就挂到**默认那套**账户上了（2026-10-07）。
+   *    `TpSlTarget` 里没有 `keyName`，认不出来时按「当前选中的那一套」算。
+   */
+  tpslTarget.value = {...t, keyId: resolveKeyId(t.keyId)}
+}
+
+/** 价格的小数位（只在提示文案里用） */
+function fmtPrice(v: number): string {
+  const a = Math.abs(v)
+  const d = a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 6 : 8
+  return v.toFixed(d)
+}
+
+/**
+ * 弹层点了「确认」——**一次把列表里所有改动提交完**。
+ *
+ * 用户 2026-10-06：「止盈止损滑动条区分开」「由于有部分平仓的多个平价价格和百分比
+ * 要显示可点击修改」「确认键没了」⇒ 弹层改成「多行 + 一颗确认」，这里就按顺序执行
+ * 那几条动作（撤 / 改 / 挂），任何一条出错都记下来、成功的照旧。
+ *
+ * ⚠️ **真金白银**：`testOrder === false` 时交易所那边真挂 / 真改 / 真撤。
+ *    `id` 有值 = 改单（后端先撤旧的再挂新的；测试模式不撤）。
+ * ⚠️ `posSide` 按持仓方向给（`LONG` / `SHORT`）：**双向持仓模式**下币安认这个，
+ *    不给会默认当成 LONG —— 空头的止损就挂到错的那一边。单向模式下后端忽略它、
+ *    改走 `reduceOnly`（见后端 `placeStopOrder` 里的 `dual` 判断）。
+ * ⚠️ 数量按百分比算，**后端再按合约精度向下取整**（取整后是 0 会报错，不会偷偷放大）。
+ * ⚠️ **串行**执行，不并发：改单是「撤旧的 + 挂新的」两步，同一个交易对并发容易被
+ *    币安按顺序拒（`-2011` 之类）；而且串行才能把每条的结果说清楚。
+ */
+async function saveTpSl(actions: TpSlAction[]): Promise<void> {
+  const t = tpslTarget.value
+  if (!t || posBusy.value || !actions.length) return
+  posBusy.value = true
+  let done = 0
+  const bad: string[] = []
+  /** 后端按现价校正过类型的那些，最后并进提示里 */
+  const noteTips: string[] = []
+  try {
+    for (const a of actions) {
+      const what = a.kind === 'profit' ? '止盈' : '止损'
+      try {
+        if (a.cancel && a.id) {
+          const r = await cancelTradeOrder(t.raw, a.id, t.keyId)
+          if (!r.ok) bad.push(`撤${what}：${r.error || '失败'}`)
+          else done++
+          continue
+        }
+        const r = await placeStopOrder(
+          {
+            symbol: t.raw,
+            /* 平仓方向跟仓位反着来：多头的止盈 / 止损是**卖** */
+            side: closeSideOf(t.side),
+            kind: a.kind,
+            stopPrice: a.price,
+            quantity: (t.amount * a.pct) / 100,
+            posSide: t.side === 'short' ? 'SHORT' : 'LONG',
+            orderId: a.id
+          },
+          t.keyId,
+          testOrder.value
+        )
+        if (!r.ok) {
+          bad.push(`${a.id ? '改' : '挂'}${what} ${fmtPrice(a.price)}：${r.error || '失败'}`)
+          continue
+        }
+        done++
+        /*
+         * ⚠️ 类型以后端**实际发出去**那个 `r.kind` 为准：币安只认「触发价相对现价在
+         *    哪一侧」，跟我们填的那一行可能不一样（后端 `legalKind()` 校正过）。
+         *    用 a.kind 会出现「提示说止盈、实际挂的是止损」。
+         */
+        if (r.kind && r.kind !== a.kind) {
+          noteTips.push(
+            `${fmtPrice(a.price)} 落在现价这一侧，按币安的规矩当成${
+              r.kind === 'profit' ? '止盈' : '止损'
+            }挂了`
+          )
+        }
+      } catch (e) {
+        bad.push(`${a.id ? '改' : '挂'}${what}：${msg(e)}`)
+      }
+    }
+    if (bad.length) {
+      /* 有失败的：弹层**留在原地**（人还能改价重试），把原因说出来 */
+      sayMsg(`${done ? `成功 ${done} 处；` : ''}${bad.join('；')}`, 'bad')
+    } else {
+      const test = testOrder.value
+      sayMsg(
+        test
+          ? `测试通过校验：${done} 处止盈止损（条件单没有测试接口，没真挂上去）`
+          : `${t.name} 已提交 ${done} 处止盈止损${noteTips.length ? `（${noteTips.join('；')}）` : ''}`,
+        'ok'
+      )
+      tpslTarget.value = null
+    }
+    /* 挂单列表刷新：真单那条路后端会推 `orders` 事件；这里再补一次**本地读** */
+    void loadOrders()
   } finally {
     posBusy.value = false
   }
@@ -438,9 +829,19 @@ const cycles = ref<ExchangePositionCycle[]>([])
 const openCycles = ref<ExchangePositionCycle[]>([])
 const cyclesSince = ref<string | null>(null)
 
-/** 读仓位历史（**纯本地**，不打交易所） */
+/*
+ * 读仓位历史（**纯本地**，不打交易所）。
+ *
+ * ⚠️ 只读**当前视图里那几套**（`activeTargets`）—— 用户 2026-10-07：
+ *    「仓位历史…没有根据账户分类显示」：以前这里读的是 `listAll`（全部账户），
+ *    而 `many` 却按「选中的是不是多套」算 ⇒ 选「币安」时会把「测试」那些段
+ *    也铺出来，**而且一条账号标签都不打**（`many=false`），根本分不出是谁的。
+ *    同一处毛病资金动向也有（见 `loadIncome`）；成交 / 挂单 / 收支曲线早就按
+ *    `activeTargets` 读了 —— 现在四处口径一致：**看哪套就只列哪套**，
+ *    选「全部」时才合并、并且每条都带账号标签。
+ */
 async function loadCycles(): Promise<void> {
-  const list = listAll.value
+  const list = activeTargets.value
   const many = multi.value
   const closed: ExchangePositionCycle[] = []
   const open: ExchangePositionCycle[] = []
@@ -522,11 +923,23 @@ async function loadSnapshots(): Promise<void> {
      * 流真正活着就说明后端会自己推（含 5 分钟采样），切 tab 不该白打一遍交易所。
      * ⚠️ 「后端说哑了」这一条不能省：SSE 心跳一直有，但上游可能一帧不推。
      */
+    const warming = streamWarming(id)
     if (
+      !warming &&
       (!streamAlive(id) || deaf.value[id] === true) &&
       Date.now() - (snapAt[id] ?? 0) > REFRESH_AFTER_SEC * 1000
     )
       stale = true
+    /*
+     * 还在握手就先不下结论：宽限期结束时**重判一次**——
+     * 那会儿要是还没人推（`streamAt` 仍是 0），上面那条就会成立，照样兜底刷。
+     */
+    if (warming && graceTimer === null) {
+      graceTimer = setTimeout(() => {
+        graceTimer = null
+        void loadSnapshots()
+      }, STREAM_GRACE_STEP_MS)
+    }
     if (r.err) err.value = `上次采集不完整：${r.err}`
   }
   parts.value = next
@@ -644,7 +1057,10 @@ async function loadFills(): Promise<void> {
  *   纯本地读，不打交易所（数据由后端定期对账灌进来）。
  */
 async function loadIncome(): Promise<void> {
-  const list = listAll.value
+  /* ⚠️ 跟 `loadCycles` 同一个口径：只读**当前视图里那几套**（用户 2026-10-07：
+     资金动向也要按账户分类显示）。`totals` 跟着一起变 —— 它就是这一格右上角
+     「近 N 天 · M 笔」那个 M，列表筛了、合计不筛的话两个数对不上。 */
+  const list = activeTargets.value
   const many = multi.value
   const rows: ExchangeIncomeRow[] = []
   const total: ExchangeIncomeTotals = {
@@ -690,10 +1106,15 @@ async function loadIncome(): Promise<void> {
  *      这种情况过 1.2 秒再问一次，那时缓存已经是新的、命中即回。
  *      ⇒ 界面上永远是「立刻有东西看」，不是白等一个转圈。
  */
-async function loadOrders(): Promise<void> {
+async function loadOrders(opts: {silent?: boolean} = {}): Promise<void> {
   const list = activeTargets.value
   const many = multi.value
-  loadingOrders.value = true
+  /*
+   * ⚠️ `silent` = **不转那颗「正在查询挂单…」的圈**。兜底那 20 秒一轮的重读走静默
+   *    （用户 2026-10-06 明确嫌过挂单那块的 loading 闪一下不好看），
+   *    真·换账户 / 手动刷新才亮圈。
+   */
+  if (!opts.silent) loadingOrders.value = true
   ordersErr.value = ''
   const res = await Promise.all(
     list.map(k =>
@@ -715,7 +1136,7 @@ async function loadOrders(): Promise<void> {
   })
   openOrders.value = out
   ordersErr.value = errs.join('；')
-  loadingOrders.value = false
+  if (!opts.silent) loadingOrders.value = false
   /* 拿到的是旧值 ⇒ 后台那份刷新完了再取一次（只补一发，不循环） */
   if (stale && !ordersRetryTimer) {
     ordersRetryTimer = setTimeout(() => {
@@ -724,13 +1145,11 @@ async function loadOrders(): Promise<void> {
     }, 1200)
   }
 }
-
 /**
  * 取净资产曲线。
  * ⚠️ 失败**不吵**（不往 `err` 里写）：主数字已经在了，曲线属于锦上添花。
  *
- * 多套时**按时间桶加总**（用户 2026-10-05 选的「都合并」）——
- * 区间带取各家上沿 / 下沿之和，正好是合并后的包络（单取 max 会偏窄）。
+ * 多套时**按时间桶加总**（用户 2026-10-05 选的「都合并」）。
  */
 async function loadCurve(): Promise<void> {
   const list = activeTargets.value
@@ -747,27 +1166,57 @@ async function loadCurve(): Promise<void> {
     curve.value = []
     return
   }
-  curveBucketSec.value = ok[0]!.bucketSec ?? 300
+  /*
+   * ⚠️ 桶宽取**最大**的那一套：几套的桶宽可能不一样（`all` 跨度是按各套最早那条
+   *    快照算的），取最宽的那个，`ExchangeCurveChart` 里「间隔超过 2.5 个桶算断档」
+   *    才不会把正常的稀疏点误判成断线。
+   */
+  curveBucketSec.value = Math.max(300, ...ok.map(r => r.bucketSec || 300))
   if (ok.length === 1) {
     curve.value = ok[0]!.points ?? []
     curveAt = Date.now()
     return
   }
-  const byT = new Map<string, CurvePoint>()
-  for (const r of ok)
-    for (const p of r.points ?? []) {
-      const cur = byT.get(p.t)
-      if (cur) {
-        cur.close += p.close
-        cur.high += p.high
-        cur.low += p.low
-      } else {
-        byT.set(p.t, {...p})
-      }
-    }
-  curve.value = [...byT.values()].sort((a, b) =>
-    a.t < b.t ? -1 : a.t > b.t ? 1 : 0
+
+  /*
+   * ★ 2026-10-06 修：合并改成**按「各自最近的已知值」相加**。
+   *
+   * ⚠️ 以前是「同一个 `t` 上各家都有点才算进和」—— 可各套的采样时刻根本不齐
+   *    （实测一套 152 个点、另一套 132 个），于是**只有一边有数据的桶，
+   *    曲线就只剩那一套的值**（总账 ~28 掉到 ~13），看着就是
+   *    「数据没有统计进去全部」（用户 2026-10-06 报的）。
+   * ⚠️ 某套在最早那几个桶还没开始采（`t` 早于它的第一个点）时，
+   *    用它的**第一个点**回填 —— 宁可把它当时的值算进去，也不要让总账缺一块。
+   */
+  const series = ok.map(r =>
+    [...(r.points ?? [])].sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0))
   )
+  const times = [...new Set(series.flat().map(p => p.t))].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0
+  )
+  /** 每套走到第几个点了 —— 只往前推，永远指向「≤ 当前 t 的最后一个点」 */
+  const idx = series.map(() => 0)
+  const merged: CurvePoint[] = []
+  for (const t of times) {
+    let close = 0
+    let high = 0
+    let low = 0
+    let any = false
+    for (let i = 0; i < series.length; i++) {
+      const s = series[i]!
+      let k = idx[i]!
+      while (k < s.length - 1 && s[k + 1]!.t <= t) k++
+      idx[i] = k
+      const p = s[k]
+      if (!p) continue
+      close += p.close
+      high += p.high
+      low += p.low
+      any = true
+    }
+    if (any) merged.push({t, close, high, low})
+  }
+  curve.value = merged
   curveAt = Date.now()
 }
 
@@ -922,6 +1371,16 @@ function startStreams(): void {
           if (keyIsActive(k.id)) {
             void loadFills()
             void loadCurve()
+            /*
+             * ★ 2026-10-06 修（用户：「挂单数据没有更新，仓位历史也没更新」）：
+             *   断线期间**挂单 / 仓位历史也变了**，可以前这里只补快照 / 成交 / 曲线，
+             *   那两份列表就一直停在断线前那一份 —— 一直等到下一次 `orders` / `fill`
+             *   事件才动，账户安静时能旧很久（后端重启、隧道抖动都算断线）。
+             *   两下都是**读库**（毫秒级、零权重），补上不心疼；
+             *   挂单那份走**静默**，别让「正在查询挂单…」闪出来。
+             */
+            void loadOrders({silent: true})
+            void loadCycles()
           }
         }
       })
@@ -1018,6 +1477,25 @@ function startSnapTimer(): void {
   snapTimer = setInterval(() => {
     /* 后台不刷（省流量，也免得在后台被交易所限频） */
     if (!isForeground()) return
+    /*
+     * ★ 2026-10-06：**兜底重读**挂单 + 仓位历史（用户：「挂单数据没有更新，
+     *   仓位历史也没更新」「没有及时更新」）。
+     *
+     * 这两份以前**只有** SSE 的 `orders` / `fill` 事件会触发重读 —— 事件本身可能
+     * 就不来：断线那阵子（重连只补快照/成交/曲线，见 `reconnect`）、后端重启、
+     * 或者交易所那边对账窗口还没轮到。结果就是「数字明明变了，列表还是旧的」，
+     * 只能靠手动刷新或者切账户。
+     *
+     * ⚠️ 敢放这儿的理由：两下都是**读我们自己的库**（挂单存库 / 仓位历史本地推），
+     *    毫秒级、零交易所权重 —— 跟上面那个「打交易所的快照」不是一回事。
+     * ⚠️ 挂单走 `silent`，别让「正在查询挂单…」每 20 秒闪一下。
+     * ⚠️ 只在这一页（交易所账户这一格）活着的时候跑：`stopWork()` 会清掉这个定时器。
+     */
+    void loadOrders({silent: true})
+    void loadCycles()
+    /* 钱账本也读库（成交 / 资金费 / 划转都会往里写）⇒ 一并兜底 */
+    void loadIncome()
+
     const now = Date.now()
     const need = activeTargets.value.some(k => {
       /* 这套压根没数据（现货 / 没填 key）→ 刷也没用，别去刷 */
@@ -1033,6 +1511,85 @@ function startSnapTimer(): void {
     if (need) void doRefresh(true)
   }, SNAP_CHECK_MS)
 }
+
+/**
+ * 换了二级 tab ⇒ **重读那一格的数据**（用户 2026-10-06：「没有及时更新」）。
+ *
+ * 这三份平时只靠 SSE 事件触发重读，切过去时先自己拉一次：
+ * 挂单（存库）、仓位历史（本地推）、成交（后端账本）—— 都是读库，毫秒级、零权重，
+ * 所以每次切换都可以放心拉。
+ */
+function onTab(t: string): void {
+  if (t === 'ord') void loadOrders({silent: true})
+  else if (t === 'inc') void loadCycles()
+  else if (t === 'trades') void loadFills()
+  else if (t === 'flow') void loadIncome()
+}
+
+/* ---------------- 开 / 停这一页的数据流 ---------------- */
+/**
+ * 开始工作：订阅 SSE + 起兜底定时器，并在「手上还没有数据」时补一次读库。
+ *
+ * ⚠️ 有数据就不重读 —— 这正是**缓存**要的效果（用户 2026-10-06：
+ *    「为什么进入时有正在获取交易快照」「该页面要做缓存」）。
+ *    重连 SSE 时后端会把当前那份快照再推一遍，数字自己就更新了。
+ */
+function startWork(): void {
+  if (!keys.value.length) return
+  /* 打点：从这一刻起 `STREAM_GRACE_MS` 内不许判定「流死了」（见 `streamWarming`） */
+  openedAt = Date.now()
+  startStreams()
+  startSnapTimer()
+  startLastPrices()
+  if (!data.value && !reason.value) void loadSnapshots()
+}
+
+/** 停掉：两条 SSE + 三个定时器（没人看的时候一条请求都不发） */
+function stopWork(): void {
+  stopStreams()
+  stopLastPrices()
+  if (snapTimer) clearInterval(snapTimer)
+  snapTimer = null
+  if (ordersRetryTimer) clearTimeout(ordersRetryTimer)
+  ordersRetryTimer = null
+  if (graceTimer) clearTimeout(graceTimer)
+  graceTimer = null
+}
+
+/* ---------------- 最新成交价（持仓卡第一格「当前价」） ---------------- */
+
+/**
+ * 挂上「全市场行情」那条流，只为了拿持仓这几个币的**最新成交价**。
+ *
+ * ⚠️ 跟标记价是两个数：现价是最后一笔成交，标记价是币安防插针那个加权价
+ *    （浮盈 / 强平按标记价算）。持仓接口里只有标记价，所以这一格得靠行情。
+ * ⚠️ 这条流是**全市场**的（一条流管所有币、不吃权重），而且 `api.ts` 的 `sharedSse`
+ *    会按 path 复用 —— 跟「合约」页头部那条其实是同一条连接。
+ * ⚠️ 只订阅**当前视图里这几个币**（`activeTargets` 变了就自动跟着变），
+ *    不然每秒几百个币的增量全会写进响应式对象、白触发重渲染。
+ */
+let unbindLastPrices: (() => void) | null = null
+
+function startLastPrices(): void {
+  if (unbindLastPrices) return
+  unbindLastPrices = bindLastPrices(() =>
+    (data.value?.futures?.positions ?? []).map(p => p.raw ?? p.symbol)
+  )
+}
+
+function stopLastPrices(): void {
+  unbindLastPrices?.()
+  unbindLastPrices = null
+}
+
+/*
+ * ⚠️ `immediate` 用默认的 false —— 挂载那一刻由 `onMounted` 自己决定要不要开工，
+ *    那时 `keys` 还没到，这里跑了也是空转。
+ */
+watch(live, on => {
+  if (on) startWork()
+  else stopWork()
+})
 
 onMounted(async () => {
   /* 汇率：跟账户列表一起并行拿，拿不到也无所谓（只用默认值） */
@@ -1055,20 +1612,15 @@ onMounted(async () => {
    */
   picked.value = keys.value.length > 1 ? 'all' : String(keys.value[0]!.id)
 
-  /* 给每一套账户都开上 SSE（只在挂载时开一次，换 tab 不再断开重连） */
-  startStreams()
-
-  /* 兜底：整份快照太久没更新就自己刷（改造 P2，见上面那段说明） */
-  startSnapTimer()
+  /*
+   * 给每一套账户都开上 SSE、起兜底定时器（见 `startWork`）。
+   * ⚠️ 切走再切回来**不会重走这里**（组件被缓存在 DOM 里），
+   *    开关交给上面那个 `watch(live)`。
+   */
+  if (live.value) startWork()
 })
 
-onUnmounted(() => {
-  stopStreams()
-  if (snapTimer) clearInterval(snapTimer)
-  snapTimer = null
-  if (ordersRetryTimer) clearTimeout(ordersRetryTimer)
-  ordersRetryTimer = null
-})
+onUnmounted(stopWork)
 </script>
 
 <template>
@@ -1117,6 +1669,8 @@ onUnmounted(() => {
       :open-orders="openOrders"
       :trades="fills"
       :income="income"
+      :income-totals="incomeTotals"
+      :income-days="INCOME_DAYS"
       :cycles="cycles"
       :open-cycles="openCycles"
       :cycles-since="cyclesSince"
@@ -1126,17 +1680,23 @@ onUnmounted(() => {
       :curve-range="curveRange"
       :curve-bucket-sec="curveBucketSec"
       :rate="rate"
+      :last-price="lastPrices"
       :busy="posBusy"
       @update:curve-range="curveRange = $event"
       @refresh="doRefresh()"
       @transfer="transferOpen = true"
       @reduce="openReduce"
       @close="closeRow"
+      @closeAll="closeAllRows"
+      @tpsl="openTpSl"
+      @open-chart="openChart"
+      @edit-order="openOrderEdit"
+      @tab="onTab"
     />
 
     <!--
-      减仓弹层（用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」）——
-      跟划转一样挂在容器这一层：只有它知道那一条持仓是哪套 Key 的。
+      平仓弹层（用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」，2026-10-07 改叫
+      「平仓」）—— 跟划转一样挂在容器这一层：只有它知道那一条持仓是哪套 Key 的。
     -->
     <ReduceSheet
       :open="!!reduceRow"
@@ -1148,6 +1708,37 @@ onUnmounted(() => {
       :busy="posBusy"
       @close="reduceRow = null"
       @confirm="confirmReduce"
+    />
+
+    <!--
+      止盈 / 止损弹层（用户 2026-10-06：「按钮加上止盈/止损是一个按钮，点击显示
+      当前仓位的止盈止损可以设置」）——
+      跟减仓一样挂在**容器**这一层：只有它知道这一条是哪套 Key 的、拿得到下单接口。
+      ⚠️ 那一坨目标数据是板子点按钮时给的（开仓价 / 标记价 / 数量 / 已有的**全部**条件单）。
+      ⚠️ 弹层只负责收集，提交是 `saveTpSl()` 串行执行那一串动作。
+    -->
+    <TpSlSheet
+      :open="!!tpslTarget"
+      :target="tpslTarget"
+      :test-order="testOrder"
+      :busy="posBusy"
+      @close="tpslTarget = null"
+      @confirm="saveTpSl"
+    />
+
+    <!--
+      改挂单弹层（用户 2026-10-06：「挂单可以修改」）——
+      「挂单」那一行点一下就是它。跟止盈止损一样挂在**容器**这一层：
+      只有它知道这张单是哪套 Key 的、也只有它能调改单 / 撤单接口。
+      ⚠️ 改单和撤单**都没有测试版**，所以弹层里那两颗按钮点下去就是真动作。
+    -->
+    <OrderEditSheet
+      :open="!!editTarget"
+      :target="editTarget"
+      :busy="orderBusy"
+      @close="editTarget = null"
+      @save="saveOrderEdit"
+      @cancel="cancelOrderEdit"
     />
 
     <!--
@@ -1245,5 +1836,31 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--muted);
   line-height: 1.6;
+}
+
+/*
+ * 窄屏：整页内容**垫到 1.2 个屏高**（用户 2026-10-06：「高度固定一下为 120vh」）。
+ *
+ * 这一页在窄屏是**整页一个滚动条**（`.tabs-body` 的定高已撤，见
+ * `ExchangeAccountBoard.vue` 末尾那个 `@media`）—— 内容不足一屏时页面就完全滚不动，
+ * 「拉到顶再往下拉」的下拉刷新也没有余量。垫到 120vh 之后：
+ * 页面正好 1.2 屏，永远有一点点可滚，切 tab / 换币时高度也不再跳。
+ *
+ * ⚠️ 用 `min-height` 而不是 `height`：`.live` 是**列向 flex 容器**，
+ *    写死 `height` 会让子项按默认的 `flex-shrink: 1` **被压扁**
+ *    （挂单 / 成交 / 资产多的时候尤其明显）。`min-height` 只保证「不少于 1.2 屏」，
+ *    内容更长时照旧往下长 —— 那时多的部分本来也得滚，不该被裁掉。
+ */
+@media (max-width: 900px) {
+  .live {
+    /*
+     * 少了垫、多了封 —— 两个一起就是「正好 1.2 屏」。
+     * 用户 2026-10-06：「高度固定一下为 120vh」→「设置最大高度 120vh，
+     * 我就想在仓位历史或者其他数据过多时不要无限滚动」。
+     * 超出 120vh 的那部分不再让整页无限长，交给下面的 `.tabs-body` 内部滚
+     * （见 `ExchangeAccountBoard.vue` 末尾那个 `@media`）。
+     */
+    height: 120vh;
+  }
 }
 </style>

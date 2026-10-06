@@ -54,7 +54,21 @@ export interface PositionCycle {
   realized: number
   /** 这一段所有成交的手续费之和（正数） */
   fee: number
-  /** **净盈亏** = 已实现 − 手续费（列表上显示的就是它） */
+  /**
+   * 这一段持仓期间的**资金费**（`FUNDING_FEE`，**钱账本**里那一项）。
+   *
+   * ⚠️ 符号跟着钱走：**负 = 付出、正 = 收到**（币安 `income` 就是这个口径）。
+   * ⚠️ 它**不在成交账本里**，只能按「同一个币 + 时间落在这段的开平之间」归过来，
+   *    所以持仓为 0 那段时间收/付的资金费归不到任何一段（在「资金动向」里能看到）。
+   */
+  funding: number
+  /**
+   * **净盈亏** = 已实现 − 手续费 **+ 资金费**（列表上显示的就是它）。
+   *
+   * ⚠️ 资金费也算这一笔真花的钱（用户 2026-10-06 追问「为什么资金费不计入」），
+   *    所以并进去了；`funding` 自带符号 ⇒ 这里就是直接加，
+   *    注意它在 `finish()` 里算不出来（要等钱账本归过来，见 `listPositionHistory`）。
+   */
   net: number
   /** 首次开仓时间 */
   openAt: string
@@ -209,6 +223,9 @@ function finish(c: CycleBuild, closeAt: string | null): PositionCycle {
     closedQty: r8(c.closedQty),
     realized: r8(c.realized),
     fee: r8(c.fee),
+    /* 资金费后面从钱账本单独归过来（见 `listPositionHistory`），这里先起 0；
+       归到之后再把它加进 `net` */
+    funding: 0,
     net: r8(c.realized - c.fee),
     openAt: c.openAt,
     closeAt: closed ? closeAt : null,
@@ -291,6 +308,49 @@ export async function listPositionHistory(
 
   const all: PositionCycle[] = []
   for (const list of bySymbol.values()) all.push(...buildCycles(list))
+
+  /*
+   * 资金费：**成交账本里没有这一项**，它在钱账本（`exchange_income`）里，
+   * 所以单独取回来，按「同一个币 + 时间落在这段的开仓~平仓之间」归给某一段
+   * （用户 2026-10-06：「仓位历史底部已实现改为资金费用」）。
+   * ⚠️ 归不到（持仓为 0 那会儿收/付的）就丢掉 —— 那段钱在「资金动向」里看得到。
+   */
+  const feeRows = await query<Record<string, unknown>>(
+    `SELECT symbol, amount, ts
+       FROM exchange_income
+      WHERE user_id = $1 AND key_id = $2 AND income_type = 'FUNDING_FEE'
+        AND ($3::text IS NULL OR upper(symbol) = upper($3::text))`,
+    [userId, keyId, symbol ?? null]
+  )
+  if (feeRows.length) {
+    const bySym = new Map<string, PositionCycle[]>()
+    for (const c of all) {
+      const list = bySym.get(c.symbol)
+      if (list) list.push(c)
+      else bySym.set(c.symbol, [c])
+    }
+    for (const r of feeRows) {
+      const sym = String(r.symbol ?? '')
+      const at = r.ts ? Date.parse(String(r.ts)) : NaN
+      const amount = num(r.amount)
+      if (!sym || !Number.isFinite(at) || !amount) continue
+      const hit = bySym
+        .get(sym)
+        ?.find(
+          c =>
+            at >= Date.parse(c.openAt) &&
+            (c.closeAt === null || at <= Date.parse(c.closeAt))
+        )
+      if (hit) {
+        hit.funding = r8(hit.funding + amount)
+        /*
+         * 资金费**当场并进净盈亏**（用户 2026-10-06：「为什么资金费不计入」）。
+         * 它是**带符号**的（付出去是负的），所以直接加 = 付出扣钱、收到进钱。
+         */
+        hit.net = r8(hit.net + amount)
+      }
+    }
+  }
 
   const openList = all
     .filter(c => !c.closed)

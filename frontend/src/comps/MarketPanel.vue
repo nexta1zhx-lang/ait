@@ -33,6 +33,7 @@ import {
 import {decimalsFor, fmt} from '../format'
 import {isForeground, onForegroundChange} from '../live'
 import {marketMinVolUsd} from '../settings'
+import {contracts} from '../store'
 
 const props = defineProps<{
   /** 当前选中的币种（高亮那一行） */
@@ -412,6 +413,34 @@ async function onTogglePin(base: string): Promise<void> {
 /* ---------------- 排序 / 筛选 ---------------- */
 
 /**
+ * 垫底名单：后端那本**合约表**（`store.contracts`，就是「仓库里的币种」）。
+ *
+ * 只有币种 / 交易对，价格那几格是 `null` —— 模板里本来就都会画成「—」，
+ * 所以首屏是一张**有内容的表**（币种名 + 图标 + 一排「—」），
+ * 而不是光秃秃一行「没有匹配的合约」；等第一条行情（SSE 增量或 REST 快照）
+ * 到了，`filtered` 那边有数据就自然换掉这一份。
+ *
+ * ⚠️ 顺序就按合约表给的（后端按成交额排过的那份），**不要**再排一次：
+ *    它没有行情字段，排也排不出东西（`rest` 那边已经按 `?? 0` 兜住了）。
+ * ⚠️ `MAX_ROWS` 那道上限照旧在 `visible` 里卡，垫底也最多铺 120 行。
+ */
+const placeholderRows = computed<MarketRow[]>(() => {
+  if (byPair.size) return []
+  return contracts.value.map(c => ({
+    base: c.base,
+    symbol: c.symbol,
+    pair: c.symbol,
+    last: null,
+    change24hPct: null,
+    high24h: null,
+    low24h: null,
+    volume24h: null,
+    quoteVolume24h: null
+  }))
+})
+
+
+/**
  * 过了「行情过滤」的（**不含搜索**）。
  *
  * ⚠️ 下面 `shown` 必须 `[...filtered.value]` 再排 —— 不能就地 `sort` 这个 computed
@@ -419,13 +448,21 @@ async function onTogglePin(base: string): Promise<void> {
  */
 const filtered = computed<MarketRow[]>(() => {
   void version.value // 增量改的是 Map 里的对象（非响应式），靠这个版本号触发重算
+  const list = [...byPair.values()]
+  /*
+   * ★ 一条行情都还没有（首屏 / 刚进页面）⇒ 拿**合约表**垫底，别让表是空的
+   *   （用户 2026-10-07：「合约行情界面初次加载不要显示没有匹配合约，
+   *   没数据先拿仓库币种垫底」）。
+   *   ⚠️ 只在**完全没有行情**时垫：有行情了就整表用行情那份，
+   *      不然行情刚到一半（只推了几个币）会跟垫底那份混在一起、还都是「—」。
+   */
+  if (!list.length) return placeholderRows.value
   /*
    * 配置里的「行情过滤」：24h 成交额低于阀值的合约直接不列（搜也不给）。
    * 阈值是「百万 USDT」× 1e6；`0` = 不过滤。没成交额（null）的当 0，照样会被滤掉。
    * ⚠️ **置顶的不受这个阀值限制** —— 那是用户自己手选的，再小也要看得见。
    */
   const floor = marketMinVolUsd.value
-  const list = [...byPair.values()]
   if (floor <= 0) return list
   return list.filter(r => (r.quoteVolume24h ?? 0) >= floor || isPinned(r.base))
 })

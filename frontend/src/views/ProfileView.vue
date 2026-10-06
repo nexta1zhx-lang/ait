@@ -31,6 +31,7 @@ import {askConfirm} from '../confirm'
 import {shellInfo, type ShellInfo} from '../native'
 import SegTabs from '../comps/SegTabs.vue'
 import ExchangeKeys from '../comps/ExchangeKeys.vue'
+import LlmConfigView from './LlmConfigView.vue'
 
 /*
  * 用户 2026-10-04（本轮）：「个人信息下添加交易所内容（可新增交易所和 key，
@@ -40,12 +41,17 @@ import ExchangeKeys from '../comps/ExchangeKeys.vue'
  *   · 账户信息：身份卡 + 基本信息 + 两步验证 + 修改密码 + 退出
  *   · 交易所：绑多套交易所 API Key
  *   · 登录设备：多端登录的会话列表（踢设备）
+ *
+ * 用户 2026-10-06：「模型配置移动到个人信息」——
+ * 又从「我的」把「模型配置」（多把大模型密钥 + 用量统计）搬进来当第四段，
+ * 不再单独占一格。
  */
-type ProfTab = 'account' | 'exchange' | 'devices'
+type ProfTab = 'account' | 'exchange' | 'llm' | 'devices'
 
 const TABS: {value: ProfTab; label: string}[] = [
   {value: 'account', label: '账户信息'},
   {value: 'exchange', label: '交易所'},
+  {value: 'llm', label: '模型配置'},
   {value: 'devices', label: '登录设备'}
 ]
 
@@ -345,6 +351,9 @@ async function changePw(): Promise<void> {
     <!-- 交易所：绑多套 Key（用户 2026-10-04 新增，独立成一个 tab） -->
     <ExchangeKeys v-if="tab === 'exchange'" />
 
+    <!-- 模型配置：多把大模型密钥 + 用量统计（用户 2026-10-06 从「我的」搬进来） -->
+    <LlmConfigView v-if="tab === 'llm'" />
+
     <section v-if="tab === 'devices'" class="panel">
       <h2>
         登录设备
@@ -623,6 +632,14 @@ async function changePw(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/*
+ * 账户信息 / 交易所那几段是表单，太宽了不好读，压到 560px。
+ * 「模型配置」（`.llm`）自带密钥表 + 用量统计，要占满整行，所以不在这里限宽。
+ * （以前是 `.profile` 自己 `max-width: 560px`，会把整页连同那一格一起压窄。）
+ */
+.profile > section.panel {
   max-width: 560px;
 }
 .who {

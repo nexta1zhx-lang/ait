@@ -2548,7 +2548,7 @@ body.fixed-viewport .split {
   overflow-x: hidden;
   /*
    * 滚动条**贴容器右边**，但内容跟它拉开 12px
-   * （用户 2026-10-04：「滚动条和内容区保持距离」，跟 `MeView` 的 `.me-pane`
+   * （用户 2026-10-04：「滚动条和内容区保持距离」，跟 `PaneShell` 的 `.tabpane-body`
    *   / `ServerStatusView` 的 `.svc` 同一个写法）。
    *
    * 只写 `padding-right` 会把滚动条也一起往里推；再加等量的负 `margin-right`
@@ -3691,6 +3691,17 @@ body.fixed-viewport .split {
   background: color-mix(in srgb, currentColor 55%, transparent);
 }
 
+/*
+ * 拖动时那条虚线**预览**的标签（2026-10-07）—— 原来的线和标签都不动，
+ * 这枚是另起的（见 `KlineChart` 的 `drawDragPreview`），描边走虚线、整体压淡一档，
+ * 一眼能看出「这条还没放下」。
+ * ⚠️ 别给它 `pointer-events`：拖动是手指在**原来那枚标签**上（指针已被它捕获）。
+ */
+.ord-labels .olb.drag {
+  border-style: dashed;
+  opacity: 0.85;
+}
+
 /* 第二段（数值）不跟第一段（多/空、强平、止损）抢眼，用它的颜色就够 */
 .ord-labels .olb > span {
   opacity: 0.95;
@@ -3864,6 +3875,16 @@ body.fixed-viewport .split {
   text-decoration: line-through;
 }
 
+/* 挂单状态标（跟图例那些能点的开关区分开：虚线边 + 警示色） */
+.ord-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--warn, #e0a33e);
+  border: 1px dashed color-mix(in srgb, var(--warn, #e0a33e) 45%, transparent);
+  border-radius: 6px;
+  padding: 2px 7px;
+}
+
 .dot {
   display: inline-block;
   width: 9px;
@@ -3970,6 +3991,13 @@ body.fixed-viewport .split {
   display: flex;
   align-items: center;
   gap: 10px;
+  /*
+   * ⚠️ 价格行要**铺满整列**：`.tk-mid` 是 `align-items: flex-start`，子项默认只占
+   *    内容那么宽 —— 而这一行的最右端现在挂着 MM 徽章（`TickerHead` 的 `#price-end`
+   *    插槽 + `AnalyzeView`），不铺满的话 `margin-left: auto` 就顶不到行尾（实测差 49px）。
+   *    左边那颗大字价格 / 涨跌胶囊仍然靠左，视觉不变。
+   */
+  width: 100%;
 }
 
 .tk-head .tk-last {
@@ -4283,6 +4311,16 @@ body.fixed-viewport .split {
  * 「可用 xxx USDT」——在价格那一行的最右（以前挂在顶栏的最右，见 `.ord-price-row`）。
  * 现在不属于 `.ord-head`，选择器去掉了那层限定。
  */
+/*
+ * 价格行最右端那颗 MM 保证金率（2026-10-07 从币种行挪下来的，用户：
+ * 「mm放在 下面最右侧和价格那一排」）—— 徽章本体在 `MarginRateBadge.vue`，
+ * 这里只管**把它顶到行尾**（价格 + 涨跌都靠左）。
+ * ⚠️ 别写成 `.tk-price .mm` 了：插槽内容是外层渲染的，带的是外层的 scope id，
+ *    这边用类名 `tk-mm` 兜住（外层 `AnalyzeView` 传下来的）。
+ */
+.tk-price .tk-mm {
+  margin-left: auto;
+}
 .ord-avail {
   font-size: 11px;
   color: var(--muted);
@@ -4396,6 +4434,7 @@ body.fixed-viewport .split {
   margin-left: auto;
   min-width: 0;
 }
+
 
 /* 账户标签：跟「交易所账户」页里那种 `.ktag` 同款，但这里点不动（切换在配置里） */
 .ord-acct {
@@ -4696,7 +4735,14 @@ body.fixed-viewport .split {
 
 .ord-pos li {
   display: block;
-  padding: 5px 0;
+  /*
+   * ⚠️ 行高**故意放松**（用户 2026-10-06：「k 线仓位的每条行高加高，防止误触」）：
+   *    行尾那两颗「减仓 / 平仓」挨得近，行太矮时手指容易点到隔壁那条持仓上。
+   *    加高之后一行约 44px，够分了。
+   * ⚠️ 加高只影响「一屏能看几条」—— 列表是 `flex: 1 1 0` + 自己滚（见上），
+   *    不会把下单区撑高。
+   */
+  padding: 9px 0;
   border-top: 1px solid var(--border);
   font-size: 11px;
   white-space: nowrap;
@@ -4798,7 +4844,11 @@ body.fixed-viewport .split {
  */
 .ord-pos .op-act {
   flex: 0 0 auto;
-  padding: 4px 6px;
+  /*
+   * 触摸目标加大一点（用户 2026-10-06：「防止误触」）——
+   * 原来 4px 上下内边距、一行才二十几像素，手指容易点偏。
+   */
+  padding: 6px 9px;
   border: 0;
   background: none;
   font-size: 11px;
@@ -6027,7 +6077,7 @@ button.badge:disabled {
    * ⚠️ 这里**原来写的是 `height: auto`**（注释还留着「手机上就是普通长文档」）——
    *    那是给当时当长文档用的「我的」页定的。现在 `/me` 要「顶部 tab 固定 +
    *    下面内容区自己滚」，窄屏也必须是一屏，所以恢复 `100vh`。
-   *    该滚的地方照样滚：`.me-pane` 自己带 `overflow-y: auto`。
+   *    该滚的地方照样滚：`PaneShell` 的 `.tabpane-body` 自己带 `overflow-y: auto`。
    *
    * ⚠️ 只有 `/analyze`、`/contracts`、`/me` 会挂 `fixed-viewport`，其它页不受影响。
    */
@@ -6912,23 +6962,127 @@ button.badge:disabled {
   background: var(--accent-soft);
 }
 
+/* ==================== 自定义下拉（`SelectPick`，2026-10-07） ==================== */
+/*
+ * 跟原生 `<select>` 说再见的那套壳：按钮长得跟这一页的输入框一样
+ * （`--panel-2` 底 + 1px 边框 + 8px 圆角），列表是浮在上面的面板。
+ * 用法 / 为什么不用原生：见 `frontend/src/comps/SelectPick.vue` 头部。
+ */
+.pk {
+  position: relative;
+  min-width: 0;
+}
+
+.pk-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+}
+
+/* 展开时边框点亮（跟 `.combo-box:focus-within` 一个色） */
+.pk.open .pk-btn,
+.pk-btn:focus-visible {
+  border-color: var(--blue);
+  outline: none;
+}
+
+.pk-btn:disabled {
+  opacity: 0.55;
+}
+
+.pk-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pk-caret {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 6px;
+  fill: currentColor;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+/* 展开时箭头翻过来（同一支三角） */
+.pk.open .pk-caret {
+  transform: rotate(180deg);
+}
+
+/*
+ * 列表：跟 `.combo-list` 同一套长相（面板底 + 阴影 + 圆角）。
+ * ⚠️ `max-height` + 自己滚：这几个选项虽然只有三条，但这类壳以后会被复用到别处。
+ */
+.pk-list {
+  position: absolute;
+  z-index: 302; /* 压在 `.sheet`（301）上面 */
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.pk-list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+
+/* 当前那一项：淡底 + 高亮字（不给勾就够了） */
+.pk-list button.on {
+  background: var(--accent-soft, rgba(128, 128, 128, 0.12));
+  color: var(--accent);
+  font-weight: var(--fw-mid, 500);
+}
+
+/* 当前项右边那枚内联勾（不用 ✓ 字符：安卓兜底字体不保证有字形） */
+.pk-tick {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* ==================== 万能划转弹层（2026-10-05） ==================== */
 
 /*
  * ⚠️ 这一块是**真钱**：币安没有划转的测试接口，点一下钱就换钱包了。
- *    所以警示语是**常驻**的（不是 3.5 秒就消失的 toast），红框、不折叠。
+ *    2026-10-07 用户：「提示去掉」—— 原来这儿还有一条 `.tr-warn`（红框常驻警示），
+ *    已经删了；保护改成只在确认框里复述一句（见 `TransferSheet.submit()`）。
  */
-.tr-warn {
-  margin: 0 0 4px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--bad, #e55361) 45%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bad, #e55361) 10%, transparent);
-  color: var(--bad, #e55361);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
 .tr-who {
   margin: 0;
   font-size: 12px;
@@ -6957,15 +7111,10 @@ button.badge:disabled {
   color: var(--muted);
 }
 
-.tr-side select {
+/* 下拉（`SelectPick`）在这一行里吃掉剩下的宽 */
+.tr-side .pk {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 6px 8px;
-  font-size: 12px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
 }
 
 .tr-swap {
@@ -7151,11 +7300,15 @@ button.badge:disabled {
   background: linear-gradient(90deg, #7ee787 50%, #ff7b72 50%);
 }
 
-/* 开关（就这一个，够了；以后要多写几个就复用） */
+/*
+ * 开关（全站就「配置」里这一个地方在用，别处要用就复用）。
+ * 2026-10-07 用户：「开关有点饱满了上下瘦一点」⇒ 46×26 → **40×22**、
+ * 旋钮 20 → 16（滑动距离仍是 40 − 2×2 − 16 = 20px）。
+ */
 .switch {
   flex: 0 0 auto;
-  width: 46px;
-  height: 26px;
+  width: 40px;
+  height: 22px;
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -7168,8 +7321,8 @@ button.badge:disabled {
 
 .switch span {
   display: block;
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: var(--muted);
   transition:
@@ -7277,69 +7430,6 @@ button.badge:disabled {
  */
 .split.mkt-page {
   grid-template-columns: minmax(0, 1fr);
-}
-
-/*
- * 「历史」页顶部的页内分段（预测历史 / 知识库）。
- * 只有两个选项，不能跟着 `.tab-row .seg { flex: 1 1 auto }` 拉满整行 ——
- * 一拉满，宽屏上就变成两个巨大的按钮。
- */
-.page-tabs {
-  flex: 0 0 auto;
-}
-
-.page-tabs .seg {
-  flex: 0 0 auto;
-}
-
-/*
- * 手机上这两格（预测历史 / 知识库）用**背景块** ——
- * 用户 2026-10-04：「预测和知识库改为背景 tab」。
- *
- * 跟它上面那排一级 tab（`MeView` 的 `.me-tabs`，横线式）区分开，
- * 层级一眼能看出来。
- *
- * ⚠️⚠️ **必须写在这条之前那个窄屏 `@media`（`.tab-row .seg …`）的后面** ——
- *   同特异性靠「后写的赢」，而 `@media` **不加特异性**。
- *   写到前面会静默失效（本文件已经栽过两次：`PromptsView` 的 `.preview`、
- *   `KnowledgePanel` 的 `.kb-card`）。
- */
-@media (max-width: 900px) {
-  .page-tabs .seg {
-    width: auto;
-    gap: 0;
-    padding: 3px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    overflow: hidden;
-  }
-  .page-tabs .seg button {
-    /*
-     * 宽度**自适应内容**（两个字/四个字各自多宽就多宽）——
-     * 用户 2026-10-04：「二级 tab 内容换行了宽度改自适应」。
-     * 原来是 `flex: 1 1 0` 平分，而 `.page-tabs .seg` 是 `flex: 0 0 auto`
-     * （跟内容一样宽），两者一叠就把每格压到 78px、「预测历史」四个字撑不下 → 换行。
-     */
-    flex: 0 0 auto;
-    padding: 6px 16px;
-    border: 0;
-    border-radius: 0;
-    text-align: center;
-    font-size: 13px;
-    white-space: nowrap;
-  }
-  .page-tabs .seg button + button {
-    margin-left: 0;
-  }
-  .page-tabs .seg button.active {
-    background: var(--blue-soft);
-    color: var(--blue);
-  }
-  /* 已经是背景块了，不要再冒一条短线出来 */
-  .page-tabs .seg button.active::after {
-    content: none;
-  }
 }
 
 /*

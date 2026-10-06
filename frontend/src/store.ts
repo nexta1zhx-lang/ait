@@ -99,7 +99,7 @@ export const notices = computed(() => {
   if (!c) return out
   if (!c.hasApiKey) {
     out.push(
-      '还没有配置大模型 API Key —— 去「我的 → 模型配置」填一个才能分析。'
+      '还没有配置大模型 API Key —— 去「我的 → 个人信息 → 模型配置」填一个才能分析。'
     )
   }
   if (!c.rules?.sources?.length) {

@@ -568,6 +568,19 @@ CREATE TABLE IF NOT EXISTS exchange_income (
 );
 CREATE INDEX IF NOT EXISTS exchange_income_user_idx ON exchange_income (user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS exchange_income_key_idx  ON exchange_income (key_id, ts DESC);
+
+-- ------------------------------------------- ccxt 的 markets 快照（公开数据）
+-- 币安 exchangeInfo 整份约 1.1MB，ccxt 每个实例都要一份、只在内存，
+-- 于是每次进程重启都得重下（本地隧道 25 秒 > ccxt 默认 10 秒超时，一超时整个实例就坏）。
+-- 这里整份落一行，启动时 setMarkets 灌回去 ⇒ 冷启动 0 网络；之后每天刷一次。
+-- key = 交易所|市场类型|环境（跟 Key 无关，公开数据几套账户共用一份）。
+CREATE TABLE IF NOT EXISTS ccxt_markets (
+  key        TEXT        PRIMARY KEY,
+  exchange   TEXT        NOT NULL,
+  count      INTEGER     NOT NULL DEFAULT 0,
+  markets    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
 
 /**

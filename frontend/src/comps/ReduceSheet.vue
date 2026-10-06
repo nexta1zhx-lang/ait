@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /**
- * 「减仓」弹层 —— 选百分比，只平掉这个仓位的一部分
- * （用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」）。
+ * 「平仓」弹层 —— 选百分比，**只平掉这个仓位的一部分**
+ * （用户 2026-10-05：「加个按钮减仓 弹窗选择百分比」；2026-10-07 改口径：
+ *  只平一部分叫**平仓**、整条平掉叫**全平** —— 所以这枚弹层的标题是「平仓」）。
  *
  * 下单模块的「仓位」tab 和「交易所账户 → 持仓」两处都用它。
  *
  * ★ 沿用 `TransferSheet.vue` 那套 `.sheet` / `.tr-*` 样式，不另起一套 CSS。
  *
- * ⚠️ **真金白银**：跟「平仓」一样是市价 `reduceOnly`，`testOrder === false` 时真成交。
+ * ⚠️ **真金白银**：跟「全平」一样是市价 `reduceOnly`，`testOrder === false` 时真成交。
  * ⚠️ 这里只是「想平掉百分之几」，真正下多少由后端按合约精度**向下取整**
  *    （取整后是 0 会报错，不会偷偷放大到最小一张）。
  */
@@ -64,18 +65,18 @@ function money(v: number): string {
 <template>
   <Teleport to="body">
     <div v-if="open" class="sheet-mask" @click="emit('close')" />
-    <section v-if="open" class="sheet" role="dialog" aria-label="减仓">
+    <section v-if="open" class="sheet" role="dialog" aria-label="平仓">
       <header class="sheet-head">
-        <b>减仓 · {{ name }} {{ sideText }}</b>
+        <b>平仓 · {{ name }} {{ sideText }}</b>
         <button class="ghost tiny" title="关掉" @click="emit('close')">✕</button>
       </header>
 
       <p class="tr-warn">
-        ⚠️ 减仓是<b>市价 reduceOnly</b>。
+        ⚠️ 平仓是<b>市价 reduceOnly</b>（只平一部分）。
         <template v-if="testOrder"
           >当前是<b>测试单</b>：币安照常校验签名 / 参数 / 权限，但<b>不进撮合、不会真平</b>。</template
         >
-        <template v-else>跟平仓一样<b>真成交</b>（只平一部分）。</template>
+        <template v-else>跟全平一样<b>真成交</b>（只平一部分）。</template>
         实际数量按合约精度<b>向下取整</b>，取整后是 0 会报错、不会多平。
       </p>
 
@@ -126,10 +127,10 @@ function money(v: number): string {
         type="button"
         class="tr-go"
         :disabled="busy"
-        :title="testOrder ? '测试减仓（只校验、不真平）' : '减仓（真单）'"
+        :title="testOrder ? '测试平仓（只校验、不真平）' : '平仓（真单）'"
         @click="emit('confirm', pct)"
       >
-        {{ busy ? '提交中…' : testOrder ? `测试减仓 ${pct}%` : `减仓 ${pct}%` }}
+        {{ busy ? '提交中…' : testOrder ? `测试平仓 ${pct}%` : `平仓 ${pct}%` }}
       </button>
     </section>
   </Teleport>

@@ -1,5 +1,10 @@
 import ccxt from 'ccxt'
 import {ccxtBaseOptions} from './exchange-account'
+import {
+  attachMarkets,
+  marketsKeyOf,
+  retryUnknownSymbol
+} from './ccxt-markets'
 import {coolingLeftMs, coolingMessage, noteRateLimit} from '../util/rate-cool'
 import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
 import {describeSeries} from '../analysis/describe'
@@ -347,6 +352,10 @@ async function getExchange(
     options: marketOptions(marketType)
   })
   if (apiBase) applyApiBase(exchange, apiBase)
+  /* markets 走落库那份（见 `data/ccxt-markets.ts`），冷启动不再下 1.1MB */
+  const mk = marketsKeyOf(exchangeId, marketType, apiBase || 'live')
+  attachMarkets(exchange, mk)
+  retryUnknownSymbol(exchange, mk)
   await exchange.loadMarkets()
   exchangeCache.set(key, exchange)
   return exchange

@@ -111,6 +111,8 @@ const BJ = new Intl.DateTimeFormat('en-CA', {
   day: '2-digit',
   hour: '2-digit',
   minute: '2-digit',
+  // 秒也要（bjTimeSec 用）；只读自己需要的字段，所以对 bjTime/bjShort 没影响
+  second: '2-digit',
   hour12: false
 })
 
@@ -121,6 +123,22 @@ function bjParts(d: Date): Record<string, string> {
 }
 
 /** 交易图上的时间：秒或毫秒时间戳 / Date */
+/**
+ * **带秒**的北京时间：`10-06 20:32:17`（只到「月-日 时:分:秒」）。
+ *
+ * ⚠️ `bjTime()` 只到分钟 —— 资金动向那一列要「这一秒到账」这种精度
+ *    （资金费 / 手续费常常同一分钟内好几笔），所以单开一个。
+ */
+export function bjTimeSec(input: number | string | Date): string {
+  const d =
+    typeof input === 'number'
+      ? new Date(input < 1e11 ? input * 1000 : input)
+      : new Date(input)
+  if (Number.isNaN(d.getTime())) return '—'
+  const p = bjParts(d)
+  return `${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`
+}
+
 export function bjTime(input: number | string | Date, withDate = true): string {
   const d =
     typeof input === 'number'

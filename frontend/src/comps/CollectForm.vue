@@ -354,7 +354,7 @@ async function collect() {
         </span>
       </div>
 
-      <RouterLink class="archived-link" to="/knowledge">
+      <RouterLink class="archived-link" to="/me?p=replay&r=kb">
         已存进知识库 → 去看卡片
       </RouterLink>
     </section>

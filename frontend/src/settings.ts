@@ -32,6 +32,12 @@ interface Stored {
   chartShowHistory?: boolean
   chartShowOrders?: boolean
   chartShowLiq?: boolean
+  /** 持仓那一格显示价值（默认）还是数量 —— 见 `posShowValue` */
+  posShowValue?: boolean
+  /** 持仓列表的排序条件 —— 见 `posSort` */
+  posSort?: PosSort
+  /** 排序方向（升 / 降）—— 见 `posSortDir` */
+  posSortDir?: 'asc' | 'desc'
 }
 
 function read(): Stored {
@@ -47,7 +53,13 @@ function read(): Stored {
         chartShowPosition: v.chartShowPosition !== false,
         chartShowHistory: v.chartShowHistory !== false,
         chartShowOrders: v.chartShowOrders !== false,
-        chartShowLiq: v.chartShowLiq !== false
+        chartShowLiq: v.chartShowLiq !== false,
+        posShowValue: v.posShowValue !== false,
+        posSort:
+          v.posSort === 'pnl' || v.posSort === 'value' || v.posSort === 'liq'
+            ? v.posSort
+            : 'symbol',
+        posSortDir: v.posSortDir === 'asc' || v.posSortDir === 'desc' ? v.posSortDir : undefined
       }
     }
     // 老键里已经没有认得的东西了（旧配置全部废弃）
@@ -115,6 +127,44 @@ export const chartShowOrders = ref(saved.chartShowOrders !== false)
 export const chartShowHistory = ref(saved.chartShowHistory !== false)
 
 /**
+ * 持仓那种「价值 / 数量」的那一格显示哪个数（用户 2026-10-07：
+ * 「数量和价值放一块可切换显示……切换放配置里」）。
+ *
+ * 价值 = 数量 × 当前价 —— 同一件事的两种说法，占同一格，所以做成**全局**开关：
+ * 一排持仓要能横着比数，逐条各切一半就比不出来了。`true` = 价值（默认）。
+ */
+export const posShowValue = ref(saved.posShowValue !== false)
+
+/**
+ * 持仓列表的排序条件（用户 2026-10-07：「持仓……顶部加排序条件」）。
+ *
+ * `symbol`（默认，= 后端给的顺序，按币种）· `pnl` 未实现盈亏多的在前 ·
+ * `value` 仓位价值大的在前 · `liq` 距强平**近**的在前（最危险的先看见）。
+ */
+/** 持仓列表的排序条件（见上面 `posSort` 那段说明） */
+export type PosSort = 'symbol' | 'pnl' | 'value' | 'liq'
+
+/**
+ * 每一档排序**天生**的方向：币种 A→Z、盈亏赚的在前、价值大的在前、距强平最危险的在前。
+ *
+ * ⚠️ 换档位时方向**回到这一档的默认**（见板子里的 `watch(posSort, …)`）——
+ *    不然「升序」这个状态会跟着人跑到完全不同的条件上，看着像排错了。
+ */
+export function naturalDirOf(by: PosSort): 'asc' | 'desc' {
+  return by === 'pnl' || by === 'value' ? 'desc' : 'asc'
+}
+
+export const posSort = ref<PosSort>(saved.posSort ?? 'symbol')
+
+/**
+ * 排序方向（用户 2026-10-07：「要加升序降序图标」）——
+ * 顶栏那颗箭头点一下就在升 / 降之间翻。缺省 = 当前条件的默认方向。
+ */
+export const posSortDir = ref<'asc' | 'desc'>(
+  saved.posSortDir ?? naturalDirOf(saved.posSort ?? 'symbol')
+)
+
+/**
  * 手机端那颗「分析」闪电 —— **已经不再存位置了**。
  *
  * 2026-10-04 做成了「可以自由移动 + 记到 localStorage」；
@@ -130,7 +180,10 @@ watch(
     chartShowPosition,
     chartShowLiq,
     chartShowOrders,
-    chartShowHistory
+    chartShowHistory,
+    posShowValue,
+    posSort,
+    posSortDir
   ],
   () => {
     try {
@@ -143,7 +196,10 @@ watch(
           chartShowPosition: chartShowPosition.value,
           chartShowLiq: chartShowLiq.value,
           chartShowOrders: chartShowOrders.value,
-          chartShowHistory: chartShowHistory.value
+          chartShowHistory: chartShowHistory.value,
+          posShowValue: posShowValue.value,
+          posSort: posSort.value,
+          posSortDir: posSortDir.value
         })
       )
     } catch {

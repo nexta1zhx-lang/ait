@@ -30,6 +30,18 @@ const DOWN = '#e35561'
 /** 图上最多画多少根（超了按 OHLC 合并） */
 const MAX_BARS = 160
 
+
+/**
+ * 一根 K 线的时间（毫秒）。
+ *
+ * ⚠️ 两种数据源混着用：`/api/candles` 给的是 **`timestamp`**，
+ *    而知识库卡片那份老数据里写的是 `time` —— 两个都认，别只认一个。
+ */
+function candleTime(c: Candle): number {
+  const legacy = (c as Candle & {time?: number}).time
+  return typeof legacy === 'number' ? legacy : c.timestamp
+}
+
 const el = ref<HTMLElement | null>(null)
 const chart = shallowRef<ECharts | null>(null)
 let ro: ResizeObserver | null = null
@@ -44,7 +56,7 @@ function downsample(cs: Candle[], step: number): Candle[] {
     const g = cs.slice(i, i + step)
     if (!g.length) continue
     out.push({
-      time: g[0].time,
+      timestamp: candleTime(g[0]),
       open: g[0].open,
       high: Math.max(...g.map(c => c.high)),
       low: Math.min(...g.map(c => c.low)),
@@ -97,7 +109,7 @@ function render(): void {
   const raw = props.candles
   const step = Math.max(1, Math.ceil(raw.length / MAX_BARS))
   const cs = downsample(raw, step)
-  const xs = cs.map(c => String(c.time))
+  const xs = cs.map(c => String(candleTime(c)))
   // echarts 的蜡烛数据顺序是 [开, 收, 低, 高]
   const ohlc = cs.map(c => [c.open, c.close, c.low, c.high])
 

@@ -22,6 +22,11 @@ export const authToken = ref<string>(
 )
 
 export function setAuthToken(token: string): void {
+  /*
+   * ⚠️ 换 token（登录 / 登出 / 401）时把长连接**立刻**全关掉：`sharedSse` 有 30 秒
+   *    宽限期，不主动关的话上一条会话的连接会多活半分钟（数据虽没人渲染，但没必要留着）。
+   */
+  if (token !== authToken.value) closeAllStreams()
   authToken.value = token
   try {
     if (token) localStorage.setItem(TOKEN_KEY, token)
@@ -243,6 +248,9 @@ const openSse = (path: string): EventSource =>
  * ⚠️ **任务型的一次性流不要用它**（`analyzeStream` / `collectStream`）：那两种流断了
  *    重连没有意义 —— 后端那份任务还在跑，重连只会再开一个任务、白花一次钱。
  *
+ * ⚠️ 直接调它的都是「长期订阅」，而长期订阅请走下面的 `sharedSse`（带宽限复用，
+ *    切页来回不再重连）—— 这里只负责**一条连接**的生命周期。
+ *
  * @param events 要转发的**具名事件**（后端 `send('kline', ...)` 里的那个名字）
  * @param onEvent 收到事件时回调（消息体已经 `JSON.parse` 过了）
  * @param opts.idleMs 多久没动静算死（默认 75 秒；后端心跳 20 秒，留了三拍余量）
@@ -333,6 +341,182 @@ function liveSse(
     closeSocket()
     offForeground()
   }
+}
+
+/* ==================================================================
+ * 长连接的**复用层**（2026-10-06，用户：「切换页面 SSE 会断开重连吗……可以做一个
+ * 前端全局的吗」）。
+ *
+ * 在那之前，5 条流全是「跟着组件走」的：`liveSse` 的取消函数一调就 `close()`，
+ * 而调用方全是「组件卸载 / 引用计数到 0 就立刻调」⇒ **切一级 tab 必然断一条、
+ * 切回来再新开一条**。断开本身不贵（上游币安 WS 是后端在维持，短暂离开不会断），
+ * 贵的是那一轮 `wake()` 补账：打开页面若数据旧了（>60 秒）会补快照 + 成交 + 账本，
+ * 来回切几次就是白花花的权重。
+ *
+ * 所以这里在 `liveSse` 外面包一层：**最后一个人走了先不关，留 `STREAM_GRACE_MS`
+ * 宽限**；这期间有人再订同一条 path 就**直接复用**（同一条 HTTP 连接、同一个看门狗，
+ * 不会重连、不会触发 `wake`）。
+ *
+ * ⚠️ 为什么不干脆做成「登录后一直连着」的全局常连：后端有两处优化**正是靠
+ *    「有没有人在订阅」判断的** ——
+ *      · 「没人看就不补展示字段」（省那 25 权重快照，§29）；
+ *      · 沉睡档的判据里明确有「没人订阅」（空转 + 空仓 + 连着 2 小时没动静才睡，§18）。
+ *    常连会让这两处永远为假（每套账户的上游 WS + 每 2 分钟一轮挂单对账就一直跑）。
+ *    宽限期只是把这两处**推迟最多 30 秒**，节省基本全保住 —— 这才是划算的那个做法。
+ *
+ * ⚠️ 复用是**按 path** 的，所以「合约」页和「我的」页订同一个 Key 时会共用同一条连接
+ *    （以前是各开各的两条）。事件按订阅者各自关心的名字分发，互不影响。
+ * ================================================================== */
+
+/** 最后一个人走了之后，连接还留多久（够来回切一次页） */
+const STREAM_GRACE_MS = 30_000
+/**
+ * 最多允许几条「已经没人听、只是在等宽限到期」的连接。
+ *
+ * ⚠️ 必须封顶，而且要给**活着的那几条留出余额**：浏览器对同一个域名（HTTP/1.1）一共只
+ *    给 **6 条**连接，而 SSE 是**长期占着不还**的。稳态下本来就有 3~4 条活着
+ *    （「我的」页 2 套账户 + 全市场行情，「合约」页还有 K 线），再加上换币时那条
+ *    path 各不相同的 K 线流——不封顶的话，攒够 6 条之后**新的请求会全部排在队列里**
+ *    永远发不出去（2026-10-06 实测：页面里的 REST 全部挂住、连新标签页都打不开）。
+ */
+const STREAM_MAX_LINGER = 2
+/** `liveSse` 的默认闲置判定（没人传 `idleMs` 时用它） */
+const STREAM_IDLE_MS = 75_000
+
+interface StreamSub {
+  /** 这条流要转发哪些具名事件 */
+  events: string[]
+  onEvent: (name: string, data: unknown) => void
+  onReconnect?: () => void
+  onAlive?: () => void
+}
+
+interface SharedStream {
+  path: string
+  events: string[]
+  idleMs: number
+  subs: Set<StreamSub>
+  stop: () => void
+  /** 宽限倒计时（有人回来就清掉） */
+  timer: ReturnType<typeof setTimeout> | null
+  /** 建立顺序 —— 挑最老的僵尸连接来关 */
+  seq: number
+}
+
+const sharedStreams = new Map<string, SharedStream>()
+let streamSeq = 0
+
+/** 真关掉（复用层内部用；外面看到的是宽限之后的关闭） */
+function dropStream(e: SharedStream): void {
+  if (e.timer) clearTimeout(e.timer)
+  e.timer = null
+  sharedStreams.delete(e.path)
+  e.stop()
+}
+
+/** 僵尸连接太多时，先把最老的关掉 */
+function trimLingeringStreams(): void {
+  const idle = [...sharedStreams.values()]
+    .filter(e => !e.subs.size)
+    .sort((a, b) => a.seq - b.seq)
+  while (idle.length > STREAM_MAX_LINGER) dropStream(idle.shift()!)
+}
+
+function spawnStream(path: string, events: string[], idleMs: number): SharedStream {
+  const e: SharedStream = {
+    path,
+    events: [...events],
+    idleMs,
+    subs: new Set(),
+    stop: () => undefined,
+    timer: null,
+    seq: ++streamSeq
+  }
+  e.stop = liveSse(
+    path,
+    e.events,
+    (name, data) => {
+      /*
+       * ⚠️ 先复制一份再遍历：回调里完全可能有人 `unsubscribe`（比如收到 `reject`
+       *    就把自己绑的那套账户退了），直接在 Set 上迭代会漏掉后面的订阅者。
+       */
+      for (const s of [...e.subs]) {
+        if (!s.events.includes(name)) continue
+        try {
+          s.onEvent(name, data)
+        } catch {
+          /* 一个订阅者出错不能影响别人 */
+        }
+      }
+    },
+    {
+      /* 断线是**这条连接**的事 ⇒ 广播给所有订阅者（各自决定补什么底稿） */
+      onReconnect: () => {
+        for (const s of [...e.subs]) s.onReconnect?.()
+      },
+      onAlive: () => {
+        for (const s of [...e.subs]) s.onAlive?.()
+      },
+      idleMs
+    }
+  )
+  return e
+}
+
+/**
+ * 订阅一条长连接（**带宽限复用**）。语义跟 `liveSse` 一样，返回取消函数。
+ *
+ * 同一个 path 被多个消费者订时只有一条连接，每个订阅者的回调都会收到（按各自
+ * `events` 过滤）；选项（`idleMs`）取**最严**的那个，不一致时重建一次。
+ */
+function sharedSse(
+  path: string,
+  events: string[],
+  sub: StreamSub,
+  idleMs = STREAM_IDLE_MS
+): () => void {
+  const live = sharedStreams.get(path)
+  let e: SharedStream
+  const merged = live
+    ? [...live.events, ...events.filter(n => !live.events.includes(n))]
+    : [...events]
+  /*
+   * 复用条件：事件名单够用 **且** 闲置判定不比它宽（更宽会被看门狗误判成活/死）。
+   * 不满足就带着老订阅者一起重建 —— 一条消息都别丢。
+   * （现有调用方每条 path 的事件名单都是固定的，重建这条路基本走不到，留着防以后。）
+   */
+  if (live && merged.length === live.events.length && idleMs >= live.idleMs) {
+    e = live
+    /* 还在宽限里 ⇒ 撤销关闭，这条连接就活了 */
+    if (e.timer) {
+      clearTimeout(e.timer)
+      e.timer = null
+    }
+  } else {
+    const old = live ? {subs: [...live.subs], idleMs: live.idleMs} : null
+    if (live) dropStream(live)
+    e = spawnStream(path, merged, Math.min(idleMs, old?.idleMs ?? idleMs))
+    if (old) for (const s of old.subs) e.subs.add(s)
+    sharedStreams.set(path, e)
+  }
+  e.subs.add(sub)
+  trimLingeringStreams()
+
+  return () => {
+    if (!e.subs.delete(sub)) return
+    if (e.subs.size) return
+    /* 最后一个人走了：**先不关** —— 这 30 秒里有人切回来就直接复用 */
+    e.timer = setTimeout(() => dropStream(e), STREAM_GRACE_MS)
+  }
+}
+
+/**
+ * 把所有长连接**立刻**全关（不等宽限）—— 登出 / 换 token 时用。
+ *
+ * ⚠️ 不关的话，登出之后那条连接最多还会多活 30 秒（数据虽然没人渲染，但没必要留着）。
+ */
+export function closeAllStreams(): void {
+  for (const e of [...sharedStreams.values()]) dropStream(e)
 }
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
@@ -897,7 +1081,12 @@ export interface ExchangePositionCycle {
   realized: number
   /** 手续费（正数） */
   fee: number
-  /** 净盈亏 = 已实现 − 手续费 —— 列表上显示的就是它 */
+  /**
+   * 这一段持仓期间的**资金费**（`FUNDING_FEE`，钱账本里那一项）。
+   * 符号跟着钱走：**负 = 付出、正 = 收到**。
+   */
+  funding: number
+  /** 净盈亏 = 已实现 − 手续费 **+ 资金费**（资金费带符号）—— 列表上显示的就是它 */
   net: number
   openAt: string
   /** 全平时间（`null` = 还没平完） */
@@ -1054,6 +1243,18 @@ export const fetchExchangeOpenOrders = (id?: number) =>
  *
  * 心跳（`heartbeat`）由 `liveSse` 自己吃掉，不会传上来。
  */
+/** 账户流要转发的具名事件（下面两处要用同一份，提到外面免得写岔） */
+const EXCHANGE_EVENTS = [
+  'snapshot',
+  'fill',
+  'backfill',
+  'reject',
+  'positions',
+  'income',
+  'health',
+  'orders'
+]
+
 export function exchangeStream(
   id: number | undefined,
   on: {
@@ -1084,30 +1285,25 @@ export function exchangeStream(
     reconnect?: () => void
   }
 ): () => void {
-  return liveSse(
+  return sharedSse(
     `/api/exchange/stream${id ? `?id=${id}` : ''}`,
-    [
-      'snapshot',
-      'fill',
-      'backfill',
-      'reject',
-      'positions',
-      'income',
-      'health',
-      'orders'
-    ],
-    (name, data) => {
-      const d = data as Record<string, unknown> | null
-      if (name === 'snapshot') on.snapshot?.(data as ExchangeSnapshotResult)
-      else if (name === 'fill') on.fill?.(data as ExchangeTrade)
-      else if (name === 'backfill') on.backfill?.(Number(d?.added ?? 0))
-      else if (name === 'income') on.income?.(Number(d?.added ?? 0))
-      else if (name === 'health') on.health?.(d?.deaf === true)
-      else if (name === 'orders') on.orders?.(String(d?.reason ?? ''))
-      else if (name === 'reject') on.reject?.(String(d?.reason ?? ''))
-      else if (name === 'positions') on.positions?.(data as PositionsPatch)
-    },
-    {onReconnect: on.reconnect, onAlive: on.alive}
+    EXCHANGE_EVENTS,
+    {
+      events: EXCHANGE_EVENTS,
+      onEvent: (name, data) => {
+        const d = data as Record<string, unknown> | null
+        if (name === 'snapshot') on.snapshot?.(data as ExchangeSnapshotResult)
+        else if (name === 'fill') on.fill?.(data as ExchangeTrade)
+        else if (name === 'backfill') on.backfill?.(Number(d?.added ?? 0))
+        else if (name === 'income') on.income?.(Number(d?.added ?? 0))
+        else if (name === 'health') on.health?.(d?.deaf === true)
+        else if (name === 'orders') on.orders?.(String(d?.reason ?? ''))
+        else if (name === 'reject') on.reject?.(String(d?.reason ?? ''))
+        else if (name === 'positions') on.positions?.(data as PositionsPatch)
+      },
+      onReconnect: on.reconnect,
+      onAlive: on.alive
+    }
   )
 }
 
@@ -1372,9 +1568,10 @@ export const fetchTradePositions = (id?: number, fresh = false) =>
 /**
  * 某个交易对当前的挂单（K 线上那条「仓位委托」价格线）。
  * `symbol` 传**币安原始符号**（`1000BONKUSDT`）。
+ * `stale: true` = 实时没读到、给的是最近一次对账的快照（最多滞后 2 分钟）。
  */
 export const fetchTradeOpenOrders = (symbol: string, id?: number) =>
-  get<{ok: boolean; orders?: TradeOpenOrder[]; error: string | null}>(
+  get<{ok: boolean; orders?: TradeOpenOrder[]; stale?: boolean; error: string | null}>(
     `/api/exchange/trade/open-orders?symbol=${encodeURIComponent(symbol)}` +
       (id ? `&id=${id}` : '')
   )
@@ -1386,6 +1583,40 @@ export const fetchTradeHistory = (symbol: string, id?: number, limit = 100) =>
       `&limit=${limit}` +
       (id ? `&id=${id}` : '')
   )
+
+/**
+ * 改一张挂单（用户 2026-10-06：「挂单可以修改」）。
+ *
+ * 后端按类型分流：**限价单**走交易所的改单接口（单号不变），**止盈 / 止损**
+ * （条件单）走撤旧挂新 —— 币安条件单没有改单接口，它自己 App 里的「修改」也是撤+挂。
+ * 所以 `price` 的含义跟着类型走：限价单 = **委托价**，条件单 = **触发价**。
+ *
+ * ⚠️ **真动作，没有测试版** —— 跟撤单一样，点之前先跟人确认一次。
+ * ⚠️ `symbol` 传**币安原始符号**（`1000BONKUSDT`）。
+ */
+export const modifyTradeOrder = (
+  key: {symbol: string; orderId: string; price: number; quantity?: number},
+  id?: number
+) =>
+  post<{ok: boolean; error: string | null} & Partial<ModifiedOrder>>(
+    `/api/exchange/trade/modify-order${id ? `?id=${id}` : ''}`,
+    {...key}
+  )
+
+/** 改单的结果（后端 `ModifiedOrder` 的镜像） */
+export interface ModifiedOrder {
+  symbol: string
+  orderId: string
+  /** `edit` = 交易所的改单接口；`replace` = 撤旧挂新（条件单只能这样） */
+  via: 'edit' | 'replace'
+  type: string
+  price: number
+  quantity: number
+  canceled?: string
+  kind?: 'profit' | 'stop'
+  /** 后端顺手纠正过什么（比如触发价跨过标记价 ⇒ 类型改成止损） */
+  note?: string
+}
 
 /**
  * 撤一张挂单（**真动作**，没有测试版 —— 撤了就是撤了，调用前自己确认）。
@@ -1583,15 +1814,19 @@ export function klineStream(
   onReconnect?: () => void
 ): () => void {
   const qs = new URLSearchParams({symbol, timeframe})
-  return liveSse(
+  return sharedSse(
     `/api/kline/stream?${qs}`,
     ['kline'],
-    (_name, data) => {
-      const d = data as {candle?: Candle}
-      if (d?.candle) onCandle(d.candle)
+    {
+      events: ['kline'],
+      onEvent: (_name, data) => {
+        const d = data as {candle?: Candle}
+        if (d?.candle) onCandle(d.candle)
+      },
+      onReconnect
     },
     /* 闲置判定给得宽：冷门币可能几十秒没成交，但 20 秒一次的心跳会把它刷新 */
-    {idleMs: 75_000, onReconnect}
+    75_000
   )
 }
 
@@ -1658,15 +1893,19 @@ export function tickerStream(
   onBatch: (updates: TickerPatch[]) => void,
   onReconnect?: () => void
 ): () => void {
-  return liveSse(
+  return sharedSse(
     '/api/tickers/stream',
     ['ticker'],
-    (_name, data) => {
-      const d = data as {updates?: TickerPatch[]}
-      if (d?.updates?.length) onBatch(d.updates)
+    {
+      events: ['ticker'],
+      onEvent: (_name, data) => {
+        const d = data as {updates?: TickerPatch[]}
+        if (d?.updates?.length) onBatch(d.updates)
+      },
+      onReconnect
     },
     /* 这条流每秒都有数据，30 秒没动静基本可以确定是死了 */
-    {idleMs: 30_000, onReconnect}
+    30_000
   )
 }
 
@@ -2453,7 +2692,7 @@ export const fetchDownloads = () => get<DownloadsResult>('/api/downloads')
  */
 export const downloadUrl = (url: string): string => apiUrl(url)
 
-/* ---------------- 服务器状态（「我的 → 服务器」） ---------------- */
+/* ---------------- 服务器状态（「我的 → 管理 → 服务器」） ---------------- */
 
 /** 曲线上的一个点（后端每 5 秒采一个，进程内滚动保留 2 小时） */
 export interface ServerSample {

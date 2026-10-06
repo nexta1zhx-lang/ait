@@ -788,7 +788,7 @@ onMounted(() => {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    /* 滚动条贴容器右边，内容离它 12px（跟 `.me-pane` / `.scroll-body` 同一套） */
+    /* 滚动条贴容器右边，内容离它 12px（跟 `.tabpane-body` / `.scroll-body` 同一套） */
     padding-right: 12px;
     margin-right: -12px;
   }

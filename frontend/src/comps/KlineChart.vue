@@ -31,9 +31,11 @@ import {
   bindOverlayPositions,
   clearTradeOverlay,
   overlayEnabled,
+  overlayErr,
   overlayFills,
   overlayOrders,
   overlayPositions,
+  overlayStale,
   overlaySymbol,
   ORPHAN_SWEEP_MS,
   refreshTradeOverlay,
@@ -42,6 +44,7 @@ import {
 } from '../trade-overlay'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
+import {createOverlayLines} from '../overlay-lines'
 import TimeModal from './TimeModal.vue'
 import StopSheet from './StopSheet.vue'
 import {
@@ -570,6 +573,8 @@ function ensureChart(): boolean {
   })
 
   refs = {chart, candle, volume, ema42}
+  /* 叠加线（仓位 / 强平 / 挂单）挂在蜡烛系列上：横线压在蜡烛**下面**（见 `../overlay-lines.ts`） */
+  overlayLines.attach(candle)
 
   /* 标签跟线一起动（见 `labelSyncTick`）：从图建好那刻起每帧盯一下指纹 */
   labelSyncKey = ''
@@ -735,12 +740,19 @@ function sameLevels(a: Levels, b: Levels): boolean {
  *        · 仓位     —— **多绿 / 空红、实线**，左侧标签显示**盈利价值**
  *        · 挂单     —— **多绿 / 空红虚线**，左侧标签显示**止损 / 止盈 + 预计收益 + 数量%**
  *
- * 四样**各画各的**，跟上面「压力 / 支撑」那两条线**分开存**（`orderLines`）——
+ * 四样**各画各的**，跟上面「压力 / 支撑」那两条线**分开存** ——
  * 那两条是「按可见窗口现算」的、跟着平移每帧重画；这几条是账户数据，
- * 15 秒才变一次。混在一个数组里，两边的「就地改价」逻辑会互相踩。
+ * 15 秒才变一次（`orderLineList()` 现算一份，画线与左标签都按它来）。
  *
  * 颜色：仓位 / 挂单**按多空分绿红**（用户点名要的），跟蜡烛同一对绿红 ——
  * 靠**线型**分开（仓位实线、挂单虚线、强平红虚线）；强平的红比仓位那根更扎眼。
+ *
+ * 2026-10-07 又一版（用户：「止损止盈和仓位的价格都放坐标轴上颜色要对应层级最低
+ * 1.仓位拖动时，原有的仓位不动，只是多条虚线去拉 方向和仓位价值不要加竖线
+ * 2.止盈止损线 左侧只显示盈利价格挪到坐标轴上」）：
+ *   · 横线 + 右侧轴上的价格 → 自己写的 series primitive（见 `overlayLines`）
+ *   · 左标签只留「一眼要用的数」，价格一律上轴
+ *   · 拖动只加一条虚线预览，原线原标签不动
  */
 /** 多（买）绿 / 空（卖）红 —— 跟蜡烛同一对色，全站「多绿空红」一套 */
 const SIDE_COLOR = {long: '#5eba89', short: '#e35561'} as const
@@ -757,20 +769,21 @@ const MARKER_SELL = '#ff7b72'
  *
  * `label` 是**左侧**那枚标签的文字（`null` = 这条线的左边不放东西）；
  * `labelTitle` 是它的 `title`（手指按住 / 悬停看细节）。
+ *
+ * ⚠️ 线本身（横线 + 右侧轴上的价格）由 `overlayLines` 这个 series primitive 画，
+ *    见 `../overlay-lines.ts` 开头为什么不用库自带的 `createPriceLine()`。
  */
 interface OrderLine {
   p: number
   color: string
-  /** 右侧价格轴上的小字 */
-  title: string
   /** 实线还是虚线 */
   dashed: boolean
   /**
    * 左侧标签：**几段**，段间一条实线分割（用户 2026-10-06：
    * 「标签都移到左边…描框带透明度中间实线分割」）。
-   *   · 仓位 → `[多] | [仓位价值] | [未实现盈亏]`
-   *   · 强平 → `[强平] | [价]`
-   *   · 挂单 → `[止损 价] | [10%]`
+   *   · 仓位 → `[多 $3.00] | [未实现盈亏]`（方向和价值**同一段**，中间不竖线 —— 2026-10-07）
+   *   · 强平 → `[强平]`
+   *   · 挂单 → `[盈利]`（止盈 / 止损）或 `[委托] | [数量]`（加仓）
    * `null` = 这条线不放标签。
    */
   label: string[] | null
@@ -817,7 +830,14 @@ interface DragRef {
   posSide?: string
 }
 
-let orderLines: any[] = []
+/**
+ * 画线的那个 series primitive（横线 + 右侧轴上的价格）。
+ *
+ * 用户 2026-10-07：「止损止盈和仓位的价格都放坐标轴上颜色要对应**层级最低**」——
+ * 库自带的 `createPriceLine()` 一是画在蜡烛**上面**、二是没有层级开关，
+ * 三样（价格上轴 + 颜色对应 + 压在蜡烛下面）凑不齐 ⇒ 自己画（见 `../overlay-lines.ts`）。
+ */
+const overlayLines = createOverlayLines()
 let orderMarkers: ReturnType<typeof LWC.createSeriesMarkers> | null = null
 
 /** 涨跌色的 CSS 变量值（跟 `--ok` / `--bad` 同一对） */
@@ -859,25 +879,25 @@ function orderTargetPos(o: TradeOpenOrder): TradePositionRow | null {
 }
 
 /**
- * 一个挂单的左侧标签：`止盈 85,123.4 │ 50%`（止损 / 委托同理）。
+ * 一个挂单的左侧标签。
  *
- * 用户 2026-10-06：「止盈止损也加上价格，止盈止损百分比放标签旁」——
- *   · 第一段 = 止盈 / 止损 **+ 触发价**（委托单不带价：那是加仓，价位看右侧轴就够）
- *   · 第二段 = **平仓百分比**（平掉这条持仓的多少），金额挪进 `title`
- * 预计收益 / 数量 / 平仓比例这些**明细都在 title 里**（按住标签 / 悬停看），
- * 标签上只留一眼要用的那两个数。
+ * 用户 2026-10-06：「止盈止损也加上价格，止盈止损百分比放标签旁」→
+ * 2026-10-07：「止盈止损线 左侧只显示盈利，价格挪到坐标轴上」→
+ * 同一天又补：「止盈止损字样和百分比要加上」——
+ *   触发价挂在**右侧价格轴**上（颜色跟着线走），左边这枚是
+ *   **止盈 / 止损 ＋ 预期盈利 ＋ 平仓百分比**（`止盈 │ +$0.5733 │ 100%`）。
+ *   加仓那种（没有盈亏）照旧「委托 │ 数量 N」。
+ * 数量 / 按开仓均价怎么算的**明细都在 title 里**（按住标签 / 悬停看）。
  *
  * ⚠️ 不含手续费（两张单两边都要吃一次 taker/maker），所以叫「预计」。
  */
 function orderLabel(
   o: TradeOpenOrder,
   px: number
-): {kind: string; value: string; title: string; color: string} {
+): {label: string[]; title: string; color: string} {
   const pos = orderTargetPos(o)
   const kind = orderKind(o)
   const base = kind === 'profit' ? '止盈' : kind === 'stop' ? '止损' : '委托'
-  /* 标签第一段：止盈 / 止损带上触发价；委托（加仓）就光两个字 */
-  const name = kind === 'plain' ? base : `${base} ${priceText(px)}`
   const notes: string[] = [`${base} ${priceText(px)}`, `数量 ${fmt(o.amount)}`]
   /*
    * 这一单是**平仓**（那才有「预计收益」）：
@@ -892,18 +912,17 @@ function orderLabel(
      * 颜色按**赚还是亏**走（绿 / 红）—— 止盈止损一眼看出是保护盈利还是割肉。
      */
     const color = pnl >= 0 ? '#5eba89' : '#e35561'
+    const parts = [base, money(pnl)]
     if (pos.amount > 0) {
       const pct = Math.min(100, (o.amount / pos.amount) * 100)
       notes.push(`平掉这条持仓的 ${pct.toFixed(1)}%`)
-      /* 第二段只留百分比（用户：「百分比放标签旁」）—— 金额在 title 里 */
-      return {kind: name, value: `${pct.toFixed(0)}%`, title: notes.join(' · '), color}
+      parts.push(`${pct.toFixed(0)}%`)
     }
-    return {kind: name, value: money(pnl), title: notes.join(' · '), color}
+    return {label: parts, title: notes.join(' · '), color}
   }
   notes.push('这一单是加仓（不是平仓），不结算盈亏')
   return {
-    kind: name,
-    value: `数量 ${fmt(o.amount)}`,
+    label: [base, `数量 ${fmt(o.amount)}`],
     title: notes.join(' · '),
     color: sideColor(o.side === 'buy' ? 'long' : 'short')
   }
@@ -921,9 +940,10 @@ function orderLineList(): OrderLine[] {
     if (chartShowPosition.value && p.entryPrice > 0) {
       /*
        * 仓位：**多绿空红、实线**（用户 2026-10-06：「空单红色，多单绿色 实线」）。
-       * 左边那枚标签：**方向 │ 仓位价值 │ 未实现盈亏**（用户 2026-10-06：
-       * 「仓位价值放方向旁」→「仓位是方向+价值+盈利额」）——
-       * 开仓价在右侧轴上已经有数了，这里给「这条仓位多大、现在赚亏多少」。
+       * 左边那枚标签：**方向 + 仓位价值 │ 未实现盈亏**（用户 2026-10-06：
+       * 「仓位价值放方向旁」→「仓位是方向+价值+盈利额」；2026-10-07：
+       * 「方向和仓位价值不要加竖线」⇒ 这两样合成**一段**，中间不再插分割线）——
+       * 开仓价已经挂到右侧轴上了（用户 2026-10-07：「仓位的价格都放坐标轴上」）。
        * ⚠️ 标签颜色按**盈亏**染（绿赚红亏）—— 所以那个金额一定要露在标签上，
        *    不然颜色在说什么就看不出来了。数量 / 杠杆仍在 `labelTitle` 里。
        */
@@ -934,9 +954,8 @@ function orderLineList(): OrderLine[] {
       out.push({
         p: p.entryPrice,
         color: sideColor(p.side),
-        title: `开仓均价 ${who}`,
         dashed: false,
-        label: [who, usd(p.notional), money(pnl)],
+        label: [`${who} ${usd(p.notional)}`, money(pnl)],
         labelColor: pnl >= 0 ? '#5eba89' : '#e35561',
         /* 拖着这条线上下走 = 给这条仓位挂一张止盈 / 止损（见 `ordLabelDown`） */
         drag: {
@@ -960,11 +979,10 @@ function orderLineList(): OrderLine[] {
       out.push({
         p: p.liquidationPrice,
         color: LINE_LIQ,
-        title: `强平 ${who}`,
         dashed: true,
-        /* 强平也放左边（用户：「标签都移到左边吧」）—— 价位本来就是右边轴上那个数，
-           这里给「强平」两个字，好认是哪条线 */
-        label: ['强平', priceText(p.liquidationPrice)],
+        /* 强平也放左边（用户：「标签都移到左边吧」）—— 价位在右侧轴上
+           （用户 2026-10-07：「价格都放坐标轴上」），这里只留「强平」两个字好认是哪条线 */
+        label: ['强平'],
         labelTitle: `强平价 ${priceText(p.liquidationPrice)} · ${who}单`
       })
     }
@@ -980,9 +998,8 @@ function orderLineList(): OrderLine[] {
         p: px,
         /* 挂单：**多（买）绿、空（卖）红，虚线**（用户 2026-10-06） */
         color: sideColor(o.side === 'buy' ? 'long' : 'short'),
-        title: `${lab.kind} ${o.side === 'buy' ? '多' : '空'}`,
         dashed: true,
-        label: [lab.kind, lab.value],
+        label: lab.label,
         labelColor: lab.color,
         cancelId: o.id,
         /* 拖着它走 = **改单**（撤旧的、挂新价）；认不出平的是哪条就只给看、不给拖 */
@@ -1070,16 +1087,8 @@ function renderOrderMarkers(): void {
  *    都没有了，留着上个币的价位线没有意义。
  */
 function dropOrderLines(): void {
-  if (refs) {
-    for (const l of orderLines) {
-      try {
-        refs.candle.removePriceLine(l)
-      } catch {
-        /* 已移除 */
-      }
-    }
-  }
-  orderLines = []
+  overlayLines.set([])
+  clearDragPreview()
   orderMarkers?.setMarkers([])
   /* 标签也一起清掉（这里是「什么都不画」，不是重算） */
   if (ordLabelHost.value) ordLabelHost.value.innerHTML = ''
@@ -1092,44 +1101,24 @@ function dropOrderLines(): void {
  */
 function renderOrderLines(): void {
   if (!refs) return
-  /* ⚠️ 正在拖那条线的时候不许重画：15 秒一轮的数据回来会把它拽回原位 */
+  /* ⚠️ 正在拖那条线的时候不许重画：15 秒一轮的数据回来会把左边那几枚标签的下标
+     全打乱（正拖着的标签会指向别人）*/
   if (drag.value) return
+  clearDragPreview()
   const list = orderLineList()
-  if (orderLines.length === list.length) {
-    for (let i = 0; i < list.length; i++) {
-      const lv = list[i]!
-      orderLines[i]?.applyOptions({
-        price: lv.p,
-        color: lv.color,
-        title: lv.title,
-        lineStyle: lv.dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
-        axisLabelVisible: false
-      })
-    }
-  } else {
-    for (const l of orderLines) {
-      try {
-        refs.candle.removePriceLine(l)
-      } catch {
-        /* 已移除 */
-      }
-    }
-    orderLines = list.map(lv =>
-      refs.candle.createPriceLine({
-        price: lv.p,
-        color: lv.color,
-        lineWidth: 1,
-        lineStyle: lv.dashed ? LWC.LineStyle.Dashed : LWC.LineStyle.Solid,
-        /*
-         * ⚠️ 右侧轴上**不再挂小字**（用户 2026-10-06：「标签都移到左边吧」）——
-         *    手机右边那条轴本来就窄，再压上「开仓均价 多 0.003852」这种长标签
-         *    整块都是糊的；这信息现在都在左边那枚标签上。
-         */
-        axisLabelVisible: false,
-        title: lv.title
-      })
-    )
-  }
+  /*
+   * 线本体交给那个 primitive：价位 → y 是它自己在 `render` 里算的（所以平移 / 缩放
+   * 自动跟手，不用像左标签那样每帧盯），右侧轴上那枚价格标签也由它出
+   *（`axis` 就是轴上要写的字 —— 全部写价格，用户 2026-10-07：「价格都放坐标轴上」）。
+   */
+  overlayLines.set(
+    list.map(l => ({
+      price: l.p,
+      color: l.color,
+      dashed: l.dashed,
+      axis: priceText(l.p)
+    }))
+  )
   renderOrdLabels(list)
   renderOrderMarkers()
 }
@@ -1152,7 +1141,7 @@ let ordLabels: {
   /** 几段文字，段与段之间是 CSS 的 `i`（那条竖分割线） */
   parts: HTMLElement[]
   drag: DragRef | null
-  /** 这条标签对应 `orderLines` 里的第几条（拖动时按它改那条线） */
+  /** 这条标签是第几条线（按下标找它 —— 点一下会露出「✕」） */
   lineIdx: number
   /** 挂单才有：点了它就去撤这张单 */
   cancelId?: string
@@ -1160,6 +1149,16 @@ let ordLabels: {
 
 /** 现在露出一颗「✕」的是哪颗标签（点一下标签出✕，再点别处收起来） */
 let cancelShownEl: HTMLElement | null = null
+
+/*
+ * 拖动时那条虚线**自己的**标签。
+ *
+ * 用户 2026-10-07：「仓位拖动时，**原有的仓位不动**，只是多条虚线去拉」——
+ * 所以拖动期间原来那枚标签（`ordLabels` 里那一枚）一根手指都不许碰，
+ * 预览另起一枚；它不在 `ordLabels` 数组里，`positionOrdLabels()` 不管它。
+ */
+let dragPreviewEl: HTMLElement | null = null
+let dragPreviewParts: HTMLElement[] = []
 
 /**
  * 撤一张挂单（用户 2026-10-06：「点击左侧标签出现叉号，点击弹窗确认可撤单」）。
@@ -1249,8 +1248,8 @@ function renderOrdLabels(lines: OrderLine[]): void {
       el.className = 'olb'
       el.style.color = l.labelColor ?? l.color
       /*
-       * 段与段之间插一条竖线（CSS 的 `i`）：`多 │ $3.00 │ +$0.12`。
-       * 段数由数据决定（仓位三段的，挂单两段）。
+       * 段与段之间插一条竖线（CSS 的 `i`）：`多 $3.00 │ +$0.12`。
+       * 段数由数据决定（仓位 / 加仓单两段，强平、止盈止损一段）。
        */
       const parts = l.label!.map((t, j) => {
         if (j) el.appendChild(document.createElement('i'))
@@ -1337,6 +1336,19 @@ function positionOrdLabels(): void {
     item.el.style.display = ''
     item.el.style.top = y + 'px'
   }
+  positionDragPreview()
+}
+
+/** 拖动预览那枚标签摆到「拖到的那个价」上（跟别的标签一样按 y 摆） */
+function positionDragPreview(): void {
+  if (!refs || !dragPreviewEl) return
+  const y = refs.candle.priceToCoordinate(dragPrice.value)
+  if (y === null || y === undefined || !Number.isFinite(y)) {
+    dragPreviewEl.style.display = 'none'
+    return
+  }
+  dragPreviewEl.style.display = ''
+  dragPreviewEl.style.top = y + 'px'
 }
 
 /**
@@ -1392,7 +1404,7 @@ const stopBusy = ref(false)
 /** 按住时手指的 y 与那条线的价（按「挪了多少像素」换算价格，手指滑出图外也不会跳） */
 let dragFromY = 0
 let dragFromPrice = 0
-/** 正被拖的那条线在 `orderLines` 里的下标（拖动期间冻结，见 `renderOrderLines`） */
+/** 正被拖的那条线是第几条（按下标找到原来那枚标签 → 点一下出「✕」） */
 let dragLineIdx = -1
 
 /**
@@ -1464,7 +1476,7 @@ function ordLabelDown(e: PointerEvent, labelIdx: number): void {
   dragPrice.value = item.price
   dragFromY = e.clientY
   dragStartX = e.clientX
-  /* 这条线在 `orderLines` 里的下标（标签建的时候就记好了，见 `renderOrdLabels`） */
+  /* 这条线是第几条（标签建的时候就记好了，见 `renderOrdLabels`） */
   dragLineIdx = item.lineIdx
   try {
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
@@ -1529,8 +1541,12 @@ function ordLabelCancel(): void {
 }
 
 /**
- * 拖动时那条线的样子：跟着手指走、变成**虚线**（挂着的样子），
+ * 拖动时那条线的样子：跟着手指走、**虚线**（挂着的样子），
  * 标签实时显示「止盈 +$0.52 · 100%」。
+ *
+ * ⚠️ 2026-10-07 起：这一份**全都是「预览」**——原来那条线（仓位线 / 已挂的单）
+ *    一动不动，虚线和标签都是另起的（用户：「原有的仓位不动，只是多条虚线去拉」）。
+ *    所以这里不再 `applyOptions()` 改原线、也不改原标签的文字。
  */
 function drawDragPreview(): void {
   const d = drag.value
@@ -1547,27 +1563,47 @@ function drawDragPreview(): void {
   const pct = DEFAULT_CLOSE_PCT
   const pnl = diff * (d.amount * pct) / 100
   const t1 = isProfit ? '止盈' : '止损'
-  const t2 = `${money(pnl)} ${pct}%`
-  const line = dragLineIdx >= 0 ? orderLines[dragLineIdx] : null
-  line?.applyOptions({
+  /* 跟图上已挂的单一样的三段：`止盈 │ +$0.52 │ 100%`（用户：「字样和百分比要加上」） */
+  const t2 = money(pnl)
+  const t3 = `${pct}%`
+  /* 预览虚线：颜色按「平仓单的方向」走（多头的平仓单是卖单 = 红，跟挂单那套一致） */
+  overlayLines.setPreview({
     price: px,
-    /* 颜色按「平仓单的方向」走：多头的平仓单是卖单 = 红（跟挂单那套一致） */
     color: sideColor(long ? 'short' : 'long'),
-    lineStyle: LWC.LineStyle.Dashed,
-    title: `${isProfit ? '止盈' : '止损'} ${long ? '空' : '多'}`
+    dashed: true,
+    axis: priceText(px)
   })
-  const hit = ordLabels.find(l => l.drag === d)
-  if (hit) {
-    if (hit.parts[0] && hit.parts[0].textContent !== t1) hit.parts[0].textContent = t1
-    if (hit.parts[1] && hit.parts[1].textContent !== t2) hit.parts[1].textContent = t2
-    const color = pnl >= 0 ? '#5eba89' : '#e35561'
-    if (hit.color !== color) {
-      hit.color = color
-      hit.el.style.color = color
-    }
-    hit.price = px
+  /* 预览标签：形状跟 `.olb` 一样，只是描边走虚线 */
+  const host = ordLabelHost.value
+  if (!dragPreviewEl && host) {
+    const el = document.createElement('span')
+    el.className = 'olb drag'
+    dragPreviewParts = [0, 1, 2].map(j => {
+      if (j) el.appendChild(document.createElement('i'))
+      const s = document.createElement(j === 0 ? 'b' : 'span')
+      el.appendChild(s)
+      return s
+    })
+    dragPreviewEl = el
+    host.appendChild(el)
   }
-  positionOrdLabels()
+  const texts = [t1, t2, t3]
+  dragPreviewParts.forEach((s, j) => {
+    if (s.textContent !== texts[j]) s.textContent = texts[j]!
+  })
+  if (dragPreviewEl) {
+    const color = pnl >= 0 ? '#5eba89' : '#e35561'
+    if (dragPreviewEl.style.color !== color) dragPreviewEl.style.color = color
+  }
+  positionDragPreview()
+}
+
+/** 收掉拖动预览（那条虚线和它那枚标签），原线不动 */
+function clearDragPreview(): void {
+  overlayLines.setPreview(null)
+  dragPreviewEl?.remove()
+  dragPreviewEl = null
+  dragPreviewParts = []
 }
 
 /**
@@ -1746,6 +1782,19 @@ watch(
   () => renderOrderLines(),
   {deep: true}
 )
+
+/** 图脚那句「挂单」状态：读不到 / 只拿到快照时才出现（正常 `null`，不渲染） */
+const ordNote = computed(() => {
+  if (!chartShowOrders.value) return null
+  if (overlayStale.value)
+    return {
+      text: '挂单：快照',
+      title: `实时没读到挂单（${overlayErr.value}），图上画的是最近一次对账的快照，最多滞后 2 分钟`
+    }
+  if (overlayErr.value)
+    return {text: '挂单：没读到', title: `这一轮没读到挂单：${overlayErr.value}`}
+  return null
+})
 
 /* 换了下单账户：这一批数据是上一套 Key 的，作废重拉 */
 watch(
@@ -3352,6 +3401,8 @@ onBeforeUnmount(() => {
   orphanTimer = null
   stopOverlayForeground?.()
   stopOverlayForeground = null
+  /* 画叠加线的那个 primitive 挂在蜡烛系列上，图拆掉之前先摘下来 */
+  overlayLines.detach()
   try {
     refs?.chart.remove()
   } catch {
@@ -3360,8 +3411,7 @@ onBeforeUnmount(() => {
   refs = null
   priceLines = []
   levelLabels = []
-  /* ⚠️ 这两个引用的是**已经拆掉的图**，不清掉的话下次挂载会往死对象上 setMarkers */
-  orderLines = []
+  /* ⚠️ 这个引用的是**已经拆掉的图**，不清掉的话下次挂载会往死对象上 setMarkers */
   orderMarkers = null
   ordLabels = []
 })
@@ -3400,8 +3450,9 @@ onBeforeUnmount(() => {
     <!--
       ⚠️ `data-no-swipe`：窄屏一级 tab 的「左右滑动切换」把手势区铺到了整个 `.split`
       （见 `AnalyzeView`），图这块得自己吃下横向手势 —— 图上横划是拖动看历史行情，
-      不能被当成「切 tab」。其余位置（tab 行 / 行情条 / 周期行 / 图下工具行 / 下单模块）
-      照旧能滑动切换。
+      不能被当成「切 tab」。其余位置（tab 行 / 行情条 / 周期行 / 图下工具行）照旧能滑动切换。
+      ⚠️ 图下面那块**下单模块**（`OrderPanel`，槽 `#bottom`，在本元素之外）也自己吃横向手势
+      （它在自己的根上标了 `data-no-swipe`）—— 横划是切「开单 / 仓位」，不是切一级 tab。
     -->
     <div ref="wrapEl" class="chart-wrap" data-no-swipe :class="{fading}">
       <div ref="chartEl" class="chart"></div>
@@ -3554,6 +3605,11 @@ onBeforeUnmount(() => {
           回到最新
         </button>
       </div>
+
+      <!-- 挂单读不到 / 只拿到快照时的提示（正常不渲染） -->
+      <span v-if="ordNote" class="ord-note" :title="ordNote.title">{{
+        ordNote.text
+      }}</span>
 
       <!-- 指标开关（点一下显示 / 隐藏） -->
       <div ref="legendEl" class="legend">

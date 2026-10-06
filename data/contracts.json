@@ -1,7 +1,7 @@
 {
   "exchange": "binance",
   "marketType": "swap",
-  "updatedAt": "2026-10-05T13:40:20.819Z",
+  "updatedAt": "2026-10-06T15:53:45.984Z",
   "source": "https://fapi.binance.com/fapi/v1/exchangeInfo",
   "count": 525,
   "contracts": [

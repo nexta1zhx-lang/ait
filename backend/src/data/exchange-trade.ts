@@ -282,12 +282,34 @@ async function specsFromLocalStore(): Promise<SpecsCache | null> {
   }
 }
 
-/** 前端给的是币安原始符号（`BTCUSDT`） */
+/**
+ * 把前端可能给的**三种写法**都收成币安原始符号（`BTCUSDT`）。
+ *
+ * 前端有两套符号在跑：币安原始符号（`BTCUSDT`，`/fapi` 和本地合约表用的）
+ * 和 ccxt 的统一符号（`BTC/USDT:USDT`，持仓快照 / 图表那边用的）。
+ * ★ 2026-10-07 实测踩到：持仓卡上那颗「平仓」把 `1000000MOG/USDT:USDT`
+ *   原样发上来，`specFor` 查不到就报「币安的合约列表里没有这个交易对」——
+ *   一句话把人带去怀疑币安，其实是**我们自己**的符号写法没对齐。
+ * ⇒ 在这里收口：`BTC/USDT:USDT` / `BTC/USDT` / `BTCUSDT` / 小写，一律转成 `BTCUSDT`。
+ * ⚠️ 别指望每个调用方都记得转：这条路上（下单 / 平仓 / 减仓 / 止盈止损）都是钱，
+ *    符号认不出来就必须在这一处兜住。
+ */
+function rawSymbolOf(raw: string): string {
+  const s = String(raw ?? '').trim().toUpperCase()
+  if (!s.includes('/')) return s
+  return s.split(':')[0].split('/').join('')
+}
+
+/**
+ * 查这个交易对的规格。
+ *
+ * ⚠️ 入参允许是 ccxt 那种写法（见 `rawSymbolOf`），不必先转。
+ */
 async function specFor(
   c: ExchangeCredentials,
   raw: string
 ): Promise<SymbolSpec> {
-  const want = String(raw ?? '').trim().toUpperCase()
+  const want = rawSymbolOf(raw)
   const {bySymbol, off} = await loadSpecs(c)
   const spec = bySymbol.get(want)
   if (spec) return spec
@@ -1395,6 +1417,143 @@ async function cancelAnyOrder(
     } catch {
       throw e
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 改单（「挂单」列表里那一行点进去改）                                 */
+/* ------------------------------------------------------------------ */
+
+/** 「挂单」那一行带上来的改单入参 */
+export interface ModifyOrderInput {
+  /** 币安原始符号（`1000BONKUSDT`） */
+  symbol: string
+  orderId: string
+  /** 新价：**限价单 = 委托价，条件单 = 触发价** */
+  price: number
+  /** 新数量（基础币）。不传 / ≤0 = 沿用原来那张单的数量 */
+  quantity?: number
+}
+
+export interface ModifiedOrder {
+  symbol: string
+  orderId: string
+  /**
+   * 走的哪条路：
+   *   · `edit`    = 交易所的改单接口（限价单，单号不变、不用撤单）
+   *   · `replace` = 撤旧 + 挂新（条件单只能这样）
+   */
+  via: 'edit' | 'replace'
+  /** 改完这张单的币安原始类型 */
+  type: string
+  price: number
+  quantity: number
+  /** `replace` 时撤掉的那张（给人看的） */
+  canceled?: string
+  kind?: 'profit' | 'stop'
+  /** 后端顺手纠正过什么（比如触发价跨过标记价 ⇒ 类型改成止损），直接显示 */
+  note?: string
+}
+
+/**
+ * 改一张挂单（用户 2026-10-06：「挂单可以修改」）。
+ *
+ * ★ **按订单类型分两条路**：
+ *   · **普通限价单** → 交易所的改单接口（`PUT /fapi/v1/order`，ccxt `editOrder`）：
+ *     单号不变、不用撤单，少一个「旧的撤了、新的还没挂上」的空档。
+ *   · **止盈 / 止损（条件单）** → **撤旧 + 挂新**：币安把条件单挪进 Algo Order
+ *     那套接口之后**没有改单接口**（它自己 App 里的「修改」也是这么干的）。
+ *     这条路直接复用 `placeStopOrder`（带 `orderId`）—— 触发价 / 类型的校正
+ *     （`legalKind`）跟 K 线上拖出来那张单是**同一段代码**。
+ *
+ * ⚠️ 类型 / 方向 / 原数量**一律以交易所上那张单为准**，不认前端传的：
+ *    前端那份列表可能是十几秒前的，中途成交 / 被撤 / 被改过都说不定。
+ *    查一次是 1 权重（带 symbol 的挂单查询），比改错一张平仓单便宜太多。
+ * ⚠️ **真动作，没有测试版** —— 撤了就是撤了（跟 `cancelTradeOrder` 一个道理），
+ *    前端点之前得自己确认一次。
+ */
+export async function modifyTradeOrder(
+  c: ExchangeCredentials,
+  keyId: number | string,
+  input: ModifyOrderInput
+): Promise<ModifiedOrder> {
+  assertTradable(c)
+  if (!input.orderId) throw new Error('缺单号')
+  const rawPrice = Number(input.price)
+  if (!Number.isFinite(rawPrice) || rawPrice <= 0) throw new Error('价格要先填好')
+
+  const spec = await specFor(c, input.symbol)
+  const live = (await listOpenOrders(c, spec.symbol)).find(
+    o => o.id === input.orderId
+  )
+  if (!live)
+    throw new Error('这张单已经不在交易所上了（可能刚成交 / 刚被撤），刷新一下再看')
+
+  const qtyRaw = Number(input.quantity)
+  const quantity = qtyRaw > 0 ? qtyRaw : live.amount
+  if (!Number.isFinite(quantity) || quantity <= 0)
+    throw new Error('数量要先填好（原来那张单也没给数量）')
+
+  const upper = String(live.type).toUpperCase()
+  const conditional = upper.includes('STOP') || upper.includes('TAKE_PROFIT')
+
+  if (!conditional) {
+    /*
+     * 限价单：`PUT /fapi/v1/order`。⚠️ 价格 / 数量都要按合约精度**向下**收一遍，
+     * 不然币安回 `-1111` / `-4014`（精度不对）。
+     */
+    const price = floorToStep(rawPrice, spec.tickSize)
+    const qty = floorToStep(quantity, spec.stepSize)
+    if (price <= 0) throw new Error('价格太小：按这个合约的精度取整之后是 0')
+    if (qty <= 0) throw new Error('数量太小：按这个合约的精度取整之后是 0')
+    if (spec.minQty && qty < spec.minQty)
+      throw new Error(`数量太小：这个合约最少要下 ${spec.minQty} ${spec.base}`)
+    if (spec.minNotional && price * qty < spec.minNotional)
+      throw new Error(
+        `名义价值太小：这一单约 ${(price * qty).toFixed(2)} USDT，` +
+          `不到交易所要求的 ${spec.minNotional} USDT`
+      )
+    const ex = createExchange(c)
+    console.log(
+      `[改单] ${spec.symbol} ${live.side} 限价 ${price} 数量 ${qty}（原 ${live.price ?? '?'} / ${live.amount}）`
+    )
+    await ex.editOrder(input.orderId, spec.symbol, 'limit', live.side, qty, price)
+    return {
+      symbol: spec.symbol,
+      orderId: input.orderId,
+      via: 'edit',
+      type: upper || 'LIMIT',
+      price,
+      quantity: qty
+    }
+  }
+
+  /*
+   * 条件单：撤旧挂新。`kind` 按**它现在挂在交易所上的类型**给，
+   * `placeStopOrder` 里还会拿标记价再校一遍（触发价跨过现价时必须改类型，
+   * 否则币安回 `-2021`）—— 校正的结果会放在 `note` 里显示出来。
+   */
+  const kind: 'profit' | 'stop' = upper.includes('TAKE_PROFIT') ? 'profit' : 'stop'
+  const r = await placeStopOrder(c, keyId, {
+    symbol: spec.symbol,
+    side: live.side === 'buy' ? 'buy' : 'sell',
+    kind,
+    stopPrice: rawPrice,
+    quantity,
+    posSide: live.posSide,
+    orderId: input.orderId,
+    test: false
+  })
+  return {
+    symbol: spec.symbol,
+    orderId: String(r.orderId ?? input.orderId),
+    via: 'replace',
+    type: r.type,
+    price: Number(r.stopPrice ?? rawPrice),
+    quantity: Number(r.quantity ?? quantity),
+    canceled: r.canceled,
+    kind: r.kind,
+    note: r.note
   }
 }
 

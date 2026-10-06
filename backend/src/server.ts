@@ -7,6 +7,7 @@ import QRCode from 'qrcode'
 import {loadConfig, ROOT_DIR} from './config'
 import {
   CONTRACTS_MAX_AGE_MS,
+  DATA_DIR,
   ensureContractsFresh,
   loadContracts
 } from './contracts'
@@ -103,6 +104,7 @@ import {
   humanize,
   type ExchangeCredentials
 } from './data/exchange-account'
+import {hydrateMarketsCache} from './data/ccxt-markets'
 import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
 import {listPositionHistory} from './data/position-history'
 import {RateBudgetError, takeWeight} from './util/rate-budget'
@@ -113,6 +115,7 @@ import {
   collectTradeInfo,
   humanizeTrade,
   listOpenOrders,
+  modifyTradeOrder,
   placeOrder,
   placeStopOrder,
   setSymbolLeverage,
@@ -133,7 +136,8 @@ import {
   listFills,
   listIncome,
   listOpenOrdersDb,
-  saveSnapshot
+  saveSnapshot,
+  type OpenOrderInput
 } from './db/exchange-store'
 import {
   reconcileKeyOrders,
@@ -598,6 +602,27 @@ const exchangeCredsOf = (k: ExchangeKey): ExchangeCredentials => ({
 })
 
 /**
+ * 库里那条挂单（`OpenOrderInput`）→ **跟实时那条接口逐字一致的形状**。
+ *
+ * ⚠️ 字段名一个都不能改：K 线 / 「我的」页都直接吃它（`price` / `stopPrice` / `time`…）。
+ * ⚠️ 给两处共用：`/api/exchange/open-orders`（读库那条）和
+ *   `/api/exchange/trade/open-orders` 的**实时读不到时的快照兜底**（见那里）。
+ */
+const orderRowOfInput = (o: OpenOrderInput) => ({
+  id: o.orderId,
+  symbol: o.symbol,
+  side: o.side,
+  type: o.type,
+  posSide: o.posSide,
+  price: o.price,
+  stopPrice: o.stopPrice,
+  amount: o.amount,
+  filled: o.filled,
+  reduceOnly: o.reduceOnly,
+  time: o.time
+})
+
+/**
  * 动手打交易所之前先跟**全局权重预算**报一声（改造 P3）。
  *
  * 为什么必须全局：币安按**出口 IP** 算权重，而一台服务器只有一个出口 IP 给所有用户用。
@@ -607,7 +632,19 @@ async function chargeExchange(weight: number, tag: string): Promise<void> {
   await takeWeight(weight, tag)
 }
 
-function fail(res: http.ServerResponse, tag: string, e: unknown): void {
+/**
+ * @param human 把这个错翻成**人话**再回给前端（原始报错照旧打日志）。
+ *
+ * ⚠️ 交易所那几条路**必须**传 `humanize`：ccxt 的原始报错里带着整条 URL ——
+ *   `binance GET https://fapi.binance.com/fapi/v2/positionRisk?timestamp=…&signature=<签名> request timed out (10000 ms)`
+ *   （2026-10-06 用户截图里弹的就是这句）。用户看不懂，而且**把自己请求的签名画在页面上**。
+ */
+function fail(
+  res: http.ServerResponse,
+  tag: string,
+  e: unknown,
+  human?: (e: unknown) => string
+): void {
   const err = e as Error
   console.error(`[${tag}]`, err.message)
   const code = (e as {code?: string})?.code
@@ -621,7 +658,7 @@ function fail(res: http.ServerResponse, tag: string, e: unknown): void {
     sendJson(res, 503, {error: dbHelpMessage(e), dbDown: true})
     return
   }
-  sendJson(res, 500, {error: err.message})
+  sendJson(res, 500, {error: human ? human(e) : err.message})
 }
 
 /* ------------------------------------------------------------------ */
@@ -739,7 +776,18 @@ async function handleCandles(
       : undefined
 
   const tfParam = (q.get('timeframe') ?? '1h') as Timeframe
-  const timeframe = (VALID_TFS as string[]).includes(tfParam) ? tfParam : '1h'
+  const tfOk = (VALID_TFS as string[]).includes(tfParam)
+  const timeframe = tfOk ? tfParam : '1h'
+  /*
+   * ⚠️ 不支持的周期以前**一声不吭**就按 `1h` 给 —— 2026-10-06 就是它把
+   *   仓位明细里请求 `1m` 的图悄悄变成一小时 K 线（8 笔成交全挤在一根上）。
+   *   行为不动（兼容老调用），但**留一行日志**：下次谁写错周期，日志里看得见。
+   */
+  if (!tfOk) {
+    console.warn(
+      `[/api/candles] 不支持的周期 ${String(tfParam)} ⇒ 按 1h 返回（支持：${VALID_TFS.join('/')}）`
+    )
+  }
   // 一屏最多 3000 根（前端「加载更多」会递加）
   const limit = Math.min(3000, Math.max(50, Number(q.get('limit')) || 300))
   const config = loadConfig({marketType: market})
@@ -1801,6 +1849,126 @@ const iconCache = new Map<string, {buf: Buffer; type: string} | null>()
 /** 缓存上限：正常就 528 个币，超了说明有人在乱刷 key，直接清空重来 */
 const ICON_CACHE_MAX = 2000
 
+/* ──────────────── 图标**落盘**（用户 2026-10-07：「落盘成本最低」） ────────────────
+ *
+ * 之前只有「进程内存 + 浏览器 HTTP 缓存」这两层，重启一次就全没了 ——
+ * 那几个币又要挨个去打 okx / coincap / spothq（还都是墙外，慢的时候一条 4 秒超时）。
+ * 现在取到的字节写进 `data/icons/`，跟 `data/contracts.json` 一个套路：
+ * 命中文件就不再打上游，重启也还在。
+ *
+ * 两条约定：
+ *  · 有图 → `data/icons/<key>.<ext>`（ext 由 content-type 推，回读时反查回类型）；
+ *  · **没图 → `data/icons/<key>.missing`**，文件里写一行取到的时间。
+ *    ⚠️ 不留标记的话重启后又会为这 122 个币各打三趟上游（正是要省的那笔）；
+ *    ⚠️ 但标记**不能永久**：图库会慢慢补上新币，所以 `.missing` 超过
+ *       `ICON_MISS_TTL_MS`（30 天）就当「不知道」，重新问一次。
+ *
+ * ⚠️ 只落**能去问上游**的那些 key（`probeable`：纯 ASCII）——
+ *    中文名的币（哈基米 / 龙虾…）上游必然没有，落盘只会在盘上堆没用的文件。
+ * ⚠️ 磁盘只是**加速**：读写全部 best-effort，出错（没权限 / 盘满）只告警一次，
+ *    绝不能让图标接口 500。
+ */
+const ICON_DIR = path.join(DATA_DIR, 'icons')
+
+/** ext → content-type（回读时用；表里没有的按 `image/<ext>` 反推） */
+const ICON_TYPES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  svg: 'image/svg+xml',
+  ico: 'image/x-icon'
+}
+
+/** content-type → 扩展名（表里没有的用子类型本身：`image/apng` → `apng`） */
+function iconExtOf(type: string): string {
+  const hit = Object.entries(ICON_TYPES).find(([, t]) => t === type)
+  if (hit) return hit[0]
+  return (type.split('/')[1] || 'bin').replace(/[^a-z0-9+.-]/gi, '')
+}
+
+/** 扩展名 → content-type */
+function iconTypeOf(ext: string): string {
+  return ICON_TYPES[ext] ?? `image/${ext}`
+}
+
+/** `.missing` 记多久（到期重新问上游，见图库补图） */
+const ICON_MISS_TTL_MS = 30 * 24 * 3600_000
+
+/** 盘上出过错就只告警一次（别一个图标一条日志把日志刷爆） */
+let iconDiskWarned = false
+function warnIconDisk(what: string, e: unknown): void {
+  if (iconDiskWarned) return
+  iconDiskWarned = true
+  console.warn(`[icon] 落盘${what}失败（只提示一次，不影响出图）:`, (e as Error).message)
+}
+
+/**
+ * 读盘：`{buf,type}` = 有图；`null` = 有「上游没有」的标记；`undefined` = 盘上没有记录。
+ *
+ * ⚠️ 三个返回值要分清 —— `undefined` 才代表「还得去问上游」（`null` 是明确知道没有）。
+ */
+function loadIconFile(
+  key: string
+): {buf: Buffer; type: string} | null | undefined {
+  let files: string[]
+  try {
+    // 一次 readdir 拿到这个 key 的所有文件（`.tmp` 那种写了一半的跳过），
+    // 不去按扩展名挨个 existsSync —— 扩展名是什么由写盘那刻决定
+    files = fs.readdirSync(ICON_DIR).filter(f => f.startsWith(`${key}.`))
+  } catch {
+    return undefined // 目录还没有 = 什么都没缓存过
+  }
+  if (!files.length) return undefined
+  if (files.includes(`${key}.missing`)) {
+    try {
+      const at = Date.parse(
+        fs.readFileSync(path.join(ICON_DIR, `${key}.missing`), 'utf8').trim()
+      )
+      // 标记过期 ⇒ 当「不知道」，重新问一次（图库会慢慢补上新币）
+      if (Number.isFinite(at) && Date.now() - at < ICON_MISS_TTL_MS) return null
+    } catch (e) {
+      warnIconDisk('读', e)
+    }
+    return undefined
+  }
+  for (const f of files) {
+    if (f.endsWith('.tmp')) continue
+    try {
+      const buf = fs.readFileSync(path.join(ICON_DIR, f))
+      if (buf.length) return {buf, type: iconTypeOf(f.slice(key.length + 1))}
+    } catch (e) {
+      warnIconDisk('读', e)
+    }
+  }
+  return undefined
+}
+
+/** 写盘（先写 `.tmp` 再 rename：并发请求同一个币时不会读到写了一半的文件） */
+function saveIconFile(
+  key: string,
+  hit: {buf: Buffer; type: string} | null
+): void {
+  try {
+    fs.mkdirSync(ICON_DIR, {recursive: true})
+    if (!hit) {
+      const file = path.join(ICON_DIR, `${key}.missing`)
+      const tmp = `${file}.tmp`
+      fs.writeFileSync(tmp, new Date().toISOString(), 'utf8')
+      fs.renameSync(tmp, file)
+      return
+    }
+    const file = path.join(ICON_DIR, `${key}.${iconExtOf(hit.type)}`)
+    const tmp = `${file}.tmp`
+    fs.writeFileSync(tmp, hit.buf)
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    warnIconDisk('写', e)
+  }
+}
+
 /*
  * ──────────────── 没有图标时：服务端自己画一张「首字母圆」 ────────────────
  *
@@ -1923,9 +2091,19 @@ async function handleIcon(
        * 候选键：先用原样，再去掉开头的数字。
        * `1000PEPE` / `1000SHIB` 这种，图标站多数只认 `pepe` / `shib`。
        */
-      const stripped = key.replace(/^\d+/, '')
-      const keys = stripped && stripped !== key ? [key, stripped] : [key]
-      hit = await fetchIcon(keys)
+      /*
+       * 先看盘上有没有（重启后就不用再打上游了）。
+       * `undefined` = 盘上没记录 ⇒ 才去问那三个源，问完**不管有没有都落盘**。
+       */
+      const onDisk = loadIconFile(key)
+      if (onDisk !== undefined) {
+        hit = onDisk
+      } else {
+        const stripped = key.replace(/^\d+/, '')
+        const keys = stripped && stripped !== key ? [key, stripped] : [key]
+        hit = await fetchIcon(keys)
+        saveIconFile(key, hit)
+      }
     }
     // 找不到也记一笔（null），别每次开页面都为同一个币把三个源都问一遍
     iconCache.set(key, hit)
@@ -3210,7 +3388,7 @@ async function route(
           err: snap.err
         })
       } catch (e) {
-        return fail(res, 'exchange/overview', e)
+        return fail(res, 'exchange/overview', e, humanize)
       }
     }
 
@@ -3263,7 +3441,7 @@ async function route(
         err: null
       })
     } catch (e) {
-      return fail(res, 'exchange/refresh', e)
+      return fail(res, 'exchange/refresh', e, humanize)
     }
   }
 
@@ -3386,27 +3564,16 @@ async function route(
       /*
        * ⚠️ 形状必须跟原来那条接口**逐字一致**（前端 / K 线都直接吃它）：
        *    `id` / `price` / `stopPrice` / `time` 这些字段名一个都不能改。
+       *    （映射收在 `orderRowOfInput` 里，实时那条的兜底也用同一份。）
        */
       return sendJson(res, 200, {
-        openOrders: rows.map(o => ({
-          id: o.orderId,
-          symbol: o.symbol,
-          side: o.side,
-          type: o.type,
-          posSide: o.posSide,
-          price: o.price,
-          stopPrice: o.stopPrice,
-          amount: o.amount,
-          filled: o.filled,
-          reduceOnly: o.reduceOnly,
-          time: o.time
-        })),
+        openOrders: rows.map(orderRowOfInput),
         stale: false,
         source: 'db',
         error: null
       })
     } catch (e) {
-      return fail(res, 'exchange/open-orders', e)
+      return fail(res, 'exchange/open-orders', e, humanize)
     }
   }
 
@@ -3619,8 +3786,8 @@ async function route(
     if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
     if (!key.apiKey || !key.secret)
       return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    const symbolQ = str(url.searchParams.get('symbol'), '') || undefined
     try {
-      const symbolQ = str(url.searchParams.get('symbol'), '') || undefined
       /*
        * ⚠️ 不带交易对查挂单在币安那边是 **40 权重/条**（带交易对才 1）——
        *    前端最容易把这里打爆（2026-10-06 就是这么把出口 IP 打进 `-1003` 的），
@@ -3628,12 +3795,33 @@ async function route(
        */
       await chargeExchange(symbolQ ? 1 : 40, 'openOrders')
       const orders = await listOpenOrders(exchangeCredsOf(key), symbolQ)
-      return sendJson(res, 200, {ok: true, orders, error: null})
+      return sendJson(res, 200, {ok: true, orders, stale: false, error: null})
     } catch (e) {
-      return sendJson(res, 200, {
-        ok: false,
-        error: e instanceof RateBudgetError ? e.message : humanizeTrade(e)
-      })
+      const why = e instanceof RateBudgetError ? e.message : humanizeTrade(e)
+      /*
+       * 实时读不到（或限流被拦）就退回最近一次对账的快照（`exchange_open_orders`），
+       * 带 `stale: true` 让前端标出来。只有读这么兜，改单 / 撤单照旧老实报错。
+       */
+      try {
+        const rows = await listOpenOrdersDb(me.id, key.id)
+        const pick = symbolQ
+          ? rows.filter(o => o.symbol.toUpperCase() === symbolQ.toUpperCase())
+          : rows
+        if (pick.length) {
+          console.warn(
+            `[exch] 挂单实时读不到（${why.slice(0, 60)}）⇒ 退回对账快照 ${pick.length} 条`
+          )
+          return sendJson(res, 200, {
+            ok: true,
+            orders: pick.map(orderRowOfInput),
+            stale: true,
+            error: why
+          })
+        }
+      } catch {
+        /* 读库也挂了：按原来的报错走 */
+      }
+      return sendJson(res, 200, {ok: false, error: why})
     }
   }
 
@@ -3726,6 +3914,39 @@ async function route(
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
       return failTrade(res, '挂止盈/止损', key.id, e)
+    }
+  }
+
+  /*
+   * 改一张挂单（用户 2026-10-06：「挂单可以修改」）。
+   *
+   * 限价单走交易所的改单接口（单号不变），止盈 / 止损走撤旧挂新 ——
+   * 分流在 `modifyTradeOrder` 里，路由这层只是把参数递下去。
+   *
+   * ⚠️ 跟撤单一样**没有测试版**：改了就是真改了。前端点「保存」之前要确认。
+   */
+  if (p === '/api/exchange/trade/modify-order' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
+    try {
+      const r = await modifyTradeOrder(exchangeCredsOf(key), key.id, {
+        symbol: str(body.symbol, 'BTCUSDT'),
+        orderId: str(body.orderId, ''),
+        price: Number(body.price),
+        quantity: body.quantity === undefined ? undefined : Number(body.quantity)
+      })
+      /* 改完挂单缓存立刻作废（不然那条线还画在旧价上） */
+      void reconcileKeyOrders(key.id)
+      return sendJson(res, 200, {ok: true, ...r, error: null})
+    } catch (e) {
+      return failTrade(res, '改单', key.id, e)
     }
   }
 
@@ -4575,7 +4796,13 @@ async function main(): Promise<void> {
         console.warn(`  交易所  ⚠️ 预热失败：${(e as Error).message}`)
       )
   }
-  kickExchange()
+  /*
+   * markets（`exchangeInfo`，1.1MB）先从库里灌进内存，再预热实例 —— 顺序不能反：
+   * 反了预热就会真去下 1.1MB（本地隧道 25 秒）。见 `data/ccxt-markets.ts`。
+   */
+  void hydrateMarketsCache()
+    .catch((e: Error) => console.warn(`  交易所  markets 读库失败：${e.message.slice(0, 80)}`))
+    .then(() => kickExchange())
 
   /*
    * K 线缓存的**后台保活**：让「预热过 / 看过一次」的 (币, 周期) 永远停在

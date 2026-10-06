@@ -1,4 +1,11 @@
 import ccxt from 'ccxt'
+import {
+  attachMarkets,
+  MARKETS_TTL_MS,
+  marketsKeyOf,
+  refreshMarketsIfStale,
+  retryUnknownSymbol
+} from './ccxt-markets'
 import type {Agent} from 'node:http'
 
 /**
@@ -162,8 +169,8 @@ const instanceCache = new Map<string, {at: number; ex: any}>()
  * ⚠️ 没有它的话，几百个并发请求会各踢一次 `loadMarkets()`（每次 1.5MB）。
  */
 const refreshing = new Set<string>()
-/** markets 表多久重新加载一次（币安上新 / 下架合约之后要能跟上） */
-const INSTANCE_TTL_MS = 30 * 60 * 1000
+/** 实例重建周期：跟 markets 的重下周期一致（2026-10-07 起每天一次） */
+const INSTANCE_TTL_MS = MARKETS_TTL_MS
 /** 缓存上限，纯保险（正常就几套 Key） */
 const INSTANCE_CACHE_MAX = 20
 
@@ -193,6 +200,7 @@ export function createExchange(c: ExchangeCredentials): any {
     c.sandbox ? 'demo' : 'live',
     c.apiKey
   ].join('|')
+  const key = marketsKeyOf(c.exchange, c.marketType, c.sandbox ? 'demo' : 'live')
   const hit = instanceCache.get(cacheKey)
   if (hit) {
     const age = Date.now() - hit.at
@@ -211,15 +219,12 @@ export function createExchange(c: ExchangeCredentials): any {
     if (!refreshing.has(cacheKey)) {
       refreshing.add(cacheKey)
       const ex = hit.ex
-      void Promise.resolve()
-        .then(() => ex.loadMarkets())
+      /* 过期照旧先把旧的交出去，库里那份也旧了才真去重下；失败不推 `at`，下一轮再来 */
+      void refreshMarketsIfStale(ex, key)
         .then(() => {
           hit.at = Date.now()
         })
-        .catch((e: Error) => {
-          /* 刷新失败就用旧的顶着，30 秒后再说（别把 at 推上去，否则要等一整轮） */
-          console.warn(`[exch] markets 后台刷新失败：${e.message.slice(0, 100)}`)
-        })
+        .catch(() => undefined)
         .finally(() => refreshing.delete(cacheKey))
     }
     return hit.ex
@@ -293,6 +298,8 @@ export function createExchange(c: ExchangeCredentials): any {
   }
   if (instanceCache.size >= INSTANCE_CACHE_MAX) instanceCache.clear()
   instanceCache.set(cacheKey, {at: Date.now(), ex})
+  attachMarkets(ex, key)
+  retryUnknownSymbol(ex, key)
   return ex
 }
 
