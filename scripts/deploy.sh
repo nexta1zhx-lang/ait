@@ -6,8 +6,7 @@
 #   bash scripts/deploy.sh                  # 代码已经放在当前目录 / APP_DIR
 #   bash scripts/deploy.sh <git仓库地址>     # 自动 clone 到 /opt/crypto-advisor
 #
-# 💡 这个脚本可以整段粘进 AWS Lightsail 控制台的「浏览器终端」——
-#    本机网络如果劫持了 SSH（实测本机就是），浏览器终端是唯一入口。
+# 💡 也可以整段粘进 AWS Lightsail 控制台的「浏览器终端」（没有 SSH 时的备用入口）。
 #
 # 它做四件事：加 swap → 装 Docker → 备好 .env → 起服务并自检。
 # 幂等：重复跑不会做坏事。

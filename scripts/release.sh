@@ -127,8 +127,7 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=30 -o Serv
 #    变量名的一部分（报 `HOST）: unbound variable`），加花括号才断得干净。
 c "SSH 检查（${SSH_USER}@${HOST}）"
 if ! ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" true 2>/dev/null; then
-  warn 'SSH 连不上。本机代理经常劫持出站 TCP（报 kex_exchange_identification / 连接被关），'
-  warn '先关掉代理的全局 TUN（或给目标 IP 加直连），再跑一次。'
+  warn 'SSH 连不上：检查网络、密钥权限或端口 22。'
   die "无法连接 $SSH_USER@$HOST"
 fi
 ok 'SSH 可用'

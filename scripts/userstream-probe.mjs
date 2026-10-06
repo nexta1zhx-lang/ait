@@ -81,9 +81,11 @@ async function main() {
   log(`listenKey = ${lk}`)
 
   let frames = 0
+  const socks = []
   const ag = await agent()
   for (const name of ['A', 'B']) {
     const w = new WebSocket(`wss://fstream.binance.com/ws/${lk}`, {agent: ag})
+    socks.push({name, w})
     w.on('open', () => log(`[${name}] open ✓ ${new Date().toISOString()}`))
     w.on('message', (d) => {
       frames++
@@ -115,6 +117,12 @@ async function main() {
   }
   await sleep(15_000)
   log(`=== 结束：共收到 ${frames} 个事件帧`)
+  for (const {name, w} of socks) {
+    const kb = (((w._socket || {}).bytesRead || 0) / 1024).toFixed(1)
+    log(`    [${name}] 收到字节 = ${kb} KB（约 0.3 = 只有握手；只有心跳也几乎不涨）`)
+  }
+  /* ⚠️ 必须显式退出：WS socket 还开着，node 自己不会结束（本地实测会一直挂着） */
+  process.exit(frames > 0 ? 0 : 2)
 }
 
 main().catch(e => log(`挂了：${String(e?.message).slice(0, 300)}`))

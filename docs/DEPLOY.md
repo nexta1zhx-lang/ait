@@ -210,8 +210,6 @@ curl -s localhost:8787/api/health
   启动时 `ensureSchema()` 是幂等的，会把 dump 之后新增的表/列补上。
 - **回滚**：
   `sudo docker exec -i ca-postgres pg_restore -U ca -d crypto_advisor --clean --if-exists --no-owner ~/server-db-before-*.dump`
-- ⚠️ 本机 SSH 被代理劫持时（`dig bitcoooin.cn` 回 **`198.18.x.x`**）第 ②③ 步会连不上，
-  先在代理里**关掉 TUN**（或给 `52.194.6.144` 加直连规则）。
 
 ### 5. 验收
 
@@ -267,7 +265,7 @@ bash scripts/release.sh            # 会问一句确认；加 -y 不问，加 --
 
 `scripts/release.sh` 按顺序做：**先要求工作区已提交**（有未提交改动直接停，加 `--no-check` 可跳过）
 → `tsc` 类型检查 → 打包（排除 `.env` / `android` / `*.apk`，并断言包里确实没有 `.env`）
-→ 检查 SSH（本机代理劫持时给出提示）→ `scp` 上传主包 → **按需补传 APK**
+→ 检查 SSH（连不上就停住并提示）→ `scp` 上传主包 → **按需补传 APK**
 （服务器上已有同名同大小的不传）→ 远端「校验包 → 清空旧文件（保留 `.env` / `downloads`）
 → 解包 → md5 与本机核对 → `sudo bash scripts/deploy.sh` → 重建 caddy」→
 最后 `curl https://bitcoooin.cn/api/health` 验收。**任一步失败就停住**，不会留下半个部署。

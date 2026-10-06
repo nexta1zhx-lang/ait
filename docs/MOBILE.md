@@ -178,16 +178,6 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 # 手机浏览器打开 http://<本机局域网IP>:8899/entry-advisor-<版本>.apk
 ```
 
-### ⚠️ 传不上去时先看这里
-
-本机代理开 **TUN / 全局模式** 时会劫持所有出站 TCP，症状：
-
-- `ssh` 报 `Connection closed by <ip> port 22`
-- `dig bitcoooin.cn` 返回 **198.18.x.x**（RFC 2544 假 IP 段，代理的 fake-IP）
-- `nc -z <任意IP> <任意端口>` **全部"成功"**（结果是伪造的，别信）
-
-**关掉代理的 TUN（或给 `52.194.6.144` 加一条直连规则）再跑 `scripts/release.sh`。**
-
 ### 安装提示
 
 这是 **debug 签名**的包，手机首次安装要在系统里允许「未知来源」。要长期分发 / 上架，
