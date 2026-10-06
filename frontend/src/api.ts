@@ -1274,8 +1274,17 @@ export interface CloseOrderParams extends PlacedOrder {
 /** 止盈 / 止损单（K 线上拖出来的那张）：参数 + 改单撤掉的旧单号 + 测试单说明 */
 export interface PlacedStopOrder extends PlacedOrder {
   canceled?: string
-  /** 测试单模式下说明「哪一部分币安没给测」（条件单没有 test 接口） */
+  /**
+   * 说明：测试单模式下「哪一部分币安没给测」（条件单没有 test 接口），
+   * 以及**类型被校正过**时为什么改。
+   */
   note?: string
+  /**
+   * **实际发出去的类型** —— 可能跟请求的不一样：触发价相对**现价**在哪一侧，
+   * 币安只接受那一种（见后端 `legalKind()`，`-2021` 那条）。
+   * 提示语要用它，不然会出现「提示说挂的止盈、实际是止损」。
+   */
+  kind?: 'profit' | 'stop'
 }
 
 export const placeOrder = (

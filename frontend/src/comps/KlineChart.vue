@@ -801,6 +801,15 @@ interface DragRef {
   side: 'long' | 'short'
   /** 开仓均价（算「预计收益」） */
   entry: number
+  /**
+   * **当前标记价** —— 判「这张单该发止盈还是止损」用的是它，**不是**开仓价。
+   *
+   * ⚠️ 2026-10-06 修 `-2021`：币安的触发方向是死的（止损类型 = 价格跌到触发价才成交），
+   *    所以「相对**现价**在哪一侧」才有意义。多单浮盈时把触发价拖到开仓价（保本单）——
+   *    相对开仓价是赚的，但相对现价在**下方** ⇒ 只能发 `STOP_MARKET`；
+   *    按开仓价判成「止盈」就会被币安回 `Order would immediately trigger.`
+   */
+  mark: number
   /** 这条持仓的数量（张） */
   amount: number
   /** 改单时：这一张的单号 + positionSide */
@@ -935,6 +944,7 @@ function orderLineList(): OrderLine[] {
           symbol: overlaySymbol.value,
           side: p.side,
           entry: p.entryPrice,
+          mark: p.markPrice,
           amount: p.amount,
           posSide: p.side === 'long' ? 'LONG' : 'SHORT'
         },
@@ -982,6 +992,7 @@ function orderLineList(): OrderLine[] {
               symbol: overlaySymbol.value,
               side: target.side,
               entry: target.entryPrice,
+              mark: target.markPrice,
               amount: target.amount,
               orderId: o.id,
               posSide: o.posSide
@@ -1526,7 +1537,12 @@ function drawDragPreview(): void {
   if (!d || !refs) return
   const px = dragPrice.value
   const long = d.side === 'long'
-  const isProfit = (px >= d.entry) === long
+  /*
+   * ⚠️ 判「止盈 / 止损」用**标记价**（拿不到才退回开仓价）—— 见 `DragRef.mark` 那段。
+   *    所以多单浮盈时把线拖到开仓价上，显示的就是**止损**（保本单），跟发出去的类型一致。
+   */
+  const ref = d.mark > 0 ? d.mark : d.entry
+  const isProfit = long ? px > ref : px < ref
   const diff = long ? px - d.entry : d.entry - px
   const pct = DEFAULT_CLOSE_PCT
   const pnl = diff * (d.amount * pct) / 100
@@ -1588,15 +1604,22 @@ async function submitStop(v: {
       return
     }
     stopSheet.value = null
-    const what = v.kind === 'profit' ? '止盈' : '止损'
+    /*
+     * ⚠️ 说出来的类型用后端**实际发出去**那个 `r.kind`（可能跟这里传的不一样：
+     *    触发价相对现价在哪一侧，币安只接受那一种，见后端 `legalKind()`）。
+     *    用 `v.kind` 会出现「提示说挂的止盈、实际挂的是止损」。
+     */
+    const sent = r.kind ?? v.kind
+    const what = sent === 'profit' ? '止盈' : '止损'
+    const fixed = sent !== v.kind ? '（触发价在现价这一侧，按币安规矩改成' + what + '）' : ''
     const name = baseToName(s.drag.symbol)
     const tail = s.drag.orderId ? (r.test ? '（测试改单）' : '（已改单）') : ''
     emit(
       'note',
       r.test
-        ? `测试${what}：${name} ${v.pct}% @ ${priceText(v.price)}，币安校验通过${tail}` +
+        ? `测试${what}：${name} ${v.pct}% @ ${priceText(v.price)}，币安校验通过${tail}${fixed}` +
             '（条件单没有测试接口，没真挂上去）'
-        : `已挂${what}：${name} ${v.pct}% @ ${priceText(v.price)}${tail}`,
+        : `已挂${what}：${name} ${v.pct}% @ ${priceText(v.price)}${tail}${fixed}`,
       'ok'
     )
     /* 立刻补一次：新挂的单要马上出现在图上 */
@@ -3588,6 +3611,7 @@ onBeforeUnmount(() => {
       :side="stopSheet?.drag.side ?? 'long'"
       :price="stopSheet?.price ?? 0"
       :entry="stopSheet?.drag.entry ?? 0"
+      :mark="stopSheet?.drag.mark ?? 0"
       :amount="stopSheet?.drag.amount ?? 0"
       :pct="stopSheet?.pct ?? 100"
       :order-id="stopSheet?.drag.orderId"

@@ -24,6 +24,8 @@ const props = defineProps<{
   price: number
   /** 开仓均价（算「预计收益」用） */
   entry: number
+  /** 当前标记价（判止盈/止损用；拿不到时传 0，退回按开仓价判） */
+  mark: number
   /** 这条持仓的数量（张） */
   amount: number
   /** 这次拖动**默认**平掉多少（一律 100% = 整条仓位；用户还能在滑轨上改） */
@@ -59,8 +61,29 @@ watch(
 const sideText = computed(() => (props.side === 'long' ? '多' : '空'))
 
 /* 止盈还是止损：按价格在开仓价的哪一边自动判（跟拖的方向一致） */
-const kind = computed<'profit' | 'stop'>(() =>
-  (price.value >= props.entry) === (props.side === 'long') ? 'profit' : 'stop'
+/**
+ * 这张单**该发止盈还是止损** —— 按**标记价**判，不能按开仓价。
+ *
+ * ⚠️ 2026-10-06 修 `-2021 Order would immediately trigger.`（用户挂「保本单」撞上的）：
+ *    币安的触发方向是死的（止损类型 = 价格跌到触发价才成交），
+ *    所以只有「相对**现价**在哪一侧」才有意义。
+ *    多单浮盈、触发价拖到开仓价（保本）⇒ 相对现价在下方 ⇒ 必须是**止损**类型；
+ *    按开仓价判会判成止盈，币安直接拒。
+ *    （后端 `legalKind()` 还会按同一个口径再校一遍，这里只是让界面别骗人。）
+ */
+const kind = computed<'profit' | 'stop'>(() => {
+  const ref = props.mark > 0 ? props.mark : props.entry
+  return (props.side === 'long' ? price.value > ref : price.value < ref)
+    ? 'profit'
+    : 'stop'
+})
+
+/**
+ * 触发价正好压在现价上 ⇒ 币安一定判「立即触发」，把按钮禁掉并说清楚
+ * （不然用户只会看到一句 `-2021`）。
+ */
+const priceOnMark = computed(
+  () => props.mark > 0 && Math.abs(price.value - props.mark) < 1e-12
 )
 const kindText = computed(() => (kind.value === 'profit' ? '止盈' : '止损'))
 
@@ -158,8 +181,14 @@ function onPrice(v: unknown): void {
       <button
         type="button"
         class="tr-go"
-        :disabled="busy"
-        :title="testOrder ? '测试单：只校验，不会真挂上去' : `真单：触发后按市价平掉 ${pct}%`"
+        :disabled="busy || priceOnMark"
+        :title="
+          priceOnMark
+            ? '触发价就在现价上，币安会判「立即触发」—— 往上/往下挪一点'
+            : testOrder
+              ? '测试单：只校验，不会真挂上去'
+              : `真单：触发后按市价平掉 ${pct}%`
+        "
         @click="emit('confirm', {kind, price, pct})"
       >
         {{ busy ? '提交中…' : `${testOrder ? '测试' : ''}${orderId ? '改' : '挂'}${kindText}` }}
