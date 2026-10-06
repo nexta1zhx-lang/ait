@@ -4642,6 +4642,22 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   })
 }
 
+/*
+ * ★ 兜一句「没人接的 Promise 拒绝」（2026-10-06 加）。
+ *
+ * ⚠️ 为什么要：WS 事件分发、后台对账定时器都是 `void asyncFn()` 发出去的。
+ *    Node 15+ 默认对未处理的拒绝是**打印堆栈后退出进程** ——
+ *    一个一帧坏数据 / 一次 DB 抖动能把整个服务带走（流全断、账全停），
+ *    而退出前的堆栈在被重定向的日志里很容易被忽略。
+ *    这里记一行**带标记**的日志，然后**继续跑**：交易相关的服务宁可降级也别猝死。
+ */
+process.on('unhandledRejection', (e: unknown) => {
+  const err = e as Error
+  console.warn(
+    `[server] 未处理的 Promise 拒绝（已兜住，没退出）：${err?.message ?? e}`
+  )
+})
+
 main().catch(e => {
   console.error('启动失败：', (e as Error).message)
   process.exitCode = 1

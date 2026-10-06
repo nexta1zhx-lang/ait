@@ -50,6 +50,7 @@ import {
 import {listOpenOrders} from './data/exchange-trade'
 import {query, queryOne} from './db/client'
 import {takeWeight} from './util/rate-budget'
+import {noteRateLimit} from './util/rate-cool'
 
 /**
  * 动手打交易所之前先跟**全局权重预算**报一声。
@@ -476,6 +477,18 @@ class KeyStream {
   private pings = 0
   /** 收到过几帧解析不了的（排查用，见 `onMessage`） */
   private badFrames = 0
+  /** 收到过几个**事件帧**（`ORDER_TRADE_UPDATE` / `ACCOUNT_UPDATE` …）—— 排查「事件到没到」 */
+  private dataFrames = 0
+  /** 见过哪些事件类型（没见过的那种记一行，别刷屏） */
+  private readonly seenEventTypes = new Set<string>()
+  /** 健康检查跑了几轮（只用来决定统计那一行多久打一次） */
+  private healthTick = 0
+  /** 这条 WS 是什么时候连上的（统计里报「连上几分钟」） */
+  private connAt = 0
+  /** 有没有一轮补账正在跑（挡住同一时刻的重复补账，见 `wake`） */
+  private wakeBusy = false
+  /** 补账期间又来了必须看到最新状态的那种（写操作）⇒ 跑完再来一轮 */
+  private wakeAgain = false
   /** 当前是否处于「哑了」状态（用来只在翻转时发一次通知） */
   private deaf = false
   /** 定期对账的三个水位 */
@@ -592,6 +605,8 @@ class KeyStream {
       const isReconnect = this.everConnected
       this.everConnected = true
       this.retry = 0
+      this.connAt = Date.now()
+      this.healthTick = 0
       console.log(`${this.tag} WS 已连（用户数据流${isReconnect ? '·重连' : ''}）`)
       /*
        * ⚠️ 连上（尤其是**重连**）之后必须 REST 对账 ——
@@ -599,7 +614,20 @@ class KeyStream {
        */
       void this.reconcile(isReconnect ? 'ws' : 'boot')
     })
-    ws.on('message', (d: Buffer) => void this.onMessage(String(d)))
+    ws.on('message', (d: Buffer) => {
+      /*
+       * ⚠️ 必须 `.catch`（2026-10-06 加）：`onMessage` 是 async，里面任何一处抛
+       *    （库里报错、解析出 NaN、字段缺失导致的 TypeError）原来都会变成
+       *    **一次「没处理的 Promise 拒绝」** —— 事件静默消失，日志一个字没有，
+       *    排查时跟「事件根本没到」**完全分不出来**。这个坑跟
+       *    `badFrames` 那个 parse catch 是同一类，见 `onMessage`。
+       */
+      void this.onMessage(String(d)).catch((e: Error) =>
+        console.warn(
+          `${this.tag} WS 事件处理未捕获（事件丢了，等兜底）：${e.message.slice(0, 140)}`
+        )
+      )
+    })
     /*
      * ★ 协议级 ping（2026-10-06 加）—— 这是**判断流死活**的唯一可靠信号。
      *
@@ -806,42 +834,74 @@ class KeyStream {
       return
     }
     const e = String(ev?.e ?? '')
-    if (e === 'ORDER_TRADE_UPDATE') {
-      await this.onOrder(ev?.o ?? {})
-      return
+    /*
+     * ★ 事件帧统一在这儿计数 + 打头几行（2026-10-06 加）。
+     *
+     * 为什么值得：用户问过一次「减仓后没有推送事件吗」—— 那会儿**日志答不了**这个问题
+     *   （只有订单事件自带一行，`ACCOUNT_UPDATE` 一条都不记）。现在「这条流到底进不进事件」
+     *   看日志就能回答：`收到事件帧 e=…` 就是进了。
+     */
+    this.dataFrames++
+    if (this.dataFrames <= 5) {
+      console.log(`${this.tag} 收到事件帧 e=${e || '(空)'}`)
     }
-    if (e === 'ACCOUNT_UPDATE') {
-      /*
-       * ★ 2026-10-06（用户贴了币安文档问「有用到这个吗」）：**用上事件里带的数据**。
-       *
-       * 原来这里只把事件当触发信号，收到就去 REST 拉一次完整快照 ——
-       * 事件里的 `a.B[].wb`（钱包余额）和 `a.P[]` 的 `pa/ep/up`（持仓量 / 开仓价 /
-       * 未实现盈亏）**一个字都没用**。代价：成交/划转/资金费之后，界面要等
-       * 一个 REST 来回（≈0.5~1 秒、21 权重）才动。
-       */
-      const {applied, newSymbols} = this.applyAccountUpdate(ev?.a ?? {})
-      if (applied) {
-        /* 持仓集合可能变了（新开 / 平掉）→ 标记价订阅跟着调，然后立刻推给前端 */
-        this.syncMarks()
-        this.pushLive(false)
+    try {
+      if (e === 'ORDER_TRADE_UPDATE') {
+        await this.onOrder(ev?.o ?? {})
+        return
+      }
+      if (e === 'ACCOUNT_UPDATE') {
+        /*
+         * ★ 2026-10-06（用户贴了币安文档问「有用到这个吗」）：**用上事件里带的数据**。
+         *
+         * 原来这里只把事件当触发信号，收到就去 REST 拉一次完整快照 ——
+         * 事件里的 `a.B[].wb`（钱包余额）和 `a.P[]` 的 `pa/ep/up`（持仓量 / 开仓价 /
+         * 未实现盈亏）**一个字都没用**。代价：成交/划转/资金费之后，界面要等
+         * 一个 REST 来回（≈0.5~1 秒、21 权重）才动。
+         */
+        const {applied, newSymbols} = this.applyAccountUpdate(ev?.a ?? {})
+        if (applied) {
+          /* 持仓集合可能变了（新开 / 平掉）→ 标记价订阅跟着调，然后立刻推给前端 */
+          this.syncMarks()
+          this.pushLive(false)
+        }
+        /*
+         * 事件里**没有**的是汇总口径：可用余额 / 保证金余额 / 资产明细 / C2C / 现货。
+         * 那些仍然要靠 REST，但**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
+         * 例外：出现了**没见过的**仓位 ⇒ 立刻要一次，否则那一行会缺杠杆/强平价。
+         */
+        const due = Date.now() - this.lastWsSnapshotAt > WS_SNAPSHOT_GAP_SEC * 1000
+        if (newSymbols.length || due) {
+          this.lastWsSnapshotAt = Date.now()
+          /* 本地已经更新过了 ⇒ 顺手把采样时钟也推一下，别让 5 分钟采样立刻再来一发 */
+          this.lastSampleAt = Date.now()
+          await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+        }
+        return
+      }
+      if (e === 'listenKeyExpired') {
+        console.warn(`${this.tag} listenKey 过期，重建`)
+        this.restart(true)
+        return
       }
       /*
-       * 事件里**没有**的是汇总口径：可用余额 / 保证金余额 / 资产明细 / C2C / 现货。
-       * 那些仍然要靠 REST，但**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
-       * 例外：出现了**没见过的**仓位 ⇒ 立刻要一次，否则那一行会缺杠杆/强平价。
+       * 没见过的事件类型（`MARGIN_CALL` / `ACCOUNT_CONFIG_UPDATE` /
+       * `STRATEGY_UPDATE` / `CONDITIONAL_ORDER_TRIGGER_REJECT` …）**记一行**。
+       * 币安增删事件类型我们是不知道的，静默忽略等于「有新信号却永远看不到」。
        */
-      const due = Date.now() - this.lastWsSnapshotAt > WS_SNAPSHOT_GAP_SEC * 1000
-      if (newSymbols.length || due) {
-        this.lastWsSnapshotAt = Date.now()
-        /* 本地已经更新过了 ⇒ 顺手把采样时钟也推一下，别让 5 分钟采样立刻再来一发 */
-        this.lastSampleAt = Date.now()
-        await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+      if (e && !this.seenEventTypes.has(e)) {
+        this.seenEventTypes.add(e)
+        console.log(`${this.tag} 收到没处理的事件类型 ${e}（先记一笔）`)
       }
-      return
-    }
-    if (e === 'listenKeyExpired') {
-      console.warn(`${this.tag} listenKey 过期，重建`)
-      this.restart(true)
+    } catch (err) {
+      /*
+       * ★ 处理抛错**必须留痕**（2026-10-06 加）：否则一次 TypeError 就等于
+       *   「这笔成交凭空消失」，下次再遇到又只能猜。
+       */
+      console.warn(
+        `${this.tag} 处理事件 ${e || '(空)'} 失败（这笔先丢，等兜底对账）：` +
+          `${(err as Error).message.slice(0, 140)}`
+      )
     }
   }
 
@@ -1057,9 +1117,19 @@ class KeyStream {
    */
   wake(
     reason: string,
-    opts: {skipOrders?: boolean; force?: boolean; skipSnapshot?: boolean} = {}
+    opts: {
+      skipOrders?: boolean
+      skipSnapshot?: boolean
+      skipIncome?: boolean
+      force?: boolean
+    } = {}
   ): void {
-    const {skipOrders = false, force = false, skipSnapshot = false} = opts
+    const {
+      skipOrders = false,
+      force = false,
+      skipSnapshot = false,
+      skipIncome = false
+    } = opts
     this.lastActivityAt = Date.now()
     const now = Date.now()
     if (force) {
@@ -1070,6 +1140,22 @@ class KeyStream {
       /* 数据还新鲜 ⇒ 一次都不请求（用户：「只有没数据才请求」） */
       return
     }
+    /*
+     * ★ 同一套账户，**同一时刻只跑一轮补账**（2026-10-06 加）。
+     *
+     * ⚠️ 为什么必须拦：进程刚起来时 `lastSampleAt = 0`，而几个页面（甚至一个页面的
+     *    几个订阅）会同时接上 SSE —— 每条订阅都调一次 `wake`、每个都判定「数据旧了」，
+     *    于是 N 轮「快照 25 + 成交 5 + 账本 30 + 挂单 40」同时打出去。
+     *    实测 2026-10-06 启动那一刻就是 **5 条** `补账（有人打开页面·数据旧了）`，
+     *    紧接着这个 IP 就吃到一整段 `-1003`（2400/分钟）。
+     *    而跑起来的那一轮干的活跟它们**一模一样**，多出来的全是白花。
+     *
+     * `force`（写操作 / 用户手动刷新）**不能就这么吞掉** ⇒ 记一笔，跑完再来一轮。
+     */
+    if (this.wakeBusy) {
+      if (force) this.wakeAgain = true
+      return
+    }
     const wasAsleep = this.isAsleep()
     if (wasAsleep) this.tier = 'normal'
     console.log(
@@ -1077,26 +1163,66 @@ class KeyStream {
         ? `${this.tag} 醒（${reason}）：补一轮沉睡期间可能漏掉的账`
         : `${this.tag} 补账（${reason}${force ? '·无视节流' : '·数据旧了'}）`
     )
+    this.runWake({skipOrders, skipSnapshot, skipIncome, force})
+  }
+
+  /**
+   * `wake` 的实际动作（拆出来是为了跑完能接着跑 `wakeAgain` 那一轮）。
+   *
+   * 补什么：快照（余额 / 持仓）+ 成交 + 钱账本（+ 挂单，除非调用方马上自己要问一次）。
+   */
+  private runWake(o: {
+    skipOrders: boolean
+    skipSnapshot: boolean
+    skipIncome: boolean
+    force: boolean
+  }): void {
+    this.wakeBusy = true
     void (async () => {
       /*
        * `skipSnapshot`：手动刷新那条路**自己刚拉过一份**全量快照（`/api/exchange/refresh`），
        * 别再问一遍那 21 权重 —— 只把「账本那几样」（成交 / 挂单 / 钱账本）对平。
        */
-      if (!skipSnapshot) {
-        /* ⚠️ 快照要节流（20 秒）：SSE 反复重连时会连着调这里 */
-        await this.snapshot('poll', WS_SNAPSHOT_GAP_SEC)
+      if (!o.skipSnapshot) {
+        /*
+         * `minGapSec` 只管**要不要把这一份写进库**（`saveSnapshot`），请求和推送给前端
+         * 那两步不受它约束。`force`（写操作）要的就是「这一笔之后」的一行 ⇒ 不节流，
+         * 曲线在平仓那一刻有个点；非 `force`（SSE 反复重连那种）20 秒内别刷同样的行。
+         */
+        await this.snapshot('poll', o.force ? 0 : WS_SNAPSHOT_GAP_SEC)
       }
       this.lastSampleAt = Date.now()
       this.lastFillReconcileAt = Date.now()
       await this.backfillFills()
-      this.lastIncomeReconcileAt = Date.now()
-      await this.reconcileIncome()
-      if (skipOrders) return
+      /*
+       * 写操作这条路（`skipIncome`）**不再单独跑 30 权重那一发**：成交对账
+       * （`backfillFills` → `saveTrade`）已经把这一笔的已实现盈亏 / 手续费写进钱账本了
+       * （同一个 `tranId`）。`income` 那个接口只补 `FUNDING_FEE` / `TRANSFER`
+       * 这类**成交里没有**的，交给定时那一轮。
+       */
+      if (!o.skipIncome) {
+        this.lastIncomeReconcileAt = Date.now()
+        await this.reconcileIncome()
+      }
+      if (o.skipOrders) return
       this.lastOrdersReconcileAt = Date.now()
       await this.reconcileOrders('wake')
-    })().catch((e: Error) =>
-      console.warn(`${this.tag} 补账失败：${e.message.slice(0, 140)}`)
-    )
+    })()
+      .catch((e: Error) =>
+        console.warn(`${this.tag} 补账失败：${e.message.slice(0, 140)}`)
+      )
+      .finally(() => {
+        this.wakeBusy = false
+        if (!this.wakeAgain) return
+        this.wakeAgain = false
+        /* 补账期间又来了写操作 ⇒ 再对一轮轻的（快照 + 成交），别再等 60 秒 */
+        this.runWake({
+          skipOrders: true,
+          skipSnapshot: false,
+          skipIncome: true,
+          force: true
+        })
+      })
   }
 
   /**
@@ -1409,6 +1535,26 @@ class KeyStream {
      */
     const silentMs = Date.now() - this.lastAliveAt
     const deaf = silentMs > WS_DEAF_MS
+    /*
+     * ★ 线级统计（2026-10-06 加，用户问「减仓后没有推送事件吗」）。
+     *
+     * 排查「上游到底推没推」时，我们原来的日志**答不了**：
+     * `ping` 是控制帧、`dataFrames` 是我们自己数的、`badFrames` 只记解析失败的。
+     * **`bytesRead` 才是硬指标**，两种情况一眼分得开：
+     *   · 字节只涨几十（心跳每 3 分钟一次，2~7 字节/帧）⇒ 业务帧**根本没到这条连接**；
+     *   · 字节涨了不少而 `dataFrames` 还是 0 ⇒ 字节到了、我们没接住，那是**我们自己的问题**。
+     * 第一轮 + 之后每 10 轮（5 分钟）打一行，不刷屏。
+     */
+    this.healthTick++
+    if (this.healthTick === 1 || this.healthTick % 10 === 0) {
+      const sock = (this.ws as unknown as {_socket?: {bytesRead?: number}})?._socket
+      const kb = ((sock?.bytesRead ?? 0) / 1024).toFixed(1)
+      const upMin = Math.round((Date.now() - this.connAt) / 60000)
+      console.log(
+        `${this.tag} 用户数据流统计：事件 ${this.dataFrames} 帧 / ping ${this.pings} 个 / ` +
+          `收 ${kb} KB（连上 ${upMin} 分钟，已解析不了 ${this.badFrames}）`
+      )
+    }
     if (deaf === this.deaf) return
     this.deaf = deaf
     console.warn(
@@ -1553,6 +1699,8 @@ class KeyStream {
       emit(this.row.id, {type: 'snapshot', source, overview: ov})
       return ov
     } catch (e) {
+      /* 限流错要记进**全局冷却**（见 `util/rate-cool`）：止住接下来所有请求的重试 */
+      noteRateLimit(e)
       console.warn(`${this.tag} 取数失败：${(e as Error).message.slice(0, 140)}`)
       return null
     }
@@ -1673,8 +1821,16 @@ export async function reconcileKeyOrders(keyId: number): Promise<void> {
   /*
    * ⚠️ 写操作 = 「这套账户有人在用」⇒ 顺手把它从沉睡里叫醒（`skipOrders`：
    *    下面这句马上就要对一次挂单，别白问两遍那 40 权重）。
+   *
+   * ★ `force` + `skipIncome`（2026-10-06 加）：写操作之后**必须当场把持仓也对平**。
+   *
+   * ⚠️ 原来这里不带 `force` ⇒ `wake` 那一套被 `FRESH_MS`（60 秒）拦住：
+   *    一分钟内已经采过一次快照，减完仓**就只对了一次挂单**，持仓数量（和由它算出来的
+   *    浮盈）还停在减仓前 —— 只能等 WS 事件（本机常态会丢）或者那个 5 分钟一轮的成交对账。
+   *    实测 2026-10-06：13:19:46 减了仓，界面到进程重启（13:20:12）靠 REST 补成交才动。
+   *    代价：一发快照 25 + 成交对账 ≤8 币 ×5 —— 只在用户真下单 / 平仓 / 撤单时发生。
    */
-  s.wake('写操作', {skipOrders: true})
+  s.wake('写操作', {skipOrders: true, force: true, skipIncome: true})
   await s.reconcileOrdersForced()
 }
 
@@ -1687,7 +1843,12 @@ export async function reconcileKeyOrders(keyId: number): Promise<void> {
 export function wakeExchangeStream(
   keyId: number | string,
   reason: string,
-  opts: {skipOrders?: boolean; force?: boolean; skipSnapshot?: boolean} = {}
+  opts: {
+    skipOrders?: boolean
+    skipSnapshot?: boolean
+    skipIncome?: boolean
+    force?: boolean
+  } = {}
 ): void {
   streams.get(keyOf(keyId))?.wake(reason, opts)
 }

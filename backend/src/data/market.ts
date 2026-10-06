@@ -1,5 +1,6 @@
 import ccxt from 'ccxt'
 import {ccxtBaseOptions} from './exchange-account'
+import {coolingLeftMs, coolingMessage, noteRateLimit} from '../util/rate-cool'
 import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
 import {describeSeries} from '../analysis/describe'
 import {ema42Of} from '../analysis/ema'
@@ -64,10 +65,18 @@ async function withRetry<T>(
 ): Promise<T> {
   let last: unknown
   for (let i = 1; i <= times; i++) {
+    /*
+     * ⚠️ 限流冷却期里**一次都不打**（见 `util/rate-cool`）：`-1003` 是「这个 IP 打满了」，
+     *    不是瞬时抖动，重试只会把封禁窗口往后推。直接抛，让调用方降级去。
+     */
+    const cool = coolingLeftMs()
+    if (cool > 0) throw new Error(`[market] ${label} 跳过：${coolingMessage()}`)
     try {
       return await fn()
     } catch (e) {
       last = e
+      /* 限流错**不重试**（原来会白打 2 次），记一次冷却就抛 */
+      if (noteRateLimit(e)) throw e
       if (i < times) {
         /*
          * 200ms / 400ms —— 够短，几乎不影响体感；够长，躲过瞬时抖动。

@@ -18,6 +18,8 @@
  *
  * ⚠️ 这里是**全局**的（不分 key / 不分用户）—— 正因为限流是按 IP，所以必须全局。
  */
+import {coolingLeftMs, coolingMessage} from './rate-cool'
+
 const WINDOW_MS = 60_000
 
 function limitOf(): number {
@@ -119,6 +121,20 @@ export async function takeWeight(
   }
 
   const started = Date.now()
+  /*
+   * ★ 限流冷却期（收到过 `-1003`）里**先别挤**（2026-10-06 加，见 `util/rate-cool`）：
+   *   币安那个窗口是滑动的，而这段时间里发出去的请求基本都是白打。
+   *   冷却比 `maxWaitMs` 还长 ⇒ 直接拒绝（回一句人话比挂住强）；
+   *   短于 `maxWaitMs` ⇒ 等它一会儿再走正常流程。
+   */
+  const cool = coolingLeftMs()
+  if (cool > 0) {
+    if (cool > maxWaitMs) {
+      console.warn(`[budget] ${tag} ${coolingMessage()}`)
+      throw new RateBudgetError(weight, budgetState().used)
+    }
+    await sleep(cool)
+  }
   for (;;) {
     if (await tryReserve(weight)) return
 
