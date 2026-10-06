@@ -101,6 +101,27 @@ const FILL_SAFETY_MS = 24 * 3600 * 1000
  */
 const ORDERS_RECONCILE_MS = 2 * 60 * 1000
 /**
+ * **空转时**的对账间隔（2026-10-06，用户问「长时间没有仓位或者用户不在线呢」）。
+ *
+ * ⚠️ 为什么必须有：币安权重是**按出口 IP** 算的，一台服务器所有用户共用 2400/分钟。
+ *    而上面那几个定时器原来是**每套 Key 都跑、不管有没有仓位、不管用户上没上线**：
+ *      挂单对账 40/2min + 钱账本 30/10min + 全量快照 ~21/5min ≈ **27 权重/分钟/套**
+ *    ⇒ **约 88 套闲置账户就能把整个出口 IP 的额度吃光**。
+ *    一个几个月没登录、没有任何仓位的账户，不该跟正在交易的账户花一样多。
+ *
+ * 判据（`isIdle()`）：**没持仓 + 没挂单 + 最近也没动静**。
+ * 空转时把两类对账降到 30 分钟一轮（≈1.3 权重/分钟/套，降了 20 倍）。
+ *
+ * ⚠️ **私有 WS 和 listenKey 照旧连着**，所以「突然来一张新挂单 / 新成交」还是秒级
+ *    （币安会推 `ORDER_TRADE_UPDATE`）—— 降频降的是**对账**，不是实时性。
+ */
+const ORDERS_RECONCILE_MS_IDLE = 30 * 60 * 1000
+const INCOME_RECONCILE_MS_IDLE = 30 * 60 * 1000
+/** 空转时全量快照的间隔（它是**钱包 / C2C 唯一的取数路**，但空账户的钱不会变） */
+const SAMPLE_IDLE_MS = 30 * 60 * 1000
+/** 多久没动静才算「空转」（刚下过单 / 刚平过仓的不算） */
+const IDLE_MS = 10 * 60 * 1000
+/**
  * **定期对账钱账本**（`/fapi/v1/income`）的间隔。
  *
  * ⚠️ 这个接口**权重 30**（比一般的贵 6 倍），别跟着成交那 60 秒一起跑。
@@ -328,6 +349,14 @@ class KeyStream {
   private lastFillReconcileAt = 0
   private lastIncomeReconcileAt = 0
   private lastOrdersReconcileAt = 0
+  /** 库里现在挂着几条单（判断空转用，见 `isIdle`） */
+  private openOrderCount = 0
+  /** 最后一次「有动静」的时间（WS 收到帧 / 成交 / 挂单变动 / 对账成功） */
+  private lastActivityAt = Date.now()
+  /** 当前是不是空转（只在翻转时打日志） */
+  private idle = false
+  /** 上一次全量采样的时间（空转时按 30 分钟拦） */
+  private lastSampleAt = 0
   /** 定期对账 / 健康检查的定时器 */
   private reconTimer: NodeJS.Timeout | null = null
   private healthTimer: NodeJS.Timeout | null = null
@@ -600,6 +629,7 @@ class KeyStream {
     /* 数据帧：两条时间都推（`lastAliveAt` 才是判死活的） */
     this.lastFrameAt = Date.now()
     this.lastAliveAt = Date.now()
+    this.lastActivityAt = Date.now()
     let ev: any
     try {
       ev = JSON.parse(raw)
@@ -649,6 +679,7 @@ class KeyStream {
    *    不然「部分成交」那种高频事件会把前端刷爆。
    */
   private async syncOrderFromEvent(o: any): Promise<void> {
+    this.lastActivityAt = Date.now()
     const orderId = String(o?.i ?? '')
     const status = String(o?.X ?? '').toUpperCase()
     if (!orderId || !status) return
@@ -669,10 +700,14 @@ class KeyStream {
           time: Number(o?.T ?? 0) || Date.now(),
           raw: o
         })
+        this.openOrderCount++
         emit(this.row.id, {type: 'orders', reason: `ws:${status}`})
       } else {
         const removed = await deleteOpenOrder(this.row.id, orderId)
-        if (removed) emit(this.row.id, {type: 'orders', reason: `ws:${status}`})
+        if (removed) {
+          this.openOrderCount = Math.max(0, this.openOrderCount - 1)
+          emit(this.row.id, {type: 'orders', reason: `ws:${status}`})
+        }
       }
     } catch (e) {
       console.warn(`${this.tag} 更新挂单失败：${(e as Error).message.slice(0, 140)}`)
@@ -686,6 +721,17 @@ class KeyStream {
    * ⚠️ 带不带 symbol 差 40 倍权重（不带 = 40），所以**不能勤**；
    *    但正因为挂单现在有 WS 那条路，这里本来就只需要兜底。
    */
+  /**
+   * 全量采样（外层那个 5 分钟定时器调）。
+   * ⚠️ 空转时按 `SAMPLE_IDLE_MS` 拦一道：空账户的钱不会变，没必要 5 分钟拉一次
+   *    （一次 `fetchExchangeOverview` ≈ 21 权重，是空转里第二大的一项）。
+   */
+  async sampleIfDue(): Promise<void> {
+    if (this.isIdle() && Date.now() - this.lastSampleAt < SAMPLE_IDLE_MS) return
+    this.lastSampleAt = Date.now()
+    await this.snapshot('poll')
+  }
+
   /** 给写操作用的（`reconcileKeyOrders`）—— 同一个动作，只是对外的口子 */
   async reconcileOrdersForced(): Promise<void> {
     await this.reconcileOrders('write')
@@ -714,6 +760,8 @@ class KeyStream {
         this.row.id,
         list
       )
+      this.openOrderCount = list.length
+      this.lastActivityAt = Date.now()
       if (added || removed) {
         console.log(
           `${this.tag} 挂单对账（${reason}）：+${added} -${removed}，现存 ${list.length} 条`
@@ -863,6 +911,29 @@ class KeyStream {
    *
    * 都靠唯一键幂等，重叠扫同一段不会重复记账。
    */
+  /**
+   * 这套账户是不是**空转**：没持仓、没挂单、最近也没动静。
+   * 空转 ⇒ 对账降频（见 `ORDERS_RECONCILE_MS_IDLE`）。WS 不动。
+   */
+  private isIdle(): boolean {
+    const hasPos = (this.lastOverview?.futures.positions?.length ?? 0) > 0
+    return (
+      !hasPos && this.openOrderCount === 0 && Date.now() - this.lastActivityAt > IDLE_MS
+    )
+  }
+
+  /** 翻转时打一行 —— 不然「到底有没有在降频」完全看不见 */
+  private noteIdle(): void {
+    const now = this.isIdle()
+    if (now === this.idle) return
+    this.idle = now
+    console.log(
+      now
+        ? `${this.tag} 空转（无持仓无挂单）→ 对账降频到 30 分钟一轮`
+        : `${this.tag} 有动静 → 对账恢复 2 分钟一轮`
+    )
+  }
+
   private async reconcileTick(): Promise<void> {
     if (this.stopped) return
     const now = Date.now()
@@ -871,11 +942,15 @@ class KeyStream {
         this.lastFillReconcileAt = now
         await this.backfillFills(now - FILL_SAFETY_MS)
       }
-      if (now - this.lastIncomeReconcileAt >= INCOME_RECONCILE_MS) {
+      this.noteIdle()
+      const idle = this.idle
+      const incGap = idle ? INCOME_RECONCILE_MS_IDLE : INCOME_RECONCILE_MS
+      const ordGap = idle ? ORDERS_RECONCILE_MS_IDLE : ORDERS_RECONCILE_MS
+      if (now - this.lastIncomeReconcileAt >= incGap) {
         this.lastIncomeReconcileAt = now
         await this.reconcileIncome()
       }
-      if (now - this.lastOrdersReconcileAt >= ORDERS_RECONCILE_MS) {
+      if (now - this.lastOrdersReconcileAt >= ordGap) {
         this.lastOrdersReconcileAt = now
         await this.reconcileOrders('tick')
       }
@@ -1062,6 +1137,7 @@ class KeyStream {
        */
       this.syncMarks()
       this.pushLive(false)
+      this.lastActivityAt = Date.now()
       if (wrote) {
         const net = ov.futures.margin + (ov.c2c?.totalUsdt ?? 0)
         console.log(`${this.tag} 快照已写（${source}）净资产 ${net}`)
@@ -1200,7 +1276,8 @@ export function startSnapshotSampler(): void {
     void (async () => {
       for (const s of streams.values()) {
         // 采样点就是 REST 全量拉，跟对账是同一件事
-        await s.snapshot('poll')
+        // ⚠️ 走 `sampleIfDue()`：空转的账户会被拦成 30 分钟一次（见 `SAMPLE_IDLE_MS`）
+        await s.sampleIfDue()
       }
     })()
   }, SAMPLE_MS)
