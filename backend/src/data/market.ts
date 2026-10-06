@@ -984,3 +984,34 @@ export async function fetchMarketList(opts: {
   rows.sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
   return opts.limit ? rows.slice(0, opts.limit) : rows
 }
+
+/**
+ * 拉**全市场标记价**（`GET /fapi/v1/premiumIndex`，不带 symbol 一次拿全，权重 10）。
+ *
+ * ★ 2026-10-06 加：给「持仓未实现盈亏」的实时重算做 **REST 兜底**用。
+ *
+ * 为什么一次拿全、而不是按币逐个查（`?symbol=` 权重才 1）：
+ * 这一路的成本**几乎全在往返上**（本地经出口隧道约 1 秒），一个来回比 10 个权重贵得多。
+ * 而且 `@markPrice@1s` 那条 WS 流本来就是「每币一条」，一次全拿语义一样。
+ *
+ * 返回 `{ 币安原始符号(大写) → 标记价 }`。
+ */
+export async function fetchMarkPrices(opts?: {
+  exchangeId?: string
+  apiBase?: string
+}): Promise<Map<string, number>> {
+  const exchange = await getExchange(
+    opts?.exchangeId ?? 'binance',
+    'swap',
+    opts?.apiBase
+  )
+  /* ccxt 的隐式方法：binance 上就是 `/fapi/v1/premiumIndex`（不带参数 = 全市场） */
+  const list: any[] = (await exchange.fapiPublicGetPremiumIndex()) ?? []
+  const out = new Map<string, number>()
+  for (const r of list) {
+    const sym = String(r?.symbol ?? '').toUpperCase()
+    const mark = numOrNull(r?.markPrice)
+    if (sym && mark !== null) out.set(sym, mark)
+  }
+  return out
+}

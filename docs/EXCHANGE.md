@@ -1031,3 +1031,64 @@ publishLive(..., live: true) → SSE positions → 前端 1 秒级跳
 而 `signedMoney(NaN)` 渲染出来是 **`+$0.00`**，看着像「没赚没亏」，其实是算错了
 （持仓卡上的「已结」就这么错过一次）。
 ⇒ 前端类型**逐字对齐**后端返回，不再在中间起小名。
+
+## 14. ⚠️⚠️ 2026-10-06 根因：BIGINT 的 key 类型不一致 ⇒ 实时事件**全部静默丢弃**
+
+这是「持仓盈利不实时」「最近成交不实时」「开仓半天界面才有数据」**共同的根因**，
+前面几节都只是在兜底，没修到它。
+
+### 症状（极有迷惑性）
+
+- SSE 连上时 `open` / 连接底稿 `snapshot` **一切正常**；
+- 之后**所有**实时事件（`positions` / `fill` / `income` / `backfill`）**一条都收不到**；
+- 浏览器控制台反复 `net::ERR_ABORTED` + 自动重连（看着像「连上了但没数据」）；
+- 服务端日志里 `subscribeExchange 加完=3` 和 `[emit] 订阅者=0` **同时出现**；
+- `[...map.keys()].join(',')` 打印出 `7`，`emit` 查的也是 `7` —— 但查不到。
+
+### 根因
+
+| 位置 | 代码 | 运行时值 |
+|---|---|---|
+| SSE 路由 | `db/exchange-keys.ts` 的 `id: Number(r.id)` | **数字** `7` |
+| 常驻流 | `exchange-stream.ts` 的 `listKeys()` 直接用 `query()` 的行 | **字符串** `'7'` |
+
+`user_exchange_keys.id` 是 **BIGSERIAL（bigint）**，`pg` 为了不丢精度把 bigint 返回成
+**字符串**。于是 `subscribeExchange(7)` 往 map 里写的是**数字键**，
+而 `emit(this.row.id)` 拿着**字符串**去 `get()` —— 永远 miss，
+`if (!set?.size) return` 就把事件丢掉了。
+
+⚠️ **`7` 和 `'7'` 用 `console.log` / `join(',')` 打印出来一模一样**，
+所以日志看着像「key 在、订阅者却是 0」，靠肉眼看日志基本不可能发现。
+
+### 改法
+
+- `exchange-stream.ts` / `position-cache.ts` 各加一个 `keyOf(keyId) => Number(keyId)`，
+  **在 map 的收发两层统一兜住**（不指望调用点传对类型 —— 调用点太多，迟早漏）；
+- `listKeys()` 也显式把 `id` / `user_id` 转成数字，别让 `KeyRow.id: number` 这个类型说谎；
+- `position-cache.ts` 的 `states` / `streamActive` / `rowsCache` / `inflight` 是**同一个 bug**
+  （所以 `positions` 事件也全军覆没），一并走 `keyOf`。
+
+### 教训
+
+**跨模块用 Map 传事件时，键的类型必须归一，而且要在边界处归一。**
+`kline-stream.ts` 那条路一直没事，就是因为它的键（`symbol|timeframe`）两边都是字符串。
+
+### 顺手加的诊断（都留着）
+
+- `ORDER_TRADE_UPDATE` 每条打一行（`s`/`x`/`X`/`t`/`l`）—— 以前丢单时**没有任何证据**；
+- 上游帧 `JSON.parse` 失败**不再静默 return**（经隧道时帧会被截断，跟「没收到」长得一样）；
+- SSE 连接**只活了 <3 秒**就打一行警告（异常拆连接的特征）；
+- 交易所流的 `handleExchangeStream` **自己 catch 并打栈**：它跑在 `writeHead(200)` 之后，
+  中途抛错会让通用 catch 去发 500，而那一下自己会再抛 `ERR_HTTP_HEADERS_SENT`，
+  真实错因被埋掉，外面只看到「连上了就断」。
+
+### 另外两件事（同一天）
+
+1. **标记价补了 REST 兜底**（`kline-stream.ts` + `market.ts` 的 `fetchMarkPrices`）：
+   原来只有 K 线 / 行情条有「上游哑了退回 REST 轮询」，标记价没有 ——
+   上游 WS 一哑，未实现盈亏就**完全不动**，只能等 5 分钟采样。
+   现在 6 秒没标记价就每 3 秒拉一次 `/fapi/v1/premiumIndex`（**不带 symbol 一次拿全市场**，
+   权重 10：这一路的成本几乎全在往返上，一个来回比 10 个权重贵得多）。
+2. **`req.on('close')` 在 SSE 里是错的**：Node 16 起它在**请求收完**就触发（GET 立刻），
+   会把刚建好的 SSE 当成「客户端走了」收尾。三处 SSE 全改成只听 `res.on('close')`。
+   （这条**不是**本次的主因，但它是同一类「连上就断」的坑，留着迟早踩。）

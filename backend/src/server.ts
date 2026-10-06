@@ -1537,6 +1537,19 @@ async function handleKlineStream(
    */
   const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
+  /*
+   * ⚠️⚠️ **只能听 `res` 的 close，绝不能听 `req` 的**（2026-10-06 查出来的大坑）。
+   *
+   * Node 16 起 `IncomingMessage` 的 `'close'` 在**请求收完**就触发 ——
+   * 对一个 GET 来说就是「刚连上就触发」，于是 SSE 刚建好就被当成「客户端走了」
+   * 收尾掉。症状极具迷惑性：
+   *   · `open` / 连接时的底稿 `snapshot`（拆之前写进去的）**能收到**；
+   *   · 之后所有**实时事件**（`positions` / `marks` / `fill` / `kline`）**一条都收不到**
+   *     —— 因为 `unsubscribe()` 已经把订阅者删了，`emit()` 变成空转；
+   *   · 浏览器那边表现为反复 `net::ERR_ABORTED`，而且**自动重连**，
+   *     每秒一轮，看着像「连上了但没数据」。
+   * 页面「持仓盈利不实时」就是这个 —— 跟 WS、跟算在哪都无关。
+   */
   let closed = false
   const done = () => {
     if (closed) return
@@ -1544,7 +1557,6 @@ async function handleKlineStream(
     clearInterval(beat)
     unsubscribe()
   }
-  req.on('close', done)
   res.on('close', done)
 }
 
@@ -1578,6 +1590,19 @@ async function handleTickerStream(
   /* 心跳必须是具名事件，理由同上 */
   const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
+  /*
+   * ⚠️⚠️ **只能听 `res` 的 close，绝不能听 `req` 的**（2026-10-06 查出来的大坑）。
+   *
+   * Node 16 起 `IncomingMessage` 的 `'close'` 在**请求收完**就触发 ——
+   * 对一个 GET 来说就是「刚连上就触发」，于是 SSE 刚建好就被当成「客户端走了」
+   * 收尾掉。症状极具迷惑性：
+   *   · `open` / 连接时的底稿 `snapshot`（拆之前写进去的）**能收到**；
+   *   · 之后所有**实时事件**（`positions` / `marks` / `fill` / `kline`）**一条都收不到**
+   *     —— 因为 `unsubscribe()` 已经把订阅者删了，`emit()` 变成空转；
+   *   · 浏览器那边表现为反复 `net::ERR_ABORTED`，而且**自动重连**，
+   *     每秒一轮，看着像「连上了但没数据」。
+   * 页面「持仓盈利不实时」就是这个 —— 跟 WS、跟算在哪都无关。
+   */
   let closed = false
   const done = () => {
     if (closed) return
@@ -1585,7 +1610,6 @@ async function handleTickerStream(
     clearInterval(beat)
     unsubscribe()
   }
-  req.on('close', done)
   res.on('close', done)
 }
 
@@ -1710,15 +1734,37 @@ async function handleExchangeStream(
   /* 心跳必须是具名事件，理由同上 */
   const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
+  /*
+   * ⚠️⚠️ **只能听 `res` 的 close，绝不能听 `req` 的**（2026-10-06 查出来的大坑）。
+   *
+   * Node 16 起 `IncomingMessage` 的 `'close'` 在**请求收完**就触发 ——
+   * 对一个 GET 来说就是「刚连上就触发」，于是 SSE 刚建好就被当成「客户端走了」
+   * 收尾掉。症状极具迷惑性：
+   *   · `open` / 连接时的底稿 `snapshot`（拆之前写进去的）**能收到**；
+   *   · 之后所有**实时事件**（`positions` / `marks` / `fill` / `kline`）**一条都收不到**
+   *     —— 因为 `unsubscribe()` 已经把订阅者删了，`emit()` 变成空转；
+   *   · 浏览器那边表现为反复 `net::ERR_ABORTED`，而且**自动重连**，
+   *     每秒一轮，看着像「连上了但没数据」。
+   * 页面「持仓盈利不实时」就是这个 —— 跟 WS、跟算在哪都无关。
+   */
   let closed = false
+  const openedAt = Date.now()
   const done = () => {
     if (closed) return
     closed = true
+    /*
+     * ⚠️ 只在**短命连接**时打：SSE 正常是长连接，几毫秒就收尾说明有人在建连后
+     *    立刻把响应结束掉（会话被踢 / 上游断了 / 前端重连风暴）。
+     *    这条日志是 2026-10-06 定位「实时事件全丢了」的关键线索之一，别删。
+     */
+    const livedMs = Date.now() - openedAt
+    if (livedMs < 3000) {
+      console.warn(`[exchange/stream] key=${keyId} 连接只活了 ${livedMs}ms 就被收尾`)
+    }
     clearInterval(beat)
     unsubscribe()
     unsubPositions()
   }
-  req.on('close', done)
   res.on('close', done)
 }
 
@@ -1948,7 +1994,8 @@ async function handleAnalyzeStream(
 
   // 页面切走了就别再往回写（大模型调用中途没法取消，但至少别浪费）
   let closed = false
-  req.on('close', () => (closed = true))
+  /* ⚠️ 只能听 `res` 的 close（`req` 的 close 在请求收完就触发，等于立刻「已关闭」） */
+  res.on('close', () => (closed = true))
 
   try {
     const outcome = await runAnalysis({
@@ -2061,7 +2108,8 @@ async function handleCollectStream(
   }
 
   let closed = false
-  req.on('close', () => (closed = true))
+  /* ⚠️ 只能听 `res` 的 close（`req` 的 close 在请求收完就触发，等于立刻「已关闭」） */
+  res.on('close', () => (closed = true))
 
   try {
     const outcome = await collectCase({
@@ -3932,6 +3980,12 @@ async function route(
     } else if (!key.apiKey || !key.secret) {
       reject = '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）'
     }
+    /*
+     * ⚠️ 这里必须自己 catch 并**打出来**：`handleExchangeStream` 是在 `writeHead(200)`
+     *    之后跑的，中途抛错会让外层那个通用 catch 去 `sendJson(500)`，
+     *    而那一下本身会再抛 `ERR_HTTP_HEADERS_SENT` —— 真实的错因被埋掉，
+     *    外面只看到「SSE 连上就断」。（2026-10-06 就是靠这一行才定位到。）
+     */
     await handleExchangeStream(
       req,
       res,
@@ -3939,7 +3993,14 @@ async function route(
       key.id,
       publicExchangeKey(key),
       reject
-    )
+    ).catch((e: Error) => {
+      console.error('[exchange/stream] 处理异常：', e?.stack ?? e)
+      try {
+        res.end()
+      } catch {
+        /* 已经断了就算了 */
+      }
+    })
     return
   }
 

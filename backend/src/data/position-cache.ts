@@ -85,6 +85,20 @@ const states = new Map<number, LiveState>()
 const streamActive = new Map<number, boolean>()
 /** SSE 订阅者 */
 const listeners = new Map<number, Set<(ev: PositionsEvent) => void>>()
+
+/**
+ * 把 key_id 归一成**数字** —— **每一个**进/出这几张表的入口都要过它。
+ *
+ * ⚠️⚠️ 2026-10-06 的大 bug（跟 `exchange-stream.ts` 的 `keyOf` 是同一件事）：
+ *   `user_exchange_keys.id` 是 BIGSERIAL，`pg` 把 bigint 返回成**字符串** `'7'`，
+ *   而 `db/exchange-keys.ts` 又 `Number()` 回了数字 `7`。写的一方和读的一方类型
+ *   对不上，表现就是**事件静默丢失**（`if (!set?.size) return`）——
+ *   「持仓盈利不实时」正是它。
+ *   ⇒ 别指望调用点传对类型（调用点太多、迟早漏），在**这一层**统一兜住。
+ */
+function keyOf(keyId: number | string): number {
+  return Number(keyId)
+}
 /** 退回 REST 时那一发的结果（短 TTL，把多个轮询合成一发） */
 const rowsCache = new Map<number, {at: number; rows: FuturesPositionRow[]}>()
 /** 正在飞的那一发（单飞） */
@@ -151,24 +165,25 @@ function statsOf(positions: LivePosition[]): Stats {
 /* ---------------- 订阅（给 SSE 用） ---------------- */
 
 export function subscribePositions(
-  keyId: number,
+  keyId: number | string,
   fn: (ev: PositionsEvent) => void
 ): () => void {
-  let set = listeners.get(keyId)
+  const id = keyOf(keyId)
+  let set = listeners.get(id)
   if (!set) {
     set = new Set()
-    listeners.set(keyId, set)
+    listeners.set(id, set)
   }
   const bucket = set
   bucket.add(fn)
   return () => {
     bucket.delete(fn)
-    if (!bucket.size) listeners.delete(keyId)
+    if (!bucket.size) listeners.delete(id)
   }
 }
 
-function emit(keyId: number, patch: PositionsPatch): void {
-  const set = listeners.get(keyId)
+function emit(keyId: number | string, patch: PositionsPatch): void {
+  const set = listeners.get(keyOf(keyId))
   if (!set?.size) return
   for (const fn of set) {
     try {
@@ -181,8 +196,8 @@ function emit(keyId: number, patch: PositionsPatch): void {
 
 /* ---------------- 写入（由常驻流调用） ---------------- */
 
-export function setStreamActive(keyId: number, active: boolean): void {
-  streamActive.set(keyId, active)
+export function setStreamActive(keyId: number | string, active: boolean): void {
+  streamActive.set(keyOf(keyId), active)
 }
 
 /**
@@ -211,9 +226,9 @@ export function publishLive(
     margin: r8(input.wallet + stats.unrealized),
     stats
   }
-  states.set(keyId, state)
+  states.set(keyOf(keyId), state)
   /* 内存里已经有更新的了，REST 那份短缓存就没用了 */
-  rowsCache.delete(keyId)
+  rowsCache.delete(keyOf(keyId))
   emit(keyId, {
     at: new Date(state.at).toISOString(),
     live: state.live,
@@ -228,12 +243,12 @@ export function publishLive(
 
 /** 内存里那份（调试 / 内部用） */
 export function liveStateOf(keyId: number): LiveState | null {
-  return states.get(keyId) ?? null
+  return states.get(keyOf(keyId)) ?? null
 }
 
 /** 这套 key 的流在跑吗 */
 export function isStreamActive(keyId: number): boolean {
-  return streamActive.get(keyId) === true
+  return streamActive.get(keyOf(keyId)) === true
 }
 
 /* ---------------- 读取（给 `/api/exchange/trade/positions` 用） ---------------- */
@@ -279,14 +294,14 @@ export async function getPositions(
    */
   if (!opts.force) {
     const now = Date.now()
-    const live = states.get(keyId)
+    const live = states.get(keyOf(keyId))
     if (live) {
       const maxAge =
         opts.maxAgeMs ?? (isStreamActive(keyId) ? TRUST_STREAM_MS : REST_TTL_MS)
       if (now - live.at < maxAge) return live.positions.map(toRow)
     }
 
-    const hit = rowsCache.get(keyId)
+    const hit = rowsCache.get(keyOf(keyId))
     if (hit && now - hit.at < REST_TTL_MS) return hit.rows
   }
 
@@ -313,10 +328,10 @@ async function fetchRows(
     try {
       await takeWeight(5, 'positionRisk')
       const rows = await listPositions(c)
-      if (keyId) rowsCache.set(keyId, {at: Date.now(), rows})
+      if (keyId) rowsCache.set(keyOf(keyId), {at: Date.now(), rows})
       return rows
     } catch (e) {
-      const stale = keyId ? rowsCache.get(keyId) : undefined
+      const stale = keyId ? rowsCache.get(keyOf(keyId)) : undefined
       console.warn(
         `[positions] ${keyId ? `key ${keyId} ` : ''}读持仓失败：${(e as Error).message.slice(0, 140)}`
       )

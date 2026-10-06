@@ -122,12 +122,29 @@ interface KeyRow {
 
 /** 要盯的 key：填了凭据的**合约**账户（现货 USDT 只是顺带统计，主体仍是合约，见方案） */
 async function listKeys(): Promise<KeyRow[]> {
-  return query<KeyRow>(
+  const rows = await query<Record<string, unknown>>(
     `SELECT id, user_id, exchange, name, api_key, secret, password, market_type, sandbox
        FROM user_exchange_keys
       WHERE api_key <> '' AND secret <> '' AND market_type = 'swap'
       ORDER BY id`
   )
+  /*
+   * ⚠️ `id` / `user_id` 是 BIGINT，`pg` 返回的是**字符串** —— 一定要在这里转成数字，
+   *    否则 `KeyRow.id: number` 这个类型就在说谎，而下游（`emit` / `streams` 的键）
+   *    会跟别处 `Number()` 过的值对不上（2026-10-06 那个「事件静默丢失」的根因）。
+   *    `keyOf()` 那层也兜了一道，但源头也别留着坑。
+   */
+  return rows.map(r => ({
+    id: Number(r.id),
+    user_id: Number(r.user_id),
+    exchange: String(r.exchange ?? ''),
+    name: String(r.name ?? ''),
+    api_key: String(r.api_key ?? ''),
+    secret: String(r.secret ?? ''),
+    password: String(r.password ?? ''),
+    market_type: String(r.market_type ?? ''),
+    sandbox: r.sandbox === true
+  }))
 }
 
 function credsOf(r: KeyRow): ExchangeCredentials {
@@ -169,18 +186,34 @@ export type ExchangeEvent =
   | {type: 'backfill'; added: number}
   /** 钱账本（income）有新行 —— 前端「盈亏」tab 重拉一次 */
   | {type: 'income'; added: number}
-  /**
-   * 上游用户数据流「哑了 / 恢复了」。
-   * ⚠️ 前端只能看见这条 SSE（心跳一直有），看不到上游那条 —— 所以要靠这个
-   *    事件才知道「现在得自己 REST 兜底刷」。
-   */
   | {type: 'health'; deaf: boolean}
 
 /** key_id → 订阅者 */
 const listenerSets = new Map<number, Set<(ev: ExchangeEvent) => void>>()
 
-function emit(keyId: number, ev: ExchangeEvent): void {
-  const set = listenerSets.get(keyId)
+/**
+ * 把 key_id 归一成**数字**。⚠️⚠️ 这两个函数（`emit` / `subscribeExchange`）**必须**
+ * 用同一把钥匙，所以统一走这里。
+ *
+ * ★ 2026-10-06 查出来的大 bug：`user_exchange_keys.id` 是 **BIGSERIAL（bigint）**，
+ *   `pg` 为了不丢精度把 bigint 返回成**字符串**（`'7'`），而
+ *   `db/exchange-keys.ts` 那边又 `Number()` 回了数字 `7`。
+ *   于是 `subscribeExchange(7)` 往 map 里写**数字键**，
+ *   而 `emit(this.row.id)` 传进来的是**字符串**，拿它去查 —— 永远查不到，`if (!set?.size) return` 就把事件**静默丢掉**。
+ *
+ *   症状特别有迷惑性：SSE 连上时的 `open` / `snapshot`（直接写响应、不走 map）
+ *   一切正常，**连接时的底稿也正常**，而之后所有实时事件（`positions` / `marks` /
+ *   `fill` / `income` / `backfill`）**一条都收不到** —— 因为 emit 全程空转。
+ *   用户的「持仓盈利不实时」「最近成交不实时」都是它。
+ *   而且 `[...map.keys()].join(',')` 里 `7` 和 `'7'` 打印出来一模一样，
+ *   日志看着像「key 在、订阅者却是 0」，极难看出来 —— 所以**别再猜类型，一律 Number()**。
+ */
+function keyOf(keyId: number | string): number {
+  return Number(keyId)
+}
+
+function emit(keyId: number | string, ev: ExchangeEvent): void {
+  const set = listenerSets.get(keyOf(keyId))
   if (!set?.size) return
   for (const fn of set) {
     try {
@@ -197,19 +230,21 @@ function emit(keyId: number, ev: ExchangeEvent): void {
  *    一个死响应里写（响应对象被 GC 之前还不报错，纯漏）。
  */
 export function subscribeExchange(
-  keyId: number,
+  keyId: number | string,
   fn: (ev: ExchangeEvent) => void
 ): () => void {
-  let set = listenerSets.get(keyId)
+  /* ⚠️ 归一成数字，跟 `emit` 用同一把钥匙（见 `keyOf` 那段） */
+  const id = keyOf(keyId)
+  let set = listenerSets.get(id)
   if (!set) {
     set = new Set()
-    listenerSets.set(keyId, set)
+    listenerSets.set(id, set)
   }
   const bucket = set
   bucket.add(fn)
   return () => {
     bucket.delete(fn)
-    if (!bucket.size) listenerSets.delete(keyId)
+    if (!bucket.size) listenerSets.delete(id)
   }
 }
 

@@ -39,7 +39,12 @@
  */
 import {WebSocket} from 'ws'
 import {wsAgent} from './exchange-account'
-import {fetchCandles, fetchMarketList, type MarketRow} from './market'
+import {
+  fetchCandles,
+  fetchMarkPrices,
+  fetchMarketList,
+  type MarketRow
+} from './market'
 import {loadConfig} from '../config'
 import {Candle, Timeframe} from '../types'
 
@@ -218,13 +223,7 @@ function onUpstreamMessage(ev: {data: string | Buffer | ArrayBuffer | Buffer[]})
     const set = markListeners.get(`${raw.toLowerCase()}@markPrice@1s`)
     const mark = Number(body.p)
     if (!set?.size || !Number.isFinite(mark) || mark <= 0) return
-    for (const fn of set) {
-      try {
-        fn(raw, mark)
-      } catch {
-        /* 单个订阅者出错不能影响别人 */
-      }
-    }
+    noteMarkTick(raw, mark)
     return
   }
   if (body?.e !== 'kline' || !body.k) return
@@ -636,14 +635,102 @@ export function tickerStreamMode(): string {
  *   · ⚠️ **别订 `!markPrice@arr@1s`**（全市场标记价）：一条消息把 ~500 个币全带上，
  *     每秒几十 KB，我们只用得上手里那几条，纯浪费带宽和解析。
  *
- * ⚠️ 这一路是**尽力而为的增强**，没有 REST 兜底：拿不到标记价就**不重算**，
- *    未实现盈亏退回 REST 快照那个口径（跟改造前完全一样）。
- *    所以它挂了不会让任何数字变错，只会让数字不再逐笔跳。
+ * ★ 2026-10-06 加**了** REST 兜底（下面那一段）：原来这路「没兜底」，
+ *   而上游 WS 一哑（本地实测会哑到 `open` 都触发不了）持仓的未实现盈亏就**一直不动**，
+ *   只能等 5 分钟一次的账户快照 —— 用户原话「前端的仓位持仓盈利不是实时变动的吗」。
  */
 type MarkListener = (rawSymbol: string, markPrice: number) => void
 
 /** 流名（`btcusdt@markPrice@1s`）→ 监听者。⚠️ 币安流名全小写 */
 const markListeners = new Map<string, Set<MarkListener>>()
+
+/* ---------------- 标记价的 REST 兜底 ---------------- */
+
+/** 多久没收到标记价就认定上游哑了 */
+const MARK_IDLE_MS = 6_000
+/** 兜底轮询间隔 */
+const MARK_FALLBACK_MS = 3_000
+/** 最后一次收到标记价的时间（WS 和兜底都算） */
+let lastMarkAt = 0
+let markFallbackTimer: ReturnType<typeof setInterval> | null = null
+/** 现在是不是兜底模式（只在翻转时打日志，别刷屏） */
+let markDegraded = false
+/** 兜底是不是报过错（同一类错只报一次） */
+let markFallbackErr = false
+
+/** 收到一条标记价（WS 或兜底）→ 分发给监听者 */
+function noteMarkTick(rawSymbol: string, mark: number): void {
+  lastMarkAt = Date.now()
+  if (markDegraded) {
+    markDegraded = false
+    console.log('[kline] 标记价上游恢复了')
+  }
+  const set = markListeners.get(markStreamName(rawSymbol))
+  if (!set?.size) return
+  for (const fn of set) {
+    try {
+      fn(rawSymbol.toUpperCase(), mark)
+    } catch {
+      /* 单个订阅者出错不能影响别人 */
+    }
+  }
+}
+
+/** 有标记价订阅者就起兜底定时器，没有就停 */
+function syncMarkFallback(): void {
+  if (markListeners.size && !markFallbackTimer) {
+    if (!lastMarkAt) lastMarkAt = Date.now()
+    markFallbackTimer = setInterval(() => void markFallbackTick(), MARK_FALLBACK_MS)
+  } else if (!markListeners.size && markFallbackTimer) {
+    clearInterval(markFallbackTimer)
+    markFallbackTimer = null
+    markDegraded = false
+  }
+}
+
+/** 兜底那一轮：上游还在推就什么都不做，哑了就 REST 拉一次全市场标记价 */
+async function markFallbackTick(): Promise<void> {
+  if (!markListeners.size) {
+    syncMarkFallback()
+    return
+  }
+  if (Date.now() - lastMarkAt < MARK_IDLE_MS) return
+  try {
+    const t0 = Date.now()
+    const marks = await fetchMarkPrices()
+    if (!marks.size) {
+      console.warn('[kline] 标记价兜底：REST 回来了但是空的')
+      return
+    }
+    if (!markDegraded) {
+      markDegraded = true
+      console.warn(
+        `[kline] 标记价上游 ${MARK_IDLE_MS / 1000} 秒没推，退回 REST 轮询（每 ${
+          MARK_FALLBACK_MS / 1000
+        } 秒）—— ${markListeners.size} 个币，REST 用了 ${Date.now() - t0}ms`
+      )
+    }
+    /*
+     * ⚠️ 只喂**当前订阅着**的那些币：全市场是几百个，别把无关的也算一遍
+     *    （一次全拿是为了省往返，不代表要全部处理）。
+     */
+    for (const key of markListeners.keys()) {
+      const raw = key.split('@')[0]!.toUpperCase()
+      const mark = marks.get(raw)
+      if (mark) noteMarkTick(raw, mark)
+    }
+  } catch (e) {
+    /*
+     * ⚠️ **失败一定要打**（第一版只在「已降级」时打，等于把错误全吞了 ——
+     *    表现就是「什么都不动，日志也一片安静」，最难查的那种）。
+     *    但一轮只打一次，别每 3 秒刷屏。
+     */
+    if (!markFallbackErr) {
+      markFallbackErr = true
+      console.warn(`[kline] 标记价兜底失败：${(e as Error).message.slice(0, 160)}`)
+    }
+  }
+}
 
 /** `BTCUSDT` → `btcusdt@markPrice@1s`（`BTC/USDT:USDT` 这种也能吃） */
 function markStreamName(rawSymbol: string): string {
@@ -686,6 +773,9 @@ export function subscribeMarkPrice(
     void ensureUpstream()
   }
   flushSubscriptions()
+  /* 有标记价订阅者 ⇒ 把 REST 兜底也起上（上游哑了才真的会用它） */
+  syncMarkFallback()
+  console.log(`[kline] 标记价 ${key} 订阅（上游一条连接共用）`)
 
   return () => {
     const cur = markListeners.get(key)
@@ -695,6 +785,7 @@ export function subscribeMarkPrice(
     markListeners.delete(key)
     wanted.delete(key)
     flushSubscriptions()
+    syncMarkFallback()
     if (!anyWantWs()) closeUpstream()
   }
 }
