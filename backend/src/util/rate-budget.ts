@@ -68,12 +68,29 @@ export class RateBudgetError extends Error {
 }
 
 /** 在链里试占一次额度；占到返回 true */
+/**
+ * 「把每一次取权重都打一行」—— 一份**不带密文**的调用日志。
+ *
+ * ⚠️ 为什么要有这个开关：用户问「有没有调用 API 的日志」。
+ *    币安那套接口出问题时（`-2021` / `-1003` 限流 / 某个符号查不到），
+ *    光看业务日志很难还原「那一刻到底发出去了哪些请求、花了多少权重」。
+ *    `EXCHANGE_VERBOSE=1` 打开后每取一次权重记一行
+ *    （`tag` 就是调用方标的口径，比如 `overview` / `openOrders` / `positionRisk`）。
+ *
+ * ⚠️ 跟 ccxt 的 `verbose` 不一样：**这个不会把 API Key 打到日志里**。
+ *    要连请求 / 响应体一起看才用 ccxt 那个（见 `createExchange`，那条会打 key）。
+ */
+const VERBOSE = process.env.EXCHANGE_VERBOSE === '1'
+
 function tryReserve(weight: number): Promise<boolean> {
   const run = chain.then(() => {
     const now = Date.now()
     prune(now)
     if (usedOf() + weight > limitOf()) return false
     slots.push({at: now, w: weight})
+    if (VERBOSE) {
+      console.log(`[api] +${weight} 权重（窗口内 ${usedOf()}/${limitOf()}）`)
+    }
     return true
   })
   chain = run.catch(() => undefined)
@@ -94,6 +111,7 @@ export async function takeWeight(
   maxWaitMs = MAX_WAIT_MS
 ): Promise<void> {
   if (!(weight > 0)) return
+  if (VERBOSE) console.log(`[api] ${tag} 取权重 ${weight}`)
   const limit = limitOf()
   if (weight > limit) {
     console.warn(`[budget] ${tag} 单次权重 ${weight} 超过上限 ${limit}，放行`)

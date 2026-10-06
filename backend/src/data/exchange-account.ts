@@ -237,6 +237,14 @@ export function createExchange(c: ExchangeCredentials): any {
     secret: c.secret,
     ...(c.password ? {password: c.password} : {}),
     options: {
+      /*
+       * ⚠️⚠️ 开了它 ccxt 会把**每一次请求 / 响应**（含请求头里的 `X-MBX-APIKEY`）
+       *    打到 stdout —— 排查「到底发出去了什么」最有用，但**日志里会带 API Key**。
+       *    所以默认关闭，只在本地排查时用：`EXCHANGE_VERBOSE=1 npm run web`。
+       *    要「不带密文」的调用日志，用 `util/rate-budget.ts` 那个同名开关的输出版
+       *    （`[api] <口径> 取权重 N`）。
+       */
+      verbose: process.env.EXCHANGE_VERBOSE === '1',
       ...marketOptionsFor(c),
       /*
        * ⚠️⚠️ **持仓必须走 v2 的 `/fapi/v2/positionRisk`**（2026-10-05 查出来的 bug：
