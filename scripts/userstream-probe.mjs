@@ -83,8 +83,17 @@ async function main() {
   let frames = 0
   const socks = []
   const ag = await agent()
-  for (const name of ['A', 'B']) {
-    const w = new WebSocket(`wss://fstream.binance.com/ws/${lk}`, {agent: ag})
+  /*
+   * 官方文档给的路径是第一条；另外两条是**同一个 listenKey 的其它已知写法**
+   * （统一账户 `/pm/ws/`、组合流 `/stream?streams=`）—— 一次全连上，谁收到帧就是它。
+   */
+  const urls = [
+    ['A /ws/', `wss://fstream.binance.com/ws/${lk}`],
+    ['B /pm/ws/', `wss://fstream.binance.com/pm/ws/${lk}`],
+    ['C /stream?streams=', `wss://fstream.binance.com/stream?streams=${lk}`]
+  ]
+  for (const [name, url] of urls) {
+    const w = new WebSocket(url, {agent: ag})
     socks.push({name, w})
     w.on('open', () => log(`[${name}] open ✓ ${new Date().toISOString()}`))
     w.on('message', (d) => {

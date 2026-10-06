@@ -1727,10 +1727,13 @@ API_KEY=… API_SECRET=… node scripts/userstream-probe.mjs
 
 ### 顺带确认的两条死路（省得以后再试）
 
-| 路 | 实测结果 |
+| 路 | 实测 / 官方结论 |
 |---|---|
-| 现货 listenKey（`POST /api/v3/userDataStream`） | **410 Gone**（币安已下架，换成 WS API 了） |
-| 合约 WS API（`wss://ws-fapi.binance.com/ws-fapi/v1`） | HMAC key 不能用：`session.logon` → `-4056 HMAC_SHA256 API key is not supported`；`userDataStream.subscribe.signature` → `-5000 Method … is invalid`。要走这条得单独建一把 **Ed25519** key |
+| 现货 listenKey（`POST /api/v3/userDataStream`） | **410 Gone**。官方 CHANGELOG 那侧的说法是现货/Margin 的 listenKey REST 接口 2026-02 起弃用移除（第三方库 `unicorn-binance-websocket-api` 也这么注），与我们实测一致 |
+| 合约想绕开 listenKey（走 WS API `userDataStream.subscribe`） | **合约没有这个方法**（它是 Spot/Margin 的）。合约 `ws-fapi` 上只有 `userDataStream.start/ping/stop`，而 **`start` 返回的还是一把 listenKey，事件仍然只能连 `wss://fstream.binance.com/ws/<listenKey>`** ⇒ **换 WS API 也绕不开同一条推送路径** |
+| 合约 WS API 鉴权 | `session.logon` **只支持 Ed25519**（HMAC 报 `-4056`）；`userDataStream.subscribe.signature` 在合约上是无效方法（`-5000`） |
+| 同一个 listenKey 多连接 | 官方文档**没有规定**（研究代理把 Connect / listenKey 三页 / WebSocket API / CHANGELOG 全文翻过，只有 Spot 那条 "only one active subscription per account on a given connection"）；但本轮已实测**与「谁持有」无关**（新建一把全新的 key、只有我们两条连接，照样 0 帧） |
+| 是不是 ccxt 的锅 | **不是**：WS 是裸 `ws` + Node socket（探针脚本不碰业务代码）；ccxt 只用来建 key，而地址/续期/删除都符合文档；最硬的反证是**伪造的 listenKey 走同一套代码，表现与真 key 一模一样** |
 
 ### 可选方案（等复验结果再定）
 
