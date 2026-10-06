@@ -984,10 +984,17 @@ export interface PositionsPatch {
   positions: FuturesPosition[]
 }
 
-/** 现在去拉一次 + 落库（慢，约 2 秒；用户点 ⟳ 用） */
-export const refreshExchangeOverview = (id?: number) =>
+/**
+ * 现在去拉一次 + 落库（用户点 ⟳ / 下拉刷新用）。
+ *
+ * `auto = true` —— **前端自己兜底**触发的那次（快照旧了 / 流没活着）。
+ * 传给后端时它会**只拉这一份快照**，顺手把那几路 RST 对账（成交 / 挂单 / 钱账本）
+ * 也全对一遍的「强制补账」留着给**用户主动**那一下（用户：
+ * 「不是每次刷新都要请求接口」）。
+ */
+export const refreshExchangeOverview = (id?: number, auto = false) =>
   post<ExchangeSnapshotResult>(
-    `/api/exchange/refresh${id ? `?id=${id}` : ''}`,
+    `/api/exchange/refresh?${id ? `id=${id}&` : ''}${auto ? 'auto=1' : ''}`,
     {}
   )
 

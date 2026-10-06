@@ -137,6 +137,7 @@ import {
 } from './db/exchange-store'
 import {
   reconcileKeyOrders,
+  wakeExchangeStream,
   startExchangeStreams,
   startSnapshotSampler,
   stopExchangeStreams,
@@ -3208,6 +3209,21 @@ async function route(
        * 立刻看到新数，不用干等 5 分钟采样。
        */
       publishSnapshot(key.id, ov, 'manual')
+      /*
+       * ★ 2026-10-06：手动刷新 = **用户觉得不对**（用户原话：「用户感觉不对可以刷新页面」）
+       *   ⇒ 一次把它**全对平**：成交 / 挂单 / 钱账本都现场补一轮。
+       *   快照刚在上面拉过了（`skipSnapshot`），别再问一遍那 21 权重。
+       *   `force` 会无视平时那些降频档 —— 这是用户明确的一次请求，值得。
+       */
+      /*
+       * ⚠️ `auto=1` = 前端自己兜底刷的那次（快照旧了 / 流没活着）。
+       *    那种「顺手刷一下」**不该**顺便把成交 / 挂单 / 钱账本也全对一遍 ——
+       *    一台机器上开着好几个页面时，重启一次能瞬间叠出十几发强制补账。
+       *    强制补账只留给**用户主动**那一下（按钮 / 下拉）。
+       */
+      if (url.searchParams.get('auto') !== '1') {
+        wakeExchangeStream(key.id, '手动刷新', {force: true, skipSnapshot: true})
+      }
       return sendJson(res, 200, {
         account,
         noSnapshot: false,

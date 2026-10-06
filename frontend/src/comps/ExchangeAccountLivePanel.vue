@@ -18,6 +18,7 @@ import ExchangeAccountBoard from './ExchangeAccountBoard.vue'
 import TransferSheet from './TransferSheet.vue'
 import ReduceSheet from './ReduceSheet.vue'
 import type {PositionRef} from './ExchangeAccountBoard.vue'
+import {usePullRefresh} from '../pull-refresh'
 import {testOrder} from '../settings'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
@@ -524,37 +525,67 @@ async function loadSnapshots(): Promise<void> {
   parts.value = next
   partReasons.value = nextReason
   rebuild()
-  if (stale) void doRefresh()
+  if (stale) void doRefresh(true)
 }
 
 /**
  * 去拉一次新的（慢，~2 秒/套）。⚠️ 并发保护：SSE 和自动刷新可能同时想刷。
  * 多套时**串行**刷（并发打交易所容易被限频）。
  */
-async function doRefresh(): Promise<void> {
+/**
+ * 上一次「用户手动刷新」的时间 —— **前端再防一道抖**（后端另有一道，见 `FORCED_MIN_MS`）。
+ *
+ * ⚠️ 用户要求：「不是每次刷新都要请求接口，要限流节流防抖」。下拉/按钮连点、
+ *    手指抖动都算一次手势，别让它们变成一串请求打交易所。
+ */
+let lastManualAt = 0
+const MANUAL_MIN_MS = 1500
+
+/**
+ * `auto = true` —— **前端自己兜底**触发的那次（快照旧了 / 流没活着 / 兜底定时器）。
+ * 这种「顺手刷一下」**不该**把成交 / 挂单 / 钱账本也全对一遍（那是用户主动刷新才做的事，
+ * 见 `wakeExchangeStream` 的 `force`）—— 用户明确说过「不是每次刷新都要请求接口」。
+ */
+async function doRefresh(auto = false): Promise<void> {
   if (refreshing.value) return
+  if (Date.now() - lastManualAt < MANUAL_MIN_MS) return
   const list = activeTargets.value
   if (!list.length) return
+  lastManualAt = Date.now()
   refreshing.value = true
   try {
     const next = {...parts.value}
     const nextReason = {...partReasons.value}
-    for (const k of list) {
-      try {
-        const r = await refreshExchangeOverview(k.id)
-        if (r.overview) {
-          next[k.id] = r.overview
-          delete nextReason[k.id]
-          snapAt = {...snapAt, [k.id]: Date.now()}
-        } else if (r.reason) {
-          nextReason[k.id] = r.reason
-          delete next[k.id]
-        }
-      } catch (e) {
-        if (isAuthError(e)) return
-        err.value = `刷新失败：${msg(e)}`
+    /*
+     * ★ 2026-10-06：**几套并发刷**（用户：「刷新图标为什么转那么久」）。
+     *
+     * 原来是 `for` 一套一套 await：一次刷新经出口隧道本来就要 0.4~0.7 秒
+     * （后端那边也改成四路并发了，见 `fetchExchangeOverview`），
+     * 两套串起来就是 1.5 秒、三套 2 秒多 —— 转圈转的就是这段。
+     * 几套之间**互不依赖**（各自一份快照），并发出去总耗时 = 最慢那一套。
+     */
+    const results = await Promise.allSettled(
+      list.map(k => refreshExchangeOverview(k.id, auto).then(r => ({k, r})))
+    )
+    let authDead = false
+    for (const item of results) {
+      if (item.status === 'rejected') {
+        if (isAuthError(item.reason)) authDead = true
+        else err.value = `刷新失败：${msg(item.reason)}`
+        continue
+      }
+      const {k, r} = item.value
+      if (r.overview) {
+        next[k.id] = r.overview
+        delete nextReason[k.id]
+        snapAt = {...snapAt, [k.id]: Date.now()}
+      } else if (r.reason) {
+        nextReason[k.id] = r.reason
+        delete next[k.id]
       }
     }
+    /* ⚠️ 认不出身份就别往下写状态了：调用方会去重新登录（跟原来 `return` 同一个意思） */
+    if (authDead) return
     parts.value = next
     partReasons.value = nextReason
     rebuild()
@@ -564,6 +595,19 @@ async function doRefresh(): Promise<void> {
     refreshing.value = false
   }
 }
+
+/*
+ * 移动端下拉刷新（用户：「移动端做下滑刷新」）—— 见 `pull-refresh.ts` 里那段说明：
+ * 它是「后台对账降频」的前提，因为给得手动兜底，才敢把自动请求砍下来。
+ * 触发的就是上面那个 `doRefresh()`（跟 ⟳ 按钮同一条路，一样有防抖）。
+ */
+const {
+  pull: pullY,
+  state: pullState,
+  onTouchStart: onPullStart,
+  onTouchMove: onPullMove,
+  onTouchEnd: onPullEnd
+} = usePullRefresh(() => doRefresh())
 
 /** 成交账本：几套合起来、按时间倒序（多套时每条标出是哪套的） */
 async function loadFills(): Promise<void> {
@@ -964,7 +1008,7 @@ function startSnapTimer(): void {
       if (streamAlive(k.id) && deaf.value[k.id] !== true) return false
       return now - (snapAt[k.id] ?? 0) > SNAP_FRESH_MS
     })
-    if (need) void doRefresh()
+    if (need) void doRefresh(true)
   }, SNAP_CHECK_MS)
 }
 
@@ -1006,7 +1050,32 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="live">
+  <div
+    class="live"
+    @touchstart.passive="onPullStart"
+    @touchmove.passive="onPullMove"
+    @touchend.passive="onPullEnd"
+    @touchcancel.passive="onPullEnd"
+  >
+    <!--
+      下拉刷新的指示条：**绝对定位、不占位**（拉的时候页面不会跳一下）。
+      三段文案 = 三种状态：还没拉到阈值 / 松开就刷 / 正在刷。
+    -->
+    <div
+      class="pull"
+      :class="{on: pullState !== 'idle', busy: pullState === 'busy'}"
+      :style="{transform: `translate(-50%, ${pullY}px)`}"
+      aria-hidden="true"
+    >
+      <span class="pull-dot" />
+      {{
+        pullState === 'busy'
+          ? '刷新中…'
+          : pullState === 'ready'
+            ? '松开刷新'
+            : '下拉刷新'
+      }}
+    </div>
     <p v-if="err" class="err">{{ err }}</p>
 
     <section v-if="!keys.length && !loading" class="panel empty">
@@ -1082,6 +1151,56 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* 下拉指示条挂在它上面（absolute），所以它得是定位祖先 */
+  position: relative;
+}
+/*
+ * 下拉刷新指示条（移动端）。
+ * ⚠️ `translate(-50%, Npx)` 里的 N 由脚本给（阻尼后的拖动距离）——
+ *    初始 `translate(-50%, 0)` 时它还压在顶部内容上，所以平时 `opacity: 0`
+ *    并且 `pointer-events: none`（绝不挡点击）。
+ */
+.pull {
+  position: absolute;
+  top: -34px;
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--fg-dim, #8b93a1);
+  background: var(--card, #171b22);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 35%);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.pull.on {
+  opacity: 1;
+}
+.pull-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent, #4c8dff);
+}
+.pull.busy .pull-dot {
+  animation: pull-spin 0.9s linear infinite;
+}
+@keyframes pull-spin {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+  100% {
+    opacity: 1;
+  }
 }
 .spacer {
   flex: 1 1 auto;

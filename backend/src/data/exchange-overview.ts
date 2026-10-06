@@ -284,8 +284,43 @@ export async function fetchExchangeOverview(
     throw new Error(`「${c.exchange}」不支持币安的合约账户接口（暂只接了币安）`)
   }
 
+  /*
+   * ★ 2026-10-06：**四路并发**（用户：「刷新图标为什么转那么久」）。
+   *
+   * 原来是 account → positionRisk → C2C → 现货 **一路 await 下来**，经出口隧道
+   * 一个来回 0.1~0.7 秒，实测串行 ≈1.8 秒、并发 364ms（`/tmp` 探针量过每一路）：
+   *
+   * | 单步 | 耗时 |
+   * |---|---|
+   * | `/fapi/v2/account` | 135ms |
+   * | `positionRisk` | 459ms |
+   * | C2C `wallet/balance` | 166ms |
+   * | C2C 估值 `fetchTickers` | 308ms |
+   * | 现货 `/api/v3/account` | **710ms** |
+   *
+   * 这四路之间**没有任何依赖**（都只吃 `ex`）⇒ 并发出去总耗时 = 最慢的那一路。
+   * ⚠️ 两处口径**故意保持原样**：
+   *   · `positionRisk`（`fetchPositions`）失败**仍然让整次刷新失败** —— 不能悄悄
+   *     当成「没有持仓」，那会让界面显示成空仓；
+   *   · C2C / 现货 读不到只当 `null`（**不拖垮整页**，跟改之前一样）。
+   */
+  const [accRaw, rawPosRaw, c2cRes, spotRes] = await Promise.all([
+    accFn.call(ex),
+    ex.fetchPositions(),
+    fetchC2c(ex).then(
+      v => ({ok: true as const, v}),
+      () => ({ok: false as const, v: null})
+    ),
+    fetchSpot(ex).then(
+      v => ({ok: true as const, v}),
+      () => ({ok: false as const, v: null})
+    )
+  ])
+  const acc: any = accRaw
+  const c2c = c2cRes.ok ? c2cRes.v : null
+  const spot = spotRes.ok ? spotRes.v : null
+
   // ---- 合约账户 ----
-  const acc: any = await accFn.call(ex)
   const wallet = n(acc?.totalWalletBalance)
   const unrealized = n(acc?.totalUnrealizedProfit)
   const margin = n(acc?.totalMarginBalance)
@@ -300,8 +335,8 @@ export async function fetchExchangeOverview(
     // 零余额的行（普通账户里就只有一行 USDT）没必要留着
     .filter((a: FuturesAsset) => a.asset && (a.wallet !== 0 || a.available !== 0))
 
-  // ---- 持仓（走 positionRisk，见文件头 ②）----
-  const rawPos: any[] = (await ex.fetchPositions()) ?? []
+  // ---- 持仓（走 positionRisk，见文件头 ②；**跟上面三路并发**）----
+  const rawPos: any[] = rawPosRaw ?? []
   const positions: FuturesPosition[] = rawPos
     .map(mapPosition)
     .filter((p: PositionRow) => p.contracts !== 0 || p.notional !== 0)
@@ -319,23 +354,7 @@ export async function fetchExchangeOverview(
     }))
     .sort((a, b) => Math.abs(b.notional) - Math.abs(a.notional))
 
-  // ---- C2C（Funding）----
-  let c2c: ExchangeOverview['c2c'] = null
-  try {
-    c2c = await fetchC2c(ex)
-  } catch {
-    // C2C 拿不到不该拖垮整个页面：合约那边的数字照样显示
-    c2c = null
-  }
-
-  // ---- 现货（只 USDT）----
-  let spot: SpotWallet | null = null
-  try {
-    spot = await fetchSpot(ex)
-  } catch {
-    /* 没读权限 / 不是币安 ⇒ 这块就不显示 */
-    spot = null
-  }
+  /* C2C / 现货 已经在上面那四路并发里取回来了（失败当 null，不拖垮整页） */
 
   const longCount = positions.filter(p => p.side !== 'short').length
   return {

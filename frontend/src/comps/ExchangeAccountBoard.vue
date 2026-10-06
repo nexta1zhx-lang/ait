@@ -160,11 +160,34 @@ const ageText = computed(() => {
   const h = Math.floor(min / 60)
   return h < 24 ? `${h} 小时前` : `${Math.floor(h / 24)} 天前`
 })
-/** 超过 5 分钟就提示一下（快照 TTL 是 5 分钟） */
+/**
+ * 「这份快照有点老了」的提示阈值。
+ *
+ * ⚠️ 2026-10-06 从 5 分钟提到 **35 分钟**（用户问「资产旁边时间几分钟前是什么意思」）。
+ *    原因：后台对账已经分档了（有人看/没人看的账户采样间隔不同，最长 **30 分钟**，
+ *    睡着档 60 分钟），5 分钟这个阈值会让一个**完全健康但闲着**的账户一直黄着 ——
+ *    而它显示的持仓 / 盈亏其实是 WS 推送 + 本地标记价算的，一秒都在动。
+ *    35 分钟 = 「连着 4 轮以上都没采到」，那才是真该看一眼的。
+ */
+const STALE_AFTER_MS = 35 * 60 * 1000
 const stale = computed(() => {
   const t = props.data?.takenAt
   if (!t) return false
-  return Date.now() - new Date(t).getTime() > 5 * 60 * 1000
+  return Date.now() - new Date(t).getTime() > STALE_AFTER_MS
+})
+
+/**
+ * 「几分钟前」这颗标签的说明 —— **说清楚它到底指的是什么**，
+ * 不然很容易被当成「这个页面是几分钟前的」（用户就是这么问的）。
+ */
+const ageTitle = computed(() => {
+  const t = props.data?.takenAt
+  if (!t) return ''
+  return (
+    `余额快照采集于 ${bjTime(t)}\n` +
+    '持仓 / 盈亏 / 成交是推送的，实时；这个时间只是「余额这几项」最后一次问交易所的时间。\n' +
+    '手机上可以下拉刷新（立刻重采一次）。'
+  )
 })
 
 /* ---------------- ③ 多空分布 ---------------- */
@@ -451,7 +474,7 @@ const RANGES = [
           >
             划转
           </button>
-          <span class="age" :class="{stale}" :title="bjTime(data.takenAt)">
+          <span class="age" :class="{stale}" :title="ageTitle">
             {{ ageText }}
           </span>
           <!--
