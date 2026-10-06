@@ -1679,3 +1679,67 @@ s.wake('写操作', {skipOrders: true, force: true, skipIncome: true})
 
 **没有任何 `收到事件帧` = 事件真没到**（不是我们吞了）；有 `收到事件帧` 但账本没动，
 才轮到查我们自己的处理逻辑。
+
+## 25. 根因排查：`/ws/<listenKey>` 这条路上，币安**一个业务字节都不推**（2026-10-06 第二轮）
+
+用户：「不要模拟了，你用真的测」⇒ 下面全是真账户上的实测，不是推断。
+
+### 逐项排除（每一条都有可复现的观测）
+
+| 环节 | 观测 | 判定 |
+|---|---|---|
+| 代理 / TLS | 对端证书 `subject={"O":"Binance Holdings Limited","CN":"*.binance.com"}`、`issuer=DigiCert/GeoTrust` | **正常，没被中间人** |
+| 网络路径 | **同一个** `wsAgent()`、**同一个** host、只差 path 的 `/market/ws`：`654 帧 / 75.1 KB`；我们的 `/ws/<listenKey>`：`0 帧 / 0.3 KB`（= 只有握手） | **不是代理在丢帧** |
+| listenKey 接口 | `last_request_url = https://fapi.binance.com/fapi/v1/listenKey` | **打对了** |
+| listenKey 有效性 | `PUT` 续期成功并回同 key；`DELETE` 之后 `PUT` 报 `-1125 This listenKey does not exist` | **key 是真的、能删能续** |
+| 「谁抢了流」 | `DELETE` → **新建一把全新的 key**（`HC6TMFD52Tcb…`，没人抢、只有我们两条连接）→ 直连交易所打**真单**（`RLCUSDT sell 0.9`，`id=8381646990 status=closed`）⇒ **两条连接 0 帧** | **「本地 vs 线上抢同一把 key」被证伪** |
+| 事件真的发生了 | 真成交（上面那笔）+ 免费可逆的划转（`UMFUTURE_MAIN` / `MAIN_UMFUTURE`，tranId 有回执）+ 杠杆 10↔11 | 不是「没有事件」的问题 |
+| 什么是「订阅生效」 | 用**伪造的** key（64 个 `A`）连 `/ws/<listenKey>`：`open ✓` + 收到 ping + 0.3 KB + 0 帧 —— **跟真 key 一模一样** | 「连上 + 有 ping」**不能**作为订阅生效的证据 |
+| 我们这侧的静默丢失 | `ws.on('message')` 无 `.catch`、`onMessage` 无 try/catch | 已堵（见 §24），且这一轮**没有**任何 `badFrames`/未捕获日志 ⇒ 不是我们吞了 |
+
+**最关键的一条**：删掉 key 的那一刻，本地服务**正连着那把 key**，币安本该立刻推
+`listenKeyExpired`（官方原文：*"When the `listenKey` used for the user data stream turns expired,
+this event will be pushed"*）——**日志里一条都没有**（`收到事件帧 / 订单事件 / listenKey 过期` 累计 0 行）。
+
+⇒ 结论：**在我们这个出口上，`wss://fstream.binance.com/ws/<listenKey>` 连上了、被 ping 了，
+但币安不往里推任何业务帧（连 `listenKeyExpired` 都不推）**；跟「谁持有 listenKey」无关。
+
+### 复验方法（换出口）
+
+`scripts/userstream-probe.mjs`（自包含，只用项目既有的 `ccxt` / `ws` / `pg`）：
+
+```bash
+KEY_ID=7 node scripts/userstream-probe.mjs           # 读库里那把 key 的凭据
+KEY_ID=9 node scripts/userstream-probe.mjs           # 另一套
+API_KEY=… API_SECRET=… node scripts/userstream-probe.mjs
+```
+
+它做四件事：`POST /fapi/v1/listenKey` → 连两条 `/ws/<listenKey>` →
+造一个**免费可逆**的真事件（合约钱包 ↔ 现货 划转 1 USDT）→ 打印每一条收到的帧。
+
+- 出现 `★★★ 事件帧` ⇒ 这条出口能收到，把用户数据流放在这台机器上就对了；
+- 只有 `ping`、收到 ≈0.3 KB、0 帧 ⇒ 这条出口同样收不到，**不是抢流的问题**。
+
+⚠️ 老脚本 `backend/src/scripts/probe-ws.ts`（M0）的结论那一行写的是
+「期间事件: 0 条（**账户没动静就是 0 条，正常**）」—— 它**不造事件**，所以永远验不出这件事，
+这也是「WS 零帧」拖到现在才被钉死的原因。
+
+### 顺带确认的两条死路（省得以后再试）
+
+| 路 | 实测结果 |
+|---|---|
+| 现货 listenKey（`POST /api/v3/userDataStream`） | **410 Gone**（币安已下架，换成 WS API 了） |
+| 合约 WS API（`wss://ws-fapi.binance.com/ws-fapi/v1`） | HMAC key 不能用：`session.logon` → `-4056 HMAC_SHA256 API key is not supported`；`userDataStream.subscribe.signature` → `-5000 Method … is invalid`。要走这条得单独建一把 **Ed25519** key |
+
+### 可选方案（等复验结果再定）
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| **A 单一所有者 + 本地靠兜底**（现状已够用） | 只有线上连用户数据流；本地不抢，实时性靠：写操作强制对平（**3 秒**，实测）+ 打开页面/下拉刷新对平 + 5 分钟成交对账 | 本地看到「币安 App 上的操作」最慢 5 分钟 |
+| **B 谁持有谁转发** | 持有方收到事件后，经内部通道（Redis / SSE / HTTP）把**事件内容**推给另一方；另一方**不再 POST listenKey、不再连 WS** | 要加一条内部通道 |
+| **C 子账户** | 本地用**子账户**（子账户有自己的 listenKey，与主账户互不影响） | 要开子账户、单独配 key |
+
+⚠️ **listenKey 是「账户级唯一」**（官方原文：*"If the account has an active `listenKey`, that
+`listenKey` will be returned and its validity will be extended for 60 minutes"*）——
+所以「再加一把 API Key 给本地用」**拿到的还是同一把 key**（本轮实测：新 key 读到同一个钱包 9.9877、
+POST 回同一把 `1maoUqh8…`）⇒ **独立流只能靠独立账户（子账户）**。
