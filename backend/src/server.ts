@@ -106,7 +106,6 @@ import {
 import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
 import {listPositionHistory} from './data/position-history'
 import {RateBudgetError, takeWeight} from './util/rate-budget'
-import {createTtlCache} from './util/ttl-cache'
 import {
   cancelOrphanOrders,
   cancelTradeOrder,
@@ -133,9 +132,11 @@ import {
   listCurve,
   listFills,
   listIncome,
+  listOpenOrdersDb,
   saveSnapshot
 } from './db/exchange-store'
 import {
+  reconcileKeyOrders,
   startExchangeStreams,
   startSnapshotSampler,
   stopExchangeStreams,
@@ -604,36 +605,6 @@ const exchangeCredsOf = (k: ExchangeKey): ExchangeCredentials => ({
 async function chargeExchange(weight: number, tag: string): Promise<void> {
   await takeWeight(weight, tag)
 }
-
-/**
- * 挂单列表对外的字段 —— 就是 `data/exchange-trade.ts` 的 `OpenOrderRow`。
- *
- * ★ 2026-10-06 统一：以前这里只回七个字段、且取数走的是**有缺陷的**
- *   `exchange-account.fetchOpenOrders`（只拉普通挂单，**看不到止盈/止损**）。
- *   用户实测：同一账户同一时刻，账户页挂单 0 条、K 线页 2 条 —— 就是两个取数方。
- *   现在两边都走 `listOpenOrders`（普通 + Algo 条件单），字段也一并带全，
- *   `stopPrice` / `posSide` / `reduceOnly` 前端画止盈止损要靠它们。
- */
-type OpenOrderLite = OpenOrderRow
-
-/**
- * 挂单列表的**短缓存**（2026-10-06，改造 P3 第二步）。
- *
- * ⚠️ 为什么这个特别值得缓存：接口**不带 symbol** ⇒ 币安那边 **40 权重/条**
- *    （带 symbol 才 1）。而「交易所账户」页每切一次账户就打一次，
- *    两套账户点几下就是几百权重 —— 限流又是按**出口 IP** 算、全服务器共用一份预算。
- *
- * TTL **30 秒**（2026-10-06 从 10 秒放宽）：挂单是**用户自己动手**才会变的
- * （下单 / 撤单都会 `bump()`），30 秒里被别的东西改掉的可能性很小，
- * 而不带 symbol 查一次是 40 权重 + 经代理一个来回。
- * 过期后走 **stale-while-revalidate**（见路由那里）：先回旧的、后台换新的，
- * 所以放宽 TTL 不会让界面变僵。
- */
-const OPEN_ORDERS_TTL_MS = 30_000
-const openOrdersCache = createTtlCache<OpenOrderLite[]>({
-  ttlMs: OPEN_ORDERS_TTL_MS,
-  tag: 'openOrders'
-})
 
 function fail(res: http.ServerResponse, tag: string, e: unknown): void {
   const err = e as Error
@@ -1710,6 +1681,8 @@ async function handleExchangeStream(
     }
     if (ev.type === 'fill') return send('fill', ev.fill)
     if (ev.type === 'income') return send('income', {added: ev.added})
+    /* 挂单变了 → 前端重读一次（**本地读**，毫秒级，见 docs 第 16 节） */
+    if (ev.type === 'orders') return send('orders', {reason: ev.reason})
     if (ev.type === 'health') return send('health', {deaf: ev.deaf})
     return send('backfill', {added: ev.added})
   })
@@ -3346,14 +3319,18 @@ async function route(
   }
 
   /*
-   * 当前挂单 —— **按需打交易所**，不进快照：
-   * 挂单是秒级变化的东西，存下来只会是过期数据（方案里的「实时层」）。
+   * 当前挂单 —— ★ 2026-10-06 改成**本地读**（用户原话：「挂单不是秒级查询啊，
+   * 有变动才改，其余存库不就行了」）。
    *
-   * ★ 2026-10-06 加 **stale-while-revalidate**（用户："我点击交易所界面，订单过 2 秒才出来"）：
-   *   手上有旧的（哪怕刚过期）就**立刻回旧的**，同时后台刷一发，响应里带 `stale: true`
-   *   让前端过一秒再问一次（那时缓存已经是新的，命中即返回）。
-   *   ⇒ 冷启动那一发还是要打交易所（这个躲不掉），**之后每次点开都是秒出**。
-   *   失败也回 200 + `error`，不让整页空着（跟老接口同一个风格）。
+   * 为什么改：挂单的**变动**币安会经用户数据流主动推（`ORDER_TRADE_UPDATE`），
+   * 根本不用轮询；而原来这里每次都现打一次「不带交易对」的挂单查询 ——
+   * 币安那边 **40 权重** + 一个来回（经隧道 0.7~1.2 秒）：
+   *   · 点开账户页要等 2 秒（用户报的）；
+   *   · 别的 tab / 别的页面想看还得各自再打一次；
+   *   · 权重全服务器共用，几个页面点几下就是几百。
+   *
+   * 现在：读库（毫秒级）+ SSE `orders` 事件推实时变更；
+   * REST 只在对账时打（连上 / 重连 / 每 2 分钟，见 `reconcileOrders`）。
    */
   if (p === '/api/exchange/open-orders' && method === 'GET') {
     const idRaw = num(url.searchParams.get('id'))
@@ -3367,35 +3344,32 @@ async function route(
         error: '这一套还没填 API Key'
       })
     }
-    /* 拉一发的动作（`load()` 给缓存和后台刷新共用） */
-    const load = async (): Promise<OpenOrderLite[]> => {
-      /* 40 权重只在这一发里付（TTL 内重复请求全部命中缓存） */
-      await chargeExchange(40, 'openOrders')
-      return listOpenOrders(exchangeCredsOf(key))
-    }
     try {
-      const cached = openOrdersCache.peek(key.id)
-      if (cached) {
-        const age = Date.now() - cached.at
-        if (age >= OPEN_ORDERS_TTL_MS) {
-          /* 过期了：后台刷（`get` 内部有单飞，同时来几个请求也只会打一发） */
-          console.log(`[exch:${key.id}] 挂单用旧值先回（${Math.round(age / 1000)} 秒前），后台刷新`)
-          void openOrdersCache.get(key.id, load).catch(() => undefined)
-        }
-        return sendJson(res, 200, {
-          openOrders: cached.value,
-          stale: age >= OPEN_ORDERS_TTL_MS,
-          error: null
-        })
-      }
-      const rows = await openOrdersCache.get(key.id, load)
-      return sendJson(res, 200, {openOrders: rows, stale: false, error: null})
-    } catch (e) {
+      const rows = await listOpenOrdersDb(me.id, key.id)
+      /*
+       * ⚠️ 形状必须跟原来那条接口**逐字一致**（前端 / K 线都直接吃它）：
+       *    `id` / `price` / `stopPrice` / `time` 这些字段名一个都不能改。
+       */
       return sendJson(res, 200, {
-        openOrders: null,
+        openOrders: rows.map(o => ({
+          id: o.orderId,
+          symbol: o.symbol,
+          side: o.side,
+          type: o.type,
+          posSide: o.posSide,
+          price: o.price,
+          stopPrice: o.stopPrice,
+          amount: o.amount,
+          filled: o.filled,
+          reduceOnly: o.reduceOnly,
+          time: o.time
+        })),
         stale: false,
-        error: e instanceof RateBudgetError ? e.message : humanize(e)
+        source: 'db',
+        error: null
       })
+    } catch (e) {
+      return fail(res, 'exchange/open-orders', e)
     }
   }
 
@@ -3536,7 +3510,7 @@ async function route(
         }
       )
       /* 真单才会真的多/少一张挂单；测试单没进撮合，不用作废缓存 */
-      if (!test) openOrdersCache.bump(key.id)
+      if (!test) void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, test, order, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
@@ -3696,7 +3670,7 @@ async function route(
           test: body.test !== false
         }
       )
-      if (r.test === false) openOrdersCache.bump(key.id)
+      if (r.test === false) void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
@@ -3733,7 +3707,7 @@ async function route(
         str(body.orderId, '')
       )
       /* 撤单没有测试版：撤了就是真撤了，缓存立刻作废（别让那条线还画着） */
-      openOrdersCache.bump(key.id)
+      void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
@@ -3764,7 +3738,7 @@ async function route(
       await chargeExchange(symbolQ ? 1 : 40, 'cleanupOrders')
       const r = await cancelOrphanOrders(exchangeCredsOf(key), symbolQ)
       /* 撤了一批 → 缓存作废（不然「撤了还在」又要被报一遍） */
-      openOrdersCache.bump(key.id)
+      void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {
@@ -3811,7 +3785,7 @@ async function route(
         body.symbol ? {symbol: str(body.symbol, 'BTCUSDT'), side, pct} : undefined,
         test
       )
-      if (!test) openOrdersCache.bump(key.id)
+      if (!test) void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, test, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})

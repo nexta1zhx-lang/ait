@@ -543,3 +543,146 @@ export async function latestSnapshot(
     err: row.err === null || row.err === undefined ? null : String(row.err)
   }
 }
+
+/* ---------------- 当前挂单（exchange_open_orders，2026-10-06） ---------------- */
+
+/** 一条挂单（对外形状跟 `data/exchange-trade.ts` 的 `OpenOrderRow` 对齐） */
+export interface OpenOrderInput {
+  orderId: string
+  /** 币安原始符号（`1000BONKUSDT`） */
+  symbol: string
+  side: string
+  /** 币安原始类型（`LIMIT` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` …） */
+  type: string
+  posSide: string
+  price: number | null
+  stopPrice: number | null
+  amount: number
+  filled: number
+  reduceOnly: boolean
+  /** 下单时间（毫秒） */
+  time: number
+  raw?: unknown
+}
+
+/**
+ * 写 / 更新一条挂单（幂等，靠 `unique(key_id, order_id)`）。
+ *
+ * 两个入口都会调它：① WS 的 `ORDER_TRADE_UPDATE`（变动时的秒级路径）；
+ * ② REST 对账（兜底，把交易所真实那一份盖过来）。
+ */
+export async function upsertOpenOrder(
+  userId: number,
+  keyId: number,
+  o: OpenOrderInput
+): Promise<void> {
+  await query(
+    `INSERT INTO exchange_open_orders
+       (user_id, key_id, order_id, symbol, side, type, pos_side, price, stop_price,
+        amount, filled, reduce_only, ts, seen_at, raw)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now(), $14)
+     ON CONFLICT (key_id, order_id) DO UPDATE SET
+       symbol      = EXCLUDED.symbol,
+       side        = EXCLUDED.side,
+       type        = EXCLUDED.type,
+       pos_side    = EXCLUDED.pos_side,
+       price       = EXCLUDED.price,
+       stop_price  = EXCLUDED.stop_price,
+       amount      = EXCLUDED.amount,
+       filled      = EXCLUDED.filled,
+       reduce_only = EXCLUDED.reduce_only,
+       ts          = EXCLUDED.ts,
+       seen_at     = now(),
+       raw         = EXCLUDED.raw`,
+    [
+      userId,
+      keyId,
+      o.orderId,
+      o.symbol,
+      o.side,
+      o.type,
+      o.posSide,
+      o.price,
+      o.stopPrice,
+      o.amount,
+      o.filled,
+      o.reduceOnly,
+      new Date(o.time),
+      o.raw ?? null
+    ]
+  )
+}
+
+/** 删掉一条挂单（成交 / 撤单 / 过期 / 被拒）。返回是否真的删掉了 */
+export async function deleteOpenOrder(
+  keyId: number,
+  orderId: string
+): Promise<boolean> {
+  const rows = await query<Record<string, unknown>>(
+    `DELETE FROM exchange_open_orders WHERE key_id = $1 AND order_id = $2
+     RETURNING order_id`,
+    [keyId, orderId]
+  )
+  return rows.length > 0
+}
+
+/**
+ * 用 REST 查到的那一份**整体替换**某套 Key 的挂单（对账用）。
+ *
+ * ⚠️ 必须「**先全部标记、再删没见到的**」，不能先 `DELETE` 再插 ——
+ *    中途失败会留下一个空列表，界面上就成了「一条挂单都没有」（比旧数据糟得多）。
+ *    这里用一个事务：插/更新见到的 → 删掉本轮没见到的 → 一起提交。
+ * 返回 `{added, removed}`（有没有变化，调用方好决定要不要推 SSE）。
+ */
+export async function replaceOpenOrders(
+  userId: number,
+  keyId: number,
+  list: OpenOrderInput[]
+): Promise<{added: number; removed: number}> {
+  const before = await query<{order_id: string}>(
+    `SELECT order_id FROM exchange_open_orders WHERE key_id = $1`,
+    [keyId]
+  )
+  const had = new Set(before.map(r => String(r.order_id)))
+  for (const o of list) await upsertOpenOrder(userId, keyId, o)
+  const now = new Set(list.map(o => o.orderId))
+  const gone = [...had].filter(id => !now.has(id))
+  if (gone.length) {
+    await query(
+      `DELETE FROM exchange_open_orders
+        WHERE key_id = $1 AND order_id = ANY($2::text[])`,
+      [keyId, gone]
+    )
+  }
+  const added = [...now].filter(id => !had.has(id)).length
+  return {added, removed: gone.length}
+}
+
+/** 某套 Key 当前挂着的单（**本地读**，毫秒级，不打交易所） */
+export async function listOpenOrdersDb(
+  userId: number,
+  keyId: number
+): Promise<OpenOrderInput[]> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT order_id, symbol, side, type, pos_side, price, stop_price,
+            amount, filled, reduce_only, ts
+       FROM exchange_open_orders
+      WHERE user_id = $1 AND key_id = $2
+      ORDER BY ts DESC`,
+    [userId, keyId]
+  )
+  return rows.map(r => ({
+    orderId: String(r.order_id ?? ''),
+    symbol: String(r.symbol ?? ''),
+    side: String(r.side ?? ''),
+    type: String(r.type ?? ''),
+    posSide: String(r.pos_side ?? 'BOTH'),
+    price: r.price === null || r.price === undefined ? null : num(r.price),
+    stopPrice:
+      r.stop_price === null || r.stop_price === undefined ? null : num(r.stop_price),
+    amount: num(r.amount),
+    filled: num(r.filled),
+    reduceOnly: r.reduce_only === true,
+    time: r.ts ? new Date(String(r.ts)).getTime() : 0
+  }))
+}

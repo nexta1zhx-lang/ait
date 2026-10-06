@@ -501,6 +501,39 @@ CREATE TABLE IF NOT EXISTS exchange_fills (
 CREATE INDEX IF NOT EXISTS exchange_fills_user_idx ON exchange_fills (user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, symbol, ts DESC);
 
+-- 当前挂单（2026-10-06，用户原话：「挂单不是秒级查询啊，有变动才改，其余存库不就行了」）。
+--
+-- ★ 为什么从「按需打交易所」改成「存库」：
+--   · 挂单的**变动**币安会经用户数据流主动推（ORDER_TRADE_UPDATE 的 NEW / CANCELED /
+--     EXPIRED / FILLED），根本不用轮询；
+--   · 原来每次点开账户页都要现打一次「不带交易对」的挂单查询 —— 币安那边 **40 权重**
+--     且要等一个来回（经隧道 0.7~1.2 秒），所以「点开等 2 秒」；
+--   · 别的页面 / 别的 tab 想看还得各自再打一次。
+--   存下来之后：前端拿到的是**本地读**（毫秒级），实时变更走 SSE 推。
+--   REST 只在对不上时兜底（连上 / 重连 / 定期），跟成交账本一个思路。
+CREATE TABLE IF NOT EXISTS exchange_open_orders (
+  id          BIGSERIAL   PRIMARY KEY,
+  user_id     BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  key_id      BIGINT      NOT NULL REFERENCES user_exchange_keys (id) ON DELETE CASCADE,
+  order_id    TEXT        NOT NULL,               -- 币安的 orderId，去重靠它
+  symbol      TEXT        NOT NULL,               -- 币安原始符号（1000BONKUSDT）
+  side        TEXT        NOT NULL,               -- buy / sell
+  type        TEXT        NOT NULL,               -- LIMIT / STOP_MARKET / TAKE_PROFIT_MARKET …
+  pos_side    TEXT        NOT NULL DEFAULT 'BOTH',
+  price       NUMERIC(24,8),                      -- 委托价（市价 / 条件单没有 ⇒ NULL）
+  stop_price  NUMERIC(24,8),                      -- 触发价（止盈止损才有）
+  amount      NUMERIC(24,8) NOT NULL DEFAULT 0,
+  filled      NUMERIC(24,8) NOT NULL DEFAULT 0,
+  reduce_only BOOLEAN     NOT NULL DEFAULT false,
+  ts          TIMESTAMPTZ NOT NULL,               -- 下单时间（币安给的）
+  seen_at     TIMESTAMPTZ NOT NULL DEFAULT now(), -- 我们最后一次确认它还挂着的时间
+  raw         JSONB,
+  UNIQUE (key_id, order_id)
+);
+CREATE INDEX IF NOT EXISTS exchange_open_orders_key_idx ON exchange_open_orders (key_id, ts DESC);
+-- 定期对账时按 seen_at 判断哪些是「这轮没见到、已经不在了」的
+CREATE INDEX IF NOT EXISTS exchange_open_orders_seen_idx ON exchange_open_orders (key_id, seen_at);
+
 -- 钱账本：**交易所自己那本账**（GET /fapi/v1/income 的每一行）。
 -- 2026-10-06 加，起因（用户原话）：「数据要统一用一套」「资金费又算吗」。
 --

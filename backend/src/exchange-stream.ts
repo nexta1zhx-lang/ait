@@ -37,13 +37,32 @@ import {
   type LivePosition
 } from './data/position-cache'
 import {
+  deleteOpenOrder,
+  replaceOpenOrders,
   saveSnapshot,
   upsertFill,
   upsertIncome,
+  upsertOpenOrder,
   type FillInput,
-  type IncomeInput
+  type IncomeInput,
+  type OpenOrderInput
 } from './db/exchange-store'
+import {listOpenOrders} from './data/exchange-trade'
 import {query, queryOne} from './db/client'
+import {takeWeight} from './util/rate-budget'
+
+/**
+ * 动手打交易所之前先跟**全局权重预算**报一声。
+ * ⚠️ 预算必须全局：币安按**出口 IP** 算权重，一台服务器一个出口给所有用户共用。
+ */
+const chargeWeight = (weight: number, tag: string): Promise<void> =>
+  takeWeight(weight, tag)
+
+/** 数字兜底：拿不到 / 不是数就给 `null`（**别给 0** —— 0 会被当成「委托价就是 0」） */
+function numOrNull(v: unknown): number | null {
+  const x = Number(v)
+  return Number.isFinite(x) && x !== 0 ? x : null
+}
 
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
@@ -73,6 +92,14 @@ const WS_SNAPSHOT_GAP_SEC = 20
 const FILL_RECONCILE_MS = 60 * 1000
 /** 每次定期对账往前看多久（重叠靠 `unique(key_id, trade_id)` 去重） */
 const FILL_SAFETY_MS = 24 * 3600 * 1000
+/**
+ * **定期对账挂单**的间隔。
+ *
+ * 挂单的**变动**币安会经用户数据流主动推，所以这个只是兜底（推的事件丢了、
+ * 或者进程重启期间的变化）。**不带交易对查一次是 40 权重**，所以别太勤：
+ * 2 分钟一轮 = 20 权重/分钟，在全服务器 1200/分钟的预算里可以忽略。
+ */
+const ORDERS_RECONCILE_MS = 2 * 60 * 1000
 /**
  * **定期对账钱账本**（`/fapi/v1/income`）的间隔。
  *
@@ -186,6 +213,15 @@ export type ExchangeEvent =
   | {type: 'backfill'; added: number}
   /** 钱账本（income）有新行 —— 前端「盈亏」tab 重拉一次 */
   | {type: 'income'; added: number}
+  /**
+   * **挂单变了**（挂上 / 撤了 / 成交了 / 过期了）。
+   *
+   * ★ 2026-10-06 加，用户原话：「挂单不是秒级查询啊，有变动才改，其余存库不就行了」——
+   *   现在挂单**存库**（`exchange_open_orders`），WS 的 `ORDER_TRADE_UPDATE`
+   *   负责秒级改，REST 只做兜底对账；前端拿的是本地读（毫秒级）。
+   *   前端收到这条就重读一次（本地，几乎零成本）。
+   */
+  | {type: 'orders'; reason: string}
   | {type: 'health'; deaf: boolean}
 
 /** key_id → 订阅者 */
@@ -288,9 +324,10 @@ class KeyStream {
   private badFrames = 0
   /** 当前是否处于「哑了」状态（用来只在翻转时发一次通知） */
   private deaf = false
-  /** 定期对账的两个水位 */
+  /** 定期对账的三个水位 */
   private lastFillReconcileAt = 0
   private lastIncomeReconcileAt = 0
+  private lastOrdersReconcileAt = 0
   /** 定期对账 / 健康检查的定时器 */
   private reconTimer: NodeJS.Timeout | null = null
   private healthTimer: NodeJS.Timeout | null = null
@@ -341,6 +378,7 @@ class KeyStream {
          */
         this.lastFillReconcileAt = 0
         this.lastIncomeReconcileAt = 0
+        this.lastOrdersReconcileAt = 0
         this.reconTimer = setInterval(
           () => void this.reconcileTick(),
           FILL_RECONCILE_MS
@@ -418,6 +456,12 @@ class KeyStream {
   private async reconcile(source: 'boot' | 'ws'): Promise<void> {
     await this.snapshot(source, WS_SNAPSHOT_GAP_SEC)
     await this.backfillFills()
+    /*
+     * 挂单也要对一次：断线那段 / 进程没起来那段的挂单变动是收不到的
+     * （WS 事件只在连着的时候有）。⚠️ 放在最后 —— 它 40 权重，别挡着快照和成交。
+     */
+    this.lastOrdersReconcileAt = Date.now()
+    await this.reconcileOrders(source)
   }
 
   /**
@@ -596,6 +640,94 @@ class KeyStream {
    * ⚠️ `NEW` / `CANCELED` / `EXPIRED` 只是**挂单状态变化**，不是成交 ——
    * 方案里定的「只存成交」，所以只处理 `x=TRADE` / `X=FILLED` 且带 tradeId 的。
    */
+  /* ---------------- 挂单（存库 + WS 实时维护 + REST 兜底对账） ---------------- */
+
+  /**
+   * 一条 `ORDER_TRADE_UPDATE` → 更新库里的挂单。
+   *
+   * ⚠️ 只有**真的改了**才推 SSE（`deleteOpenOrder` 会告诉我们原本在不在），
+   *    不然「部分成交」那种高频事件会把前端刷爆。
+   */
+  private async syncOrderFromEvent(o: any): Promise<void> {
+    const orderId = String(o?.i ?? '')
+    const status = String(o?.X ?? '').toUpperCase()
+    if (!orderId || !status) return
+    try {
+      if (status === 'NEW' || status === 'PARTIALLY_FILLED') {
+        await upsertOpenOrder(this.row.user_id, this.row.id, {
+          orderId,
+          /* ⚠️ 用 `s`（币安原始符号），跟账本 / 接口一个口径 */
+          symbol: String(o?.s ?? '').toUpperCase(),
+          side: String(o?.S ?? '').toLowerCase(),
+          type: String(o?.o ?? '').toUpperCase(),
+          posSide: String(o?.ps ?? 'BOTH').toUpperCase(),
+          price: numOrNull(o?.p),
+          stopPrice: numOrNull(o?.sp),
+          amount: Number(o?.q ?? 0),
+          filled: Number(o?.z ?? 0),
+          reduceOnly: o?.R === true,
+          time: Number(o?.T ?? 0) || Date.now(),
+          raw: o
+        })
+        emit(this.row.id, {type: 'orders', reason: `ws:${status}`})
+      } else {
+        const removed = await deleteOpenOrder(this.row.id, orderId)
+        if (removed) emit(this.row.id, {type: 'orders', reason: `ws:${status}`})
+      }
+    } catch (e) {
+      console.warn(`${this.tag} 更新挂单失败：${(e as Error).message.slice(0, 140)}`)
+    }
+  }
+
+  /**
+   * REST **对账**挂单（兜底）：拿交易所那一份替换本地。
+   *
+   * 什么时候跑：连上 / 重连（`reconcile()`）、启动后第一轮、以及每 2 分钟一轮。
+   * ⚠️ 带不带 symbol 差 40 倍权重（不带 = 40），所以**不能勤**；
+   *    但正因为挂单现在有 WS 那条路，这里本来就只需要兜底。
+   */
+  /** 给写操作用的（`reconcileKeyOrders`）—— 同一个动作，只是对外的口子 */
+  async reconcileOrdersForced(): Promise<void> {
+    await this.reconcileOrders('write')
+  }
+
+  private async reconcileOrders(reason: string): Promise<void> {
+    try {
+      await chargeWeight(40, 'openOrders')
+      const rows = await listOpenOrders(credsOf(this.row))
+      const list: OpenOrderInput[] = rows.map(r => ({
+        orderId: r.id,
+        symbol: r.symbol,
+        side: r.side,
+        type: r.type,
+        posSide: r.posSide,
+        price: r.price,
+        stopPrice: r.stopPrice,
+        amount: r.amount,
+        filled: r.filled,
+        reduceOnly: r.reduceOnly,
+        time: r.time || Date.now(),
+        raw: r
+      }))
+      const {added, removed} = await replaceOpenOrders(
+        this.row.user_id,
+        this.row.id,
+        list
+      )
+      if (added || removed) {
+        console.log(
+          `${this.tag} 挂单对账（${reason}）：+${added} -${removed}，现存 ${list.length} 条`
+        )
+        emit(this.row.id, {type: 'orders', reason: `rest:${reason}`})
+      }
+    } catch (e) {
+      /* 对账失败不清库（`replaceOpenOrders` 也不会在中途清），下一轮再说 */
+      console.warn(
+        `${this.tag} 挂单对账失败（${reason}）：${(e as Error).message.slice(0, 140)}`
+      )
+    }
+  }
+
   /**
    * 有成交落地 ⇒ 持仓集合可能变了 ⇒ 顺手对齐一次。
    *
@@ -628,6 +760,14 @@ class KeyStream {
     console.log(
       `${this.tag} 订单事件 s=${o?.s} x=${o?.x} X=${o?.X} t=${tradeId} l=${o?.l}`
     )
+    /*
+     * ★ 先处理**挂单生命周期**（2026-10-06）：挂单存库、由这条事件流实时维护。
+     *   `X` = 订单状态：
+     *     NEW / PARTIALLY_FILLED  → 还挂着（部分成交也算挂着，量要更新）
+     *     FILLED / CANCELED / EXPIRED / REJECTED → 不在了
+     *   ⚠️ 这一步**不受 `t`/`l` 的约束**：挂单事件本来就没有 tradeId。
+     */
+    await this.syncOrderFromEvent(o)
     if (!tradeId || tradeId === '0' || !(lastQty > 0)) return
 
     const fill: FillInput = {
@@ -734,6 +874,10 @@ class KeyStream {
       if (now - this.lastIncomeReconcileAt >= INCOME_RECONCILE_MS) {
         this.lastIncomeReconcileAt = now
         await this.reconcileIncome()
+      }
+      if (now - this.lastOrdersReconcileAt >= ORDERS_RECONCILE_MS) {
+        this.lastOrdersReconcileAt = now
+        await this.reconcileOrders('tick')
       }
     } catch (e) {
       console.warn(`${this.tag} 定期对账失败：${(e as Error).message.slice(0, 140)}`)
@@ -1033,6 +1177,20 @@ export function startExchangeStreams(): void {
       console.warn('  交易所资产  启动失败：', (e as Error).message.slice(0, 160))
     }
   })()
+}
+
+/**
+ * 让某套 Key **立刻**去对账一次挂单（写操作之后调）。
+ *
+ * 为什么需要：挂单这会儿是**存库**的（见 `reconcileOrders`）。刚下的单 / 刚撤的单
+ * 理论上会经 WS `ORDER_TRADE_UPDATE` 在几百毫秒内落到库里，但**不能只靠它**
+ * （今天已经抓到 WS 丢事件的实证）。写操作之后主动对一次，界面才是确定的。
+ * 代价：一发 40 权重，只在用户真的下单 / 撤单时发生。
+ */
+export async function reconcileKeyOrders(keyId: number): Promise<void> {
+  const s = streams.get(Number(keyId))
+  if (!s) return
+  await s.reconcileOrdersForced()
 }
 
 /** 5 分钟采样（曲线 + 兜底对账；C2C 只能靠它） */

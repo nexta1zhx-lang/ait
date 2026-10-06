@@ -1020,6 +1020,7 @@ export const fetchExchangeOpenOrders = (id?: number) =>
  *   `fill`     新成交 → 插到成交列表最前面（实时下单能当场看见）
  *   `backfill` 后端用 REST 补了一批断线期间的成交 → 重拉一次成交列表
  *   `income`   后端对账了一批钱账本（已实现/手续费/资金费）→ 重拉一次「盈亏」
+ *   `orders`   挂单变了（WS 实时 / REST 对账）→ 重读一次挂单（**本地读**，毫秒级）
  *   `health`   **上游用户数据流哑了 / 恢复了** ⇒ 哑了的时候前端得自己 REST 兜底刷
  *              （⚠️ 这条 SSE 自己的心跳一直有，看不出上游死活，只能靠这个事件）
  *   `reject`   这套账户不参与统计（现货 / 没填 Key）→ ⚠️ **上层必须关掉订阅**：
@@ -1035,6 +1036,13 @@ export function exchangeStream(
     backfill?: (added: number) => void
     income?: (added: number) => void
     health?: (deaf: boolean) => void
+    /**
+     * **挂单变了**（挂上 / 撤了 / 成交 / 过期）→ 重读一次。
+     *
+     * ★ 2026-10-06：挂单改成**存库**（用户提的「有变动才改，其余存库不就行了」），
+     *   所以这条重读是**本地读**（毫秒级、零权重），收到就能直接刷新界面。
+     */
+    orders?: (reason: string) => void
     reject?: (reason: string) => void
     /** 持仓增量（改造 P1/P4）：常驻流每次刷新持仓都会推 */
     positions?: (p: PositionsPatch) => void
@@ -1052,7 +1060,16 @@ export function exchangeStream(
 ): () => void {
   return liveSse(
     `/api/exchange/stream${id ? `?id=${id}` : ''}`,
-    ['snapshot', 'fill', 'backfill', 'reject', 'positions', 'income', 'health'],
+    [
+      'snapshot',
+      'fill',
+      'backfill',
+      'reject',
+      'positions',
+      'income',
+      'health',
+      'orders'
+    ],
     (name, data) => {
       const d = data as Record<string, unknown> | null
       if (name === 'snapshot') on.snapshot?.(data as ExchangeSnapshotResult)
@@ -1060,6 +1077,7 @@ export function exchangeStream(
       else if (name === 'backfill') on.backfill?.(Number(d?.added ?? 0))
       else if (name === 'income') on.income?.(Number(d?.added ?? 0))
       else if (name === 'health') on.health?.(d?.deaf === true)
+      else if (name === 'orders') on.orders?.(String(d?.reason ?? ''))
       else if (name === 'reject') on.reject?.(String(d?.reason ?? ''))
       else if (name === 'positions') on.positions?.(data as PositionsPatch)
     },
