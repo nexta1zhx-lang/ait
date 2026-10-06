@@ -557,13 +557,59 @@ function pickSort(v: PosSort): void {
   buzz(8)
 }
 
-/** 排完序的持仓（列表按它渲染） */
-const sortedPositions = computed(() => {
-  const arr = [...positions.value]
-  const [field, dir] = posSort.value.split('-') as ['value' | 'pnl', 'desc' | 'asc']
+/** 一条持仓的**身份**（排序冻结用；多账户时必须带账户名，否则两套的同名币会串） */
+function posKey(p: TradePositionRow): string {
+  return `${p.keyName ?? ''}|${p.symbol}|${p.side}`
+}
+
+/** 按某种方式排一份（只在 `frozenOrder` 重算时用一次） */
+function sortPositions(arr: TradePositionRow[], mode: PosSort): TradePositionRow[] {
+  const [field, dir] = mode.split('-') as ['value' | 'pnl', 'desc' | 'asc']
   const sign = dir === 'desc' ? -1 : 1
-  arr.sort((a, b) => sign * ((field === 'pnl' ? a.unrealized - b.unrealized : a.notional - b.notional)))
-  return arr
+  return [...arr].sort(
+    (a, b) =>
+      sign * (field === 'pnl' ? a.unrealized - b.unrealized : a.notional - b.notional)
+  )
+}
+
+/**
+ * 列表的**显示顺序**（身份串的数组）。
+ *
+ * ⚠️⚠️ 为什么不能每次渲染都按盈利重排（用户 2026-10-06：
+ *    「我开了一个 ain 但是一直在跳」）：
+ *    未实现盈亏**每秒都在变**，两个仓位数值接近时（实测 RLC −0.39 / 1000BONK −0.47）
+ *    排名**每秒翻一次** —— 12 次采样出现 7 种不同顺序，看着就是列表上下乱跳。
+ *
+ * ⇒ 顺序**冻结**，只在两种情况重排：
+ *    ① 用户改了排序方式（`posSort`）；
+ *    ② **持仓集合**变了（开新仓 / 平掉 / 换了一批）。
+ *   中间的盈亏波动**只改数字、不改位置**。
+ */
+const frozenOrder = ref<string[]>([])
+
+watch(
+  [
+    posSort,
+    /*
+     * ⚠️ 依赖的是「身份集合」的**字符串**，不是持仓数组本身 ——
+     *    数组每秒都会被 SSE 换成新的一份，挂在它上面等于没冻结。
+     */
+    () => positions.value.map(posKey).sort().join('\u0001')
+  ],
+  () => {
+    frozenOrder.value = sortPositions(positions.value, posSort.value).map(posKey)
+  },
+  {immediate: true}
+)
+
+/** 排完序的持仓（列表按它渲染）—— 顺序来自 `frozenOrder`，**不现排** */
+const sortedPositions = computed(() => {
+  const rank = new Map(frozenOrder.value.map((k, i) => [k, i]))
+  return [...positions.value].sort(
+    (a, b) =>
+      (rank.get(posKey(a)) ?? Number.MAX_SAFE_INTEGER) -
+      (rank.get(posKey(b)) ?? Number.MAX_SAFE_INTEGER)
+  )
 })
 
 /** 弹层里那四行（顺序就是弹层里的顺序） */
