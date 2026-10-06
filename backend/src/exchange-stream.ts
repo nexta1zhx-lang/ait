@@ -67,6 +67,16 @@ function numOrNull(v: unknown): number | null {
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
 /**
+ * 保留 8 位小数。
+ * ⚠️ 跟 `position-cache` / `exchange-overview` 里那个 `r8` 同一个精度 ——
+ *    这三个地方算出来的是**同一个数**（同一屏上可能同时出现），精度不一致就会
+ *    「左栏 8.09988529、右边 8.0998853」这种看着像 bug 的差。
+ */
+function r8(x: number): number {
+  return Math.round(x * 1e8) / 1e8
+}
+
+/**
  * 标记价合并窗口（毫秒）。
  *
  * 订了几个币就有几路 `@markPrice@1s`（每个币 1 秒 1 条），一条一条推给前端太吵；
@@ -78,7 +88,15 @@ const MARK_BATCH_MS = 1000
 const SAMPLE_MS = 5 * 60 * 1000
 /** listenKey 30 分钟过期，25 分钟续一次留点余量 */
 const KEEPALIVE_MS = 25 * 60 * 1000
-/** ACCOUNT_UPDATE 触发的快照最短间隔（秒）—— 一秒来几条事件时别全写库 */
+/**
+ * `ACCOUNT_UPDATE` 之后**再去问一次 REST 快照**的最小间隔（秒）。
+ *
+ * ⚠️ 2026-10-06 更正：这个数原来注释写的是「别全写库」，而且**只拦了写库**
+ *    （`saveSnapshot` 的 `minGapSec`），**请求本身一次都没拦** ——
+ *    一秒来 5 条 `ACCOUNT_UPDATE` 就是 5 发 REST（每发 21 权重）。
+ *    现在事件里带的数据**当场就用**（见 `applyAccountUpdate`），REST 只补它没有的
+ *    汇总口径，并且**真的按这个间隔拦请求**。
+ */
 const WS_SNAPSHOT_GAP_SEC = 20
 /**
  * **兜底的基准节奏**（有仓 / 有单 / 刚有动静的账户）。
@@ -483,6 +501,8 @@ class KeyStream {
   private tier: Tier = 'normal'
   /** 上一次**用户手动**刷新（含下拉）的时间（节流用，见 `FORCED_MIN_MS`） */
   private lastForcedAt = 0
+  /** 上一次因为 `ACCOUNT_UPDATE` 去问 REST 快照的时间（**真的拦请求**，见那个常量） */
+  private lastWsSnapshotAt = 0
   /** activity 时钟有没有从库里种过一次（见 `seedActivity`） */
   private seededActivity = false
   /** 上一次全量采样的时间（空转时按 30 分钟拦） */
@@ -789,16 +809,128 @@ class KeyStream {
     if (e === 'ORDER_TRADE_UPDATE') {
       await this.onOrder(ev?.o ?? {})
       return
-    }    if (e === 'ACCOUNT_UPDATE') {
-      // 余额/仓位变了 → 事件里**没有** totalMarginBalance 这种汇总字段，
-      // 所以拉一次完整的（节流 20s，一天最多几千次也够便宜）
-      await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+    }
+    if (e === 'ACCOUNT_UPDATE') {
+      /*
+       * ★ 2026-10-06（用户贴了币安文档问「有用到这个吗」）：**用上事件里带的数据**。
+       *
+       * 原来这里只把事件当触发信号，收到就去 REST 拉一次完整快照 ——
+       * 事件里的 `a.B[].wb`（钱包余额）和 `a.P[]` 的 `pa/ep/up`（持仓量 / 开仓价 /
+       * 未实现盈亏）**一个字都没用**。代价：成交/划转/资金费之后，界面要等
+       * 一个 REST 来回（≈0.5~1 秒、21 权重）才动。
+       */
+      const {applied, newSymbols} = this.applyAccountUpdate(ev?.a ?? {})
+      if (applied) {
+        /* 持仓集合可能变了（新开 / 平掉）→ 标记价订阅跟着调，然后立刻推给前端 */
+        this.syncMarks()
+        this.pushLive(false)
+      }
+      /*
+       * 事件里**没有**的是汇总口径：可用余额 / 保证金余额 / 资产明细 / C2C / 现货。
+       * 那些仍然要靠 REST，但**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
+       * 例外：出现了**没见过的**仓位 ⇒ 立刻要一次，否则那一行会缺杠杆/强平价。
+       */
+      const due = Date.now() - this.lastWsSnapshotAt > WS_SNAPSHOT_GAP_SEC * 1000
+      if (newSymbols.length || due) {
+        this.lastWsSnapshotAt = Date.now()
+        /* 本地已经更新过了 ⇒ 顺手把采样时钟也推一下，别让 5 分钟采样立刻再来一发 */
+        this.lastSampleAt = Date.now()
+        await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+      }
       return
     }
     if (e === 'listenKeyExpired') {
       console.warn(`${this.tag} listenKey 过期，重建`)
       this.restart(true)
     }
+  }
+
+  /**
+   * `ACCOUNT_UPDATE` 里带的数据**当场就用**（2026-10-06）。
+   *
+   * 币安这个事件里有：
+   *
+   * ```json
+   * {"a": {"B": [{"a": "USDT", "wb": "122624.12", "cw": "...", "bc": "50.12"}],
+   *        "P": [{"s": "BTCUSDT", "pa": "1", "ep": "9000", "up": "0.12"}]}}
+   * ```
+   *
+   * · `B[].wb` = **钱包余额**（USDT 本位合约就等于 `totalWalletBalance`）
+   * · `P[].pa` = 持仓量（**有符号**，负 = 空）、`ep` = 开仓价、`up` = 未实现盈亏
+   *
+   * ⚠️ 两个坑：
+   *   ① `P` 里**只有「这次变了」的仓位**，不是全量 ⇒ 必须**合并**，不能整份替换；
+   *   ② 它**没有**杠杆 / 强平价 / 可用余额 / 资产明细 / C2C / 现货 ⇒
+   *      那些还是得靠 REST 快照（分档 5/30/60 分钟那条路），这里只把
+   *      「余额 + 持仓量 / 开仓价 / 未实现」这几项**立刻改对**。
+   *
+   * 返回 `applied` = 本地改到了没有；`newSymbols` = 出现的新交易对（那行缺杠杆 / 强平价，
+   * 调用方会因此立刻去要一次 REST）。
+   */
+  private applyAccountUpdate(a: any): {applied: boolean; newSymbols: string[]} {
+    const ov = this.lastOverview
+    /* 还没有底稿（刚起流）⇒ 让 REST 那条路去拿，别瞎拼一份缺字段的 */
+    if (!ov) return {applied: false, newSymbols: []}
+    const bal: any[] = Array.isArray(a?.B) ? a.B : []
+    const changed: any[] = Array.isArray(a?.P) ? a.P : []
+    const usdt = bal.find(x => String(x?.a ?? '').toUpperCase() === 'USDT')
+    const walletRaw = usdt ? Number(usdt.wb) : NaN
+    const wallet = Number.isFinite(walletRaw) ? walletRaw : ov.futures.wallet
+    if (!changed.length && !Number.isFinite(walletRaw)) {
+      return {applied: false, newSymbols: []}
+    }
+
+    const next = [...ov.futures.positions]
+    const newSymbols: string[] = []
+    for (const p of changed) {
+      const raw = String(p?.s ?? '').toUpperCase()
+      if (!raw) continue
+      /* 事件里是**币安原始符号**（BTCUSDT），快照里是 ccxt 统一符号（BTC/USDT:USDT） */
+      const unified = String(this.ex?.market?.(raw)?.symbol ?? raw)
+      const idx = next.findIndex(x => x.symbol === unified)
+      const signed = Number(p?.pa ?? 0)
+      const amount = Math.abs(signed)
+      /* 平掉了（pa = 0）⇒ 从列表里摘掉，跟 REST 那份「过滤零仓」一个口径 */
+      if (!(amount > 0)) {
+        if (idx >= 0) next.splice(idx, 1)
+        continue
+      }
+      const row = idx >= 0 ? next[idx]! : null
+      if (!row) newSymbols.push(raw)
+      const entryPrice = Number(p?.ep ?? row?.entryPrice ?? 0)
+      const mark = this.marks.get(raw) ?? row?.markPrice ?? entryPrice
+      const notional = amount * mark
+      const merged = {
+        ...(row ?? {
+          symbol: unified,
+          liquidationPrice: null as number | null,
+          leverage: 0,
+          percentage: null as number | null
+        }),
+        side: signed < 0 ? 'short' : 'long',
+        amount,
+        entryPrice,
+        markPrice: mark,
+        notional,
+        unrealizedPnl: Number(p?.up ?? row?.unrealizedPnl ?? 0)
+      }
+      if (idx >= 0) next[idx] = merged
+      else next.push(merged)
+    }
+
+    const unrealized = next.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0)
+    this.lastOverview = {
+      ...ov,
+      futures: {
+        ...ov.futures,
+        wallet: r8(wallet),
+        unrealized: r8(unrealized),
+        /* 保证金余额 = 钱包 + 浮盈（跟 REST 的 totalMarginBalance 同一算法） */
+        margin: r8(wallet + unrealized),
+        positions: next
+      }
+    }
+    return {applied: true, newSymbols}
   }
 
   /**
