@@ -1818,7 +1818,7 @@ wss://fstream.binance.com/private/ws/<listenKey>
 
 - 状态在 `X`：`NEW` = 还挂着（`upsert`）、`CANCELED`/`EXPIRED`/`REJECTED`/`FINISHED`/`TRIGGERED` = 不在场上了（`delete`）；
 - **触发价在 `tp`**（不是普通单那套的 `sp`）；
-- 触发之后是**另一张真单**进场，由 `ORDER_TRADE_DUPDATE` 接管。
+- 触发之后是**另一张真单**进场，由 `ORDER_TRADE_UPDATE` 接管。
 
 ⚠️ 原来只认 `ORDER_TRADE_UPDATE` ⇒ **撤掉的条件单会一直留在界面挂单列表里**。
 
