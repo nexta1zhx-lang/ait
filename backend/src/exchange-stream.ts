@@ -456,6 +456,8 @@ class KeyStream {
       if (added) {
         console.log(`${this.tag} REST 补成交 ${added} 笔`)
         emit(this.row.id, {type: 'backfill', added})
+        /* 补回来的成交同样可能改变持仓集合（离线期间开的仓就在这里被发现） */
+        this.resyncAfterFill()
       }
     } catch (e) {
       console.warn(`${this.tag} 补成交失败：${(e as Error).message.slice(0, 140)}`)
@@ -594,6 +596,24 @@ class KeyStream {
    * ⚠️ `NEW` / `CANCELED` / `EXPIRED` 只是**挂单状态变化**，不是成交 ——
    * 方案里定的「只存成交」，所以只处理 `x=TRADE` / `X=FILLED` 且带 tradeId 的。
    */
+  /**
+   * 有成交落地 ⇒ 持仓集合可能变了 ⇒ 顺手对齐一次。
+   *
+   * ★ 2026-10-06 加（用户问「用户不在线怎么办后续数据怎么更新」）：
+   *   ⚠️ 原来 `syncMarks()` **只在 `snapshot()` 里调**，而快照是 **5 分钟**一次。
+   *   所以「开了一个新仓」之后，那 5 分钟里**没有给这个币订标记价** ——
+   *   未实现盈亏就一直停在开仓那一刻的数（有人看还是没人看都一样）。
+   *   `ACCOUNT_UPDATE` 本来盖得住（币安开仓会推它），但它也会丢（跟成交事件
+   *   同一类问题），丢了就没人补 → 所以这里用「有成交」当触发器。
+   *
+   * ⚠️ 走 `snapshot('ws')` 自带 **20 秒节流**（`WS_SNAPSHOT_GAP_SEC`）：
+   *   一笔一笔成交连着来也只打一发，权重 25，不会失控。
+   */
+  private resyncAfterFill(): void {
+    if (this.stopped) return
+    void this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+  }
+
   private async onOrder(o: any): Promise<void> {
     const tradeId = String(o?.t ?? '')
     const lastQty = Number(o?.l ?? 0)
@@ -650,6 +670,8 @@ class KeyStream {
             ts: fill.ts.toISOString()
           }
         })
+        /* 持仓集合可能变了（新开 / 平掉）→ 对齐一次，别让新仓的盈亏停 5 分钟 */
+        this.resyncAfterFill()
       }
     } catch (err) {
       console.warn(`${this.tag} 写成交失败：${(err as Error).message.slice(0, 140)}`)
