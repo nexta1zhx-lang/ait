@@ -42,12 +42,18 @@ import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
   closeTradePositions,
   fetchTradeInfo,
-  fetchTradePositions,
   placeOrder,
   setTradeLeverage,
   type TradeInfoResult,
   type TradePositionRow
 } from '../api'
+import {
+  bindPositions,
+  positionsAt,
+  positionsErr,
+  positionsRows,
+  refreshPositions
+} from '../positions'
 import {pickSymbol, prefetchSymbol} from '../analyze'
 import {fmt, price, usd} from '../format'
 import {isForeground, onForegroundChange} from '../live'
@@ -134,8 +140,8 @@ function say(text: string, tone: 'ok' | 'bad' = 'bad'): void {
 }
 
 onBeforeUnmount(() => {
-  if (posTimer) clearInterval(posTimer)
-  posTimer = null
+  unbindPos?.()
+  unbindPos = null
   stopForeground?.()
   stopForeground = null
 })
@@ -512,14 +518,16 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
  *
  * 用户 2026-10-05：「仓位 平仓是针对每一个仓位的，没有补仓」
  * —— 所以这一格是一个**列表**，每一行自带一颗「平仓」，不再有「补仓」。
- * 列表单独走 `GET /api/exchange/trade/positions`（切到这一格才拉）。
+ *
+ * ★ 2026-10-06 改造 P1：**不再自己每 15 秒拉一次**，改成读共享 store
+ *   （`./positions`）—— 常驻流经 SSE 推过来，跟交易所界面 / K 线叠加同源。
+ *   这一格从此只负责「显示 + 排序 + 平仓」。
  */
-const positions = ref<TradePositionRow[]>([])
-const posLoading = ref(false)
-/** 有没有一发持仓请求在路上（去重用，见 `loadPositions`） */
-let posFetching = false
+const positions = computed<TradePositionRow[]>(() => positionsRows.value)
+/** 还没读到过任何一份数据（`positionsAt` 为 0）= 正在读 */
+const posLoading = computed(() => positionsAt.value === 0 && !posErr.value)
 /** 读失败的原因：**列表里那一行小字**（不弹 toast —— 切过来看见空列表总得知道为什么） */
-const posErr = ref('')
+const posErr = computed(() => positionsErr.value)
 
 /**
  * 持仓列表的**排序方式**（用户 2026-10-06）。
@@ -660,61 +668,35 @@ async function confirmReduce(pct: number): Promise<void> {
 /**
  * 拉一次持仓列表。
  *
- * `silent = true` 是**后台自动刷**用的：不翻 `posLoading`，免得列表每 15 秒
- * 闪一下「正在读持仓…」（列表已经有内容了，卡一下反而像是坏了）。
- * 请求去重还是靠 `posFetching`：自动刷和「切 tab 触发的拉」撞在一起时，
- * 后到的那个直接跳过，别把交易所连着打两遍。
+ * ★ 改造后持仓由共享 store 持有，这里只是让它**绕过后端缓存**立刻拉一次 ——
+ *   下单 / 平仓 / 减仓之后用，不然要等常驻流下一次推（最多 20 秒）。
  */
-async function loadPositions(silent = false): Promise<void> {
-  if (posFetching) return
-  posFetching = true
-  if (!silent) posLoading.value = true
-  posErr.value = ''
-  try {
-    const r = await fetchTradePositions(keyId.value)
-    if (!r.ok) {
-      positions.value = []
-      posErr.value = r.error || '读不到持仓'
-      return
-    }
-    positions.value = r.positions ?? []
-  } catch (e) {
-    positions.value = []
-    posErr.value = (e as Error).message
-  } finally {
-    posFetching = false
-    posLoading.value = false
-  }
+async function loadPositions(): Promise<void> {
+  refreshPositions([keyId.value])
 }
 
 /**
- * 持仓列表**自动刷**（用户 2026-10-05：「刷新持仓按钮去掉」）——
- * 按钮去掉之后这一格得自己保持新鲜：每 `POS_REFRESH_MS` 拉一次。
+ * 持仓来源的**绑定**（改造 P1）——替代原来那个 15 秒轮询定时器。
  *
- * 什么时候不刷：
- *   · 不在「仓位」那一格（开单页不看持仓，没必要打交易所）
- *   · 这一页不是当前页 / App 切到后台（`isForeground()`）—— 省流量，也避免
- *     在后台被交易所限频
- * 定时器在 `onBeforeUnmount` 里收掉，切 tab / 切前后台时重新对齐。
+ * 什么时候绑：
+ *   · 在「仓位」那一格（开单页不看持仓，没必要订）
+ *   · 这一页是当前页 / App 在前台（`isForeground()`）—— 省流量，也免得在后台被限频
+ * 什么时候解：上面任一条不满足就解绑，一个请求都不发。
  */
-const POS_REFRESH_MS = 15_000
-let posTimer: ReturnType<typeof setInterval> | null = null
-
 function posPollWanted(): boolean {
   return tab.value === 'position' && props.active && isForeground()
 }
 
+let unbindPos: (() => void) | null = null
+
 function syncPosTimer(): void {
-  const want = posPollWanted()
-  if (!want) {
-    if (posTimer) clearInterval(posTimer)
-    posTimer = null
+  if (!posPollWanted()) {
+    unbindPos?.()
+    unbindPos = null
     return
   }
-  if (posTimer) return
-  posTimer = setInterval(() => {
-    if (posPollWanted()) void loadPositions(true)
-  }, POS_REFRESH_MS)
+  if (unbindPos) return
+  unbindPos = bindPositions([keyId.value])
 }
 
 /** 前后台翻转：回前台立刻补一次（不等到下一个 15 秒），并重排定时器 */
@@ -826,25 +808,18 @@ watch(
   () => props.active,
   on => {
     if (on) void load()
-    /* 不在这一页了就别让持仓轮询继续打交易所 */
-    if (!on && posTimer) {
-      clearInterval(posTimer)
-      posTimer = null
-    }
+    /* 不在这一页了就把持仓订阅也放掉（一个请求都不发） */
     syncPosTimer()
   }
 )
 
 /*
- * 切到「仓位」那一格才去拉持仓列表 —— `positionRisk` 不带 symbol 是**全量**查询，
- * 没必要在开单页就替它付这一笔。
- *
- * ⚠️ 顺带把**自动刷新的定时器**对齐：只在「仓位」这一格开着（见 `syncPosTimer`）——
- *    用户 2026-10-05 把「刷新持仓」那颗按钮去掉了，列表得自己保持新鲜。
+ * 切到「仓位」那一格才去订持仓 —— 这是「开单页不看持仓」的那条老规矩，
+ * 改造后订的是常驻流（不再每 15 秒打一次交易所），但没必要为它白开一条 SSE。
  */
 watch(tab, t => {
-  if (t === 'position') void loadPositions()
   syncPosTimer()
+  if (t === 'position') void loadPositions()
 })
 
 /* 关掉「市价」= 要填价格开限价单：价格空着就先填上标记价 */
@@ -863,8 +838,11 @@ watch(
     seq++
     info.value = null
     pct.value = 0
-    positions.value = []
+    /* 换了一套 Key ⇒ 持仓订阅要重绑（旧的先解掉，不然会串到上一个账户） */
+    unbindPos?.()
+    unbindPos = null
     void load()
+    syncPosTimer()
     if (tab.value === 'position') void loadPositions()
   }
 )
@@ -874,11 +852,11 @@ onMounted(async () => {
   await loadTradeKeys()
   if (props.active) void load()
   /*
-   * 前后台翻转：回前台**立刻补一次**持仓（不干等下一个 15 秒），并把轮询定时器
-   * 按当前前后台状态重排 —— 切后台时停掉，别在后台一直打交易所。
+   * 前后台翻转：回前台**立刻补一次**持仓，并把订阅按当前前后台状态重排
+   * —— 切后台就解掉，别在后台一直占着。
    */
   stopForeground = onForegroundChange(on => {
-    if (on && tab.value === 'position' && props.active) void loadPositions(true)
+    if (on && tab.value === 'position' && props.active) void loadPositions()
     syncPosTimer()
   })
   syncPosTimer()
@@ -1164,8 +1142,9 @@ onMounted(async () => {
            （用户：「下单区域高度固定」），这么窄的格子里再占掉 6px 滚动条不划算，
            手指一划就能滚（用户 2026-10-05：「滚动条不显示」）。
         ⚠️ **没有「刷新持仓」按钮**了（用户 2026-10-05：「刷新持仓按钮去掉」）——
-           列表在这一格开着的时候**自己 15 秒刷一次**（见脚本 `syncPosTimer`），
-           想立刻看到结果就切走再切回来（`watch(tab)` 也会拉一次）。
+           列表**不需要自己刷**：改造（2026-10-06 P1）之后持仓由后端常驻流经 SSE 推，
+           开仓 / 平仓一秒钟内自己就变（见脚本 `syncPosTimer`，它只负责订阅）。
+           想立刻看到结果就切走再切回来（`watch(tab)` 会让 store 绕缓存拉一次）。
       -->
       <ul v-if="positions.length" class="ord-pos">
         <li

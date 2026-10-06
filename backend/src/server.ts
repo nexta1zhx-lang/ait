@@ -100,9 +100,13 @@ import {
 } from './db/exchange-keys'
 import {
   EXCHANGE_CATALOG,
-  fetchOpenOrders,
-  humanize
+  humanize,
+  type ExchangeCredentials
 } from './data/exchange-account'
+import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
+import {listPositionHistory} from './data/position-history'
+import {RateBudgetError, takeWeight} from './util/rate-budget'
+import {createTtlCache} from './util/ttl-cache'
 import {
   cancelOrphanOrders,
   cancelTradeOrder,
@@ -110,11 +114,10 @@ import {
   collectTradeInfo,
   humanizeTrade,
   listOpenOrders,
-  listPositions,
-  listUserTrades,
   placeOrder,
   placeStopOrder,
-  setSymbolLeverage
+  setSymbolLeverage,
+  type OpenOrderRow
 } from './data/exchange-trade'
 import {fetchExchangeOverview} from './data/exchange-overview'
 import {
@@ -125,9 +128,11 @@ import {
 } from './data/exchange-transfer'
 import {
   firstSnapshotHours,
+  incomeTotals,
   latestSnapshot,
   listCurve,
   listFills,
+  listIncome,
   saveSnapshot
 } from './db/exchange-store'
 import {
@@ -137,6 +142,7 @@ import {
   subscribeExchange,
   publishSnapshot
 } from './exchange-stream'
+import {startExchangeArchiver} from './exchange-archive'
 import {
   backfillUsageKeys,
   createLlmKey,
@@ -577,6 +583,53 @@ const publicExchangeKey = (k: ExchangeKey) => ({
   isDefault: k.isDefault,
   createdAt: k.createdAt,
   updatedAt: k.updatedAt
+})
+
+/** 从库里的 Key 摊平成连交易所要的那几个字段（省得每条路由各抄一遍） */
+const exchangeCredsOf = (k: ExchangeKey): ExchangeCredentials => ({
+  exchange: k.exchange,
+  apiKey: k.apiKey,
+  secret: k.secret,
+  password: k.password,
+  marketType: k.marketType,
+  sandbox: k.sandbox
+})
+
+/**
+ * 动手打交易所之前先跟**全局权重预算**报一声（改造 P3）。
+ *
+ * 为什么必须全局：币安按**出口 IP** 算权重，而一台服务器只有一个出口 IP 给所有用户用。
+ * 详见 `util/rate-budget.ts` 的说明。
+ */
+async function chargeExchange(weight: number, tag: string): Promise<void> {
+  await takeWeight(weight, tag)
+}
+
+/**
+ * 挂单列表对外的字段 —— 就是 `data/exchange-trade.ts` 的 `OpenOrderRow`。
+ *
+ * ★ 2026-10-06 统一：以前这里只回七个字段、且取数走的是**有缺陷的**
+ *   `exchange-account.fetchOpenOrders`（只拉普通挂单，**看不到止盈/止损**）。
+ *   用户实测：同一账户同一时刻，账户页挂单 0 条、K 线页 2 条 —— 就是两个取数方。
+ *   现在两边都走 `listOpenOrders`（普通 + Algo 条件单），字段也一并带全，
+ *   `stopPrice` / `posSide` / `reduceOnly` 前端画止盈止损要靠它们。
+ */
+type OpenOrderLite = OpenOrderRow
+
+/**
+ * 挂单列表的**短缓存**（2026-10-06，改造 P3 第二步）。
+ *
+ * ⚠️ 为什么这个特别值得缓存：接口**不带 symbol** ⇒ 币安那边 **40 权重/条**
+ *    （带 symbol 才 1）。而「交易所账户」页每切一次账户就打一次，
+ *    两套账户点几下就是几百权重 —— 限流又是按**出口 IP** 算、全服务器共用一份预算。
+ *
+ * TTL 只有 **10 秒**（比这个页面原来 15 秒的轮询还紧），
+ * 而且下单 / 撤单 / 清理残留单都会 `bump()` 立刻作废 ——
+ * 不会出现「刚撤掉的单还画在图上」。
+ */
+const openOrdersCache = createTtlCache<OpenOrderLite[]>({
+  ttlMs: 10_000,
+  tag: 'openOrders'
 })
 
 function fail(res: http.ServerResponse, tag: string, e: unknown): void {
@@ -1542,6 +1595,11 @@ async function handleTickerStream(
  *               连上先补一条当底稿（前端不用再 GET 一次就能渲染），之后
  *               WS 事件 / 5 分钟采样 / 用户点刷新 都会推。
  *   `fill`      新成交（WS 实时）
+ *   `positions` **持仓增量**：常驻流每次刷新持仓（REST 快照 或 标记价重算）都会推。
+ *               载荷是 `PositionsPatch`（只有会随行情变的那几项）—— 前端拿着往
+ *               已有快照上盖，**不用再打一次 `/trade/positions`**。
+ *               这一条是 2026-10-06 改造（P1/P4）加的：交易所界面 / K 线叠加 /
+ *               下单页从此**读同一份数据**，同屏不会再出现两个数。
  *   `backfill`  REST 补成交的汇总（前端收到重拉一次成交列表）
  *   `reject`    这套账户不参与统计（现货 / 没填 Key）—— ⚠️ **前端收到必须
  *               `es.close()`**，否则 EventSource 会自动重连，变成一个死循环。
@@ -1624,8 +1682,28 @@ async function handleExchangeStream(
       return
     }
     if (ev.type === 'fill') return send('fill', ev.fill)
+    if (ev.type === 'income') return send('income', {added: ev.added})
+    if (ev.type === 'health') return send('health', {deaf: ev.deaf})
     return send('backfill', {added: ev.added})
   })
+
+  /*
+   * 持仓增量（改造 P1/P4）—— 连上先补一条**底稿**（常驻流内存里那份），
+   * 之后每次持仓变化（REST 快照 / 标记价重算）都会推。前端几个页面靠它同步。
+   */
+  const liveNow = liveStateOf(keyId)
+  if (liveNow) {
+    send('positions', {
+      at: new Date(liveNow.at).toISOString(),
+      live: liveNow.live,
+      wallet: liveNow.wallet,
+      unrealized: liveNow.unrealized,
+      margin: liveNow.margin,
+      stats: liveNow.stats,
+      positions: liveNow.positions
+    })
+  }
+  const unsubPositions = subscribePositions(keyId, ev => send('positions', ev.patch))
   /* 心跳必须是具名事件，理由同上 */
   const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
@@ -1635,6 +1713,7 @@ async function handleExchangeStream(
     closed = true
     clearInterval(beat)
     unsubscribe()
+    unsubPositions()
   }
   req.on('close', done)
   res.on('close', done)
@@ -3130,6 +3209,8 @@ async function route(
   /*
    * 成交账本（WS 实时落 + 断线后 REST 补）—— **不需要交易对**。
    * 老接口「币安必须给交易对才能查成交」那套已经不需要了（M3）。
+   * ★ 2026-10-06：`/api/exchange/trade/history`（K 线买卖点）也改读这里，
+   *   一个账户的成交只有这一个来源 —— 那套 REST 版曾是「减仓了但账上没这笔」的另一半原因。
    */
   if (p === '/api/exchange/fills' && method === 'GET') {
     const idRaw = num(url.searchParams.get('id'))
@@ -3141,11 +3222,75 @@ async function route(
       const fills = await listFills(
         me.id,
         key.id,
-        num(url.searchParams.get('limit')) ?? 60
+        num(url.searchParams.get('limit')) ?? 60,
+        str(url.searchParams.get('symbol'), '') || undefined
       )
       return sendJson(res, 200, {fills})
     } catch (e) {
       return fail(res, 'exchange/fills', e)
+    }
+  }
+
+  /*
+   * 仓位历史（「开仓 → 全平」一个来回算一笔，像币安「仓位历史」）。
+   *
+   * ★ 2026-10-06 新增，按用户的原话做的：
+   *   「盈亏界面不是统计数据，是每笔仓位的概念 —— 开仓到结仓中间的盈利，
+   *     减仓不单独算一笔、全平才算；要币种 / 盈利 / 开仓均价 / 平仓均价 /
+   *     开平仓时间 / 持仓时间，点开能看每笔订单，减仓那几笔要有实现盈利」
+   *
+   * ⚠️ 数据来自**成交账本**（`exchange_fills`），不是 income 的分类汇总。
+   *    账本只有币安 `userTrades` 给的那 7 天，所以返回里带 `since`，
+   *    界面上要说明白「这段之前的历史没进来」。
+   */
+  if (p === '/api/exchange/position-history' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    try {
+      const r = await listPositionHistory(
+        me.id,
+        key.id,
+        num(url.searchParams.get('limit')) ?? 50,
+        str(url.searchParams.get('symbol'), '') || undefined
+      )
+      return sendJson(res, 200, {...r, error: null})
+    } catch (e) {
+      return fail(res, 'exchange/position-history', e)
+    }
+  }
+
+  /*
+   * 钱账本（`/fapi/v1/income` 的落库版）—— 「盈亏」tab 的数据源。
+   *
+   * ★ 2026-10-06 新增，回答用户那三个问题：
+   *   · **盈亏怎么算**：已实现 `REALIZED_PNL` + 手续费 `COMMISSION` + 资金费 `FUNDING_FEE`
+   *     + 其它，四类**直接相加**（币安这两类本来就是负数）—— 这才是净的。
+   *     之前「盈亏」tab 只加 `fills.realized`（毛数），手续费和资金费根本没算。
+   *   · **资金费算吗**：算，就在 `FUNDING_FEE` 里。
+   *   · **减仓还会出现吗**：会 —— 减仓那笔成交号同时是 `REALIZED_PNL` 的 `tranId`，
+   *     两边同一把钥匙，不会再出现「成交有、盈亏没有」。
+   *
+   * ⚠️ **纯本地读，不打交易所**（数据由 `exchange-stream` 的定期对账灌进来）。
+   */
+  if (p === '/api/exchange/income' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    try {
+      /* `days=0` ⇒ 全部历史（`incomeTotals(…, null)`） */
+      const days = num(url.searchParams.get('days')) ?? 7
+      const [totals, rows] = await Promise.all([
+        incomeTotals(me.id, key.id, days || null),
+        listIncome(me.id, key.id, num(url.searchParams.get('limit')) ?? 200)
+      ])
+      return sendJson(res, 200, {totals, rows, days, error: null})
+    } catch (e) {
+      return fail(res, 'exchange/income', e)
     }
   }
 
@@ -3167,29 +3312,17 @@ async function route(
       })
     }
     try {
-      const rows = await fetchOpenOrders({
-        exchange: key.exchange,
-        apiKey: key.apiKey,
-        secret: key.secret,
-        password: key.password,
-        marketType: key.marketType,
-        sandbox: key.sandbox
+      const rows = await openOrdersCache.get(key.id, async () => {
+        /* 40 权重只在这一发里付（TTL 内重复请求全部命中缓存） */
+        await chargeExchange(40, 'openOrders')
+        return listOpenOrders(exchangeCredsOf(key))
       })
-      /* 只回界面要用的七个字段（cost/status 这些挂单列表不显示） */
-      return sendJson(res, 200, {
-        openOrders: rows.map(o => ({
-          id: o.id,
-          symbol: o.symbol,
-          side: o.side,
-          type: o.type,
-          price: o.price,
-          amount: o.amount,
-          datetime: o.datetime
-        })),
-        error: null
-      })
+      return sendJson(res, 200, {openOrders: rows, error: null})
     } catch (e) {
-      return sendJson(res, 200, {openOrders: null, error: humanize(e)})
+      return sendJson(res, 200, {
+        openOrders: null,
+        error: e instanceof RateBudgetError ? e.message : humanize(e)
+      })
     }
   }
 
@@ -3329,6 +3462,8 @@ async function route(
           test
         }
       )
+      /* 真单才会真的多/少一张挂单；测试单没进撮合，不用作废缓存 */
+      if (!test) openOrdersCache.bump(key.id)
       return sendJson(res, 200, {ok: true, test, order, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
@@ -3336,9 +3471,12 @@ async function route(
   }
 
   /*
-   * 所有持仓（面板「仓位」那一格列的列表）。
-   * ⚠️ 跟 `/api/exchange/trade` 分开：那个是「这一个交易对」的面板初始化数据，
-   *    这个要跨交易对、而且面板每次切到「仓位」都得是新的。
+   * 所有持仓（面板「仓位」那一格 + K 线叠加用的列表）。
+   *
+   * ★ 2026-10-06 改造（P1/P3）：**不再每次都直连交易所**，改成读
+   *   `data/position-cache.ts` 那个统一来源 ——
+   *   · 常驻流在跑 → 读内存（跟「交易所界面」是**同一份数据**，同屏不会再打架）；
+   *   · 流没在跑 → 退回 REST，但带 TTL + 单飞 + 权重预算（多个轮询器合成一发）。
    */
   if (p === '/api/exchange/trade/positions' && method === 'GET') {
     const idRaw = num(url.searchParams.get('id'))
@@ -3349,17 +3487,22 @@ async function route(
     if (!key.apiKey || !key.secret)
       return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
     try {
-      const positions = await listPositions({
-        exchange: key.exchange,
-        apiKey: key.apiKey,
-        secret: key.secret,
-        password: key.password,
-        marketType: key.marketType,
-        sandbox: key.sandbox
-      })
+      /*
+       * `?fresh=1`：**绕过后端缓存**（下单 / 平仓之后前端要立刻看到结果）。
+       * 平时不传 —— 走缓存/常驻流，多个轮询器合成一发，别把出口 IP 打封。
+       */
+      const fresh = url.searchParams.get('fresh') === '1'
+      const positions = await getPositions(
+        key.id,
+        exchangeCredsOf(key),
+        fresh ? {force: true} : {}
+      )
       return sendJson(res, 200, {ok: true, positions, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return sendJson(res, 200, {
+        ok: false,
+        error: e instanceof RateBudgetError ? e.message : humanizeTrade(e)
+      })
     }
   }
 
@@ -3378,26 +3521,34 @@ async function route(
     if (!key.apiKey || !key.secret)
       return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
     try {
-      const orders = await listOpenOrders(
-        {
-          exchange: key.exchange,
-          apiKey: key.apiKey,
-          secret: key.secret,
-          password: key.password,
-          marketType: key.marketType,
-          sandbox: key.sandbox
-        },
-        str(url.searchParams.get('symbol'), '') || undefined
-      )
+      const symbolQ = str(url.searchParams.get('symbol'), '') || undefined
+      /*
+       * ⚠️ 不带交易对查挂单在币安那边是 **40 权重/条**（带交易对才 1）——
+       *    前端最容易把这里打爆（2026-10-06 就是这么把出口 IP 打进 `-1003` 的），
+       *    所以先跟预算报一声。
+       */
+      await chargeExchange(symbolQ ? 1 : 40, 'openOrders')
+      const orders = await listOpenOrders(exchangeCredsOf(key), symbolQ)
       return sendJson(res, 200, {ok: true, orders, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return sendJson(res, 200, {
+        ok: false,
+        error: e instanceof RateBudgetError ? e.message : humanizeTrade(e)
+      })
     }
   }
 
   /*
    * 成交历史（K 线上那些买卖点 = 「订单历史」）。
-   * 币安 `userTrades` 默认回最近 7 天、最多 1000 条，图上够用，不分页。
+   *
+   * ★ 2026-10-06 统一：**改读后端账本**（`exchange_fills`），不再直连币安
+   *   `userTrades`。两个来源并存过一段，症状就是用户遇到的那个 ——
+   *   同一笔减仓，K 线有、账户页「最近成交」没有（或反过来），
+   *   而且 REST 那路要交易对、要 5 权重、还只能回 7 天。
+   *   账本这份是 WS 实时落 + 定期 REST 对账补的，一个账户只有它一份。
+   *
+   * ⚠️ 行情要求 `symbol`（交易所原始符号，如 `1000BONKUSDT`），但只是**过滤**：
+   *    账本本来就按账户存着，过滤不到就返回空数组（不再回 400 让前端没法渲染）。
    */
   if (p === '/api/exchange/trade/history' && method === 'GET') {
     const idRaw = num(url.searchParams.get('id'))
@@ -3411,21 +3562,25 @@ async function route(
     if (!symbol) return sendJson(res, 400, {error: '缺 symbol'})
     try {
       const limit = Math.min(1000, Math.max(1, num(url.searchParams.get('limit')) ?? 100))
-      const trades = await listUserTrades(
-        {
-          exchange: key.exchange,
-          apiKey: key.apiKey,
-          secret: key.secret,
-          password: key.password,
-          marketType: key.marketType,
-          sandbox: key.sandbox
-        },
-        symbol,
-        limit
-      )
+      const rows = await listFills(me.id, key.id, limit, symbol)
+      const trades = rows.map(r => ({
+        id: r.id,
+        symbol: r.symbol,
+        side: r.side,
+        price: r.price,
+        amount: r.amount,
+        cost: r.cost,
+        fee: r.fee,
+        feeCurrency: r.feeCurrency,
+        realized: r.realized,
+        datetime: r.datetime
+      }))
       return sendJson(res, 200, {ok: true, trades, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return sendJson(res, 200, {
+        ok: false,
+        error: humanizeTrade(e)
+      })
     }
   }
 
@@ -3468,6 +3623,7 @@ async function route(
           test: body.test !== false
         }
       )
+      if (r.test === false) openOrdersCache.bump(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
@@ -3503,6 +3659,8 @@ async function route(
         str(body.symbol, 'BTCUSDT'),
         str(body.orderId, '')
       )
+      /* 撤单没有测试版：撤了就是真撤了，缓存立刻作废（别让那条线还画着） */
+      openOrdersCache.bump(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
@@ -3528,20 +3686,18 @@ async function route(
     if (!key.apiKey || !key.secret)
       return sendJson(res, 200, {ok: false, error: '这一套还没填 API Key'})
     try {
-      const r = await cancelOrphanOrders(
-        {
-          exchange: key.exchange,
-          apiKey: key.apiKey,
-          secret: key.secret,
-          password: key.password,
-          marketType: key.marketType,
-          sandbox: key.sandbox
-        },
-        str(url.searchParams.get('symbol'), '') || undefined
-      )
+      const symbolQ = str(url.searchParams.get('symbol'), '') || undefined
+      /* 不带交易对查挂单 = 40 权重/条；这一路是 2026-10-06 把 IP 打封的元凶，必须报预算 */
+      await chargeExchange(symbolQ ? 1 : 40, 'cleanupOrders')
+      const r = await cancelOrphanOrders(exchangeCredsOf(key), symbolQ)
+      /* 撤了一批 → 缓存作废（不然「撤了还在」又要被报一遍） */
+      openOrdersCache.bump(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return sendJson(res, 200, {
+        ok: false,
+        error: e instanceof RateBudgetError ? e.message : humanizeTrade(e)
+      })
     }
   }
 
@@ -3582,6 +3738,7 @@ async function route(
         body.symbol ? {symbol: str(body.symbol, 'BTCUSDT'), side, pct} : undefined,
         test
       )
+      if (!test) openOrdersCache.bump(key.id)
       return sendJson(res, 200, {ok: true, test, ...r, error: null})
     } catch (e) {
       return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
@@ -4146,6 +4303,12 @@ async function main(): Promise<void> {
      */
     startExchangeStreams()
     startSnapshotSampler()
+    /*
+     * 快照的**归档 + 清理**（2026-10-06）：5m 留 7 天、聚合成 1h 留 90 天、
+     * 再聚合成 1d 永久。不跑的话 `exchange_snapshots` 会无限长
+     * （一套 key ≈ 128 MB/年）。启动时先跑一次，把停机那段断档补上。
+     */
+    startExchangeArchiver()
     /*
      * 检查有没有管理员账号（2026-10-04 起不开放注册，账号由管理员创建）。
      * ⚠️ **不建号、不内置密码** —— 管理员账号（用户名 + 密码哈希）

@@ -28,6 +28,7 @@ import {askConfirm} from '../confirm'
 import {tradeKey} from '../trade-account'
 import {
   baseToExSymbol,
+  bindOverlayPositions,
   clearTradeOverlay,
   overlayEnabled,
   overlayFills,
@@ -36,7 +37,8 @@ import {
   overlaySymbol,
   ORPHAN_SWEEP_MS,
   refreshTradeOverlay,
-  sweepOrphanOrders
+  sweepOrphanOrders,
+  unbindOverlayPositions
 } from '../trade-overlay'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
@@ -1664,7 +1666,17 @@ function overlayWanted(): boolean {
 }
 
 async function pullOverlay(): Promise<void> {
-  if (!overlayWanted()) return
+  if (!overlayWanted()) {
+    /* 这一页不要订单信息了 → 持仓订阅也跟着放掉（一个请求都不发） */
+    unbindOverlayPositions()
+    return
+  }
+  /*
+   * ★ 2026-10-06 改造 P1：持仓改成订阅**共享 store**（常驻流经 SSE 推），
+   *   不再每 15 秒独立打一次 `/trade/positions`。绑一次就一直在，
+   *   换了「下单账户」会自动重绑（`bindOverlayPositions` 里判 keyId）。
+   */
+  bindOverlayPositions(tradeKey.value?.id)
   await refreshTradeOverlay(props.symbol, tradeKey.value?.id)
 }
 
@@ -3310,6 +3322,7 @@ onBeforeUnmount(() => {
   labelSyncRaf = 0
   labelSyncKey = ''
   /* 订单信息那套（定时器 + 前后台监听）也要收掉，不然切页之后还在打交易所 */
+  unbindOverlayPositions()
   if (overlayTimer) clearInterval(overlayTimer)
   overlayTimer = null
   if (orphanTimer) clearInterval(orphanTimer)

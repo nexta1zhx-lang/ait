@@ -955,59 +955,115 @@ export async function listOpenOrders(
   return out
 }
 
-/** 一笔成交（画成 K 线上的买卖点 = 「订单历史」） */
-export interface UserTradeRow {
-  id: string
+/* ------------------------------------------------------------------ */
+/* 交易所那本账（`/fapi/v1/income`，2026-10-06）                        */
+/* ------------------------------------------------------------------ */
+
+/** 一条收入记录（币安 `/fapi/v1/income` 的一行） */
+export interface IncomeRecord {
+  /**
+   * **去重键**（不是币安那个 `tranId` 原值，见下面的注意）。
+   *
+   * ⚠️ 币安 `income` 的 `tranId` 跟成交号**不是一个东西**
+   *    （实测：成交 `959680406` 对应的 `tranId` 是 `95850959680406`），
+   *    所以**不能**拿它去跟 WS 事件里的 `t` 对齐 —— 一对不上就会
+   *    同一笔钱记两遍（WS 一条、income 一条）。真正能对齐的是 `tradeId` 字段。
+   */
+  tranId: string
+  incomeType: string
   symbol: string
-  side: 'buy' | 'sell'
-  /** 成交均价 */
-  price: number
-  /** 成交量（基础币） */
+  asset: string
+  /** 正数进钱、负数出钱 */
   amount: number
-  /** 这一笔已实现盈亏（USDT，币安 `realizedPnl`；没有就给 `null`） */
-  realizedPnl: number | null
-  /** 手续费（**计价币**，通常是 USDT） */
-  fee: number
-  /** 成交时间（毫秒） */
-  time: number
+  /** 毫秒 */
+  ts: number
+  tradeId: string
 }
 
 /**
- * 成交历史（某个交易对最近的若干笔，画「订单历史」用）。
+ * 一条 income 的**去重键**：成交类用 `tradeId`（+ 资产），其它类用 `tranId`。
  *
- * 走 ccxt 的 `fetchMyTrades` → 币安 `fapi/v1/userTrades`。
- * ⚠️ 不传 `since`：币安这个接口默认回**最近 7 天**、最多 1000 条，
- *    画在图上够用了；传 `since` 反而要自己分页。
+ * ⚠️ 为什么必须算法统一：同一笔钱有**两条写入路**（WS/成交 REST 补 VS income 对账），
+ *    两边只有算出**同一个键**才会撞在唯一键上。踩过的坑：按 `tranId` 去重 ⇒
+ *    手续费 27 条变 54 条、已实现 -0.1510 变 -0.3020（正好两倍）。
+ * ⚠️ 带上资产：同一笔的手续费理论上可能拆成两个币（BNB 抵扣），
+ *    只按 `tradeId` 会丢掉一条。
  */
-export async function listUserTrades(
+export function incomeDedupeKey(r: {
+  tranId: string
+  tradeId?: string
+  asset: string
+}): string {
+  const tid = String(r.tradeId ?? '')
+  const base = tid && tid !== '0' ? tid : r.tranId
+  return `${base}:${r.asset || 'USDT'}`
+}
+
+/**
+ * 拉交易所的**钱账本**（`GET /fapi/v1/income`）。
+ *
+ * 这是「统一口径」的关键一步 —— 用户原话「数据要统一用一套」「资金费又算吗」：
+ * ```
+ *   已实现盈亏 REALIZED_PNL  ┐
+ *   手续费     COMMISSION    ├─ 三个加起来才是**净收益**
+ *   资金费     FUNDING_FEE   ┘   （每 8 小时结一次，合约特有的成本）
+ * ```
+ * 只把成交里的 `realizedPnl` 加起来是**毛的**（实测 7 天：已实现 -0.151、
+ * 手续费 -0.265、资金费 -0.004 —— 手续费比已实现还大）。
+ *
+ * ⚠️ **权重 30**（币安文档），比一般接口贵得多 ⇒ 别按分钟轮询，见
+ *    `exchange-stream.ts` 的对账节奏（接上时一次 + 每小时一次）。
+ * ⚠️ 不给 `incomeType` 就是**全类型**（省调用次数）。
+ * ⚠️ 币安这个接口一次最多 1000 条、只能查最近 7 天（不给 startTime 时）。
+ */
+export async function fetchIncomeHistory(
   c: ExchangeCredentials,
-  symbol: string,
-  limit = 100
-): Promise<UserTradeRow[]> {
+  opts: {startTime: number; limit?: number}
+): Promise<IncomeRecord[]> {
   assertTradable(c)
   const ex = createExchange(c)
-  const raw: any[] = (await ex.fetchMyTrades(symbol, undefined, limit)) ?? []
-  const out: UserTradeRow[] = []
-  for (const t of raw) {
-    const id = String(t?.id ?? '')
-    /* 同挂单：优先币安原始符号 */
-    const sym = String(t?.info?.symbol ?? t?.symbol ?? symbol).toUpperCase()
-    const price = n(t?.price)
-    const time = n(t?.timestamp)
-    if (!id || !sym || !price || !time) continue
+  const call =
+    typeof ex.fapiPrivateGetIncome === 'function'
+      ? ex.fapiPrivateGetIncome
+      : null
+  if (!call) return []
+
+  const limit = Math.min(1000, Math.max(1, opts.limit ?? 1000))
+  const raw: any = await call.call(ex, {
+    startTime: Math.round(opts.startTime),
+    limit
+  })
+  const list: any[] = Array.isArray(raw) ? raw : []
+  const out: IncomeRecord[] = []
+  for (const r of list) {
+    const ts = Number(r?.time)
+    const amount = Number(r?.income)
+    const type = String(r?.incomeType ?? '')
+    if (!type || !Number.isFinite(ts) || !ts || !Number.isFinite(amount)) continue
+    const tranId = String(r?.tranId ?? '')
+    const asset = String(r?.asset ?? 'USDT')
+    const tradeId = String(r?.tradeId ?? '')
     out.push({
-      id,
-      symbol: sym,
-      side: String(t?.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy',
-      price,
-      amount: n(t?.amount),
-      realizedPnl: nullish(t?.info?.realizedPnl),
-      fee: n(t?.fee?.cost),
-      time
+      /*
+       * ⚠️ 缺 `tranId` 时**必须自己造一个稳定的键**：不然 `ON CONFLICT` 挡不住
+       *    重复，定期重扫同一个窗口就会把同一笔记好几遍。
+       *    用「类型 + 时间 + 金额 + 币种」当兜底键（这些一样的基本就是同一笔）。
+       */
+      tranId: incomeDedupeKey({
+        tranId: tranId || `${type}:${ts}:${amount}:${asset}`,
+        tradeId,
+        asset
+      }),
+      incomeType: type,
+      symbol: String(r?.symbol ?? '').toUpperCase(),
+      asset,
+      amount,
+      ts,
+      tradeId
     })
   }
-  /* 旧的排前面（画点按时间顺序） */
-  out.sort((a, b) => a.time - b.time)
+  /* 旧的排前面（写库顺序无所谓，但看着顺眼好排查） */
+  out.sort((a, b) => a.ts - b.ts)
   return out
 }
 

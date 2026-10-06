@@ -500,6 +500,41 @@ CREATE TABLE IF NOT EXISTS exchange_fills (
 );
 CREATE INDEX IF NOT EXISTS exchange_fills_user_idx ON exchange_fills (user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, symbol, ts DESC);
+
+-- 钱账本：**交易所自己那本账**（GET /fapi/v1/income 的每一行）。
+-- 2026-10-06 加，起因（用户原话）：「数据要统一用一套」「资金费又算吗」。
+--
+-- ★ 为什么必须有：exchange_fills 只有**成交**，而**真正影响总收益的还有两样**：
+--   · COMMISSION 手续费（实测 7 天 -0.2649，比已实现盈亏还大）
+--   · FUNDING_FEE 资金费（每 8 小时结一次，合约特有的成本）
+--   之前「盈亏」tab 只把成交里的 realized 加起来 ⇒ **算出来是毛的**，
+--   而那个 tooltip 还写着「手续费/资金费也算在里面」—— 对不上账就是这么来的。
+--
+-- ★ 两个写入方（幂等靠 tranId，所以两条路不会重复记账）：
+--   · WS ORDER_TRADE_UPDATE（实时）：o.rp → REALIZED_PNL、o.n → COMMISSION
+--   · REST GET /fapi/v1/income（对账 + 补断线）：全类型，含 FUNDING_FEE
+--
+-- ⚠️ tran_id 就是币安那行的 tranId（成交类是**成交号**，跟 exchange_fills.trade_id
+--    同一个东西；资金费是它自己的一串）。**同一个 tranId 下会有多条**（一笔成交既有
+--    REALIZED_PNL 又有 COMMISSION），所以唯一键必须带 income_type。
+-- ⚠️ 不加 ts 进唯一键：定期重扫同一个时间窗时，只有 (key, type, tranId) 才能挡住重复。
+CREATE TABLE IF NOT EXISTS exchange_income (
+  id          BIGSERIAL   PRIMARY KEY,
+  user_id     BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  key_id      BIGINT      NOT NULL REFERENCES user_exchange_keys (id) ON DELETE CASCADE,
+  tran_id     TEXT        NOT NULL,
+  income_type TEXT        NOT NULL,   -- REALIZED_PNL / COMMISSION / FUNDING_FEE / TRANSFER / …
+  symbol      TEXT,                   -- 有的类型没有币种（比如划转）
+  asset       TEXT        NOT NULL,   -- USDT
+  amount      NUMERIC(24,8) NOT NULL, -- 正数 = 进钱，负数 = 出钱
+  ts          TIMESTAMPTZ NOT NULL,   -- 币安那个 time
+  trade_id    TEXT,                   -- 关联到哪笔成交（有的话）
+  raw         JSONB,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (key_id, income_type, tran_id)
+);
+CREATE INDEX IF NOT EXISTS exchange_income_user_idx ON exchange_income (user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS exchange_income_key_idx  ON exchange_income (key_id, ts DESC);
 `
 
 /**

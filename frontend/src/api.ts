@@ -253,7 +253,7 @@ function liveSse(
   path: string,
   events: string[],
   onEvent: (name: string, data: unknown) => void,
-  opts: {idleMs?: number; onReconnect?: () => void} = {}
+  opts: {idleMs?: number; onReconnect?: () => void; onAlive?: () => void} = {}
 ): () => void {
   const idleMs = opts.idleMs ?? 75_000
   /** 断开超过这么久才值得重拉底稿（快抖就交给下一批推送） */
@@ -291,11 +291,14 @@ function liveSse(
     // 后端 20 秒一次的心跳：只喂看门狗，不往上层转发
     cur.addEventListener('heartbeat', () => {
       lastAt = Date.now()
+      /* 心跳是「这条流还活着」最可靠的证据（见 `onAlive` 的说明） */
+      opts.onAlive?.()
     })
 
     for (const name of events) {
       cur.addEventListener(name, e => {
         lastAt = Date.now()
+        opts.onAlive?.()
         try {
           onEvent(name, JSON.parse((e as MessageEvent).data))
         } catch {
@@ -645,6 +648,8 @@ export interface ExchangeIncomeRow {
   symbol: string
   income: number
   time: string | null
+  /** 钱账本的类型（`REALIZED_PNL` / `COMMISSION` / `FUNDING_FEE` …） */
+  type: string
 }
 
 export const fetchExchangeKeys = () =>
@@ -705,6 +710,14 @@ export interface FuturesPosition {
   /** ROE %（相对保证金） */
   percentage: number | null
   /**
+   * **币安原始符号**（`BTCUSDT`）—— 2026-10-06 改造 P1 加。
+   *
+   * `symbol` 是 ccxt 统一写法（`BTC/USDT:USDT`，板子和平仓按钮吃这个），
+   * K 线叠加 / 下单页按原始符号比对，两拨人不用各自再换一次。
+   * 老快照里没有这个字段 ⇒ 用的时候要 `raw ?? symbol`。
+   */
+  raw?: string
+  /**
    * 这条数据是哪套 Key 的 —— **只有「全部」那一格会带上**（前端合并时补的），
    * 单套账户时不带。用来在列表里标出来源（用户 2026-10-05：「其余针对 key 数据加标签」）。
    */
@@ -760,18 +773,131 @@ export interface ExchangeOverview {
   }
 }
 
-/** 当前挂单（`fapi/v1/openOrders`，**不需要交易对**） */
+/** 当前挂单（后端 `listOpenOrders`：普通挂单 + **Algo 条件单**，不需要交易对） */
 export interface ExchangeOpenOrder {
   id: string
+  /** 币安原始符号（`1000BONKUSDT`）——跟合约表里的 symbol 对得上 */
   symbol: string
   side: string
+  /** 币安原始订单类型（`LIMIT` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` …） */
   type: string
-  price: number
+  /** 币安原始持仓方向（`LONG` / `SHORT` / `BOTH`） */
+  posSide: string
+  /** 委托价（市价 / 条件单没有 ⇒ `null`） */
+  price: number | null
+  /** **触发价**（止盈 / 止损才有）——以前这个接口不带它，条件单只能显示成「委托」 */
+  stopPrice: number | null
   amount: number
-  datetime: string | null
+  filled: number
+  reduceOnly: boolean
+  /** 下单时间（毫秒） */
+  time: number
   /** 哪套 Key 的（只有「全部」那一格会带，见 `FuturesPosition.keyName`） */
   keyName?: string
 }
+
+/* ---------------- 钱账本（`/fapi/v1/income`） ---------------- */
+
+/** 币安 income 的类型（我们单独统计的那几种） */
+export type IncomeType =
+  | 'REALIZED_PNL'
+  | 'COMMISSION'
+  | 'FUNDING_FEE'
+  | 'TRANSFER'
+  | 'INSURANCE_CLEAR'
+  | 'REFERRAL_KICKBACK'
+  | 'COMMISSION_REBATE'
+
+/**
+ * 盈亏汇总 —— **交易所的口径**。
+ *
+ * `net` = 已实现 + 手续费 + 资金费 + 其它（币安那两类本来就是负数，**相加**）。
+ * ⚠️ 划转（`TRANSFER`）不进 `net`：那是账户之间搬钱，不是赚亏。
+ */
+export interface ExchangeIncomeTotals {
+  realized: number
+  /** 手续费（已经是**负数**） */
+  commission: number
+  /** 资金费（有正有负；对多头多数时候是负的） */
+  funding: number
+  other: number
+  /** 净盈亏 = 上面四个相加 */
+  net: number
+  count: number
+}
+
+/** 读钱账本（**纯本地**，不打交易所；数据由后端定期对账灌进来） */
+export const fetchExchangeIncome = (id?: number, days = 7, limit = 200) =>
+  get<{
+    totals: ExchangeIncomeTotals
+    rows: ExchangeIncomeRow[]
+    days: number
+    error: string | null
+  }>(
+    `/api/exchange/income?days=${days}&limit=${limit}` + (id ? `&id=${id}` : '')
+  )
+
+/* ---------------- 仓位历史（「开仓 → 全平」一笔的那种） ---------------- */
+
+/** 仓位周期里的一笔成交（点开详情看的那份） */
+export interface ExchangePositionOrder {
+  /** 成交号 */
+  id: string
+  time: string
+  side: 'buy' | 'sell'
+  amount: number
+  price: number
+  fee: number
+  /** 这一笔的已实现盈亏（**减仓 / 平仓那几笔才有**） */
+  realized: number
+  /** 是加仓还是减仓 */
+  reduce: boolean
+}
+
+/**
+ * 一个**仓位周期**：开仓（0 → 有量）到全平（回 0）。
+ * 减仓不单独算一笔，它的已实现盈亏归到这一段头上（同时逐笔留在 `orders` 里）。
+ */
+export interface ExchangePositionCycle {
+  symbol: string
+  side: 'long' | 'short'
+  /** 开仓均价（账本不全时为 `null`） */
+  entryPrice: number | null
+  /** 平仓均价 */
+  exitPrice: number | null
+  qty: number
+  closedQty: number
+  /** 已实现（毛） */
+  realized: number
+  /** 手续费（正数） */
+  fee: number
+  /** 净盈亏 = 已实现 − 手续费 —— 列表上显示的就是它 */
+  net: number
+  openAt: string
+  /** 全平时间（`null` = 还没平完） */
+  closeAt: string | null
+  /** 持仓秒数 */
+  holdSec: number
+  closed: boolean
+  /** 账本不完整（开仓发生在账本覆盖之前） */
+  partial: boolean
+  orders: ExchangePositionOrder[]
+}
+
+/** 仓位历史（**纯本地**读成交账本，不打交易所） */
+export const fetchExchangePositionHistory = (id?: number, limit = 50) =>
+  get<{
+    /** 已全平的（最近平的在最前） */
+    cycles: ExchangePositionCycle[]
+    /** 还没平完的（最近开仓的在最前） */
+    open: ExchangePositionCycle[]
+    openCount: number
+    /** 账本里最早的成交时间 —— 这个时间点之前的历史没进账本 */
+    since: string | null
+    error: string | null
+  }>(
+    `/api/exchange/position-history?limit=${limit}` + (id ? `&id=${id}` : '')
+  )
 
 /**
  * 一笔成交 —— 来自**后端账本**（WS 实时落 + 断线后 REST 补），
@@ -820,6 +946,31 @@ export interface ExchangeSnapshotResult {
 export const fetchExchangeOverview = (id?: number) =>
   get<ExchangeSnapshotResult>(`/api/exchange/overview${id ? `?id=${id}` : ''}`)
 
+/**
+ * 持仓**增量**（SSE 事件 `positions`，2026-10-06 改造 P1/P4）。
+ *
+ * 只带会随行情变的那几项 —— `wallet` / `assets` / `c2c` / `spot` 那些跟标记价
+ * 无关的字段不在这里，前端拿着往**已有快照**上盖就行。
+ * 有了它，交易所界面 / K 线叠加 / 下单页看的是**同一份**持仓，同屏不会再出现两个数。
+ */
+export interface PositionsPatch {
+  /** 数据时间（ISO） */
+  at: string
+  /** 这一份有没有叠过「标记价本地重算」（false = 纯 REST 快照口径） */
+  live: boolean
+  wallet: number
+  unrealized: number
+  /** 保证金余额 = 钱包 + 浮盈 */
+  margin: number
+  stats: {
+    longCount: number
+    shortCount: number
+    notional: number
+    unrealized: number
+  }
+  positions: FuturesPosition[]
+}
+
 /** 现在去拉一次 + 落库（慢，约 2 秒；用户点 ⟳ 用） */
 export const refreshExchangeOverview = (id?: number) =>
   post<ExchangeSnapshotResult>(
@@ -849,6 +1000,9 @@ export const fetchExchangeOpenOrders = (id?: number) =>
  *   `snapshot` 最新快照 —— 载荷跟 `fetchExchangeOverview` **一模一样**，直接替换
  *   `fill`     新成交 → 插到成交列表最前面（实时下单能当场看见）
  *   `backfill` 后端用 REST 补了一批断线期间的成交 → 重拉一次成交列表
+ *   `income`   后端对账了一批钱账本（已实现/手续费/资金费）→ 重拉一次「盈亏」
+ *   `health`   **上游用户数据流哑了 / 恢复了** ⇒ 哑了的时候前端得自己 REST 兜底刷
+ *              （⚠️ 这条 SSE 自己的心跳一直有，看不出上游死活，只能靠这个事件）
  *   `reject`   这套账户不参与统计（现货 / 没填 Key）→ ⚠️ **上层必须关掉订阅**：
  *              `liveSse` 不知道「这条流永远不会有数据了」，EventSource 会一直重连。
  *
@@ -860,22 +1014,37 @@ export function exchangeStream(
     snapshot?: (r: ExchangeSnapshotResult) => void
     fill?: (t: ExchangeTrade) => void
     backfill?: (added: number) => void
+    income?: (added: number) => void
+    health?: (deaf: boolean) => void
     reject?: (reason: string) => void
+    /** 持仓增量（改造 P1/P4）：常驻流每次刷新持仓都会推 */
+    positions?: (p: PositionsPatch) => void
+    /**
+     * 收到**任何**东西（数据事件或 20 秒一次的心跳）时回调。
+     *
+     * 用途：这套账户的流还活着 ⇒ 后端的定时采样会自己把快照推过来，
+     * 前端就**不必**再自己打交易所兜底（省掉稳态里最大的一路请求）。
+     * ⚠️ 心跳**只有这条回调看得到**（`liveSse` 不把它转发给 `onEvent`）。
+     */
+    alive?: () => void
     /** 断够了时间又连回来 → 重拉底稿（补断线期间漏的） */
     reconnect?: () => void
   }
 ): () => void {
   return liveSse(
     `/api/exchange/stream${id ? `?id=${id}` : ''}`,
-    ['snapshot', 'fill', 'backfill', 'reject'],
+    ['snapshot', 'fill', 'backfill', 'reject', 'positions', 'income', 'health'],
     (name, data) => {
       const d = data as Record<string, unknown> | null
       if (name === 'snapshot') on.snapshot?.(data as ExchangeSnapshotResult)
       else if (name === 'fill') on.fill?.(data as ExchangeTrade)
       else if (name === 'backfill') on.backfill?.(Number(d?.added ?? 0))
+      else if (name === 'income') on.income?.(Number(d?.added ?? 0))
+      else if (name === 'health') on.health?.(d?.deaf === true)
       else if (name === 'reject') on.reject?.(String(d?.reason ?? ''))
+      else if (name === 'positions') on.positions?.(data as PositionsPatch)
     },
-    {onReconnect: on.reconnect}
+    {onReconnect: on.reconnect, onAlive: on.alive}
   )
 }
 
@@ -928,8 +1097,6 @@ export interface TradeOpenOrder {
   side: 'buy' | 'sell'
   /** 币安原始订单类型（`LIMIT` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` …） */
   type: string
-  /** 币安原始持仓方向（`LONG` / `SHORT` / `BOTH`） */
-  posSide: string
   /** 币安原始持仓方向（`LONG` / `SHORT` / `BOTH`） */
   posSide: string
   /** 委托价（市价 / 条件单没有 ⇒ `null`，**别当 0 画**） */
@@ -1114,9 +1281,10 @@ export const closeTradePositions = (
   }>(`/api/exchange/trade/close${id ? `?id=${id}` : ''}`, {...(target ?? {}), test})
 
 /** 账户里**所有**持仓（面板「仓位」那一格列的列表） */
-export const fetchTradePositions = (id?: number) =>
+export const fetchTradePositions = (id?: number, fresh = false) =>
   get<{ok: boolean; positions?: TradePositionRow[]; error: string | null}>(
-    `/api/exchange/trade/positions${id ? `?id=${id}` : ''}`
+    `/api/exchange/trade/positions${id ? `?id=${id}` : ''}` +
+      (fresh ? `${id ? '&' : '?'}fresh=1` : '')
   )
 
 /**

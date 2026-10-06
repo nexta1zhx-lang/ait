@@ -36,6 +36,7 @@ import {
   type ExchangeCredentials,
   type PositionRow
 } from './exchange-account'
+import {takeWeight} from '../util/rate-budget'
 
 /** 合约账户里的多资产明细（`fapi/v2/account.assets[]`） */
 export interface FuturesAsset {
@@ -264,6 +265,17 @@ export async function fetchExchangeOverview(
   if (c.marketType !== 'swap') {
     throw new Error('这套账户不是合约账户（这一页的主体是合约）')
   }
+  /*
+   * 一次 = 4 个请求，权重按币安文档估：
+   *   /fapi/v2/account          5
+   *   /fapi/v2/positionRisk     5
+   *   /sapi/asset/wallet/balance ~1
+   *   /api/v3/account（现货）    10   ← 这个最容易被漏掉
+   * 合计 ≈ 21，**往上记到 25** 留余量（宁可少放行，也别把出口 IP 打封）。
+   * ⚠️ 冷实例还会先 loadMarkets（1.5MB exchangeInfo），那个不按权重算，
+   *    靠实例缓存（30 分钟）挡掉。
+   */
+  await takeWeight(25, 'overview')
   const ex = createExchange(c)
   await ex.loadMarkets()
 

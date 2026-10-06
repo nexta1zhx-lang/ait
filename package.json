@@ -35,6 +35,7 @@
     "swing": "tsx backend/src/scripts/swing.ts",
     "learn": "tsx backend/src/scripts/learn.ts",
     "history": "tsx backend/src/scripts/history.ts",
+    "archive": "tsx backend/src/scripts/archive.ts",
     "cost": "tsx backend/src/scripts/cost.ts",
     "reprice": "tsx backend/src/scripts/reprice.ts",
     "peak": "tsx backend/src/scripts/peak.ts",

@@ -3,6 +3,8 @@
  *
  *   1. K 线    `{sym}@kline_{tf}`      —— 按「币 + 周期」订阅，事件 `kline`
  *   2. 全市场行情 `!ticker@arr`          —— 一条流管所有币，事件 `ticker`（一批增量）
+ *   3. 标记价   `{sym}@markPrice@1s`    —— 只订**有持仓的币**（2026-10-06 加），
+ *                                          给「未实现盈亏逐笔重算」供数，见 `subscribeMarkPrice`
  *
  * 上游按币安文档那种「一条连接 + SUBSCRIBE 多条流」的用法：
  *
@@ -118,10 +120,15 @@ function flushSubscriptions(): void {
   }
 }
 
-/** 还有没有流指望 WS（含全市场行情那条） */
+/** 还有没有流指望 WS（含全市场行情那条、以及持有的标记价） */
 function anyWantWs(): boolean {
   for (const ch of channels.values()) if (ch.mode === 'ws') return true
-  return tickerMode === 'ws'
+  if (tickerMode === 'ws') return true
+  /*
+   * 标记价：**没有 REST 兜底**（兜底就是「不推就算了」，未实现盈亏退回 REST 快照口径，
+   * 见 `exchange-stream.ts`）。但这里得算数，否则上游会被当成「没人要了」关掉。
+   */
+  return markListeners.size > 0
 }
 
 function closeUpstream(): void {
@@ -203,6 +210,21 @@ function onUpstreamMessage(ev: {data: string | Buffer | ArrayBuffer | Buffer[]})
    */
   if (Array.isArray(body)) {
     handleTickerBatch(body)
+    return
+  }
+  /* 标记价（持仓的未实现盈亏靠它逐笔重算，见 `exchange-stream.ts`） */
+  if (body?.e === 'markPriceUpdate') {
+    const raw = String(body.s ?? '')
+    const set = markListeners.get(`${raw.toLowerCase()}@markPrice@1s`)
+    const mark = Number(body.p)
+    if (!set?.size || !Number.isFinite(mark) || mark <= 0) return
+    for (const fn of set) {
+      try {
+        fn(raw, mark)
+      } catch {
+        /* 单个订阅者出错不能影响别人 */
+      }
+    }
     return
   }
   if (body?.e !== 'kline' || !body.k) return
@@ -602,4 +624,82 @@ export function subscribeTickers(listener: TickerListener): () => void {
 /** 现在全市场行情还指望 WS 吗（调试用） */
 export function tickerStreamMode(): string {
   return tickerMode
+}
+
+/* ---------------- 标记价（`{sym}@markPrice@1s`） ---------------- */
+
+/**
+ * 持仓的**未实现盈亏**要逐笔动，就必须逐笔拿到标记价（2026-10-06 改造 P4）。
+ *
+ * 复用**同一条上游连接**（`/market/ws`，见文件头）—— 不再多开一条 WS：
+ *   · 只订**有持仓的那几个币**，一条 `{sym}@markPrice@1s` 秒级推一次；
+ *   · ⚠️ **别订 `!markPrice@arr@1s`**（全市场标记价）：一条消息把 ~500 个币全带上，
+ *     每秒几十 KB，我们只用得上手里那几条，纯浪费带宽和解析。
+ *
+ * ⚠️ 这一路是**尽力而为的增强**，没有 REST 兜底：拿不到标记价就**不重算**，
+ *    未实现盈亏退回 REST 快照那个口径（跟改造前完全一样）。
+ *    所以它挂了不会让任何数字变错，只会让数字不再逐笔跳。
+ */
+type MarkListener = (rawSymbol: string, markPrice: number) => void
+
+/** 流名（`btcusdt@markPrice@1s`）→ 监听者。⚠️ 币安流名全小写 */
+const markListeners = new Map<string, Set<MarkListener>>()
+
+/** `BTCUSDT` → `btcusdt@markPrice@1s`（`BTC/USDT:USDT` 这种也能吃） */
+function markStreamName(rawSymbol: string): string {
+  const base = String(rawSymbol)
+    .trim()
+    .toUpperCase()
+    .replace(/[:/\-\s]/g, '')
+    .toLowerCase()
+  return `${base}@markPrice@1s`
+}
+
+/**
+ * 订阅某个交易对的标记价。返回取消函数。
+ *
+ * ⚠️ 跟 K 线不一样，这里**没有「最后一个订阅者走了等 30 秒再退订」**：
+ *    调用方（`exchange-stream.ts`）是按**当前持仓**来订的，
+ *    持仓没了就该立刻退 —— 留着白占一条流。
+ */
+export function subscribeMarkPrice(
+  rawSymbol: string,
+  listener: MarkListener
+): () => void {
+  const key = markStreamName(rawSymbol)
+  /* 币种为空（或只有 `/` 这种）→ 别去订一条 `@markPrice@1s` 的野流 */
+  if (!/^[a-z0-9]+@/.test(key)) {
+    console.warn(`[kline] 标记价订阅：符号不合法（${rawSymbol}）`)
+    return () => undefined
+  }
+
+  let set = markListeners.get(key)
+  if (!set) {
+    set = new Set()
+    markListeners.set(key, set)
+  }
+  const bucket = set
+  bucket.add(listener)
+
+  if (!wanted.has(key)) {
+    wanted.add(key)
+    void ensureUpstream()
+  }
+  flushSubscriptions()
+
+  return () => {
+    const cur = markListeners.get(key)
+    if (!cur) return
+    cur.delete(listener)
+    if (cur.size) return
+    markListeners.delete(key)
+    wanted.delete(key)
+    flushSubscriptions()
+    if (!anyWantWs()) closeUpstream()
+  }
+}
+
+/** 现在订了几条标记价流（调试用） */
+export function markChannelCount(): number {
+  return markListeners.size
 }

@@ -21,22 +21,27 @@ import type {PositionRef} from './ExchangeAccountBoard.vue'
 import {testOrder} from '../settings'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
+import {isForeground} from '../live'
 import {
   closeTradePositions,
   exchangeStream,
   fetchExchangeCurve,
   fetchExchangeFills,
   fetchExchangeKeys,
+  fetchExchangeIncome,
   fetchExchangeOpenOrders,
+  fetchExchangePositionHistory,
   fetchExchangeOverview,
   fetchRate,
   isAuthError,
   refreshExchangeOverview,
   type CurvePoint,
   type ExchangeIncomeRow,
+  type ExchangeIncomeTotals,
   type ExchangeKey,
   type ExchangeOpenOrder,
   type ExchangeOverview,
+  type ExchangePositionCycle,
   type ExchangeSnapshotResult,
   type ExchangeTrade,
   type FuturesAsset,
@@ -54,6 +59,12 @@ import {
 const REFRESH_AFTER_SEC = 15
 /** 成交列表最多留多少条 */
 const FILLS_MAX = 60
+/** 「盈亏」看最近几天（`0` = 全部历史） */
+const INCOME_DAYS = 7
+/** 盈亏明细最多留多少条 */
+const INCOME_MAX = 200
+/** 仓位历史最多列多少段 */
+const CYCLES_MAX = 50
 
 const keys = ref<ExchangeKey[]>([])
 
@@ -95,6 +106,12 @@ const activeTargets = computed<ExchangeKey[]>(() => {
 /** 看的是**多套**（合并视图）—— 单套时不合并、也不打 key 标签，跟以前一模一样 */
 const multi = computed(() => activeTargets.value.length > 1)
 
+/**
+ * **全部** Key（跟 `activeTargets` 的区别：那个是当前 tab 选中的）。
+ * ⚠️ 盈亏汇总要算全部账户 —— 只算选中的那套，切 tab 时「净盈亏」会跳来跳去。
+ */
+const listAll = computed<ExchangeKey[]>(() => keys.value)
+
 /** board 顶部那排 tab 的选项：`全部` + 每套的名字（只有一套时不摆 tab） */
 const accountOptions = computed(() => {
   const list = keys.value.map(k => ({value: String(k.id), label: k.name}))
@@ -107,6 +124,43 @@ const accountOptions = computed(() => {
 const parts = ref<Record<number, ExchangeOverview>>({})
 /** keyId → 那套「没数据」的原因 */
 const partReasons = ref<Record<number, string>>({})
+
+/**
+ * keyId → 最近一次拿到**整份快照**的时刻（改造 P2）。
+ *
+ * ⚠️ 只记「整份」（`snapshot` 事件 / 首次读库 / 手动刷新），
+ *    **不算** `positions` 补丁 —— 那个只带持仓，钱包 / C2C / 现货还是上一份快照的。
+ *    兜底定时器靠它判断「这份数据整体是不是太旧了」。
+ */
+let snapAt: Record<number, number> = {}
+
+/** keyId → 这套的 SSE 最后一次有动静的时刻（数据事件或 20 秒一次的心跳都算） */
+let streamAt: Record<number, number> = {}
+
+/**
+ * 这些账户的 SSE **还活着吗**（心跳 20 秒一次，3 拍没来就当断了）。
+ *
+ * 活着 ⇒ 后端的 5 分钟采样 / 事件快照都会经同一条流推过来 ⇒
+ * **前端一次交易所都不用打**。这是 2026-10-06 收敛掉的稳态最大一项
+ * （原先每 90 秒 25 权重/套）。
+ */
+const STREAM_ALIVE_MS = 60_000
+
+function streamAlive(keyId: number): boolean {
+  return Date.now() - (streamAt[keyId] ?? 0) < STREAM_ALIVE_MS
+}
+
+/**
+ * keyId → 后端报告「上游用户数据流哑了」。
+ *
+ * ⚠️ 为什么单开一个标记：**SSE 活着 ≠ 数据在动**。
+ *    我们这条 SSE 每 20 秒有心跳，心跳能一直来；但上游那条币安用户数据流
+ *    可能「连上了却一帧不推」（假 IP，见 `backend/src/data/kline-stream.ts` 头部），
+ *    这时如果还按「流活着就别刷」收敛，界面就会**一直停在旧数上** ——
+ *    用户最早提的「开仓半天交易所页面才有数据」就是这么来的。
+ *    所以只有后端说「哑了」时，前端才恢复自己兜底刷。
+ */
+const deaf = ref<Record<number, boolean>>({})
 
 /**
  * 把几套快照**加总**成一份（「全部」那一格用）。
@@ -353,17 +407,46 @@ async function closeRow(p: PositionRef): Promise<void> {
   }
 }
 
-/** 已实现盈亏 = 账本里带 realized 的那些（一笔成交一条）；多套时跟着成交一起带 key 名 */
-const income = computed<ExchangeIncomeRow[]>(() =>
-  fills.value
-    .filter(f => Number(f.realized ?? 0) !== 0)
-    .map(f => ({
-      symbol: f.symbol,
-      income: Number(f.realized),
-      time: f.datetime,
-      keyName: f.keyName
-    }))
-)
+/**
+ * 已实现盈亏 = 账本里带 realized 的那些（一笔成交一条）；多套时跟着成交一起带 key 名
+ *
+ * ★ 2026-10-06 换成钱账本（`/api/exchange/income`）—— 这里只留容器，
+ *   取数在 `loadIncome()`（那个才是权威口径：已实现 + 手续费 + 资金费）。
+ */
+const income = ref<ExchangeIncomeRow[]>([])
+/** 盈亏汇总（已实现 / 手续费 / 资金费 / 净）—— 后端按交易所口径算好的 */
+const incomeTotals = ref<ExchangeIncomeTotals | null>(null)
+
+/**
+ * **仓位历史**（用户 2026-10-06 定的口径）：开仓 → 全平算一笔。
+ * ⚠️ 不是 income 的分类统计 —— 那个只用来给持仓卡上的「已结」供数。
+ */
+const cycles = ref<ExchangePositionCycle[]>([])
+const openCycles = ref<ExchangePositionCycle[]>([])
+const cyclesSince = ref<string | null>(null)
+
+/** 读仓位历史（**纯本地**，不打交易所） */
+async function loadCycles(): Promise<void> {
+  const list = listAll.value
+  const many = multi.value
+  const closed: ExchangePositionCycle[] = []
+  const open: ExchangePositionCycle[] = []
+  let since: string | null = null
+  for (const k of list) {
+    try {
+      const r = await fetchExchangePositionHistory(k.id, CYCLES_MAX)
+      if (r.since && (!since || r.since < since)) since = r.since
+      for (const c of r.cycles ?? [])
+        closed.push(many ? {...c, keyName: k.name} : c)
+      for (const c of r.open ?? []) open.push(many ? {...c, keyName: k.name} : c)
+    } catch (e) {
+      if (!isAuthError(e)) err.value = `读取仓位历史失败：${msg(e)}`
+    }
+  }
+  cycles.value = closed
+  openCycles.value = open
+  cyclesSince.value = since
+}
 
 const loading = computed(() => !data.value && !reason.value && !err.value)
 
@@ -406,10 +489,31 @@ async function loadSnapshots(): Promise<void> {
       continue
     }
     if (r.overview) {
-      next[id] = r.overview
+      /* 库里那条的时间：后端给的 `ageSec` 反推出来 */
+      const dbAt = Date.now() - (r.ageSec ?? 0) * 1000
+      const knownAt = snapAt[id] ?? 0
+      /*
+       * ⚠️ **别拿更旧的盖掉更新鲜的** —— 常驻流一直在推（1 秒级），
+       *    而库里那条 5 分钟才写一次。不加这个判断，换一次 tab 就会把
+       *    刚推过来的新数**退回**成库里那份旧的（越刷新越旧，很难查）。
+       */
+      if (!(next[id] && dbAt <= knownAt)) {
+        next[id] = r.overview
+        snapAt = {...snapAt, [id]: dbAt}
+      }
       delete nextReason[id]
     }
-    if ((r.ageSec ?? 0) > REFRESH_AFTER_SEC) stale = true
+    /*
+     * 该不该主动刷一次：看**手上这份数据多旧**（不是库里那行），
+     * 而且**只在流不活着、或者后端说上游哑了的时候**才刷 ——
+     * 流真正活着就说明后端会自己推（含 5 分钟采样），切 tab 不该白打一遍交易所。
+     * ⚠️ 「后端说哑了」这一条不能省：SSE 心跳一直有，但上游可能一帧不推。
+     */
+    if (
+      (!streamAlive(id) || deaf.value[id] === true) &&
+      Date.now() - (snapAt[id] ?? 0) > REFRESH_AFTER_SEC * 1000
+    )
+      stale = true
     if (r.err) err.value = `上次采集不完整：${r.err}`
   }
   parts.value = next
@@ -436,6 +540,7 @@ async function doRefresh(): Promise<void> {
         if (r.overview) {
           next[k.id] = r.overview
           delete nextReason[k.id]
+          snapAt = {...snapAt, [k.id]: Date.now()}
         } else if (r.reason) {
           nextReason[k.id] = r.reason
           delete next[k.id]
@@ -474,8 +579,51 @@ async function loadFills(): Promise<void> {
   fills.value = all.slice(0, FILLS_MAX)
 }
 
-/** 挂单：几套合起来（多套时每条标出是哪套的），失败原因也带上账户名 */
-async function loadOrders(): Promise<void> {
+/**
+ * 钱账本（`/fapi/v1/income` 的落库版）—— 「盈亏」tab 的数据源。
+ *
+ * ★ 2026-10-06 统一：**不再**从 `fills.realized` 现算（那是毛数，漏手续费和资金费）。
+ *   这里读的是币安那本账：已实现 + 手续费 + 资金费 + 其它，四类直接相加才是净的。
+ *   纯本地读，不打交易所（数据由后端定期对账灌进来）。
+ */
+async function loadIncome(): Promise<void> {
+  const list = listAll.value
+  const many = multi.value
+  const rows: ExchangeIncomeRow[] = []
+  const total: ExchangeIncomeTotals = {
+    realized: 0,
+    commission: 0,
+    funding: 0,
+    other: 0,
+    net: 0,
+    count: 0
+  }
+  let any = false
+  for (const k of list) {
+    try {
+      const r = await fetchExchangeIncome(k.id, INCOME_DAYS, INCOME_MAX)
+      if (!r.totals) continue
+      any = true
+      total.realized += r.totals.realized
+      total.commission += r.totals.commission
+      total.funding += r.totals.funding
+      total.other += r.totals.other
+      total.net += r.totals.net
+      total.count += r.totals.count
+      for (const row of r.rows ?? [])
+        rows.push(many ? {...row, keyName: k.name} : row)
+    } catch (e) {
+      if (!isAuthError(e)) err.value = `读取盈亏失败：${msg(e)}`
+    }
+  }
+  rows.sort((a, b) =>
+    String(b.time ?? '').localeCompare(String(a.time ?? ''))
+  )
+  incomeTotals.value = any ? total : null
+  income.value = rows.slice(0, INCOME_MAX)
+}
+
+/** 挂单：几套合起来（多套时每条标出是哪套的），失败原因也带上账户名 */async function loadOrders(): Promise<void> {
   const list = activeTargets.value
   const many = multi.value
   loadingOrders.value = true
@@ -546,7 +694,7 @@ async function loadCurve(): Promise<void> {
 /* ---------------- SSE ---------------- */
 
 /**
- * 每个选中的账户一条 SSE（后端本来就按 key_id 分流）。
+ * 每个账户一条 SSE（后端本来就按 key_id 分流）。
  * 多套时就是几条并行 —— 数量就是账户数，不会爆。
  */
 let stops: (() => void)[] = []
@@ -556,12 +704,28 @@ function stopStreams(): void {
   stops = []
 }
 
+/** 这套 key 现在是不是「正在看的那几套」之一 */
+function keyIsActive(id: number): boolean {
+  return activeTargets.value.some(k => k.id === id)
+}
+
+/**
+ * 给**每一套**账户都开一条 SSE（不是只给「正在看的那几套」）。
+ *
+ * ★ 2026-10-06 改造：以前每次换 tab 都 `stopStreams()` + 重新订阅 ——
+ *   换一次格就是一轮断开重连（后端还会重发一遍底稿），而且新数据要等一轮才到。
+ *   SSE 本身**不占交易所权重**（就是一条 HTTP 长连接），按账户数开一次就够了 ⇒
+ *   换 tab 从此不碰连接，切过去就是活的。
+ */
 function startStreams(): void {
   stopStreams()
-  const many = multi.value
-  for (const k of activeTargets.value) {
+  for (const k of keys.value) {
     stops.push(
       exchangeStream(k.id, {
+        /* 有心跳/数据 = 这条流还活着 → 兜底定时器就不用打交易所（见 startSnapTimer） */
+        alive: () => {
+          streamAt = {...streamAt, [k.id]: Date.now()}
+        },
         snapshot: r => {
           const next = {...parts.value}
           const nextReason = {...partReasons.value}
@@ -571,22 +735,73 @@ function startStreams(): void {
           } else if (r.overview) {
             next[k.id] = r.overview
             delete nextReason[k.id]
+            snapAt = {...snapAt, [k.id]: Date.now()}
           }
           parts.value = next
           partReasons.value = nextReason
-          rebuild()
-          // SSE 来得勤：最多每分钟把曲线也重拉一次
-          if (Date.now() - curveAt > 60_000) void loadCurve()
+          if (keyIsActive(k.id)) rebuild()
+          /* 曲线只看「正在看的那几套」；SSE 来得勤，最多每分钟重拉一次 */
+          if (keyIsActive(k.id) && Date.now() - curveAt > 60_000) void loadCurve()
+        },
+        /*
+         * 持仓增量（改造 P1/P4）—— 后端常驻流每次刷新持仓都会推。
+         *
+         * ⚠️ 只往**已有快照**上盖（没有底稿就先不管：`snapshot` 事件马上就到，
+         *    凭空造一份缺 wallet/assets/c2c 的快照反而会让净资产算错）。
+         * ⚠️ **不动 `snapAt`**：这份补丁里只有持仓，钱包 / C2C / 现货还是上一份快照的，
+         *    所以那条「太久没整份快照就刷一次」的兜底定时器不该被它喂饱。
+         */
+        positions: p => {
+          const cur = parts.value[k.id]
+          if (!cur) return
+          parts.value = {
+            ...parts.value,
+            [k.id]: {
+              ...cur,
+              takenAt: p.at,
+              futures: {
+                ...cur.futures,
+                positions: p.positions,
+                wallet: p.wallet,
+                unrealized: p.unrealized,
+                margin: p.margin
+              },
+              stats: p.stats
+            }
+          }
+          if (keyIsActive(k.id)) rebuild()
         },
         fill: t => {
+          /*
+           * ⚠️ 流是**全部账户**都订着的，所以别的账户成交时不能往这张列表里塞
+           *    （列表只显示「正在看的那几套」）。换 tab 会 `loadFills()` 重拉。
+           */
+          if (!keyIsActive(k.id)) return
           // 同一笔可能「实时事件」和「REST 回补」都给到 → 按 tradeId 去重
           if (fills.value.some(f => f.id === t.id)) return
-          fills.value = [many ? {...t, keyName: k.name} : t, ...fills.value].slice(
-            0,
-            FILLS_MAX
-          )
+          const tagged = keys.value.length > 1 ? {...t, keyName: k.name} : t
+          fills.value = [tagged, ...fills.value].slice(0, FILLS_MAX)
+          /* 仓位历史是从成交推出来的 —— 新成交可能刚开一段、也可能刚平掉一段 */
+          void loadCycles()
         },
-        backfill: () => void loadFills(),
+        backfill: () => {
+          if (keyIsActive(k.id)) {
+            void loadFills()
+            /* REST 补回来的成交同样会改变「这一段平没平完」 */
+            void loadCycles()
+          }
+        },
+        /* 钱账本对账到新记录 → 手续费 / 资金费变了，持仓卡上的「已结」要跟着动 */
+        income: () => void loadIncome(),
+        /*
+         * 上游用户数据流哑了 / 恢复了。
+         * ⚠️ 只记标记，**马上刷一次**那次由兜底定时器（20 秒一轮）去做 ——
+         *    事件可能连着来几次，不该每个都打一遍交易所。
+         */
+        health: d => {
+          deaf.value = {...deaf.value, [k.id]: d}
+          if (d && keyIsActive(k.id)) void doRefresh()
+        },
         reject: r => {
           /*
            * 这套账户不参与统计（现货 / 没填 key）。
@@ -598,12 +813,14 @@ function startStreams(): void {
           const next = {...parts.value}
           delete next[k.id]
           parts.value = next
-          rebuild()
+          if (keyIsActive(k.id)) rebuild()
         },
         reconnect: () => {
           void loadSnapshots()
-          void loadFills()
-          void loadCurve()
+          if (keyIsActive(k.id)) {
+            void loadFills()
+            void loadCurve()
+          }
         }
       })
     )
@@ -645,23 +862,75 @@ function onTransferred(): void {
 
 /* ---------------- 换 tab ---------------- */
 
+/*
+ * 换 tab（全部 ↔ 某个账户）。
+ *
+ * ★ 2026-10-06 改造：以前这里把**所有状态清空**再全部重拉 ——
+ *   切 A→B→A 要把两套都重读一遍，而且界面会先白一下；更贵的是
+ *   `loadOrders()` 每套都打一次**不带 symbol 的挂单查询（币安 40 权重/条）**，
+ *   再叠上快照 stale 触发的刷新 ⇒ 点一下就是几十上百权重。
+ *
+ * 现在：
+ *   · `parts` / `partReasons` **不清** —— 它们是按 keyId 存的，`rebuild()` 只读
+ *     `activeTargets`，留着别套的数据既不会串进视图，切回来还能秒开；
+ *   · SSE **不动**（`startStreams()` 已经给每套都开好了，见上面）；
+ *   · 只重拉「跟视图有关」的那几样：成交 / 挂单 / 曲线（挂单那一路现在有 10 秒缓存顶着）。
+ */
 watch(picked, () => {
-  /* 换格：把上一格攒下的 parts 清掉（不然「全部」会把没在看的那套也算进来） */
-  parts.value = {}
-  partReasons.value = {}
-  data.value = null
-  reason.value = ''
+  /*
+   * ⚠️ 不置 `data.value = null`：`rebuild()` 马上会按新的 activeTargets 重算，
+   *    中间那一下空白没必要（切到没数据的账户时 `rebuild()` 自己会给原因）。
+   */
   err.value = ''
-  openOrders.value = []
-  ordersErr.value = ''
-  fills.value = []
-  curve.value = []
   void loadSnapshots()
   void loadFills()
+  void loadIncome()
+  void loadCycles()
   void loadOrders()
   void loadCurve()
-  startStreams()
 })
+
+/* ---------------- 整份快照的兜底定时器（改造 P2 + 2026-10-06 收敛） ---------------- */
+
+/**
+ * ⚠️ 改造前这个页面**没有定时器**：`loadSnapshots()` 只在挂载 / 切账户时跑一次，
+ *    之后纯靠 SSE。WS 那边一旦不推，界面最长要等 **5 分钟采样**才动 ——
+ *    用户 2026-10-06 报的「K 线有仓位了、交易所界面过一会儿才出来」就是这么来的。
+ *
+ * ★ 2026-10-06 收敛：一上来加的是「整份快照超 90 秒就刷」，但**持仓/未实现盈亏
+ *   已经由 SSE 1 秒级推了**（那才是当初要修的），所以这个定时器现在只负责
+ *   「万一流断了」这一种情况。改成：
+ *
+ *     这套账户的 SSE **还活着**（20 秒一次心跳）⇒ 后端的 5 分钟采样 / 事件快照
+ *     都会经同一条流推过来 ⇒ **一次交易所都不打**；
+ *     流断了（3 拍心跳没来）⇒ 才按 `SNAP_FRESH_MS` 的节奏去打兜底。
+ *
+ *   稳态下这一项从「每 90 秒 25 权重/套」降到 **0** —— 它是当时最大的一项。
+ */
+const SNAP_FRESH_MS = 90_000
+const SNAP_CHECK_MS = 20_000
+let snapTimer: ReturnType<typeof setInterval> | null = null
+
+function startSnapTimer(): void {
+  if (snapTimer) return
+  snapTimer = setInterval(() => {
+    /* 后台不刷（省流量，也免得在后台被交易所限频） */
+    if (!isForeground()) return
+    const now = Date.now()
+    const need = activeTargets.value.some(k => {
+      /* 这套压根没数据（现货 / 没填 key）→ 刷也没用，别去刷 */
+      if (!parts.value[k.id]) return false
+      /*
+       * 流真正活着 → 后端会自己推，不用我们打交易所。
+       * ⚠️ 但后端报告「上游哑了」时必须继续兜底 —— SSE 心跳还在，
+       *    上游那条用户数据流却一帧不推，全靠这里把数字救回来。
+       */
+      if (streamAlive(k.id) && deaf.value[k.id] !== true) return false
+      return now - (snapAt[k.id] ?? 0) > SNAP_FRESH_MS
+    })
+    if (need) void doRefresh()
+  }, SNAP_CHECK_MS)
+}
 
 onMounted(async () => {
   /* 汇率：跟账户列表一起并行拿，拿不到也无所谓（只用默认值） */
@@ -683,9 +952,19 @@ onMounted(async () => {
    * 只有一套时 `activeTargets` 就是它自己，效果跟以前一样。
    */
   picked.value = keys.value.length > 1 ? 'all' : String(keys.value[0]!.id)
+
+  /* 给每一套账户都开上 SSE（只在挂载时开一次，换 tab 不再断开重连） */
+  startStreams()
+
+  /* 兜底：整份快照太久没更新就自己刷（改造 P2，见上面那段说明） */
+  startSnapTimer()
 })
 
-onUnmounted(stopStreams)
+onUnmounted(() => {
+  stopStreams()
+  if (snapTimer) clearInterval(snapTimer)
+  snapTimer = null
+})
 </script>
 
 <template>
@@ -709,6 +988,9 @@ onUnmounted(stopStreams)
       :open-orders="openOrders"
       :trades="fills"
       :income="income"
+      :cycles="cycles"
+      :open-cycles="openCycles"
+      :cycles-since="cyclesSince"
       :loading-orders="loadingOrders"
       :refreshing="refreshing"
       :curve="curve"

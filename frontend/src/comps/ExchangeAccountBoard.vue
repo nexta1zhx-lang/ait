@@ -27,6 +27,8 @@ import {
   type ExchangeIncomeRow,
   type ExchangeOpenOrder,
   type ExchangeOverview,
+  type ExchangePositionCycle,
+  type ExchangePositionOrder,
   type ExchangeTrade
 } from '../api'
 import {bjTime, fixed, fmt} from '../format'
@@ -49,7 +51,14 @@ const props = defineProps<{
   openOrders?: ExchangeOpenOrder[]
   /** 成交/盈亏来自**后端账本**（WS 实时落 + 断线后 REST 补） */
   trades?: ExchangeTrade[]
+  /** 钱账本逐笔（已实现 / 手续费 / 资金费 …）—— 持仓卡上那行「已结」用它 */
   income?: ExchangeIncomeRow[]
+  /** **仓位历史**：开仓 → 全平一笔（「盈亏」那一格的主体，用户 2026-10-06 定的） */
+  cycles?: ExchangePositionCycle[]
+  /** 还没平完的仓位（减仓的已实现盈亏就在这些的详情里） */
+  openCycles?: ExchangePositionCycle[]
+  /** 账本里最早的成交（这个时间之前的历史不在账本里） */
+  cyclesSince?: string | null
   /** 挂单正在拉（慢接口，单独转圈） */
   loadingOrders?: boolean
   /** 正在刷新快照（⟳ 转圈 + 禁点） */
@@ -197,10 +206,11 @@ function posRef(p: FuturesPosition): PositionRef {
 }
 
 /**
- * 这个交易对的**已实现盈亏**（用户 2026-10-05：「已结盈利小字在下面」）。
+ * 这个交易对的**净盈亏**（用户 2026-10-05：「已结盈利小字在下面」）。
  *
- * ⚠️ 数据来自后端账本（`income` 那批：成交带 realized 的那些），
- *    所以**只有账本里有这个币的记录时**才有值 —— 没有就返回 `null`，那一行不显示
+ * ⚠️ 数据来自**钱账本**（`/api/exchange/income`：已实现 + 手续费 + 资金费），
+ *    所以这是**净**的（2026-10-06 之前是毛的 `realized`，跟盈亏 tab 的口径不一致）。
+ *    只有账本里有这个币的记录时才有值 —— 没有就返回 `null`，那一行不显示
  *    （宁可不说，也别显示成 0 让人以为「这个仓位从来没赚过钱」）。
  * ⚠️ 多套账户合起来看时按 `symbol + keyName` 匹配，别把两套账户的同名币加一起。
  */
@@ -249,7 +259,7 @@ const tabs = computed(() => [
     value: 'ord' as Tab,
     label: withCount('挂单', props.openOrders?.length ?? 0)
   },
-  {value: 'inc' as Tab, label: withCount('盈亏', props.income?.length ?? 0)},
+  {value: 'inc' as Tab, label: withCount('仓位历史', (props.cycles?.length ?? 0) + (props.openCycles?.length ?? 0))},
   {value: 'trades' as Tab, label: '成交'},
   {value: 'bags' as Tab, label: '资产'}
 ])
@@ -270,28 +280,72 @@ const orderGroups = computed(() => {
   return [...m.values()]
 })
 
-/** 已实现盈亏：按（账户 + 币种）汇总（逐笔看着累） */
-const incomeRows = computed(() => props.income ?? [])
-const incomeTotal = computed(() =>
-  incomeRows.value.reduce(
-    (s, r) => s + (Number.isFinite(r.income) ? r.income : 0),
-    0
-  )
-)
-const incomeGroups = computed(() => {
-  const m = new Map<
-    string,
-    {symbol: string; keyName?: string; sum: number; count: number}
-  >()
-  for (const r of incomeRows.value) {
-    const k = `${r.keyName ?? ''}|${r.symbol}`
-    const g = m.get(k) ?? {symbol: r.symbol, keyName: r.keyName, sum: 0, count: 0}
-    g.sum += r.income
-    g.count++
-    m.set(k, g)
-  }
-  return [...m.values()].sort((a, b) => Math.abs(b.sum) - Math.abs(a.sum))
-})
+/**
+ * 仓位历史 —— **开仓到全平算一笔**（用户 2026-10-06 定的口径）。
+ *
+ * ⚠️ 不是「把 income 按类型加起来」的统计。减仓不单独算一笔，
+ *    它的已实现盈亏归到整段头上，同时逐笔留在详情里（用户要「减仓的要有实现盈利」）。
+ * ⚠️ **未平**的单独一组放前面：减仓就发生在未平那一段里 ——
+ *    只列已平的段，用户会找不到「刚才减仓赚了多少」。
+ */
+const closedCycles = computed(() => props.cycles ?? [])
+const openCycles = computed(() => props.openCycles ?? [])
+
+/** 点开了哪几段（key = 账户 + 币种 + 方向 + 开仓时间） */
+const expanded = ref<Set<string>>(new Set())
+
+function cycleKey(c: ExchangePositionCycle): string {
+  return `${c.keyName ?? ''}|${c.symbol}|${c.side}|${c.openAt}`
+}
+
+function isExpanded(c: ExchangePositionCycle): boolean {
+  return expanded.value.has(cycleKey(c))
+}
+
+function toggleCycle(c: ExchangePositionCycle): void {
+  const k = cycleKey(c)
+  const next = new Set(expanded.value)
+  if (next.has(k)) next.delete(k)
+  else next.add(k)
+  expanded.value = next
+}
+
+/** 持仓时长说人话：`34 秒` / `3 分` / `2 小时 5 分` / `1 天 3 小时` */
+function holdText(sec: number): string {
+  if (!(sec > 0)) return '—'
+  if (sec < 60) return `${Math.round(sec)} 秒`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} 分`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr} 小时 ${min % 60} 分`
+  return `${Math.floor(hr / 24)} 天 ${hr % 24} 小时`
+}
+
+/**
+ * 逐笔那一行的动作标签。
+ * ⚠️ 一段里的**最后一笔减仓就是「平仓」** —— 算法上仓位归零的那一笔才收尾
+ *    （减仓和全平都说成「减仓」会让人以为这段还开着）。
+ */
+function orderAction(c: ExchangePositionCycle, o: ExchangePositionOrder, i: number): string {
+  if (!o.reduce) return '加仓'
+  if (c.closed && i === c.orders.length - 1) return '平仓'
+  return '减仓'
+}
+
+/** 钱账本类型 → 中文 */
+const INCOME_LABELS: Record<string, string> = {
+  REALIZED_PNL: '已实现',
+  COMMISSION: '手续费',
+  COMMISSION_REBATE: '手续费返还',
+  FUNDING_FEE: '资金费',
+  TRANSFER: '划转',
+  INSURANCE_CLEAR: '保险清算',
+  REFERRAL_KICKBACK: '推荐返佣'
+}
+
+function incomeLabel(t: string): string {
+  return INCOME_LABELS[t] ?? t
+}
 
 /* ---------------- 格式化 ---------------- */
 
@@ -630,7 +684,7 @@ const RANGES = [
           <!--
             一条持仓的版式（用户 2026-10-05 逐条提的）：
               · 币种用**简写**（`1000LUNCUSDT` → `1000LUNC`），别把 USDT 也念一遍
-              · **未实现盈亏靠右**，下面挂一行小字「已结」= 这个币到现在的已实现盈亏
+              · **未实现盈亏靠右**，下面挂一行小字「已结」= 这个币到现在的净盈亏
               · 「名义」改叫「价值」，强平价 / 距强平**不要小字**（它不是附注，是要紧的数）
               · 底部两颗按钮：减仓（弹窗选百分比）/ 平仓
           -->
@@ -656,7 +710,7 @@ const RANGES = [
                   v-if="realizedOf(p) !== null"
                   class="realized"
                   :class="tone(realizedOf(p) ?? 0)"
-                  title="这个交易对到现在的已实现盈亏（手续费/资金费也算在里面）"
+                  title="这个交易对到现在的净盈亏（已实现 + 手续费 + 资金费，不含划转）"
                 >
                   已结 {{ signedMoney(realizedOf(p) ?? 0) }}
                 </span>
@@ -744,45 +798,115 @@ const RANGES = [
         <p v-else class="dim">当前没有挂单</p>
       </section>
 
-      <!-- 已实现盈亏 -->
+      <!--
+        仓位历史（用户 2026-10-06 定的口径）：
+        **开仓 → 全平算一笔**，「盈利」是这一整段赚的；减仓不单独算一笔，
+        但点开详情能逐笔看到每次减仓锁了多少。
+      -->
       <section v-show="tab === 'inc'" class="panel">
         <div class="pn-h">
-          <h2>已实现盈亏</h2>
+          <h2>仓位历史</h2>
           <span class="spacer" />
-          <span v-if="incomeRows.length" class="pnl" :class="tone(incomeTotal)">
-            {{ signedMoney(incomeTotal) }}
+          <span
+            v-if="cyclesSince"
+            class="dim tiny"
+            title="账本只有币安给的那段成交（约 7 天），更早的历史不在里面"
+          >
+            账本自 {{ bjTime(cyclesSince).slice(5, 16) }} 起
           </span>
+          <span class="dim tiny">{{ closedCycles.length }} 笔已平</span>
         </div>
-        <template v-if="incomeRows.length">
-          <ul class="incs">
-            <li v-for="g in incomeGroups" :key="(g.keyName ?? '') + g.symbol">
-              <span class="sym">{{ g.symbol }}</span>
-              <span v-if="g.keyName" class="ktag">{{ g.keyName }}</span>
-              <span class="dim tiny">{{ g.count }} 笔</span>
-              <span class="spacer" />
-              <span class="pnl" :class="tone(g.sum)">{{
-                signedMoney(g.sum)
-              }}</span>
-            </li>
-          </ul>
-          <p class="sub-h dim tiny">最近明细</p>
-          <ul class="rows">
-            <li
-              v-for="(r, i) in incomeRows.slice(0, 10)"
-              :key="`${r.keyName ?? ''}-${r.symbol}-${i}`"
-            >
-              <span class="sym">{{ r.symbol }}</span>
-              <span v-if="r.keyName" class="ktag">{{ r.keyName }}</span>
-              <span class="spacer" />
-              <span class="pnl" :class="tone(r.income)">{{
-                signedMoney(r.income)
-              }}</span>
-              <span class="dim tiny">{{ r.time ? bjTime(r.time) : '' }}</span>
+
+        <!-- 还没平完的先放前面：减仓的已实现盈亏就在这些的详情里 -->
+        <template v-if="openCycles.length">
+          <p class="sub-h dim tiny">持仓中（未平仓，不算进下面的盈亏）</p>
+          <ul class="cycles">
+            <li v-for="c in openCycles" :key="cycleKey(c)" class="cyc open">
+              <div class="cyc-h" @click="toggleCycle(c)">
+                <span class="sym">{{ baseOf(c.symbol) }}</span>
+                <span class="side" :class="c.side === 'short' ? 'sell' : 'buy'">
+                  {{ c.side === 'short' ? '空' : '多' }}
+                </span>
+                <span v-if="c.keyName" class="ktag">{{ c.keyName }}</span>
+                <span class="spacer" />
+                <span class="dim tiny">已结</span>
+                <span class="pnl" :class="tone(c.net)">{{ signedMoney(c.net) }}</span>
+                <span class="car">{{ isExpanded(c) ? '▾' : '▸' }}</span>
+              </div>
+              <div class="cyc-kv">
+                <span>开仓均价 <b>{{ c.entryPrice === null ? '—' : fmt(c.entryPrice) }}</b></span>
+                <span>已平 <b>{{ qty(c.closedQty) }}</b> / {{ qty(c.qty) }}</span>
+                <span>开仓 <b>{{ bjTime(c.openAt).slice(5, 16) }}</b></span>
+                <span>持仓 <b>{{ holdText(c.holdSec) }}</b></span>
+              </div>
+              <ul v-if="isExpanded(c)" class="cyc-orders">
+                <li v-for="(o, i) in c.orders" :key="o.id">
+                  <span class="dim tiny">{{ bjTime(o.time).slice(5, 16) }}</span>
+                  <span class="side" :class="o.side === 'buy' ? 'buy' : 'sell'">
+                    {{ o.side === 'buy' ? '买入' : '卖出' }}
+                  </span>
+                  <span class="dim tiny">{{ orderAction(c, o, i) }}</span>
+                  <span class="spacer" />
+                  <span class="num">{{ fmt(o.price) }} × {{ qty(o.amount) }}</span>
+                  <span class="dim tiny">费 {{ fixed(o.fee, 4) }}</span>
+                  <span v-if="o.realized !== 0" class="pnl" :class="tone(o.realized)">
+                    {{ signedMoney(o.realized) }}
+                  </span>
+                </li>
+              </ul>
             </li>
           </ul>
         </template>
-        <p v-else class="dim">
-          还没有已实现盈亏（有成交后会自动记进账本）
+
+        <template v-if="closedCycles.length">
+          <p v-if="openCycles.length" class="sub-h dim tiny">已平仓</p>
+          <ul class="cycles">
+            <li v-for="c in closedCycles" :key="cycleKey(c)" class="cyc">
+              <div class="cyc-h" @click="toggleCycle(c)">
+                <span class="sym">{{ baseOf(c.symbol) }}</span>
+                <span class="side" :class="c.side === 'short' ? 'sell' : 'buy'">
+                  {{ c.side === 'short' ? '空' : '多' }}
+                </span>
+                <span v-if="c.keyName" class="ktag">{{ c.keyName }}</span>
+                <span v-if="c.partial" class="ktag warn" title="账本里没有这一段的开仓记录（币安只给最近 7 天）">
+                  不完整
+                </span>
+                <span class="spacer" />
+                <span class="pnl" :class="tone(c.net)">{{ signedMoney(c.net) }}</span>
+                <span class="car">{{ isExpanded(c) ? '▾' : '▸' }}</span>
+              </div>
+              <div class="cyc-kv">
+                <span>开仓均价 <b>{{ c.entryPrice === null ? '—' : fmt(c.entryPrice) }}</b></span>
+                <span>平仓均价 <b>{{ c.exitPrice === null ? '—' : fmt(c.exitPrice) }}</b></span>
+                <span>持仓 <b>{{ holdText(c.holdSec) }}</b></span>
+                <span>手续费 <b>{{ fixed(c.fee, 4) }}</b></span>
+              </div>
+              <div class="cyc-kv">
+                <span>开仓 <b>{{ bjTime(c.openAt).slice(5, 16) }}</b></span>
+                <span>平仓 <b>{{ c.closeAt ? bjTime(c.closeAt).slice(5, 16) : '—' }}</b></span>
+                <span>数量 <b>{{ qty(c.qty) }}</b></span>
+                <span>已实现 <b>{{ signedMoney(c.realized) }}</b></span>
+              </div>
+              <ul v-if="isExpanded(c)" class="cyc-orders">
+                <li v-for="(o, i) in c.orders" :key="o.id">
+                  <span class="dim tiny">{{ bjTime(o.time).slice(5, 16) }}</span>
+                  <span class="side" :class="o.side === 'buy' ? 'buy' : 'sell'">
+                    {{ o.side === 'buy' ? '买入' : '卖出' }}
+                  </span>
+                  <span class="dim tiny">{{ orderAction(c, o, i) }}</span>
+                  <span class="spacer" />
+                  <span class="num">{{ fmt(o.price) }} × {{ qty(o.amount) }}</span>
+                  <span class="dim tiny">费 {{ fixed(o.fee, 4) }}</span>
+                  <span v-if="o.realized !== 0" class="pnl" :class="tone(o.realized)">
+                    {{ signedMoney(o.realized) }}
+                  </span>
+                </li>
+              </ul>
+            </li>
+          </ul>
+        </template>
+        <p v-else-if="!openCycles.length" class="dim">
+          账本里还没有完整的仓位（开一笔、平掉之后这里会出现）
         </p>
       </section>
 
@@ -1170,10 +1294,66 @@ const RANGES = [
 
 .poss,
 .incs,
+.cycles,
 .rows {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+/* 仓位历史的一段（开仓 → 全平） */
+.cycles .cyc {
+  padding: 9px 0;
+  border-top: 1px solid var(--line, rgba(128, 128, 128, 0.16));
+}
+.cycles .cyc:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.cycles .cyc.open {
+  /* 未平的段：左边加一条浅色竖线，跟「已平仓」区分开 */
+  border-left: 2px solid var(--line, rgba(128, 128, 128, 0.35));
+  padding-left: 8px;
+}
+.cyc-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.cyc .car {
+  width: 12px;
+  text-align: center;
+  color: var(--dim, #999);
+  font-size: 11px;
+}
+.cyc-kv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--dim, #999);
+}
+.cyc-kv b {
+  color: inherit;
+  font-weight: 600;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 展开后的逐笔明细 */
+.cyc-orders {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 10px;
+  border-left: 2px solid var(--line, rgba(128, 128, 128, 0.2));
+}
+.cyc-orders li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
 }
 .poss li {
   padding: 11px 0;

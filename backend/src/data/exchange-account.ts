@@ -283,38 +283,6 @@ function n(v: unknown): number {
   return Number.isFinite(x) ? x : 0
 }
 
-export interface OrderRow {
-  id: string
-  datetime: string | null
-  symbol: string
-  side: string
-  type: string
-  price: number
-  amount: number
-  cost: number
-  status: string
-  fee: number
-  feeCurrency: string
-}
-
-function mapOrder(o: any): OrderRow {
-  const price = n(o?.average ?? o?.price)
-  const amount = n(o?.filled ?? o?.amount)
-  return {
-    id: String(o?.id ?? ''),
-    datetime: o?.datetime ?? null,
-    symbol: String(o?.symbol ?? ''),
-    side: String(o?.side ?? ''),
-    type: String(o?.type ?? ''),
-    price,
-    amount,
-    cost: n(o?.cost) || price * amount,
-    status: String(o?.status ?? ''),
-    fee: n(o?.fee?.cost),
-    feeCurrency: String(o?.fee?.currency ?? '')
-  }
-}
-
 /** 这个错是不是「你得给我一个交易对」 */
 function requiresSymbol(e: unknown): boolean {
   return /requires? a symbol|symbol (is )?required|symbol argument/i.test(
@@ -378,7 +346,7 @@ export function humanize(e: unknown): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* 持仓 / 当前挂单                                                    */
+/* 持仓                                                               */
 /* ------------------------------------------------------------------ */
 
 export interface PositionRow {
@@ -423,21 +391,3 @@ export function mapPosition(p: any): PositionRow {
   }
 }
 
-/**
- * 当前挂单（ccxt 统一 `fetchOpenOrders()` → 币安 `/fapi/v1/openOrders`）。
- * ⚠️ 币安合约的挂单接口**不需要交易对** —— 这块比历史订单好拿得多。
- */
-export async function fetchOpenOrders(
-  c: ExchangeCredentials,
-  limit = 100
-): Promise<OrderRow[]> {
-  const ex = createExchange(c)
-  await ex.loadMarkets()
-  const cap = Math.max(1, Math.min(200, limit))
-  const rows: any[] = (await ex.fetchOpenOrders(undefined, undefined, cap)) ?? []
-  const list: OrderRow[] = rows.map((o: any) => mapOrder(o))
-  list.sort((a: OrderRow, b: OrderRow) =>
-    (b.datetime ?? '').localeCompare(a.datetime ?? '')
-  )
-  return list
-}

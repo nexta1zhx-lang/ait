@@ -199,11 +199,13 @@ export interface FillRow {
  *
  * ⚠️ **不需要交易对** —— 这是 WS 实时落下来的（断线那段还有 REST 补），
  *    跟老接口「币安必须给交易对才能查成交」完全是两码事。
+ *    `symbol` 是可选的**过滤**（K 线「订单历史」只要一个币），不是查询条件。
  */
 export async function listFills(
   userId: number,
   keyId: number,
-  limit = 60
+  limit = 60,
+  symbol?: string
 ): Promise<FillRow[]> {
   const cap = Math.min(500, Math.max(1, Math.round(limit) || 60))
   const rows = await query<Record<string, unknown>>(
@@ -211,9 +213,10 @@ export async function listFills(
             realized, ts
        FROM exchange_fills
       WHERE user_id = $1 AND key_id = $2
+        AND ($4::text IS NULL OR upper(symbol) = upper($4::text))
       ORDER BY ts DESC
       LIMIT $3`,
-    [userId, keyId, cap]
+    [userId, keyId, cap, symbol ?? null]
   )
   return rows.map(r => ({
     id: String(r.trade_id ?? ''),
@@ -227,6 +230,177 @@ export async function listFills(
     realized: num(r.realized),
     datetime: r.ts ? new Date(String(r.ts)).toISOString() : null
   }))
+}
+
+/* ---------------- 钱账本（exchange_income，2026-10-06） ---------------- */
+
+/** 币安 income 里我们认得的类型（别的也照收，只是不单独统计） */
+export const INCOME_TYPES = [
+  'REALIZED_PNL',
+  'COMMISSION',
+  'FUNDING_FEE',
+  'TRANSFER',
+  'INSURANCE_CLEAR',
+  'REFERRAL_KICKBACK',
+  'COMMISSION_REBATE'
+] as const
+
+/** 一条收入（= 币安 `/fapi/v1/income` 的一行） */
+export interface IncomeInput {
+  /**
+   * **去重键**（列名沿用币安的说法，但内容见 `data/exchange-trade.ts` 的
+   * `incomeDedupeKey()`：成交类用 `tradeId:资产`，其它类用 `tranId:资产`）。
+   *
+   * ⚠️ **不是**币安那个 `tranId` 原值 —— 那个跟成交号对不上，两条写入路
+   *    （WS 成交 / income 对账）会各记一遍，实测直接把手续费算成两倍。
+   */
+  tranId: string
+  incomeType: string
+  symbol: string
+  asset: string
+  /** 正数进钱、负数出钱 */
+  amount: number
+  ts: Date
+  tradeId?: string
+  raw?: unknown
+}
+
+/**
+ * 批量写钱账本 —— **幂等**（靠 `unique(key_id, income_type, tran_id)`）。
+ *
+ * ⚠️ 两条写入路（WS 实时 / REST 对账）会推到同一批行上，全靠这个唯一键挡住重复，
+ *    所以别改成普通 INSERT，也别把 `income_type` 从唯一键里拿掉
+ *    （一笔成交同时有 REALIZED_PNL 和 COMMISSION，只用 tranId 会丢一条）。
+ *
+ * 返回**新写进去几条**。
+ */
+export async function upsertIncome(
+  userId: number,
+  keyId: number,
+  list: IncomeInput[]
+): Promise<number> {
+  let added = 0
+  for (const r of list) {
+    const rows = await query<{id: string}>(
+      `INSERT INTO exchange_income
+         (user_id, key_id, tran_id, income_type, symbol, asset, amount, ts, trade_id, raw)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+       ON CONFLICT (key_id, income_type, tran_id) DO NOTHING
+       RETURNING id`,
+      [
+        userId,
+        keyId,
+        r.tranId,
+        r.incomeType,
+        r.symbol || null,
+        r.asset || 'USDT',
+        r.amount,
+        r.ts,
+        r.tradeId || null,
+        JSON.stringify(r.raw ?? {})
+      ]
+    )
+    if (rows.length) added++
+  }
+  return added
+}
+
+/** 钱账本里的一行（数字都转回 number —— pg 的 NUMERIC 出来是字符串） */
+export interface IncomeRow {
+  id: string
+  /** 去重键，前端当 key 用 */
+  tradeId: string
+  incomeType: string
+  symbol: string
+  asset: string
+  amount: number
+  datetime: string
+}
+
+/** 最近的收入流水（「盈亏」tab 逐笔看的那份） */
+export async function listIncome(
+  userId: number,
+  keyId: number,
+  limit = 200
+): Promise<IncomeRow[]> {
+  const cap = Math.min(1000, Math.max(1, Math.round(limit) || 200))
+  const rows = await query<Record<string, unknown>>(
+    `SELECT id, tran_id, income_type, symbol, asset, amount, ts
+       FROM exchange_income
+      WHERE user_id = $1 AND key_id = $2
+      ORDER BY ts DESC, id DESC
+      LIMIT $3`,
+    [userId, keyId, cap]
+  )
+  return rows.map(r => ({
+    id: String(r.id),
+    tradeId: String(r.tran_id ?? ''),
+    incomeType: String(r.income_type ?? ''),
+    symbol: String(r.symbol ?? ''),
+    asset: String(r.asset ?? ''),
+    amount: num(r.amount),
+    datetime: r.ts ? new Date(String(r.ts)).toISOString() : ''
+  }))
+}
+
+/**
+ * 盈亏汇总 —— **交易所的口径**（正是用户那句「数据要统一用一套」）。
+ *
+ * `net` = 已实现 + 手续费 + 资金费 + 其它。⚠️ 手续费和资金费在币安那边本来就是
+ * **负数**（出钱），所以这里是**相加**，不是相减。
+ */
+export interface IncomeTotals {
+  realized: number
+  commission: number
+  funding: number
+  other: number
+  net: number
+  count: number
+}
+
+/**
+ * 汇总。`sinceDays` 给了就只算最近这些天（`null` = 全部历史）。
+ *
+ * ⚠️ `TRANSFER`（划转）**进「其它」但不进净**：那是**账户之间搬钱**，
+ *    不是赚亏 —— 算进去会让「净盈亏」看着忽上忽下（实测 7 天里就有一笔 9.29 的划转，
+ *    混进去净盈亏直接从 -0.42 变成 +8.87，完全没法看）。
+ */
+export async function incomeTotals(
+  userId: number,
+  keyId: number,
+  sinceDays: number | null = null
+): Promise<IncomeTotals> {
+  const days = sinceDays === null ? null : Math.max(1, Math.round(sinceDays))
+  const rows = await query<Record<string, unknown>>(
+    `SELECT income_type, sum(amount) AS s, count(*) AS n
+       FROM exchange_income
+      WHERE user_id = $1 AND key_id = $2
+        AND ($3::int IS NULL OR ts >= now() - make_interval(days => $3::int))
+      GROUP BY income_type`,
+    [userId, keyId, days]
+  )
+  let realized = 0
+  let commission = 0
+  let funding = 0
+  let other = 0
+  let count = 0
+  for (const r of rows) {
+    const type = String(r.income_type ?? '')
+    const sum = num(r.s)
+    count += num(r.n)
+    if (type === 'REALIZED_PNL') realized += sum
+    else if (type === 'COMMISSION' || type === 'COMMISSION_REBATE') commission += sum
+    else if (type === 'FUNDING_FEE') funding += sum
+    else if (type !== 'TRANSFER') other += sum
+  }
+  return {
+    realized: r8(realized),
+    commission: r8(commission),
+    funding: r8(funding),
+    other: r8(other),
+    net: r8(realized + commission + funding + other),
+    count
+  }
 }
 
 /* ---------------- 资产曲线（M4） ---------------- */
@@ -247,8 +421,16 @@ export interface CurvePoint {
  * 净资产序列（画曲线用）。
  *
  * `hours = null` ⇒ **不设下界**（看全部历史）。
- * ⚠️ 只读 `kind='5m'` 的原始行 —— 归档任务（5m→1h→1d）还没做，
- *    长跨度（180 天 / 一年 / 全部）会扫很多行；等归档做了应该改读聚合档。
+ *
+ * ★ 2026-10-06：归档（`exchange-archive.ts`）做了之后，这里要**三档一起读** ——
+ *   5m 只留 7 天、1h 留 90 天、1d 永久，而三档的**时间区间互不重叠**
+ *   （聚合完就把低档删掉），所以 `kind IN (...)` 一锅端再分桶就行，
+ *   不用判断「这一段该读哪一档」，也不会重复计数。
+ *
+ * ⚠️ 区间带取的是**存下来的 `high` / `low` 列**，不是拿 payload 现算 ——
+ *    1h / 1d 行的 `high`/`low` 是**整桶的包络**，现算会把它抹掉，
+ *    而 5m 行的 `high = low = 自身净值`（见 `saveSnapshot`），两种口径本来就是同一套。
+ *
  * ⚠️ 桶内**取 close / max / min，绝不取平均**：平均会把「中间爆过一次仓」这种
  *    真实的尖峰抹平（见 docs 的「聚合不取平均」）。
  * ⚠️ 净值口径 = `margin + c2c_total + spot_usdt`（`netOf()` 那一份），
@@ -260,14 +442,15 @@ export async function listCurve(
   hours: number | null,
   bucketSec: number
 ): Promise<CurvePoint[]> {
+  /** 净值口径 —— 全仓库唯一一处，跟 `netOf()` 保持一致 */
+  const net = 'margin + coalesce(c2c_total, 0) + coalesce(spot_usdt, 0)'
   const rows = await query<Record<string, unknown>>(
     `SELECT to_timestamp(floor(extract(epoch FROM taken_at) / $4) * $4) AS t,
-            max(margin + coalesce(c2c_total, 0) + coalesce(spot_usdt, 0)) AS high,
-            min(margin + coalesce(c2c_total, 0) + coalesce(spot_usdt, 0)) AS low,
-            (array_agg(margin + coalesce(c2c_total, 0) + coalesce(spot_usdt, 0)
-                       ORDER BY taken_at DESC))[1] AS close
+            max(coalesce(high, ${net})) AS high,
+            min(coalesce(low, ${net})) AS low,
+            (array_agg(${net} ORDER BY taken_at DESC))[1] AS close
        FROM exchange_snapshots
-      WHERE user_id = $1 AND key_id = $2 AND kind = '5m'
+      WHERE user_id = $1 AND key_id = $2 AND kind IN ('5m', '1h', '1d')
         AND ($3::int IS NULL OR taken_at >= now() - make_interval(hours => $3::int))
       GROUP BY 1
       ORDER BY 1`,
@@ -292,9 +475,10 @@ export async function firstSnapshotHours(
   keyId: number
 ): Promise<number> {
   const row = await queryOne<{h: string | null}>(
+    /* ⚠️ 三档都要看：`all` 跨度靠它算桶宽，只看 5m 会以为只有 7 天 */
     `SELECT extract(epoch FROM now() - min(taken_at)) / 3600 AS h
        FROM exchange_snapshots
-      WHERE user_id = $1 AND key_id = $2 AND kind = '5m'`,
+      WHERE user_id = $1 AND key_id = $2 AND kind IN ('5m', '1h', '1d')`,
     [userId, keyId]
   )
   const h = num(row?.h)

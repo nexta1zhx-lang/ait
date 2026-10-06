@@ -20,16 +20,21 @@
  * ⚠️ 只有**主图**（`KlineChart` 里 `active` 为真的那张）会调 `refreshTradeOverlay` ——
  *    桌面端左栏那张小图不取数，不然一次进页面要打两遍交易所。
  */
-import {ref} from 'vue'
+import {computed, ref} from 'vue'
 import {
   cleanupOrphanOrders,
   fetchTradeHistory,
   fetchTradeOpenOrders,
-  fetchTradePositions,
   type TradeFill,
   type TradeOpenOrder,
   type TradePositionRow
 } from './api'
+import {
+  bindPositions,
+  positionsAt,
+  positionsErr,
+  positionsOf
+} from './positions'
 import {
   chartShowHistory,
   chartShowLiq,
@@ -40,8 +45,16 @@ import {contracts} from './store'
 
 /** 这批数据是**哪个交易对**的（币安原始符号）。换币时先清空再拉，别让上一个币的线留在图上 */
 export const overlaySymbol = ref('')
-/** 当前这个币的持仓（双向持仓模式下多空各一条） */
-export const overlayPositions = ref<TradePositionRow[]>([])
+/**
+ * 当前这个币的持仓（双向持仓模式下多空各一条）。
+ *
+ * ★ 2026-10-06 改造 P1：**不再自己拉** —— 从共享 store（`./positions`）取，
+ *   跟交易所界面 / 下单页**同一份数据**。以前这里每 15 秒独立打一次
+ *   `/trade/positions`，于是同一屏左边栏和图上会显示两个不同的持仓数。
+ */
+export const overlayPositions = computed<TradePositionRow[]>(() =>
+  overlaySymbol.value ? positionsOf(overlaySymbol.value) : []
+)
 /** 当前这个币的挂单 */
 export const overlayOrders = ref<TradeOpenOrder[]>([])
 /** 当前这个币的成交历史 */
@@ -76,10 +89,38 @@ export function overlayEnabled(): boolean {
  */
 export function clearTradeOverlay(): void {
   overlaySymbol.value = ''
-  overlayPositions.value = []
   overlayOrders.value = []
   overlayFills.value = []
   overlayErr.value = ''
+}
+
+/* ---------------- 持仓：绑到共享 store（改造 P1） ---------------- */
+
+/** 现在绑的是哪套 Key（`undefined` = 没绑）。同一个 key 不重复绑 */
+let boundKey: number | undefined | null = null
+let unbindPositions: (() => void) | null = null
+
+/**
+ * 绑定 / 换绑持仓来源（K 线页调；换「下单账户」时重绑）。
+ *
+ * 四个开关全关时**什么都不绑** —— 一个请求都不发（跟 `overlayEnabled()` 的口径一致）。
+ */
+export function bindOverlayPositions(keyId?: number): void {
+  if (!overlayEnabled()) {
+    unbindOverlayPositions()
+    return
+  }
+  if (boundKey === keyId) return
+  unbindOverlayPositions()
+  unbindPositions = bindPositions([keyId])
+  boundKey = keyId
+}
+
+/** 解绑（K 线页卸载时调，别把订阅漏在那儿） */
+export function unbindOverlayPositions(): void {
+  unbindPositions?.()
+  unbindPositions = null
+  boundKey = null
 }
 
 /** 同一时刻只允许一发在飞（15 秒轮询 + 换币 + 回前台可能撞一起） */
@@ -113,37 +154,14 @@ export async function refreshTradeOverlay(
   const my = ++seq
   if (overlaySymbol.value !== symbol) {
     overlaySymbol.value = symbol
-    overlayPositions.value = []
     overlayOrders.value = []
     overlayFills.value = []
   }
-  const wantPos = chartShowPosition.value || chartShowLiq.value
+  /* 持仓走共享 store（见 `overlayPositions`），这里只拉挂单和成交 */
   const wantOrd = chartShowOrders.value
   const wantFill = chartShowHistory.value
   const jobs: Promise<unknown>[] = []
   let err = ''
-
-  if (wantPos) {
-    jobs.push(
-      fetchTradePositions(keyId)
-        .then(r => {
-          if (my !== seq || overlaySymbol.value !== symbol) return
-          if (!r.ok) {
-            err = r.error || '读不到持仓'
-            return
-          }
-          const rows = (r.positions ?? []).filter(
-            p => String(p.symbol).toUpperCase() === symbol
-          )
-          overlayPositions.value = rows
-        })
-        .catch(e => {
-          if (my === seq) err = (e as Error).message
-        })
-    )
-  } else if (overlaySymbol.value === symbol) {
-    overlayPositions.value = []
-  }
 
   if (wantOrd) {
     jobs.push(
@@ -203,10 +221,15 @@ export async function refreshTradeOverlay(
    * 「没有仓位所有挂单都应该取消才对，为什么还显示在图上」）。
    *
    * 就地清掉 —— 手上正好有这个币的持仓和挂单，不用再多打一次接口。
-   * ⚠️ 只有「持仓这一路拿到过」才敢这么判（`wantPos`）：读不到持仓时
-   *    「一条都没有」跟「没读出来」长得一模一样，误判就是误撤。
+   * ⚠️ **必须确认「持仓真的读到过」**才敢这么判：读不到持仓时「一条都没有」跟
+   *    「没读出来」长得一模一样，误判就是误撤。
+   *    改造后持仓来自共享 store ⇒ 判据是 `positionsAt > 0`（成功读到过至少一次）
+   *    **而且**这一轮没有读失败（`positionsErr` 有值就说明这份数据不可信）。
    */
-  if (wantPos && wantOrd && my === seq && overlaySymbol.value === symbol) {
+  const wantPos = chartShowPosition.value || chartShowLiq.value
+  const posTrusted =
+    positionsAt.value > 0 && my === seq && overlaySymbol.value === symbol
+  if (wantPos && wantOrd && posTrusted && !positionsErr.value) {
     const live = new Set(overlayPositions.value.map(p => p.side))
     const hasOrphan = overlayOrders.value.some(o => o.reduceOnly && !live.has(closesSide(o)))
     if (hasOrphan) {
