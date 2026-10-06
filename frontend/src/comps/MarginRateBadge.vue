@@ -13,13 +13,10 @@
     v-if="text"
     class="mm"
     :class="level.cls"
-    :style="{'--mm-pct': pct + '%'}"
     :title="tip"
     aria-label="MM 合约保证金率"
   >
     <em>MM</em>{{ text }}
-    <!-- 离强平还有多少空间：底下那根细条的长度就是保证金率本身 -->
-    <i class="mm-bar" aria-hidden="true" />
   </span>
 </template>
 
@@ -64,9 +61,6 @@ const text = computed(() => {
   return r === null || !Number.isFinite(r) ? '' : `${fixed(r, 2)}%`
 })
 
-/** 细条长度：100% 就是强平线，超过也按 100 画 */
-const pct = computed(() => Math.min(Math.max(risk.value?.ratio ?? 0, 0), 100))
-
 /**
  * **按风险变色**（用户：「样式改一下根据风险来变色」）。
  *
@@ -102,19 +96,17 @@ const tip = computed(() => {
 <style scoped>
 /*
  * 跟旁边那颗齿轮排一行。窄屏也留着 —— 这是**风险**刻度，比齿轮更该看见。
- * `--mm-pct` 由脚本给（保证金率本身），底条长度就是它。
+ * ⚠️ 只有一枚「胶囊 + 数字」，**底下不加进度条**（用户 2026-10-06：「下面不用加进度条」）。
  */
 .mm {
-  position: relative;
   display: inline-flex;
   align-items: baseline;
   gap: 3px;
-  padding: 2px 7px 4px;
+  padding: 2px 7px;
   border-radius: 7px;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  overflow: hidden;
   /* 兜底色（理论上进不来：没数据就不渲染） */
   color: var(--muted, #8b93a1);
   background: color-mix(in srgb, currentcolor 10%, transparent);
@@ -125,18 +117,6 @@ const tip = computed(() => {
   opacity: 0.75;
   letter-spacing: 0.3px;
 }
-/* 底条：长度 = 保证金率，颜色跟文字同一档 */
-.mm-bar {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 2px;
-  width: var(--mm-pct, 0%);
-  background: currentcolor;
-  border-radius: 0 2px 2px 0;
-  transition: width 0.3s ease-out;
-}
-
 /* ① 正常（< 30%） */
 .mm.lv1 {
   color: var(--ok, #5eba89);
