@@ -1607,6 +1607,27 @@ async function handleTickerStream(
  * ⚠️ 事件按 `key_id` 广播（`subscribeExchange`），key 是**校验过属于当前用户**的，
  *    所以不会串到别人账上。
  */
+/**
+ * 交易类写操作失败时**统一记一行日志**（2026-10-06）。
+ *
+ * ⚠️ 为什么必须记：这些接口失败时只把原因塞进 JSON 返回给前端，
+ *    **后端一个字都不留** —— 于是「我试了几次都失败，你看日志」这句话
+ *    在日志里**根本查不到**（用户 2026-10-06 就是这么问的）。
+ *    挂条件单那类还有 `-2021 / -1106 / -4164` 这种靠猜的码，不记下来没法复盘。
+ */
+function failTrade(
+  res: http.ServerResponse,
+  what: string,
+  keyId: number | undefined,
+  e: unknown
+): void {
+  const msg = humanizeTrade(e)
+  console.warn(
+    `[交易所] ${what} 失败${keyId ? `（key=${keyId}）` : ''}：${String(msg).slice(0, 200)}`
+  )
+  sendJson(res, 200, {ok: false, error: msg})
+}
+
 async function handleExchangeStream(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -3482,7 +3503,7 @@ async function route(
       )
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return failTrade(res, '改杠杆', key.id, e)
     }
   }
 
@@ -3529,7 +3550,7 @@ async function route(
       if (!test) void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, test, order, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return failTrade(res, '下单', key.id, e)
     }
   }
 
@@ -3704,7 +3725,7 @@ async function route(
       if (r.test === false) void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return failTrade(res, '挂止盈/止损', key.id, e)
     }
   }
 
@@ -3741,7 +3762,7 @@ async function route(
       void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return failTrade(res, '撤单', key.id, e)
     }
   }
 
@@ -3819,7 +3840,7 @@ async function route(
       if (!test) void reconcileKeyOrders(key.id)
       return sendJson(res, 200, {ok: true, test, ...r, error: null})
     } catch (e) {
-      return sendJson(res, 200, {ok: false, error: humanizeTrade(e)})
+      return failTrade(res, '平仓/减仓', key.id, e)
     }
   }
 

@@ -1252,6 +1252,17 @@ export async function placeStopOrder(
       : ''
   const type = kind === 'profit' ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET'
   const test = input.test !== false
+  /*
+   * ★ 记一行决策日志（2026-10-06，用户：「我试了几次你看日志」）。
+   *   `-2021` 这类错只看返回值很难复盘 —— 把「用什么价判的、判成什么类型、
+   *   最后发的是哪张单」都留一行，出问题一眼能对。
+   */
+  console.log(
+    `[止损单] ${spec.symbol} ${input.side} 触发价 ${stopPrice} 标记价 ${mark || '?'} ` +
+      `→ ${type}（请求 ${wantKind === 'profit' ? '止盈' : '止损'}）数量 ${quantity}` +
+      `${dual ? ` posSide=${input.posSide === 'SHORT' ? 'SHORT' : 'LONG'}` : ' reduceOnly'}` +
+      `${input.orderId ? ` 改单 ${input.orderId}` : ''}${test ? ' [测试]' : ' [真单]'}`
+  )
 
   /*
    * ⚠️⚠️ 条件单**不能**发到 `/fapi/v1/order`（无论 test 还是真单）：
