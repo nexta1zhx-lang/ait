@@ -1311,12 +1311,30 @@ function startStreams(): void {
            *    （列表只显示「正在看的那几套」）。换 tab 会 `loadFills()` 重拉。
            */
           if (!keyIsActive(k.id)) return
-          // 同一笔可能「实时事件」和「REST 回补」都给到 → 按 tradeId 去重
-          if (fills.value.some(f => f.id === t.id)) return
+          /*
+           * 同一笔可能「实时事件」和「REST 回补」都给到 → 按**成交号**去重。
+           *
+           * ⚠️ 2026-10-07 修：后端这条事件以前**没带 `id`**，而这里拿 `f.id === t.id` 判重复 ——
+           *    `t.id` 是 `undefined`，列表里一旦躺了一条 `id: undefined` 的（就是上一笔），
+           *    **后面每一笔都被这行挡掉**。表现就是用户报的
+           *    「成交历史 / 仓位历史不是实时的，有延迟」：一个仓分 3 笔成交，只有第一笔
+           *    触发重读，另外两笔丢了，得等 20 秒兜底。
+           *    后端现在发的就是 `/api/exchange/fills` 的形状（`id` / `datetime` / `cost` /
+           *    `feeCurrency` 都齐），所以这里能真正按成交号去重；`id` 缺失时**别去重**
+           *    （宁可重复一下 —— 下一轮 `loadFills()` 会用整份覆盖回来）。
+           */
+          if (t.id && fills.value.some(f => f.id === t.id)) return
           const tagged = keys.value.length > 1 ? {...t, keyName: k.name} : t
           fills.value = [tagged, ...fills.value].slice(0, FILLS_MAX)
           /* 仓位历史是从成交推出来的 —— 新成交可能刚开一段、也可能刚平掉一段 */
           void loadCycles()
+          /*
+           * 钱账本（已实现 / 手续费）后端在**同一条 WS 帧里**也写了一份
+           * （见 `writeIncomeFromFill`）⇒ 顺手重读一次。
+           * 不然「资金动向」和持仓卡上那行「已实现盈利」要等下一轮 `income` 事件
+           * （那是**对账**的节奏，几分钟）或者 20 秒兜底才动。
+           */
+          void loadIncome()
         },
         backfill: () => {
           if (keyIsActive(k.id)) {

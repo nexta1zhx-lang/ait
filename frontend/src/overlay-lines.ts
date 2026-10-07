@@ -11,8 +11,10 @@
  *   · `paneViews()` 的视图 `zOrder: 'bottom'`（画在蜡烛**下面**，见 `PrimitivePaneViewZOrder`）；
  *   · `priceAxisViews()` 每条线一枚轴标签：底色压深、**文字用线自己的颜色**（颜色对应）。
  *
- * 拖动预览也走这里（`setPreview`）：被拖的那条线**一动不动**，只是多一条虚线跟着手指
- *（用户 2026-10-07：「仓位拖动时，原有的仓位不动，只是多条虚线去拉」）。
+ * 拖动时线怎么走，分两种（两条路都在 `KlineChart.vue` 的 `drawDragPreview` 里）：
+ *   · 拖**已挂的单** = 改单 ⇒ 那条线本身就是那张单，**挪它自己**（走 `set()` 换个价重画一遍）；
+ *   · 拖**仓位线** = 新挂一张止盈 / 止损 ⇒ 走 `setPreview()`：仓位线**一动不动**，
+ *     另画一条虚线跟着手指（用户 2026-10-07：「仓位拖动时，原有的仓位不动，只是多条虚线去拉」）。
  */
 import type {
   IPrimitivePaneRenderer,
@@ -38,7 +40,7 @@ export interface OverlayLine {
 export interface OverlayLines {
   /** 换一批线（数据变了 / 开关变了 / 换币） */
   set(lines: OverlayLine[]): void
-  /** 拖动时那条虚线的预览（松手 / 取消传 `null`） */
+  /** 拖**仓位线**时那条虚线的预览（松手 / 取消传 `null`）；拖已挂的单不走这儿 */
   setPreview(line: OverlayLine | null): void
   attach(series: ISeriesApi<SeriesType, any>): void
   detach(): void

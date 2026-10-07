@@ -1090,6 +1090,7 @@ function renderOrderMarkers(): void {
  *    都没有了，留着上个币的价位线没有意义。
  */
 function dropOrderLines(): void {
+  lastLines = []
   overlayLines.set([])
   clearDragPreview()
   orderMarkers?.setMarkers([])
@@ -1114,14 +1115,13 @@ function renderOrderLines(): void {
    * 自动跟手，不用像左标签那样每帧盯），右侧轴上那枚价格标签也由它出
    *（`axis` 就是轴上要写的字 —— 全部写价格，用户 2026-10-07：「价格都放坐标轴上」）。
    */
-  overlayLines.set(
-    list.map(l => ({
-      price: l.p,
-      color: l.color,
-      dashed: l.dashed,
-      axis: priceText(l.p)
-    }))
-  )
+  lastLines = list.map(l => ({
+    price: l.p,
+    color: l.color,
+    dashed: l.dashed,
+    axis: priceText(l.p)
+  }))
+  overlayLines.set(lastLines)
   renderOrdLabels(list)
   renderOrderMarkers()
 }
@@ -1153,12 +1153,24 @@ let ordLabels: {
 /** 现在露出一颗「✕」的是哪颗标签（点一下标签出✕，再点别处收起来） */
 let cancelShownEl: HTMLElement | null = null
 
-/*
- * 拖动时那条虚线**自己的**标签。
+/**
+ * 上一次画给 `overlayLines` 的那一份（**含顺序**）。
  *
- * 用户 2026-10-07：「仓位拖动时，**原有的仓位不动**，只是多条虚线去拉」——
- * 所以拖动期间原来那枚标签（`ordLabels` 里那一枚）一根手指都不许碰，
- * 预览另起一枚；它不在 `ordLabels` 数组里，`positionOrdLabels()` 不管它。
+ * 拖动时要拿它把**被拖的那一条**换个价再 `set()` 回去 —— 线是 primitive 自己按价算 y 的，
+ * 想让它跟手就得把新的价交给它（见 `drawDragPreview`）。
+ */
+let lastLines: {price: number; color: string; dashed?: boolean; axis?: string}[] = []
+/** 这次拖动**真的动过**吗（只点一下不算 —— 点一下是"露出 ✕"） */
+let dragTouched = false
+
+/*
+ * 拖**仓位线**时那条虚线自己的标签。
+ *
+ * ★ 两条路的区别（用户 2026-10-07 亲口定的，别搞混）：
+ *   · 拖**已挂的单** = **改单** ⇒ 那条线本身就是那张单，**挪它自己**（见 `drawDragPreview`）；
+ *   · 拖**仓位线** = **新挂**一张止盈 / 止损 ⇒ 原来那条是**仓位**、不是订单，
+ *     挪它没有意义 —— 所以这里另起一条虚线和一枚标签（用户：「仓位的派生」）。
+ * 它不在 `ordLabels` 数组里，`positionOrdLabels()` 不管它。
  */
 let dragPreviewEl: HTMLElement | null = null
 let dragPreviewParts: HTMLElement[] = []
@@ -1342,7 +1354,7 @@ function positionOrdLabels(): void {
   positionDragPreview()
 }
 
-/** 拖动预览那枚标签摆到「拖到的那个价」上（跟别的标签一样按 y 摆） */
+/** 拖仓位线时，那枚预览标签摆到「拖到的那个价」上（跟别的标签一样按 y 摆） */
 function positionDragPreview(): void {
   if (!refs || !dragPreviewEl) return
   const y = refs.candle.priceToCoordinate(dragPrice.value)
@@ -1352,6 +1364,32 @@ function positionDragPreview(): void {
   }
   dragPreviewEl.style.display = ''
   dragPreviewEl.style.top = y + 'px'
+}
+
+/**
+ * 就地把一枚标签的文字换掉（拖「已挂的单」时用）。
+ *
+ * ⚠️ 段数不一样（加仓单两段、平仓单三段）就得**重建**里面的节点，而重建时要把
+ *    「✕」按钮捞回来 —— 它是 `el` 的最后一个子节点，`innerHTML = ''` 会连它一起清掉。
+ */
+function setLabelTexts(item: (typeof ordLabels)[number], texts: string[]): void {
+  if (item.parts.length !== texts.length) {
+    const x = item.el.querySelector('.olb-x')
+    item.el.innerHTML = ''
+    item.parts = texts.map((t, j) => {
+      if (j) item.el.appendChild(document.createElement('i'))
+      const el = document.createElement(j === 0 ? 'b' : 'span')
+      el.textContent = t
+      item.el.appendChild(el)
+      return el
+    })
+    if (x) item.el.appendChild(x)
+    return
+  }
+  item.parts.forEach((el, j) => {
+    const t = texts[j]!
+    if (el.textContent !== t) el.textContent = t
+  })
 }
 
 /**
@@ -1486,12 +1524,18 @@ function ordLabelDown(e: PointerEvent, labelIdx: number): void {
   } catch {
     /* 拿不到指针捕获也能拖（手指滑出这颗标签才断） */
   }
-  drawDragPreview()
+  /*
+   * ⚠️ 这里**不**画拖动样子：按一下不动 = 点开「✕」，那时候把标签文字改成
+   *    「止盈 +$0.00 100%」纯属捣乱。越过 6px 门槛才算拖（见 `ordLabelMove`，跟
+   *    `ordLabelUp` 判"是不是点"用的是同一个门槛）。
+   */
 }
 
 function ordLabelMove(e: PointerEvent): void {
   if (!drag.value || !refs) return
   e.preventDefault()
+  /* 还没跨过"点"的门槛 ⇒ 先别动样子（见 `ordLabelDown` 末尾那条说明） */
+  if (Math.abs(e.clientY - dragFromY) <= 6 && Math.abs(e.clientX - dragStartX) <= 6) return
   const perPx = pricePerPixel()
   let next = dragFromPrice
   if (perPx > 0) next = dragFromPrice + (dragFromY - e.clientY) * perPx
@@ -1544,22 +1588,21 @@ function ordLabelCancel(): void {
 }
 
 /**
- * 拖动时那条线的样子：跟着手指走、**虚线**（挂着的样子），
- * 标签实时显示「止盈 +$0.52 · 100%」。
+ * 拖动时那条线的样子（两条路，见上面 `dragPreviewEl` 那段说明）。
  *
- * ⚠️ 2026-10-07 起：这一份**全都是「预览」**——原来那条线（仓位线 / 已挂的单）
- *    一动不动，虚线和标签都是另起的（用户：「原有的仓位不动，只是多条虚线去拉」）。
- *    所以这里不再 `applyOptions()` 改原线、也不改原标签的文字。
+ *   · **已挂的单** ⇒ 把被拖的那条线**换价再 `set()` 回去**：线的 y 是 primitive
+ *     自己按价算的，想让它跟手就得把新价交给它；标签也换成新的
+ *     「止盈 │ +$0.52 │ 100%」（形状本来就一样）⇒ 看上去就是**原来那条线在走**。
+ *     松手确认之后它就是新的那张单（后端撤旧挂新），所以"派生一条"是错的。
+ *   · **仓位线** ⇒ 原来那条一动不动，`setPreview` 另画一条虚线 + 另起一枚标签。
+ *
+ * ⚠️ 判「止盈 / 止损」用**标记价**（拿不到才退回开仓价）—— 见 `DragRef.mark` 那段。
  */
 function drawDragPreview(): void {
   const d = drag.value
   if (!d || !refs) return
   const px = dragPrice.value
   const long = d.side === 'long'
-  /*
-   * ⚠️ 判「止盈 / 止损」用**标记价**（拿不到才退回开仓价）—— 见 `DragRef.mark` 那段。
-   *    所以多单浮盈时把线拖到开仓价上，显示的就是**止损**（保本单），跟发出去的类型一致。
-   */
   const ref = d.mark > 0 ? d.mark : d.entry
   const isProfit = long ? px > ref : px < ref
   const diff = long ? px - d.entry : d.entry - px
@@ -1567,8 +1610,33 @@ function drawDragPreview(): void {
   const pnl = diff * (d.amount * pct) / 100
   const t1 = isProfit ? '止盈' : '止损'
   /* 跟图上已挂的单一样的三段：`止盈 │ +$0.52 │ 100%`（用户：「字样和百分比要加上」） */
-  const t2 = money(pnl)
-  const t3 = `${pct}%`
+  const texts = [t1, money(pnl), `${pct}%`]
+  const pnlColor = pnl >= 0 ? '#5eba89' : '#e35561'
+  dragTouched = true
+
+  if (d.kind === 'order') {
+    /* ① 线：挪**原来那条**（`lastLines` 是上一次画的那一份，顺序跟 `dragLineIdx` 对齐） */
+    const cur = lastLines[dragLineIdx]
+    if (cur) {
+      const next = lastLines.slice()
+      next[dragLineIdx] = {...cur, price: px, dashed: true, axis: priceText(px)}
+      overlayLines.set(next)
+    }
+    /* ② 标签：原来那枚跟着走 + 文字换成新的（拖到哪、预计盈亏就是多少） */
+    const item = ordLabels.find(l => l.lineIdx === dragLineIdx)
+    if (item) {
+      setLabelTexts(item, texts)
+      if (item.color !== pnlColor) {
+        item.color = pnlColor
+        item.el.style.color = pnlColor
+      }
+      item.price = px
+      positionOrdLabels()
+    }
+    return
+  }
+
+  /* 仓位线：另起一条虚线 + 另起一枚标签（原线 / 原标签一根手指都不碰） */
   /* 预览虚线：颜色按「平仓单的方向」走（多头的平仓单是卖单 = 红，跟挂单那套一致） */
   overlayLines.setPreview({
     price: px,
@@ -1583,30 +1651,40 @@ function drawDragPreview(): void {
     el.className = 'olb drag'
     dragPreviewParts = [0, 1, 2].map(j => {
       if (j) el.appendChild(document.createElement('i'))
-      const s = document.createElement(j === 0 ? 'b' : 'span')
-      el.appendChild(s)
-      return s
+      const t = document.createElement(j === 0 ? 'b' : 'span')
+      el.appendChild(t)
+      return t
     })
     dragPreviewEl = el
     host.appendChild(el)
   }
-  const texts = [t1, t2, t3]
-  dragPreviewParts.forEach((s, j) => {
-    if (s.textContent !== texts[j]) s.textContent = texts[j]!
+  dragPreviewParts.forEach((el, j) => {
+    const t = texts[j]!
+    if (el.textContent !== t) el.textContent = t
   })
-  if (dragPreviewEl) {
-    const color = pnl >= 0 ? '#5eba89' : '#e35561'
-    if (dragPreviewEl.style.color !== color) dragPreviewEl.style.color = color
+  if (dragPreviewEl && dragPreviewEl.style.color !== pnlColor) {
+    dragPreviewEl.style.color = pnlColor
   }
   positionDragPreview()
 }
 
-/** 收掉拖动预览（那条虚线和它那枚标签），原线不动 */
+/**
+ * 收掉拖动的临时样子。
+ *
+ * ⚠️ 拖「已挂的单」时改的是**原来那条线 / 那枚标签** ⇒ 这里得让它回到"数据的样子"：
+ *    线由紧接着的 `renderOrderLines()` 重新 `set()` 一份数据的就复位了；
+ *    标签则是把 `ordLabels` 清空、逼 `renderOrdLabels` 走**重建**（拖动期间文字和位置
+ *    都改过，原地改不回去）。`dragTouched` 那道闸是为了**别每次刷新都重建标签**。
+ */
 function clearDragPreview(): void {
   overlayLines.setPreview(null)
   dragPreviewEl?.remove()
   dragPreviewEl = null
   dragPreviewParts = []
+  if (!dragTouched) return
+  dragTouched = false
+  ordLabels = []
+  cancelShownEl = null
 }
 
 /**

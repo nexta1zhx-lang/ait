@@ -43,6 +43,7 @@ import {
   type LivePosition
 } from './data/position-cache'
 import {
+  type FillRow,
   deleteOpenOrder,
   replaceOpenOrders,
   saveSnapshot,
@@ -53,7 +54,7 @@ import {
   type IncomeInput,
   type OpenOrderInput
 } from './db/exchange-store'
-import {listOpenOrders} from './data/exchange-trade'
+import {cancelOrphanOrders, listOpenOrders} from './data/exchange-trade'
 import {query, queryOne} from './db/client'
 import {takeWeight} from './util/rate-budget'
 import {noteRateLimit} from './util/rate-cool'
@@ -103,6 +104,25 @@ const KEEPALIVE_MS = 25 * 60 * 1000
  *    不该变成 5 发 REST。
  */
 const WS_SNAPSHOT_GAP_SEC = 180
+/**
+ * 仓位刚平掉之后，撤它残留平仓单的**去抖间隔**（同一个币这么久内只扫一次）。
+ *
+ * 为什么要去抖：一次平仓可能连着来好几条 `ACCOUNT_UPDATE`（分批成交），
+ * 每条都去撤一次 = 白打几发；30 秒足够覆盖「同一个币被平了又立刻开回来」的场景 ——
+ * 那种情况下 `cancelOrphanOrders` 自己会看到持仓还在、**一张也不撤**（安全边界在它那儿）。
+ */
+const ORPHAN_SWEEP_GAP_MS = 30_000
+/**
+ * 头一次没撤到东西时的**重试节奏**（毫秒，两次）。
+ *
+ * ★ 为什么必须有：我们这条触发是 **WS 事件**（`ACCOUNT_UPDATE` 报 `pa = 0`），
+ *   而 `cancelOrphanOrders` 撤之前要**重新读一次 REST 持仓**当保险 ——
+ *   两个源头有时差，币安那会儿的 `positionRisk` 还报着这条仓位
+ *   ⇒ 保险生效「一张也不撤」。**实测就是这样**：第一次一张没撤、30 秒去抖又把
+ *   重试关了，最后只能等前端那 15 秒轮询兜底（等于没修）。
+ *   REST 通常一秒内就转过来了，隔一下再来一次就对了。
+ */
+const ORPHAN_SWEEP_RETRY_MS = [1200, 2500]
 /**
  * **三条兜底对账**的基准节奏（normal 档）—— 各按自己的冗余度定。
  *
@@ -290,15 +310,13 @@ export type ExchangeEvent =
   | {type: 'snapshot'; source: string; overview: ExchangeOverview}
   | {
       type: 'fill'
-      fill: {
-        symbol: string
-        side: string
-        price: number
-        amount: number
-        fee: number
-        realized: number
-        ts: string
-      }
+      /**
+       * ⚠️ 形状必须跟 `/api/exchange/fills` 的每行**逐字一致**（`FillRow`）——
+       *    前端是把它直接塞进同一个列表里的：缺 `datetime` 那一行时间是空的、
+       *    缺 `id` 更是要命（前端的去重按 `f.id === t.id` 判，`undefined` 会把
+       *    **后面的每一笔**都当成重复丢掉，详见前端那个 `fill` 处理）。
+       */
+      fill: FillRow
     }
   | {type: 'backfill'; added: number}
   /** 钱账本（income）有新行 —— 前端「盈亏」tab 重拉一次 */
@@ -454,7 +472,30 @@ const TIER_GAPS: Record<
  * 一条 key = 一条流
  * ================================================================== */
 
-class KeyStream {
+/**
+ * 从「刚平掉的币」里挑出这一轮**真要扫**的：同一个币 `gapMs` 内只扫一次
+ * （一次平仓常连着来好几条 `ACCOUNT_UPDATE`，分批成交），同批里重复的也去一次重。
+ *
+ * 抽成纯函数就为了离线自检能**固定时钟**卡它 —— 去抖的方向性错误（写反成
+ * "扫过一次就永远不扫"、或干脆没去抖）在实盘里都是悄悄地白烧权重，看不出来。
+ */
+export function orphanSweepTargets(
+  symbols: string[],
+  sweptAt: Map<string, number>,
+  now: number,
+  gapMs = ORPHAN_SWEEP_GAP_MS
+): string[] {
+  const out: string[] = []
+  for (const s of symbols) {
+    if (!s || out.includes(s)) continue
+    if (now - (sweptAt.get(s) ?? 0) <= gapMs) continue
+    out.push(s)
+  }
+  return out
+}
+
+/** 一个 API Key 对应的那条流。⚠️ 导出只为离线自检（`scripts/selftest.ts`）能直接驱动它 */
+export class KeyStream {
   private ws: WebSocket | null = null
   private ex: any = null
   private listenKey = ''
@@ -906,12 +947,22 @@ class KeyStream {
          * 未实现盈亏）**一个字都没用**。代价：成交/划转/资金费之后，界面要等
          * 一个 REST 来回（≈0.5~1 秒、21 权重）才动。
          */
-        const {applied, newSymbols} = this.applyAccountUpdate(ev?.a ?? {})
+        const {applied, newSymbols, closedSymbols} = this.applyAccountUpdate(ev?.a ?? {})
         if (applied) {
           /* 持仓集合可能变了（新开 / 平掉）→ 标记价订阅跟着调，然后立刻推给前端 */
           this.syncMarks()
           this.pushLive(false)
         }
+        /*
+         * ★ 仓位**刚平掉** ⇒ 当场撤掉它残留的止盈止损单（用户 2026-10-07：
+         *   「持仓订单已经全部平仓了，那么他的挂单止盈止损要全部撤单，目前有延迟」）。
+         *
+         * 延迟原来出在**触发方式**上：撤残留单只有前端那条路（K 线页每 15 秒、
+         * 整账户进页面 + 每分钟一次），没人看页面就没人撤，看到了也最多慢 15 秒。
+         * 现在由**后端**在收到平仓事件的那一刻就去做 —— 事件本身毫秒级到，
+         * 前端那两条路的轮询留着当兜底（WS 事件也会丢）。
+         */
+        if (closedSymbols.length) this.sweepOrphans(closedSymbols)
         /*
          * 事件里**没有**的是汇总口径：可用余额 / 保证金余额 / 资产明细 / C2C / 现货。
          * 那些仍然要靠 REST，但**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
@@ -990,21 +1041,27 @@ class KeyStream {
    * 返回 `applied` = 本地改到了没有；`newSymbols` = 出现的新交易对（那行缺杠杆 / 强平价，
    * 调用方会因此立刻去要一次 REST）。
    */
-  private applyAccountUpdate(a: any): {applied: boolean; newSymbols: string[]} {
+  private applyAccountUpdate(a: any): {
+    applied: boolean
+    newSymbols: string[]
+    closedSymbols: string[]
+  } {
     const ov = this.lastOverview
     /* 还没有底稿（刚起流）⇒ 让 REST 那条路去拿，别瞎拼一份缺字段的 */
-    if (!ov) return {applied: false, newSymbols: []}
+    if (!ov) return {applied: false, newSymbols: [], closedSymbols: []}
     const bal: any[] = Array.isArray(a?.B) ? a.B : []
     const changed: any[] = Array.isArray(a?.P) ? a.P : []
     const usdt = bal.find(x => String(x?.a ?? '').toUpperCase() === 'USDT')
     const walletRaw = usdt ? Number(usdt.wb) : NaN
     const wallet = Number.isFinite(walletRaw) ? walletRaw : ov.futures.wallet
     if (!changed.length && !Number.isFinite(walletRaw)) {
-      return {applied: false, newSymbols: []}
+      return {applied: false, newSymbols: [], closedSymbols: []}
     }
 
     const next = [...ov.futures.positions]
     const newSymbols: string[] = []
+    /** 这一批里**刚被平掉**的币（原来有持仓、现在 `pa = 0`） */
+    const closedSymbols: string[] = []
     for (const p of changed) {
       const raw = String(p?.s ?? '').toUpperCase()
       if (!raw) continue
@@ -1015,7 +1072,11 @@ class KeyStream {
       const amount = Math.abs(signed)
       /* 平掉了（pa = 0）⇒ 从列表里摘掉，跟 REST 那份「过滤零仓」一个口径 */
       if (!(amount > 0)) {
-        if (idx >= 0) next.splice(idx, 1)
+        if (idx >= 0) {
+          next.splice(idx, 1)
+          /* `idx >= 0` = 原来就在列表里 ⇒ 这是真的「平掉」，不是"收到一条零仓事件" */
+          closedSymbols.push(raw)
+        }
         continue
       }
       const row = idx >= 0 ? next[idx]! : null
@@ -1057,7 +1118,7 @@ class KeyStream {
         positions: next
       }
     }
-    return {applied: true, newSymbols}
+    return {applied: true, newSymbols, closedSymbols}
   }
 
   /**
@@ -1413,6 +1474,84 @@ class KeyStream {
     void this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
   }
 
+  /** 最近一次替某个币撤残留单的时刻（去抖用，见 `ORPHAN_SWEEP_GAP_MS`） */
+  private orphanSweptAt = new Map<string, number>()
+
+  /**
+   * 仓位刚平掉 ⇒ 撤掉它**残留的平仓单**。
+   *
+   * 为什么不是「我们自己撤」而是复用 `cancelOrphanOrders`：那里的安全边界是现成的 ——
+   *   · 只碰 `reduceOnly`（普通加仓委托一律不碰）；
+   *   · 撤之前**重新读一次持仓**，持仓还在（比如平了又立刻开回来）就**一张也不撤**；
+   *   · 持仓读不到（网络 / 权限）就整体不动，宁可留着也不误撤。
+   *
+   * 权重：`positionRisk` 5 + 带 symbol 的挂单 1 + 每张撤单 1 ⇒ 一般 7~9，比整账户那发 40 便宜得多。
+   * 失败不重试：前端那两条兜底轮询还在，别在这里把预算打光。
+   */
+  private sweepOrphans(rawSymbols: string[]): void {
+    const now = Date.now()
+    const todo = orphanSweepTargets(rawSymbols, this.orphanSweptAt, now)
+    if (!todo.length) return
+    for (const s of todo) this.orphanSweptAt.set(s, now)
+    void this.runSweep(todo)
+  }
+
+  /**
+   * 真的去撤（`sweepOrphans` 去抖之后调进来；`retry` 是第几次重试，见 `ORPHAN_SWEEP_RETRY_MS`）。
+   */
+  private async runSweep(todo: string[], retry = 0): Promise<void> {
+    for (const raw of todo) {
+      if (this.stopped) return
+      try {
+        await chargeWeight(7, 'orphanOrders')
+        const r = await cancelOrphanOrders(credsOf(this.row), raw)
+        if (!r.cancelled.length) {
+          if (r.failed.length) {
+            console.warn(
+              `${this.tag} 撤 ${raw} 残留平仓单：${r.failed.length} 张失败（${r.failed[0]!.error.slice(0, 90)}）`
+            )
+          } else if (retry < ORPHAN_SWEEP_RETRY_MS.length && r.checked > 0) {
+            /*
+             * ★ 「看见了平仓单、却一张也没撤」= REST 那边仓位还报着（见常量注释）。
+             *   我们手里是更新的 WS 事件，所以隔一下再来一次 —— 重试别再走过去抖。
+             */
+            const wait = ORPHAN_SWEEP_RETRY_MS[retry]!
+            console.log(
+              `${this.tag} 撤 ${raw} 残留平仓单：REST 那边仓位还在（${r.checked} 张先留着），${wait}ms 后重试`
+            )
+            await sleep(wait)
+            if (this.stopped) return
+            await this.runSweep([raw], retry + 1)
+          }
+          continue
+        }
+        /*
+         * 撤成功就**就地**从库里删掉那几张（别走 40 权重那一发挂单对账）——
+         * 顺带把计数减掉、推一条 orders 事件让界面立刻少那几行。
+         */
+        for (const c of r.cancelled) {
+          try {
+            await deleteOpenOrder(this.row.id, c.orderId)
+          } catch (e) {
+            console.warn(
+              `${this.tag} 删本地挂单行失败（${c.orderId}）：${(e as Error).message.slice(0, 80)}`
+            )
+          }
+        }
+        this.openOrderCount = Math.max(0, this.openOrderCount - r.cancelled.length)
+        this.noteActivity()
+        console.log(
+          `${this.tag} 仓位平掉（${raw}）⇒ 当场撤掉 ${r.cancelled.length} 张残留平仓单`
+        )
+        emit(this.row.id, {type: 'orders', reason: 'orphan'})
+      } catch (e) {
+        console.warn(
+          `${this.tag} 撤 ${raw} 残留平仓单跳过：${(e as Error).message.slice(0, 100)}`
+        )
+      }
+    }
+  }
+
   /**
    * `ALGO_UPDATE` —— **条件单（止盈 / 止损）**的生命周期。
    *
@@ -1527,13 +1666,16 @@ class KeyStream {
         emit(this.row.id, {
           type: 'fill',
           fill: {
+            id: tradeId,
             symbol: fill.symbol,
             side: fill.side,
             price: fill.price,
             amount: fill.amount,
+            cost: fill.price * fill.amount,
             fee: fill.fee,
+            feeCurrency: fill.feeCcy,
             realized: fill.realized,
-            ts: fill.ts.toISOString()
+            datetime: fill.ts.toISOString()
           }
         })
         /* 持仓集合可能变了（新开 / 平掉）→ 对齐一次，别让新仓的盈亏停 5 分钟 */

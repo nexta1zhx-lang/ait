@@ -16,9 +16,11 @@
  *   ② 渲染能把这四个字段印出来
  *   ③ `sanitizeRows` 该丢的丢、该留的留、该覆盖的覆盖
  *   ④ `planContractChanges` 该加的加、该摘的摘（新币 / 下架 / 待上线）
+ *   ⑤ 「这个币刚被平仓」判得对不对 + 撤残留单的去抖（平了就撤，见 `docs/EXCHANGE.md`）
  */
 import {sanitizeRows, type NewCandleRow} from '../db/candle-store'
 import {planContractChanges, type RawContract} from '../data/market'
+import {KeyStream, orphanSweepTargets} from '../exchange-stream'
 import type {JudgeResult} from '../llm/client'
 import {OUTPUT_CONTRACT} from '../llm/prompt'
 import {judgeSchema} from '../llm/schema'
@@ -296,12 +298,78 @@ function checkDiff(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ⑤ 平仓 ⇒ 当场撤残留止盈止损单：判据 + 去抖                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 一条 `ACCOUNT_UPDATE` 里哪个币算「**刚被平掉**」—— 驱动的是**真的那份代码**
+ * （`applyAccountUpdate`），不是这里另写一份判断。
+ *
+ * 为什么必须卡：判宽了（只要看见 `pa = 0` 就算）会对着**本来就没仓位的币**发撤单请求 ——
+ *   一条账户事件里常带着一堆零仓位的币，那就是一串白打的 REST（权重白烧，还可能踩 `-1003`）；
+ *   判窄了（漏掉）就回到用户 2026-10-07 报的那个「平完仓止盈止损还挂着」。
+ */
+function checkCloseSweep(): boolean {
+  const ks = new KeyStream({id: 0} as any) as any
+  /* `ex.market()` 拿不到就退回原始符号 —— 夹具里统一符号 == 币安原始符号，够用 */
+  ks.ex = {market: () => null}
+  const overview = (held: string[]): any => ({
+    futures: {
+      wallet: 100,
+      positions: held.map(symbol => ({symbol, entryPrice: 1, unrealizedPnl: 0}))
+    }
+  })
+  const cases: [string, string[], any[], string[]][] = [
+    ['整个仓平掉', ['BTCUSDT'], [{s: 'BTCUSDT', pa: '0'}], ['BTCUSDT']],
+    ['本来就没这个仓（只是又收了一条零仓事件）', [], [{s: 'BTCUSDT', pa: '0'}], []],
+    ['仓位还在（只是均价变了）', ['BTCUSDT'], [{s: 'BTCUSDT', pa: '0.5', ep: '1.1'}], []],
+    ['一半平一半留', ['BTCUSDT', 'ETHUSDT'], [{s: 'BTCUSDT', pa: '0'}, {s: 'ETHUSDT', pa: '2'}], ['BTCUSDT']],
+    ['平旧仓 + 开新仓混在一批', ['BTCUSDT'], [{s: 'BTCUSDT', pa: '0'}, {s: 'SOLUSDT', pa: '3'}], ['BTCUSDT']]
+  ]
+  let ok = true
+  for (const [name, held, changed, want] of cases) {
+    ks.lastOverview = overview(held)
+    const got: string[] = ks.applyAccountUpdate({B: [], P: changed}).closedSymbols
+    if (got.join(',') !== want.join(',')) {
+      console.error(`❌ 平仓判定：${name} —— 期望 [${want.join(',')}]，拿到 [${got.join(',')}]`)
+      ok = false
+    }
+  }
+
+  /*
+   * 去抖（`ORPHAN_SWEEP_GAP_MS` = 30 秒）：同一个币 30 秒内只扫一次，过了才再扫。
+   * ⚠️ 写反的后果是"悄悄白烧权重"，所以两边都要卡。
+   */
+  const swept = new Map<string, number>()
+  const t0 = 1_700_000_000_000
+  swept.set('BTCUSDT', t0)
+  const debounce: [string, string[], number, string[]][] = [
+    ['刚扫过（10 秒）不再扫', ['BTCUSDT'], t0 + 10_000, []],
+    ['刚好卡在门槛上（30 秒）还不扫', ['BTCUSDT'], t0 + 30_000, []],
+    ['过了 30 秒就再扫', ['BTCUSDT'], t0 + 31_000, ['BTCUSDT']],
+    ['没扫过的币立刻扫，同批重复只挑一次', ['ETHUSDT', 'ETHUSDT'], t0 + 1_000, ['ETHUSDT']],
+    ['空符号忽略', ['', 'ETHUSDT'], t0 + 1_000, ['ETHUSDT']]
+  ]
+  for (const [name, list, now, want] of debounce) {
+    const got = orphanSweepTargets(list, swept, now)
+    if (got.join(',') !== want.join(',')) {
+      console.error(`❌ 撤残留单去抖：${name} —— 期望 [${want.join(',')}]，拿到 [${got.join(',')}]`)
+      ok = false
+    }
+  }
+
+  if (ok) console.log(`✅ 平仓即撤单：${cases.length + debounce.length} 组夹具通过`)
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
 let failed = !checkContract()
 if (!checkSanitize()) failed = true
 if (!checkDiff()) failed = true
+if (!checkCloseSweep()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)
