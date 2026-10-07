@@ -419,7 +419,11 @@ export async function fetchCandles(
 export interface FetchRangeOptions {
   exchangeId: string
   symbol: string
-  timeframe: Timeframe
+  /**
+   * `'1m'` 不在 `Timeframe` 里（全站图表周期是 5m/15m/1h/4h/1d），
+   * 但 K 线底座要按 1m 补缺口 —— 见 `data/kline-recorder.ts`。
+   */
+  timeframe: Timeframe | '1m'
   /** 起始时间（毫秒） */
   from: number
   /** 结束时间（毫秒） */
@@ -438,7 +442,7 @@ export async function fetchCandlesRange(
   opts: FetchRangeOptions
 ): Promise<Candle[]> {
   const marketType = opts.marketType ?? 'swap'
-  const step = TF_MS[opts.timeframe]
+  const step = opts.timeframe === '1m' ? 60_000 : TF_MS[opts.timeframe]
   const maxCandles = opts.maxCandles ?? 3000
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
   const symbol = resolveSymbol(exchange, opts.symbol, marketType)
@@ -938,6 +942,50 @@ export interface MarketRow {
 }
 
 /**
+ * 全站**唯一的一把尺子**：U 本位永续只认 `contractType = PERPETUAL`。
+ *
+ * 币安的「TradFi 永续」（AAPLUSDT / XAUUSDT / SOXLUSDT…）也是 swap + linear，
+ * 不拦就多出两百多个 —— 行情表的「共 N 个合约」、币种下拉、K 线底座的订阅币集
+ * 一旦各用一把尺子，用户就会看到「合约数量对不上」。
+ * （别的交易所没有 contractType，拿不到就照收。）
+ */
+function isPerpetual(m: any): boolean {
+  const ct = String(m?.info?.contractType ?? '').toUpperCase()
+  return !ct || ct === 'PERPETUAL'
+}
+
+export interface PerpSymbol {
+  /** ccxt 统一符号（BTC/USDT:USDT）—— 库里 / 接口里都用它 */
+  symbol: string
+  /** 币安交易对（BTCUSDT）—— 上游 WS 的流名用它 */
+  pair: string
+  base: string
+}
+
+/**
+ * U 本位永续的完整清单，**0 网络**（markets 是启动时从库里灌进内存的那份，
+ * 见 `data/ccxt-markets.ts`）。
+ */
+export async function listPerpetualSymbols(opts: {
+  exchangeId: string
+  apiBase?: string
+}): Promise<PerpSymbol[]> {
+  const exchange = await getExchange(opts.exchangeId, 'swap', opts.apiBase)
+  const out: PerpSymbol[] = []
+  for (const [sym, raw] of Object.entries(exchange.markets ?? {})) {
+    const m = raw as any
+    if (!m || m.active === false) continue
+    if (!(m.swap && m.linear)) continue
+    if (String(m.quote).toUpperCase() !== 'USDT') continue
+    if (!isPerpetual(m)) continue
+    const pair = String(m.id ?? '')
+    if (!pair) continue
+    out.push({symbol: sym, pair, base: String(m.base ?? sym.split('/')[0])})
+  }
+  return out
+}
+
+/**
  * 全部合约的 24h 行情。
  *
  * 参考币安合约行情页：**一次请求拿全**（ccxt `fetchTickers` 对币安 U 本位
@@ -969,16 +1017,7 @@ export async function fetchMarketList(opts: {
     // U 本位永续一律 USDT 计价；币本位是 USD，现货挑 USDT 对
     if (marketType !== 'coinm' && String(m.quote).toUpperCase() !== 'USDT')
       continue
-    /*
-     * ⚠️ 币安上了「TradFi 永续」之后（AAPLUSDT / XAUUSDT / SOXLUSDT …，
-     * contractType = TRADIFI_PERPETUAL），ccxt 一样把它们算成 swap + linear，
-     * 于是这里能捞出 740 个 —— 而全站口径（`contracts.ts` 的 `/api/contracts`、
-     * 币种下拉、「共 N 个合约」）只认 `contractType = PERPETUAL` 的那 528 个。
-     * 两把尺子不一致就是用户报的「合约数量对不上」，所以这里按同一把过滤。
-     * （别的交易所没有 contractType 这个字段，拿不到就照收，不影响。）
-     */
-    const contractType = String(m.info?.contractType ?? '').toUpperCase()
-    if (contractType && contractType !== 'PERPETUAL') continue
+    if (!isPerpetual(m)) continue
 
     const t = tickers?.[sym]
     if (!t) continue

@@ -581,6 +581,40 @@ CREATE TABLE IF NOT EXISTS ccxt_markets (
   markets    JSONB       NOT NULL DEFAULT '{}'::jsonb,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ──────────────────────────────── K 线底座（2026-10-07）
+-- 后端常驻订阅 1m 推送流（525 个 U 本位永续），收盘就地落库并滚出高周期。
+-- 设计定稿见 docs/EXCHANGE.md：「实时 K 线底座」那一节（1m 直订 + rollup 物化）。
+--
+-- 保留策略**按周期分级**（见 db/candle-store.ts 的 pruneCandles）：
+--   1m 7 天 / 5m 7 天 / 15m 30 天 / 1h 400 天 / 4h 永久 / 1d 永久。
+--   为什么不按天分区：分区没法只丢「1m 那部分」（同一格里混着所有周期），
+--   而分级保留才是这里真正需要的（1h 要能画一年）。
+CREATE TABLE IF NOT EXISTS candles (
+  exchange         TEXT             NOT NULL,
+  market_type      TEXT             NOT NULL DEFAULT 'swap',
+  symbol           TEXT             NOT NULL,   -- ccxt 统一符号（BTC/USDT:USDT）
+  pair             TEXT             NOT NULL,   -- 币安交易对（BTCUSDT），上游流名用它
+  interval         TEXT             NOT NULL,
+  open_time        TIMESTAMPTZ      NOT NULL,
+  open             DOUBLE PRECISION NOT NULL,
+  high             DOUBLE PRECISION NOT NULL,
+  low              DOUBLE PRECISION NOT NULL,
+  close            DOUBLE PRECISION NOT NULL,
+  volume           DOUBLE PRECISION NOT NULL DEFAULT 0,  -- 基础币成交量
+  quote_volume     DOUBLE PRECISION NOT NULL DEFAULT 0,  -- 计价币成交额
+  trades           INTEGER          NOT NULL DEFAULT 0,
+  taker_buy_volume DOUBLE PRECISION NOT NULL DEFAULT 0,
+  -- ws（实时流）/ rollup（由 1m 滚出）/ backfill（补缺口）/ seed（首灌历史）
+  source           TEXT             NOT NULL DEFAULT 'ws',
+  updated_at       TIMESTAMPTZ      NOT NULL DEFAULT now(),
+  PRIMARY KEY (exchange, market_type, symbol, interval, open_time)
+);
+-- 每天要删掉约 90 万行（1m 那部分滚出 7 天）⇒ 让 autovacuum 勤快点，别等表涨到阈值
+ALTER TABLE candles SET (
+  autovacuum_vacuum_scale_factor = 0.05,
+  autovacuum_analyze_scale_factor = 0.02
+);
 `
 
 /**

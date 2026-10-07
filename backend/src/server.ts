@@ -139,6 +139,7 @@ import {
   saveSnapshot,
   type OpenOrderInput
 } from './db/exchange-store'
+import {candleStoreStats} from './db/candle-store'
 import {
   reconcileKeyOrders,
   wakeExchangeStream,
@@ -192,6 +193,11 @@ import {
   getLatestCandles,
   startKlineKeepWarm
 } from './data/kline-store'
+import {
+  klineRecorderStats,
+  startKlineRecorder,
+  stopKlineRecorder
+} from './data/kline-recorder'
 import {subscribeKline, subscribeTickers} from './data/kline-stream'
 import {buildContext} from './context/builder'
 import {judge, type JudgeMeta, type JudgeResult} from './llm/client'
@@ -4452,6 +4458,21 @@ async function route(
     await handleMarkets(url, res)
     return
   }
+  if (p === '/api/kline/recorder' && method === 'GET') {
+    /*
+     * 底座自检（读路径还没切过来，P0 期间靠它 + 日志看是否正常）。
+     * `?db=1` 顺带把库里每档的行数与覆盖区间带上。
+     */
+    try {
+      const st = klineRecorderStats()
+      if (url.searchParams.get('db')) {
+        return sendJson(res, 200, {...st, db: await candleStoreStats()})
+      }
+      return sendJson(res, 200, st)
+    } catch (e) {
+      return fail(res, 'kline/recorder', e)
+    }
+  }
   if (p === '/api/kline/stream') {
     await handleKlineStream(url, req, res)
     return
@@ -4812,6 +4833,15 @@ async function main(): Promise<void> {
   startKlineKeepWarm()
 
   /*
+   * ★ K 线底座（常驻 1m 推送流 → 落库 7 天 → 滚出高周期）。
+   *
+   * ⚠️ P0 **影子模式**：它只写不读，读路径还是老那套（`kline-store` + REST）。
+   *    先跑够 24 小时、把「桶连续率 / 权重 / 内存」攒出来，P1 再把读路径切过来
+   *    并删掉预热/保活那两套（见 docs/EXCHANGE.md）。
+   */
+  startKlineRecorder()
+
+  /*
    * 市值排名（CoinGecko）：也跟着预热一次 —— 不预热的话第一个打开行情页的人
    * 会看到第二行没有「No.x」（`marketCapRanks()` 同步返回空 Map，后台才去拉）。
    * 之后每 6 小时由 `data/marketcap.ts` 自己按 TTL 在后台刷。
@@ -4857,7 +4887,11 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
      *    （写锚点要每条 key 打一次 REST，约 2s/条）。
      */
     void Promise.race([
-      stopExchangeStreams(),
+      (async () => {
+        await stopExchangeStreams()
+        /* K 线底座：把攒着的那批点落库再关（最多几秒） */
+        await stopKlineRecorder()
+      })(),
       new Promise(r => setTimeout(r, 5000))
     ])
       .catch(() => undefined)
