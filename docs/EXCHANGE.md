@@ -3559,3 +3559,62 @@ SSE 的 `orders` 事件也会补一发 ⇒ 这条乐观数据活不过一两秒�
 
 ★ 顺带说明：**提示本身那 1 秒是下单往返**（币安那边撤旧 + 发 algo 条件单，本地走代理），
 这个省不掉；这次修的是「提示到了线还在路上」。
+
+## 45. 手机 K 线页：整页 120vh，多出来的那一截**只给底部**（2026-10-07 用户）
+
+用户：「k 线的仓位大小感觉太矮了，能把页面高度加到 120vh，多的空间只放底部，滚动条不显示，
+拖动区域自动让父级向下，触顶回弹。」（问过一轮，选的是「给底部的下单 / 仓位模块 ——
+底部能多显示几行持仓」，K 线保持现在的高度。）
+
+### 45.1 为什么「把页面加高」这一步会变形
+
+底部那格（`OrderPanel.vue` → `.ord`）原来是 `flex: 0 0 auto`：**高度按内容**，不参与分摊。
+而画布 `.chart-wrap` 是 `flex: 1 1 auto`，在一屏（100vh）时它是被两边挤下来的 —— 基准其实是
+`height: 50vh`，靠 `flex-shrink` 才落到 268px。所以：
+
+* 只把页面拉高 → 画布**立刻长回基准**（422px），多出来的 20vh 全被它吃掉，底部一格一点不涨；
+* 只把底部撑高 → 画布反过来被它挤扁（`min-height: 150px` 是地板），页面还是 100vh。
+
+⇒ 必须**同时**做三件事：页面写明 120dvh、画布钉住原高、底部改成吸收剩余高度。
+
+### 45.2 改法（都在 `style.css` 的 `@media (max-width: 900px)` 里，只认「K 线」那一格）
+
+```css
+/* ① 页面：内容写到 120dvh 减掉 #app 那圈内边距，滚的还是 #app（它在这格本来就是 overflow: auto） */
+body.fixed-viewport:has(.split.m-chart) .analyze {
+  min-height: calc(120dvh - 10px - var(--safe-top) - var(--tabbar-h) - env(safe-area-inset-bottom));
+}
+/* ② 画布：按「一屏时它正好是多少」定死（576 = #app 上下内边距 69 + tab 行 49 + 图头 217 + 图下那圈 241） */
+.split.m-chart .chart-side .chart-wrap { flex: 0 0 auto; height: calc(100dvh - 576px); }
+/* ③ 底部：吸收剩余高度（里面的 .ord-pos 是 flex: 1 1 0，跟着多铺几行） */
+.split.m-chart .ord { flex: 1 1 auto; }
+/* 滚动条不画出来；持仓列表放开 overscroll（拖到底继续拖 = 滚父级，父级到顶是系统原生回弹） */
+body.fixed-viewport:has(.split.m-chart) #app { scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.split.m-chart .ord-pos { overscroll-behavior: auto; }
+```
+
+⚠️ `calc(100dvh - 576px)` 是**故意**不用 `32vh`：vh 只在 844 这一档上等于 268，
+矮屏（667）算出来是 91、被 `min-height: 150px` 顶住 —— 跟改之前一模一样；`32vh` 在矮屏会把图**撑大**。
+
+⚠️ 另外把 `.ord` 从块级改成**一列 flex**（`.ord-head` + `.ord-body { flex: 1 1 auto }`）：
+块级的话 `.ord-body` 是内容高，多出来的高度会落在它**外面**（白空一块、列表一行不涨）——
+这一条是实测抓到的：先只改了 ①②③，`.ord` 已经 355px 了，可 `.ord-pos` 还是 129px。
+桌面（`.ord { flex: 0 0 auto }`）两种写法等高，188px 对 188px，不影响。
+
+### 45.3 实测（390×844 与 390×667）
+
+| | 改前 | 改后 |
+|---|---|---|
+| 画布 `.chart-wrap`（844） | 268px | **268px**（不变） |
+| 底部 `.ord`（844） | 186px | **355px**（+169 = 20vh） |
+| 持仓列表 `.ord-pos`（844，行高 44） | 129px ≈ 2.9 行 | **298px ≈ 6.8 行** |
+| 整页可滚距离（844） | 0 | **169px** = 20vh |
+| 画布（667） | 150px（下限兜底） | 150px（不变） |
+| 整页可滚距离（667） | 0 | **133px** = 20vh |
+
+另外三项：`#app` 的 `scrollbar-width: none` ✓（`::-webkit-scrollbar` 也补了 `width: 0`）；
+底栏 `.tabbar` 是 `position: fixed`，滚到底它不动、内容末行（`b = 773`）刚好停在它上面（`top = 785`）✓；
+「实时分析 / 历史分析」两格与桌面（1280×900）**一屏照样不滚**（`#app` 844/844、900/900）✓。
+
+★ 老实说一句：「拖动让父级向下 / 触顶回弹」是靠 `overscroll-behavior: auto` 交回给浏览器原生的
+滚动链 + iOS 回弹（计算值已核：列表 `auto`、`#app` `auto`），**手指那一下没法在这台机器上用真手势复核**。
