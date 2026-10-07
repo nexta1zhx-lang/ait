@@ -16,11 +16,29 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# 源码（.dockerignore 已排除 node_modules / dist / .env / logs）
+# 源码（.dockerignore **不**排除 dist —— 见下面的 PREBUILT）
 COPY . .
 
-# 后端 tsc -> backend/dist，前端 vite -> frontend/dist
-RUN npm run build:all
+# PREBUILT=0（默认）：服务器上从源码编译（老行为）。
+# PREBUILT=1：用包里的预构建产物，跳过编译（release.sh 会传这个 build-arg）。
+ARG PREBUILT=0
+
+# 后端 tsc -> backend/dist，前端 vite -> frontend/dist。
+#
+# PREBUILT=1：用 **release.sh 在本机已经构建好**、随包发过来的那两个 dist，
+#   跳过编译。为什么值得这么绕：服务器是 2 核 Lightsail，`tsc` ≈31 秒 +
+#   `vite build` ≈51 秒（777 个模块）= **111 秒**，而这一步在本机只是几秒钟的事。
+#   ⚠️ 两个产物**都**在、且都非空才认；缺一个就退回源码编译 ——
+#      宁可慢一点，也不要做出一个「半个旧产物」的镜像。
+RUN if [ "${PREBUILT}" = "1" ] \
+       && [ -s backend/dist/server.js ] \
+       && [ -s frontend/dist/index.html ]; then \
+      echo "=== PREBUILT=1：用随包带来的预构建产物，跳过 build:all ==="; \
+      ls -l backend/dist/server.js frontend/dist/index.html; \
+    else \
+      echo "=== 从源码编译（PREBUILT=${PREBUILT}）==="; \
+      npm run build:all; \
+    fi
 
 # ---------------------------------------------------------------- 运行阶段
 FROM node:22-alpine AS runtime

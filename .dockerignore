@@ -1,7 +1,9 @@
-# 依赖与产物（镜像里重新装 / 重新构建）
+# 依赖与产物
+# ⚠️ `backend/dist` / `frontend/dist` **故意不排除**（2026-10-07）：
+#    release.sh 在本机构建好这两个目录随包发过来，镜像里 `PREBUILT=1` 就直接用它们
+#    （省掉服务器上 111 秒的 tsc + vite）。PREBUILT=0 时 `build:all` 会自己覆盖，
+#    不会出现新旧混着用的情况（`clean:backend` 先删、vite 也会清空 outDir）。
 node_modules
-backend/dist
-frontend/dist
 
 # git 与本地历史（不进镜像）
 .git

@@ -79,6 +79,19 @@ if (( CHECK )); then
   ok '通过'
 fi
 
+# ---------------------------------------------------------------- 0b. 本机预构建
+# 2026-10-07：这一步是为了**别让服务器去编译**。原来每次发布都在服务器上跑
+# `npm run build:all`，那台 2 核 Lightsail 实测 `tsc` ≈31 秒 + `vite build` ≈51 秒
+# （777 个模块）= **111 秒**，占整趟发布 5 分钟里的 1/3 还多 —— 哪怕只改了一个 .vue。
+# 本机（M 系 Mac）跑同一份脚本只要几秒，产物是纯 JS/CSS/HTML，跟平台无关。
+# 容器侧靠 `Dockerfile` 的 `PREBUILT` 开关跳过编译（见 docker-compose.prod.yml）。
+c '本机预构建（backend/dist + frontend/dist 随包发过去）'
+rm -rf backend/dist frontend/dist
+npm run --silent build:all
+[[ -f backend/dist/server.js ]] || die '预构建失败：没有 backend/dist/server.js'
+[[ -f frontend/dist/index.html ]] || die '预构建失败：没有 frontend/dist/index.html'
+ok "产物已就绪（后端 $(find backend/dist -type f | wc -l | tr -d ' ') 个文件 / 前端 $(find frontend/dist -type f | wc -l | tr -d ' ') 个文件）"
+
 # ---------------------------------------------------------------- 1. 打包
 c "打包 → $LOCAL_TAR"
 rm -f "$LOCAL_TAR"
@@ -91,9 +104,11 @@ rm -f "$LOCAL_TAR"
 # ./downloads 要传（`releases.json` 是下载页的数据源），但 **`*.apk` 排除在外**——
 #   APK 一个就有 9MB，而服务器上已经有的不必重传（它们不走镜像，是
 #   Caddy 从裸机目录发 `/dl/*` 的）。需要新的那份由「4b. APK 按需上传」单独 scp。
+# ⚠️ `backend/dist` / `frontend/dist` **不再排除**（2026-10-07）：上面刚在本地构建好，
+#    要随包发过去给镜像直接用（`.dockerignore` 里也对应放开了）。
 COPYFILE_DISABLE=1 tar --no-xattrs -czf "$LOCAL_TAR" \
   --exclude='node_modules' --exclude='.git' --exclude='.env' --exclude='.env.local' \
-  --exclude='backend/dist' --exclude='frontend/dist' --exclude='logs' \
+  --exclude='logs' \
   --exclude='.DS_Store' --exclude='._*' --exclude='backup*.dump' \
   --exclude='./android' \
   --exclude='./downloads/*.apk' \
@@ -102,7 +117,8 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$LOCAL_TAR" \
 if tar tzf "$LOCAL_TAR" | grep -qx '\./\.env'; then
   die '包里混进了 .env —— 会覆盖服务器上的密钥，已中止'
 fi
-for f in './package.json' './backend/src/server.ts' './docker-compose.prod.yml' './Caddyfile' './scripts/deploy.sh' './downloads/releases.json'; do
+for f in './package.json' './backend/src/server.ts' './docker-compose.prod.yml' './Caddyfile' './scripts/deploy.sh' './downloads/releases.json' \
+         './backend/dist/server.js' './frontend/dist/index.html'; do
   if ! tar tzf "$LOCAL_TAR" | grep -qxF "$f"; then
     die "包里缺 $f —— 打包内容不对，已中止"
   fi
@@ -110,7 +126,7 @@ done
 if tar tzf "$LOCAL_TAR" | grep -q '\.apk$'; then
   die '包里混进了 .apk —— 应该由「4b. APK 按需上传」单独传，已中止'
 fi
-ok "$(du -h "$LOCAL_TAR" | cut -f1) · $(tar tzf "$LOCAL_TAR" | wc -l | tr -d ' ') 项 · 已确认不含 .env"
+ok "$(du -h "$LOCAL_TAR" | cut -f1) · $(tar tzf "$LOCAL_TAR" | wc -l | tr -d ' ') 项 · 已确认不含 .env · 含预构建产物"
 
 LOCAL_MD5_TS="$(md5of backend/src/server.ts)"
 LOCAL_MD5_DEPLOY="$(md5of scripts/deploy.sh)"
@@ -118,7 +134,7 @@ LOCAL_MD5_DEPLOY="$(md5of scripts/deploy.sh)"
 if (( DRY_RUN )); then
   c 'DRY RUN —— 不连服务器。真要执行的是：'
   printf '    scp %s %s@%s:%s\n' "$LOCAL_TAR" "$SSH_USER" "$HOST" "$REMOTE_TAR"
-  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env / downloads）→ 解包 → md5 核对 → sudo bash scripts/deploy.sh\n' \
+  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env / downloads）→ 解包 → md5 核对 → sudo PREBUILT=1 bash scripts/deploy.sh\n' \
     "$SSH_USER" "$HOST" "$APP_DIR"
   printf '    （APK 不在主包里，只把服务器上没有的那些单独 scp 到 %s）\n' "$REMOTE_APK_DIR"
   printf '    curl https://%s/api/health\n' "$DOMAIN"
@@ -191,9 +207,12 @@ fi
 # ---------------------------------------------------------------- 5. 远端：检查 → 清旧 → 解包 → 核对 → 部署
 c '远端执行（清旧 → 解包 → 核对 → scripts/deploy.sh）'
 ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" \
-  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR'" <<'REMOTE'
+  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR' '1'" <<'REMOTE'
 set -euo pipefail
 APP_DIR="$1"; TAR="$2"; WANT_TS="$3"; WANT_DEPLOY="$4"; APK_STAGE="$5"
+# 第 6 个参数：PREBUILT —— 包里有本机构建好的 backend/dist / frontend/dist，
+# 让 compose 把 build-arg 传进 Dockerfile 跳过服务器上的编译（见上面「本机预构建」）。
+PREBUILT="${6:-0}"
 
 echo "==> 前置检查"
 [[ -d "$APP_DIR" ]] || { echo "✗ $APP_DIR 不存在 —— 首次部署请按 docs/DEPLOY.md 手动走一遍" >&2; exit 1; }
@@ -221,6 +240,9 @@ fi
 
 echo "==> 清掉旧文件（保留 .env / downloads）"
 before=$(find "$APP_DIR" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
+# 清之前先记下 Caddyfile 的指纹：它没变就不必重建 caddy 容器（见文件末尾）。
+# 读不到（首次部署 / 权限）就当「变了」—— 重建是安全的那一边。
+old_caddy=$(md5sum "$APP_DIR/Caddyfile" 2>/dev/null | cut -d' ' -f1 || true)
 # tar 只覆盖、不删除：不清的话，本机删掉的 .ts 会残留并被 tsc 编进镜像
 # ⚠️ 但这两项必须留着：
 #   · .env      服务器上管的密钥，本机那份会盖掉
@@ -263,21 +285,43 @@ else
   echo "    （没有新的 APK）"
 fi
 
-echo "==> 跑 scripts/deploy.sh（构建镜像 + 起容器 + 自检），2 核机器要等几分钟"
+echo "==> 跑 scripts/deploy.sh（构建镜像 + 起容器 + 自检）
+    （PREBUILT=$PREBUILT：包里已带本机构建好的产物，服务器跳过 tsc + vite）"
 cd "$APP_DIR"
-sudo bash scripts/deploy.sh
+sudo PREBUILT="$PREBUILT" bash scripts/deploy.sh
 
-echo "==> 重建 caddy（Caddyfile 改了靠这一步生效）"
 # Caddyfile 是 bind mount 的**单个文件**：内容变了 compose 看不出来，`up -d` 不会重建容器，
 # 而 Caddy 只在启动时读一次配置 —— 不重建的话改了等于没改。
 # 证书在命名卷 ca-caddy-data 里，重建不会重新申请。
-sudo docker compose -f docker-compose.prod.yml up -d --force-recreate caddy
+# 2026-10-07：改成**只在真的变了时**才重建 —— 每次无脑 `--force-recreate caddy`
+# 要多花十几秒（容器重起 + 等它监听 443），而绝大多数发布根本没碰 Caddyfile。
+new_caddy=$(md5sum "$APP_DIR/Caddyfile" | cut -d' ' -f1)
+if [[ -n "$old_caddy" && "$old_caddy" == "$new_caddy" ]]; then
+  echo "==> Caddyfile 没变，跳过重建 caddy"
+else
+  echo "==> 重建 caddy（Caddyfile 变了，靠这一步生效）"
+  sudo docker compose -f docker-compose.prod.yml up -d --force-recreate caddy
+fi
 REMOTE
 
 # ---------------------------------------------------------------- 6. 公网验收
 c '公网验收'
-sleep 3
-if curl -fsS --max-time 25 "https://$DOMAIN/api/health" > /tmp/ca-health.remote.json 2>/dev/null; then
+# ⚠️ 这里**必须重试**，别一次 curl 就判死。
+#    2026-10-07 实测踩过：caddy 刚被 force-recreate，第一次 curl 撞在
+#    「容器还在起 / 443 还没监听」的空窗上 ⇒ 脚本 exit 1，但 6 秒后就是 200
+#    —— 假警报比真故障更浪费时间（还得再查一遍才知道是假的）。
+ATTEMPTS=8
+for (( i = 1; i <= ATTEMPTS; i++ )); do
+  if curl -fsS --max-time 25 "https://$DOMAIN/api/health" > /tmp/ca-health.remote.json 2>/dev/null; then
+    break
+  fi
+  if (( i < ATTEMPTS )); then
+    warn "第 $i 次没通（容器可能还在起），3 秒后再试"
+    sleep 3
+  fi
+done
+
+if [[ -s /tmp/ca-health.remote.json ]]; then
   head -c 300 /tmp/ca-health.remote.json; echo
   if grep -q '"ok":true' /tmp/ca-health.remote.json; then
     ok "线上正常：https://$DOMAIN"
@@ -286,7 +330,7 @@ if curl -fsS --max-time 25 "https://$DOMAIN/api/health" > /tmp/ca-health.remote.
   warn 'health 返回了，但 ok 不是 true（看上面远端输出里的数据库提示）'
   exit 1
 fi
-warn "https://$DOMAIN/api/health 没通 —— 可能容器还在重启，等几秒自己再试一次："
+warn "https://$DOMAIN/api/health 试了 $ATTEMPTS 次都没通："
 printf '      curl -s https://%s/api/health\n' "$DOMAIN"
 printf '      看日志：ssh -i %s %s@%s "cd %s && sudo docker compose -f docker-compose.prod.yml logs --tail=80 app"\n' \
   "$KEY" "$SSH_USER" "$HOST" "$APP_DIR"

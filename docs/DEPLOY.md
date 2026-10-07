@@ -272,11 +272,31 @@ bash scripts/release.sh            # 会问一句确认；加 -y 不问，加 --
 ```
 
 `scripts/release.sh` 按顺序做：**先要求工作区已提交**（有未提交改动直接停，加 `--no-check` 可跳过）
-→ `tsc` 类型检查 → 打包（排除 `.env` / `android` / `*.apk`，并断言包里确实没有 `.env`）
-→ 检查 SSH（连不上就停住并提示）→ `scp` 上传主包 → **按需补传 APK**
+→ `tsc` 类型检查 → **本机预构建**（`npm run build:all`，见下面「为什么先在本地编译」）
+→ 打包（排除 `.env` / `android` / `*.apk`，并断言包里确实没有 `.env`、确实**有**那两个
+`dist`）→ 检查 SSH（连不上就停住并提示）→ `scp` 上传主包 → **按需补传 APK**
 （服务器上已有同名同大小的不传）→ 远端「校验包 → 清空旧文件（保留 `.env` / `downloads`）
-→ 解包 → md5 与本机核对 → `sudo bash scripts/deploy.sh` → 重建 caddy」→
-最后 `curl https://bitcoooin.cn/api/health` 验收。**任一步失败就停住**，不会留下半个部署。
+→ 解包 → md5 与本机核对 → `sudo PREBUILT=1 bash scripts/deploy.sh`
+→ **Caddyfile 真的变了才**重建 caddy」→ 最后 `curl https://bitcoooin.cn/api/health` 验收
+（**失败会重试 8 次 × 3 秒**，别被 caddy 刚重启的空窗骗了）。**任一步失败就停住**，
+不会留下半个部署。
+
+### 为什么先在本地编译（`PREBUILT=1`）
+
+2026-10-07 实测了一次发布：整趟 **5 分 12 秒**，其中**服务器上构建镜像 ≈182 秒**，
+而里面 `RUN npm run build:all` 一项就是 **111 秒**（`tsc` ≈31 秒 + `vite build` ≈51 秒，
+777 个模块）—— 那台机器只有 **2 核**，而这一步在你的 Mac 上只要几秒。
+
+所以现在的流程改成：**本机 build → 产物随包发过去 → 镜像里跳过编译**。
+
+- `scripts/release.sh` 在打包前跑 `npm run build:all`，把 `backend/dist` + `frontend/dist`
+  打进 tar（`tar` 与 `.dockerignore` 里都**不再排除**这两个目录）
+- `docker-compose.prod.yml` 把 `PREBUILT` 作为 build-arg 传给 `Dockerfile`
+- `Dockerfile`：`PREBUILT=1` **且**两个产物都在且非空 ⇒ 跳过 `build:all`；
+  否则**自动退回**源码编译（宁可慢，也不要「半个旧产物」的镜像）
+- 手工在服务器上 `sudo bash scripts/deploy.sh`（不带 `PREBUILT`）＝ 老行为：服务器上编译
+
+⚠️ 万一包里的产物有问题，最直接的兜底：`sudo PREBUILT=0 bash scripts/deploy.sh`。
 
 先分清哪一类改动：
 
@@ -298,6 +318,9 @@ bash scripts/release.sh            # 会问一句确认；加 -y 不问，加 --
 - **`Caddyfile` 改了要重建 caddy 容器**：它是 bind mount 的**单个文件**，内容变了
   compose 看不出来，`up -d` 不会重建，而 Caddy 只在启动时读一次配置 —— 不重建等于没改。
   （证书在命名卷 `ca-caddy-data` 里，重建不会重新申请。）
+  ⚠️ 2026-10-07 起这一步**只在 Caddyfile 的 md5 真的变了**时才做（release.sh 比对了
+  解包前后的指纹）—— 每次无脑 `--force-recreate caddy` 要多花十几秒，而绝大多数发布
+  根本没碰它。**在服务器上手工编辑 Caddyfile 之后，记得自己 recreate 一次**。
 
 > 💡 为什么要「先清一遍旧文件」：`tar xzf` 只覆盖同名文件、**不会删除**本机已经删掉的
 > 文件；残留的旧 `.ts` 会被 `tsc` 一起编进镜像（还 import 已删模块的话直接构建失败）。
@@ -346,15 +369,16 @@ https://bitcoooin.cn/dl/entry-advisor-0.1.0.apk
 
 ```bash
 bash scripts/build-apk.sh        # 顺带把新 APK 放进 downloads/（并在 releases.json 里补一条）
-bash scripts/release.sh -y       # 打包上传 + 重建 caddy 容器
+bash scripts/release.sh -y       # 打包上传（Caddyfile 没变就不会重建 caddy —— APK 只是文件）
 ```
 
 > 💭 本地 `npm run web` 也能下：线上 `/dl/*` 是 Caddy 发的，本地没有 Caddy，
 > 后端 `serveDownload()` 会自己发一份（`backend/src/server.ts`）。效果一样，
 > 所以 `/download` 页在本机就能完整验收。
 
-⚠️ 第一次加这个挂载**必须重建 caddy**（`scripts/release.sh` 走的就是
-`up -d --build`，会按新配置重建），否则容器里没有 `/srv/dl`。
+⚠️ 第一次加这个挂载**必须重建 caddy**，否则容器里没有 `/srv/dl`。
+现在这一步是**改了 Caddyfile 才会**触发（release.sh 比对解包前后的 md5）——
+所以「只是为了换 APK」的发布不用重建 caddy，文件是 bind mount 的、立刻生效。
 
 ## 常用命令
 

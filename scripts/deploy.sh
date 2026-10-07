@@ -117,7 +117,11 @@ $SUDO docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine
   || die 'Caddyfile 语法有问题，改完再跑一次'
 
 c '构建并启动（首次要拉镜像 + 装依赖，几分钟）'
-$SUDO docker compose -f docker-compose.prod.yml up -d --build
+# PREBUILT（0/1）：1 ⇒ Dockerfile 跳过 `tsc + vite`，直接用包里带来的
+#   backend/dist / frontend/dist。release.sh 会带 1 过来（实测省 111 秒）；
+#   手工跑不带就是 0 = 老行为：服务器上从源码编译。
+# ⚠️ 必须显式传给 docker（`sudo` 默认会清环境变量，不显式给就丢了）。
+$SUDO PREBUILT="${PREBUILT:-0}" docker compose -f docker-compose.prod.yml up -d --build
 
 echo
 $SUDO docker compose -f docker-compose.prod.yml ps

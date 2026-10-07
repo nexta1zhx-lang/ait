@@ -54,6 +54,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # PREBUILT=1 ⇒ 镜像里跳过 `tsc + vite`，直接用包里带来的 backend/dist /
+      # frontend/dist（release.sh 会 export 这个变量；实测省 111 秒）。
+      # 手工在服务器上 `docker compose up -d --build`（不带它）就是老行为：
+      # 服务器上从源码编译 —— 反正 Dockerfile 那边两个产物不齐也会自动退回编译。
+      args:
+        PREBUILT: ${PREBUILT:-0}
     container_name: ca-app
     restart: unless-stopped
     # environment 的优先级高于 env_file，所以 .env 里本地的

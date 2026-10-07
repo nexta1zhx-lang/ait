@@ -165,7 +165,7 @@ https://bitcoooin.cn/dl/entry-advisor-<版本>.apk
 发一次：
 
 ```bash
-bash scripts/release.sh          # 会连 downloads/ 一起打上去，并重建 caddy 容器
+bash scripts/release.sh          # 会连 downloads/ 一起打上去（Caddyfile 没变就不重建 caddy）
 ```
 
 `scripts/build-apk.sh` 每次都会把新 APK 自动放进 `downloads/entry-advisor-<版本>.apk`，
