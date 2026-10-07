@@ -563,7 +563,13 @@ export async function latestSnapshot(
     overview,
     source: String(row.source ?? 'poll'),
     ageSec,
-    stale: ageSec > 5 * 60,
+    /*
+     * 「旧了」的阈值 = **校准间隔（1 小时）+ 余量**。
+     * ⚠️ 前端只在「流不活 / 后端报 deaf」时才拿它去补一次（见 `ExchangeAccountLivePanel`），
+     *    所以这个值大一点只是少打空枪 —— 曲线点（`live`）每 5 分钟都在写，
+     *    但那是本地算的净值，不代表「跟交易所对过账」。
+     */
+    stale: ageSec > 70 * 60,
     err: row.err === null || row.err === undefined ? null : String(row.err)
   }
 }
