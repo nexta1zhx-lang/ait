@@ -12,7 +12,7 @@
  * ⚠️ 分层（跟已经删掉的老面板不同）：老的把 5 个交易所调用塞进一个请求、
  *    每次都要现拉；这个首屏只读库，慢的东西（挂单）拆开按需查。
  */
-import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
+import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue'
 import {useRouter} from 'vue-router'
 import ExchangeAccountBoard from './ExchangeAccountBoard.vue'
 import TransferSheet from './TransferSheet.vue'
@@ -24,6 +24,7 @@ import {pickSymbol, prefetchSymbol} from '../analyze'
 import {bindLastPrices, lastPrices} from '../last-price'
 import {
   closeSideOf,
+  pairOf,
   type OrderEditTarget,
   type TpSlAction,
   type TpSlTarget
@@ -33,6 +34,9 @@ import {testOrder} from '../settings'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
 import {isForeground} from '../live'
+import {bjTime} from '../format'
+import LedgerRangeSheet from './LedgerRangeSheet.vue'
+import {bjDayStart, TYPE_NAME, type RangeKey} from '../ledger'
 import {
   cancelTradeOrder,
   closeTradePositions,
@@ -71,14 +75,167 @@ import {
  *    不会变成轮询：刷完 age 归零，要等它再旧过 15 秒才可能触发下一次。
  */
 const REFRESH_AFTER_SEC = 15
-/** 成交列表最多留多少条 */
-const FILLS_MAX = 60
-/** 「盈亏」看最近几天（`0` = 全部历史） */
+/**
+ * 账本三格**一次取多少条**（留着的上限也一起用）。
+ *
+ * ⚠️ 2026-10-07 从 `60 / 200 / 50` 放大到 `500`：这三格现在带**周期范围**（用户
+ *    「默认显示 7 天，右侧一个按钮选周期范围」），选 30 / 90 天时还按原来那几十条
+ *    就是「筛出来的比实际少」——那是静默的假数据，最不能留。
+ *    · 后端那边 `listFills` / `listIncome` / `listPositionHistory` 各自还有硬上限 500/2000/500；
+ *    · 列表还是**按需铺**的（窄屏一屏 20 条，滚到底再铺一批，见 board 的 `PAGE`），
+ *      所以放大上限只是「允许往下滚更多」，不是一上来就渲染五百行。
+ */
+const LEDGER_MAX = 500
+/**
+ * 只用来写那句提示「账本只有币安给的那段成交（约 7 天）」。
+ *
+ * ⚠️ **别拿它去请求**：范围现在由各格的周期范围（`from`/`to`）决定，
+ *    两个条件是与关系，传 `days=7` 会把「近 30 天」卡成 7 天（见 `loadIncome` 那段）。
+ */
 const INCOME_DAYS = 7
-/** 盈亏明细最多留多少条 */
-const INCOME_MAX = 200
-/** 仓位历史最多列多少段 */
-const CYCLES_MAX = 50
+
+/* ---------------- 账本三格的筛选（周期范围 + 币种 + 资金类型） ---------------- */
+
+/** 三格：仓位历史 / 成交历史 / 资金动向 */
+type LedgerTab = 'inc' | 'trades' | 'flow'
+
+interface LedgerFilter {
+  range: RangeKey
+  /** 毫秒（含端点）；`null` = 不限 */
+  from: number | null
+  to: number | null
+  /** 币种**简称**（`PUMP`，`''` = 全部）—— **本地筛**，这样下拉里始终有全部可选 */
+  symbol: string
+  /** 资金类型（`income_type`，`null` = 全部）—— **后端筛**，合计口径才跟列表一致 */
+  types: string[] | null
+}
+
+/** 默认：近 7 天 + 全部币种 + 全部类型（用户 2026-10-07：「默认显示 7 天的数据」） */
+function defaultFilter(): LedgerFilter {
+  const to = Date.now()
+  return {range: '7d', from: bjDayStart(to, 6), to, symbol: '', types: null}
+}
+
+/**
+ * ⚠️ 三格**各自独立**：三格是三个不同的列表，共用一份筛选会出现
+ *    「在成交历史里选了 30 天，仓位历史也跟着变」，而它们右上角各有各的按钮。
+ */
+const filters = reactive<Record<LedgerTab, LedgerFilter>>({
+  inc: defaultFilter(),
+  trades: defaultFilter(),
+  flow: defaultFilter()
+})
+
+/** 交给 api 的范围参数（币种不传 —— 本地筛） */
+function rangeOf(tab: LedgerTab): {from: number | null; to: number | null; types?: string[] | null} {
+  const f = filters[tab]
+  return tab === 'flow'
+    ? {from: f.from, to: f.to, types: f.types}
+    : {from: f.from, to: f.to}
+}
+
+/** 按钮上那行字 */
+function rangeLabel(tab: LedgerTab): string {
+  const f = filters[tab]
+  switch (f.range) {
+    case 'today':
+      return '今天'
+    case '30d':
+      return '近 30 天'
+    case '90d':
+      return '近 90 天'
+    case 'custom':
+      return f.from && f.to
+        ? `${bjDay(f.from)}→${bjDay(f.to)}`
+        : '自定义'
+    default:
+      return '近 7 天'
+  }
+}
+
+/**
+ * 这一格现在有没有在筛（不是默认的「近 7 天 + 全部币种 + 全部类型」）。
+ * 空列表的文案要分开：默认状态是「还没有数据」，筛过之后是「这个条件下没有」。
+ */
+function filtered(tab: LedgerTab): boolean {
+  const f = filters[tab]
+  return !!f.symbol || f.range !== '7d' || !!f.types?.length
+}
+
+/** 范围/类型不是默认值 —— 那颗按钮要不要高亮（币种不算：它在左边下拉里看得见） */
+function rangeOn(tab: LedgerTab): boolean {
+  const f = filters[tab]
+  return f.range !== '7d' || !!f.types?.length
+}
+
+function bjDay(ms: number): string {
+  return bjTime(ms).slice(5, 10)
+}
+
+/** 资金动向按钮上的类型摘要（没筛就是空串，按钮显示范围） */
+function typesLabel(tab: LedgerTab): string {
+  const t = filters[tab].types
+  if (tab !== 'flow' || !t?.length) return ''
+  const names = t.map(v => TYPE_NAME[v] ?? v)
+  return names.length <= 2 ? names.join('+') : `${names[0]}等${names.length}种`
+}
+
+/** 哪一格开着「周期范围」弹窗（`null` = 关着） */
+const rangeSheet = ref<LedgerTab | null>(null)
+
+/** 那一格现在筛出多少笔（弹窗底部那句「当前筛出 N 笔」） */
+const rangeCount = computed(() => {
+  const tab = rangeSheet.value
+  if (!tab) return null
+  if (tab === 'inc') return cycles.value.filter(c => hitSymbol(c.symbol, filters.inc.symbol)).length
+  if (tab === 'trades') return fills.value.filter(t => hitSymbol(t.symbol, filters.trades.symbol)).length
+  return income.value.filter(r => hitSymbol(r.symbol, filters.flow.symbol)).length
+})
+
+/** 跟 board 里那份同一个口径：比**币种简称**（下拉给的就是简称） */
+function hitSymbol(sym: string, want: string): boolean {
+  return !want || baseOf(sym) === want
+}
+
+const RANGE_TITLE: Record<LedgerTab, string> = {
+  inc: '仓位历史',
+  trades: '成交历史',
+  flow: '资金动向'
+}
+
+/** 面板里换了币种（下拉里选的；`''` = 全部）—— 只改本地视图，不用重取 */
+function onLedgerFilter(e: {tab: LedgerTab; symbol: string}): void {
+  filters[e.tab].symbol = e.symbol
+}
+
+/** 面板里点了「周期范围」—— 弹窗在这一层挂（它才知道怎么重取） */
+function onLedgerRange(e: {tab: LedgerTab}): void {
+  rangeSheet.value = e.tab
+}
+
+/** 弹窗点了「完成」：换范围（可能要重新取数），币种不动 */
+function onRangeApply(v: {
+  range: RangeKey
+  from: number | null
+  to: number | null
+  types: string[] | null
+}): void {
+  const tab = rangeSheet.value
+  if (!tab) return
+  const f = filters[tab]
+  f.range = v.range
+  f.from = v.from
+  f.to = v.to
+  if (tab === 'flow') f.types = v.types
+  void reloadLedger(tab)
+}
+
+/** 按新的范围把那格重取一次 */
+function reloadLedger(tab: LedgerTab): void {
+  if (tab === 'inc') void loadCycles()
+  else if (tab === 'trades') void loadFills()
+  else void loadIncome()
+}
 
 const keys = ref<ExchangeKey[]>([])
 
@@ -839,7 +996,7 @@ async function loadCycles(): Promise<void> {
   let since: string | null = null
   for (const k of list) {
     try {
-      const r = await fetchExchangePositionHistory(k.id, CYCLES_MAX)
+      const r = await fetchExchangePositionHistory(k.id, LEDGER_MAX, rangeOf('inc'))
       if (r.since && (!since || r.since < since)) since = r.since
       for (const c of r.cycles ?? [])
         closed.push(many ? {...c, keyName: k.name} : c)
@@ -1028,7 +1185,7 @@ async function loadFills(): Promise<void> {
   const all: ExchangeTrade[] = []
   for (const k of list) {
     try {
-      const r = await fetchExchangeFills(k.id, FILLS_MAX)
+      const r = await fetchExchangeFills(k.id, LEDGER_MAX, rangeOf('trades'))
       for (const t of r.fills ?? []) all.push(many ? {...t, keyName: k.name} : t)
     } catch (e) {
       if (!isAuthError(e)) err.value = `读取成交失败：${msg(e)}`
@@ -1037,7 +1194,7 @@ async function loadFills(): Promise<void> {
   all.sort((a, b) =>
     String(b.datetime ?? '').localeCompare(String(a.datetime ?? ''))
   )
-  fills.value = all.slice(0, FILLS_MAX)
+  fills.value = all.slice(0, LEDGER_MAX)
 }
 
 /**
@@ -1065,7 +1222,13 @@ async function loadIncome(): Promise<void> {
   let any = false
   for (const k of list) {
     try {
-      const r = await fetchExchangeIncome(k.id, INCOME_DAYS, INCOME_MAX)
+      /*
+       * ⚠️ `days` 一律传 **0（全部历史）**，范围交给 `from/to` ——
+       *    两个条件是**与**关系：传 `days=7` 再挑「近 30 天」会被那 7 天卡死
+       *    （实测：30 天和 7 天返回的行数一模一样）。
+       *    默认那一档本来就是「近 7 天」（`defaultFilter()` 里算好了 from/to）。
+       */
+      const r = await fetchExchangeIncome(k.id, 0, LEDGER_MAX, rangeOf('flow'))
       if (!r.totals) continue
       any = true
       total.realized += r.totals.realized
@@ -1084,7 +1247,7 @@ async function loadIncome(): Promise<void> {
     String(b.datetime ?? '').localeCompare(String(a.datetime ?? ''))
   )
   incomeTotals.value = any ? total : null
-  income.value = rows.slice(0, INCOME_MAX)
+  income.value = rows.slice(0, LEDGER_MAX)
 }
 
 /**
@@ -1324,8 +1487,14 @@ function startStreams(): void {
            *    （宁可重复一下 —— 下一轮 `loadFills()` 会用整份覆盖回来）。
            */
           if (t.id && fills.value.some(f => f.id === t.id)) return
+          /*
+           * ⚠️ 只有「范围还没关到过去」时才插进列表 —— 用户把成交历史筛成
+           *    「8 月 1 号 → 8 月 10 号」的时候，刚成交的这笔不该冒在最上面。
+           */
+          const rf = filters.trades
+          if (rf.to && rf.to < Date.now() - 1000) return
           const tagged = keys.value.length > 1 ? {...t, keyName: k.name} : t
-          fills.value = [tagged, ...fills.value].slice(0, FILLS_MAX)
+          fills.value = [tagged, ...fills.value].slice(0, LEDGER_MAX)
           /* 仓位历史是从成交推出来的 —— 新成交可能刚开一段、也可能刚平掉一段 */
           void loadCycles()
           /*
@@ -1701,6 +1870,45 @@ onUnmounted(stopWork)
       @open-chart="openChart"
       @edit-order="openOrderEdit"
       @tab="onTab"
+      :cycles-filter="{
+        symbol: filters.inc.symbol,
+        range: rangeLabel('inc'),
+        filtered: filtered('inc'),
+        rangeOn: rangeOn('inc')
+      }"
+      :fills-filter="{
+        symbol: filters.trades.symbol,
+        range: rangeLabel('trades'),
+        filtered: filtered('trades'),
+        rangeOn: rangeOn('trades')
+      }"
+      :flow-filter="{
+        symbol: filters.flow.symbol,
+        range: rangeLabel('flow'),
+        types: typesLabel('flow'),
+        filtered: filtered('flow'),
+        rangeOn: rangeOn('flow')
+      }"
+      @filter="onLedgerFilter"
+      @range="onLedgerRange"
+    />
+
+    <!--
+      「周期范围」底部弹窗（账本三格右上角那颗按钮打开）。
+      ⚠️ 三个共用一个实例：开哪一格由 `rangeSheet` 决定，值也从那一格的 `filters` 里取
+         （所以关掉再打开看到的是那一格**自己的**选择）。
+    -->
+    <LedgerRangeSheet
+      :model-value="!!rangeSheet"
+      :title="rangeSheet ? RANGE_TITLE[rangeSheet] : ''"
+      :range="rangeSheet ? filters[rangeSheet].range : '7d'"
+      :from="rangeSheet ? filters[rangeSheet].from : null"
+      :to="rangeSheet ? filters[rangeSheet].to : null"
+      :types="rangeSheet === 'flow' ? filters.flow.types : null"
+      :type-filter="rangeSheet === 'flow'"
+      :count="rangeCount"
+      @update:model-value="v => !v && (rangeSheet = null)"
+      @apply="onRangeApply"
     />
 
     <!--

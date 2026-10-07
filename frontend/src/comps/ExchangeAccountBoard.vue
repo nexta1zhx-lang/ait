@@ -31,6 +31,7 @@ import {
   watch
 } from 'vue'
 import {
+  type Contract,
   type CurvePoint,
   type ExchangeIncomeRow,
   type ExchangeIncomeTotals,
@@ -50,6 +51,7 @@ import {
 } from '../settings'
 import {orderKind, pairOf, tpSlOf, typeText, type OrderEditTarget, type TpSlTarget} from '../tpsl'
 import SegTabs from './SegTabs.vue'
+import SymbolCombo from './SymbolCombo.vue'
 import SettingsSheet from './SettingsSheet.vue'
 
 /**
@@ -119,10 +121,39 @@ const props = defineProps<{
   incomeDays?: number
   /** 正在提交「平仓 / 全平」（按钮转圈 + 禁点） */
   busy?: boolean
+  /**
+   * 账本三格各自的筛选（2026-10-07 用户）：
+   *   「仓位历史，成交历史，资金动向 默认显示 7 天的数据，左侧去掉文字标题
+   *     改为币种搜索可下拉默认全部，右侧配置一个按钮点击底部弹窗可选择周期范围」。
+   *
+   * `symbol` = 币种**简称**（`PUMP`，`''` = 全部 —— 跟左侧下拉显示的一致）；`range` = 右侧那颗按钮上的字（「近 7 天」…）；
+   * `types` = 资金类型的**摘要**（`''` = 全部，只有资金动向有）。真正的取数在外层（LivePanel）。
+   */
+  /**
+   * 币种（`''` = 全部）+ 周期范围文案 + 资金类型摘要。
+   * · `filtered`：这格**现在有没有在筛**（连币种一起算）⇒ 空列表文案要用它分岔
+   * · `rangeOn`：范围/类型不是默认值时按钮高亮（只改币种不高亮 —— 币种在左边下拉里看得见）
+   */
+  cyclesFilter?: {symbol: string; range: string; filtered?: boolean; rangeOn?: boolean}
+  fillsFilter?: {symbol: string; range: string; filtered?: boolean; rangeOn?: boolean}
+  flowFilter?: {
+    symbol: string
+    range: string
+    types: string
+    filtered?: boolean
+    rangeOn?: boolean
+  }
 }>()
+
+/** 账本三格（仓位历史 / 成交历史 / 资金动向） */
+export type LedgerTab = 'inc' | 'trades' | 'flow'
 
 const emit = defineEmits<{
   (e: 'refresh'): void
+  /** 换了筛选的币种（`''` = 全部）—— 取数在外层，这里只往上报 */
+  (e: 'filter', v: {tab: LedgerTab; symbol: string}): void
+  /** 点了「周期范围」那颗按钮 —— 底部弹窗由外层挂 */
+  (e: 'range', v: {tab: LedgerTab}): void
   (e: 'update:modelValue', id: number): void
   (e: 'update:curveRange', range: string): void
   /** 点「划转」——弹层由外层（LivePanel）挂，它才知道当前是哪套 Key */
@@ -636,6 +667,57 @@ const orderGroups = computed(() => {
  *    只列已平的段，用户会找不到「刚才减仓赚了多少」。
  */
 const closedCycles = computed(() => props.cycles ?? [])
+
+/* ---------------- 三格的筛选（币种下拉 + 周期范围按钮） ---------------- */
+
+/** 这一格选中的币种（`''` = 全部） */
+const cyclesSymbol = computed(() => props.cyclesFilter?.symbol ?? '')
+const fillsSymbol = computed(() => props.fillsFilter?.symbol ?? '')
+const flowSymbol = computed(() => props.flowFilter?.symbol ?? '')
+
+/**
+ * 这个币符不符合筛选。
+ *
+ * ⚠️ 比的是**币种简称**（`PUMPUSDT` / `PUMP/USDT:USDT` → `PUMP`），
+ *    因为左侧那个下拉 (`SymbolCombo`) 给的、显示的都是简称；
+ *    拿 `pairOf` 比是不行的 —— 它只归一「带 `/` 的统一写法」，简称 `PUMP` 会原样返回。
+ */
+function hitSymbol(sym: string, want: string): boolean {
+  return !want || baseOf(sym) === want
+}
+
+/**
+ * 这一格下拉里能选哪些币。
+ *
+ * ⚠️ 从**当前已取到的那份数据**里取（那已经是「周期范围」筛过的），
+ *    **不带币种筛选** —— 否则选中一个币之后，列表里就只剩它自己，回不去别的了。
+ */
+function symbolOptions(rows: {symbol: string}[]): Contract[] {
+  const seen = new Map<string, Contract>()
+  for (const r of rows) {
+    const base = baseOf(r.symbol)
+    if (!base) continue
+    if (!seen.has(base)) seen.set(base, {base, symbol: r.symbol})
+  }
+  return [...seen.values()].sort((a, b) => a.base.localeCompare(b.base))
+}
+
+const cyclesOptions = computed(() => symbolOptions(closedCycles.value))
+const fillsOptions = computed(() => symbolOptions(props.trades ?? []))
+const flowOptions = computed(() => symbolOptions(props.income ?? []))
+
+/** 仓位历史：筛过币种的那一份（列表 / 计数都用它） */
+const shownCycles = computed(() =>
+  closedCycles.value.filter(c => hitSymbol(c.symbol, cyclesSymbol.value))
+)
+/** 成交历史：同上 */
+const shownTrades = computed(() =>
+  (props.trades ?? []).filter(t => hitSymbol(t.symbol, fillsSymbol.value))
+)
+/** 资金动向：币种在本地筛，**类型**在后端筛（那样合计口径不会跟列表打架） */
+const shownFlow = computed(() =>
+  (props.income ?? []).filter(r => hitSymbol(r.symbol, flowSymbol.value))
+)
 /** 「还没平完」的那一份（拆出去做别的用；仓位历史**不再显示**它，见 `visibleCycles`） */
 const openCycles = computed(() => props.openCycles ?? [])
 
@@ -675,7 +757,7 @@ const tabTotal = computed(() => {
   if (tab.value === 'pos') return positions.value.length
   if (tab.value === 'ord')
     return orderGroups.value.reduce((n, g) => n + g.rows.length, 0)
-  if (tab.value === 'inc') return closedCycles.value.length
+  if (tab.value === 'inc') return shownCycles.value.length
   if (tab.value === 'trades') return props.trades?.length ?? 0
   if (tab.value === 'flow') return props.income?.length ?? 0
   return 0
@@ -778,7 +860,7 @@ const visiblePositions = computed(() =>
 const posRefAll = computed(() => positions.value.map(posRef))
 
 const visibleTrades = computed(() => {
-  const list = props.trades ?? []
+  const list = shownTrades.value
   return cap.value === Number.POSITIVE_INFINITY
     ? list
     : list.slice(0, cap.value)
@@ -786,7 +868,7 @@ const visibleTrades = computed(() => {
 
 /** 资金动向：整本钱账本（后端已按时间倒序、跨账户合并好） */
 const visibleFlow = computed(() => {
-  const list = props.income ?? []
+  const list = shownFlow.value
   return cap.value === Number.POSITIVE_INFINITY
     ? list
     : list.slice(0, cap.value)
@@ -798,8 +880,8 @@ const visibleCycles = computed(() => {
   return {
     closed:
       c === Number.POSITIVE_INFINITY
-        ? closedCycles.value
-        : closedCycles.value.slice(0, c)
+        ? shownCycles.value
+        : shownCycles.value.slice(0, c)
   }
 })
 
@@ -1604,16 +1686,40 @@ const RANGES = [
       -->
         <section v-show="tab === 'inc'" class="panel">
           <div class="pn-h">
-            <h2>仓位历史</h2>
+            <!--
+              左侧：**币种筛选**（用户 2026-10-07：「左侧去掉文字标题，改为币种搜索可下拉默认全部」）
+              ⚠️ 用 `plain` 模式（一行「全部 ▾」，搜索框在列表里）—— 表头这一行放不下一个输入框；
+                 `all-label` 那颗「全部」是回到不筛的唯一入口（plain 模式没有 ✕）。
+            -->
+            <SymbolCombo
+              plain
+              placeholder="全部"
+              all-label="全部"
+              :model-value="cyclesSymbol"
+              :contracts="cyclesOptions"
+              @pick="v => emit('filter', {tab: 'inc', symbol: v})"
+            />
             <span class="spacer" />
             <span
-              v-if="cyclesSince"
               class="dim tiny"
-              title="账本只有币安给的那段成交（约 7 天），更早的历史不在里面"
+              :title="
+                '这一格是开仓→全平算一笔' +
+                (cyclesSince
+                  ? `；账本自 ${bjTime(cyclesSince).slice(5, 16)} 起（更早的历史不在里面）`
+                  : '')
+              "
             >
-              账本自 {{ bjTime(cyclesSince).slice(5, 16) }} 起
+              {{ shownCycles.length }} 笔已平
             </span>
-            <span class="dim tiny">{{ closedCycles.length }} 笔已平</span>
+            <button
+              type="button"
+              class="pn-range"
+              :class="{on: !!cyclesFilter?.rangeOn}"
+              title="选择周期范围"
+              @click="emit('range', {tab: 'inc'})"
+            >
+              {{ cyclesFilter?.range ?? '近 7 天' }}<i>▾</i>
+            </button>
           </div>
 
           <!--
@@ -1709,8 +1815,12 @@ const RANGES = [
               </div>
             </li>
           </ul>
-          <p v-else-if="!closedCycles.length" class="dim">
-            账本里还没有完整的仓位（开一笔、平掉之后这里会出现）
+          <p v-else-if="!shownCycles.length" class="dim">
+            {{
+              cyclesFilter?.filtered
+                ? '这个筛选条件下没有已平仓位（换个币种或周期范围试试）'
+                : '账本里还没有完整的仓位（开一笔、平掉之后这里会出现）'
+            }}
           </p>
 
           <!-- 逐笔明细（读的是一整份 `orders`，点哪张卡就是哪一张） -->
@@ -1793,9 +1903,25 @@ const RANGES = [
         <!-- 成交（后端账本：WS 实时落 + 断线后 REST 补） -->
         <section v-show="tab === 'trades'" class="panel">
           <div class="pn-h">
-            <h2>成交历史</h2>
+            <SymbolCombo
+              plain
+              placeholder="全部"
+              all-label="全部"
+              :model-value="fillsSymbol"
+              :contracts="fillsOptions"
+              @pick="v => emit('filter', {tab: 'trades', symbol: v})"
+            />
             <span class="spacer" />
-            <span class="dim tiny">实时记账本</span>
+            <span class="dim tiny">{{ shownTrades.length }} 笔</span>
+            <button
+              type="button"
+              class="pn-range"
+              :class="{on: !!fillsFilter?.rangeOn}"
+              title="选择周期范围"
+              @click="emit('range', {tab: 'trades'})"
+            >
+              {{ fillsFilter?.range ?? '近 7 天' }}<i>▾</i>
+            </button>
           </div>
           <!--
             一行两段。第二行的版式用户 2026-10-07 又定了一次（见 `.t-cols`）：
@@ -1857,7 +1983,13 @@ const RANGES = [
               </div>
             </li>
           </ul>
-          <p v-else class="dim">还没有成交记录（下单成交后会自动记进来）</p>
+          <p v-else class="dim">
+            {{
+              fillsFilter?.filtered
+                ? '这个筛选条件下没有成交（换个币种或周期范围试试）'
+                : '还没有成交记录（下单成交后会自动记进来）'
+            }}
+          </p>
         </section>
 
         <!--
@@ -1877,14 +2009,35 @@ const RANGES = [
         -->
         <section v-show="tab === 'flow'" class="panel">
           <div class="pn-h">
-            <h2>资金动向</h2>
+            <SymbolCombo
+              plain
+              placeholder="全部"
+              all-label="全部"
+              :model-value="flowSymbol"
+              :contracts="flowOptions"
+              @pick="v => emit('filter', {tab: 'flow', symbol: v})"
+            />
+            <span class="spacer" />
             <span
-              v-if="incomeTotals"
               class="dim tiny"
-              :title="`账本只涵盖最近 ${incomeDays ?? 7} 天（币安只给这么久），更早的不在里面`"
+              title="按上面的周期范围筛；账本只有币安给的那段成交（约 7 天），更早的里面没有"
             >
-              近 {{ incomeDays ?? 7 }} 天 · {{ incomeTotals.count }} 笔
+              {{ shownFlow.length }} 笔
             </span>
+            <button
+              type="button"
+              class="pn-range"
+              :class="{on: !!flowFilter?.rangeOn}"
+              title="选择周期范围 / 资金类型"
+              @click="emit('range', {tab: 'flow'})"
+            >
+              <!-- 类型 + 范围**都**要看得见（只显示类型的话，范围就藏起来了） -->
+              {{
+                flowFilter?.types
+                  ? `${flowFilter.types} · ${flowFilter.range || '近 7 天'}`
+                  : flowFilter?.range || '近 7 天'
+              }}<i>▾</i>
+            </button>
           </div>
 
           <ul v-if="visibleFlow.length" class="rows flows">
@@ -1929,7 +2082,11 @@ const RANGES = [
             </li>
           </ul>
           <p v-else class="dim">
-            账本里还没有资金变动（成交 / 资金费 / 划转之后这里会逐笔出现）
+            {{
+              flowFilter?.filtered
+                ? '这个筛选条件下没有资金变动（换个币种、周期范围或类型试试）'
+                : '账本里还没有资金变动（成交 / 资金费 / 划转之后这里会逐笔出现）'
+            }}
           </p>
         </section>
       </div>
@@ -2294,6 +2451,34 @@ const RANGES = [
 .pn-h h2 {
   margin: 0;
   font-size: 14px;
+}
+/*
+ * 账本三格表头右侧那颗「周期范围」（2026-10-07 用户：「右侧配置一个按钮
+ * 点击底部弹窗可选择周期范围」）。做成小胶囊，跟左边的币种下拉同一档高度。
+ */
+.pn-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 11.5px;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+/* 范围/类型不是默认值时高亮（提示「现在不是全部」） */
+.pn-range.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pn-range i {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 10px;
 }
 .sub-h {
   margin: 12px 0 2px;

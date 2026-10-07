@@ -1036,14 +1036,38 @@ export interface ExchangeIncomeTotals {
 }
 
 /** 读钱账本（**纯本地**，不打交易所；数据由后端定期对账灌进来） */
-export const fetchExchangeIncome = (id?: number, days = 7, limit = 200) =>
+/**
+ * 账本三格（仓位历史 / 成交历史 / 资金动向）共用的**筛选条件**。
+ *
+ * `from` / `to` 是**毫秒时间戳含端点** —— 时区在前端算好（「今天」= 北京时间今天 0 点到现在），
+ * 后端只当两个毫秒数用（见 `server.ts` 的 `ledgerRange`）。
+ */
+export interface LedgerQuery {
+  from?: number | null
+  to?: number | null
+  /** 只看这几种 `income_type`（资金动向我们自己那本账的类型） */
+  types?: string[] | null
+}
+
+/** 拼成 query string（空值一律不拼，后端按「不限」处理） */
+function ledgerQs(q: LedgerQuery = {}): string {
+  const parts: string[] = []
+  if (q.from) parts.push(`from=${Math.round(q.from)}`)
+  if (q.to) parts.push(`to=${Math.round(q.to)}`)
+  if (q.types?.length) parts.push(`types=${encodeURIComponent(q.types.join(','))}`)
+  return parts.join('&')
+}
+
+export const fetchExchangeIncome = (id?: number, days = 7, limit = 200, q: LedgerQuery = {}) =>
   get<{
     totals: ExchangeIncomeTotals
     rows: ExchangeIncomeRow[]
     days: number
     error: string | null
   }>(
-    `/api/exchange/income?days=${days}&limit=${limit}` + (id ? `&id=${id}` : '')
+    `/api/exchange/income?days=${days}&limit=${limit}` +
+      (ledgerQs(q) ? `&${ledgerQs(q)}` : '') +
+      (id ? `&id=${id}` : '')
   )
 
 /* ---------------- 仓位历史（「开仓 → 全平」一笔的那种） ---------------- */
@@ -1099,7 +1123,11 @@ export interface ExchangePositionCycle {
 }
 
 /** 仓位历史（**纯本地**读成交账本，不打交易所） */
-export const fetchExchangePositionHistory = (id?: number, limit = 50) =>
+export const fetchExchangePositionHistory = (
+  id?: number,
+  limit = 50,
+  q: LedgerQuery = {}
+) =>
   get<{
     /** 已全平的（最近平的在最前） */
     cycles: ExchangePositionCycle[]
@@ -1110,7 +1138,9 @@ export const fetchExchangePositionHistory = (id?: number, limit = 50) =>
     since: string | null
     error: string | null
   }>(
-    `/api/exchange/position-history?limit=${limit}` + (id ? `&id=${id}` : '')
+    `/api/exchange/position-history?limit=${limit}` +
+      (ledgerQs(q) ? `&${ledgerQs(q)}` : '') +
+      (id ? `&id=${id}` : '')
   )
 
 /**
@@ -1206,9 +1236,15 @@ export const refreshExchangeOverview = (id?: number, auto = false) =>
   )
 
 /** 读成交账本（WS 实时 + 断线补，**不需要交易对**） */
-export const fetchExchangeFills = (id?: number, limit = 60) =>
+export const fetchExchangeFills = (
+  id?: number,
+  limit = 60,
+  q: LedgerQuery = {}
+) =>
   get<{fills: ExchangeTrade[]}>(
-    `/api/exchange/fills?limit=${limit}${id ? `&id=${id}` : ''}`
+    `/api/exchange/fills?limit=${limit}` +
+      (ledgerQs(q) ? `&${ledgerQs(q)}` : '') +
+      (id ? `&id=${id}` : '')
   )
 
 /**

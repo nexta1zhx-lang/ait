@@ -3429,6 +3429,39 @@ async function route(
    * ★ 2026-10-06：`/api/exchange/trade/history`（K 线买卖点）也改读这里，
    *   一个账户的成交只有这一个来源 —— 那套 REST 版曾是「减仓了但账上没这笔」的另一半原因。
    */
+  /*
+   * 账本三格（仓位历史 / 成交历史 / 资金动向）共用的**筛选参数**：
+   *   `from` / `to` —— 毫秒时间戳（含端点）；时区由前端算（北京时间那天几点到几点），
+   *                    这边只当两个毫秒数用，免得「今天」在两种时区里解释两遍。
+   *   `types`       —— 资金动向的类型过滤（逗号分隔的 `income_type`，如 `REALIZED_PNL,COMMISSION`）。
+   */
+  const ledgerRange = (): {
+    from: number | null
+    to: number | null
+    types: string[] | null
+    other: boolean
+  } => {
+    const f = num(url.searchParams.get('from'))
+    const t = num(url.searchParams.get('to'))
+    const all = String(url.searchParams.get('types') ?? '')
+      .split(',')
+      .map(x => x.trim().toUpperCase())
+      .filter(Boolean)
+    /*
+     * `OTHER` 是界面上那颗「其它」——**不是**一个真的 `income_type`，
+     * 而是「不在已知那几个里的」（币安还有 `AUTO_EXCHANGE` 之类）。
+     * 这里把它摘出来单独当一个标志，SQL 那边翻成 `income_type <> ALL(已知)`。
+     */
+    const other = all.includes('OTHER')
+    const types = all.filter(x => x !== 'OTHER')
+    return {
+      from: f && f > 0 ? Math.round(f) : null,
+      to: t && t > 0 ? Math.round(t) : null,
+      types: types.length ? types : null,
+      other
+    }
+  }
+
   if (p === '/api/exchange/fills' && method === 'GET') {
     const idRaw = num(url.searchParams.get('id'))
     const key = idRaw
@@ -3436,11 +3469,13 @@ async function route(
       : await getDefaultExchangeKey(me.id)
     if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
     try {
+      const rg = ledgerRange()
       const fills = await listFills(
         me.id,
         key.id,
         num(url.searchParams.get('limit')) ?? 60,
-        str(url.searchParams.get('symbol'), '') || undefined
+        str(url.searchParams.get('symbol'), '') || undefined,
+        {from: rg.from, to: rg.to}
       )
       return sendJson(res, 200, {fills})
     } catch (e) {
@@ -3467,11 +3502,13 @@ async function route(
       : await getDefaultExchangeKey(me.id)
     if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
     try {
+      const rg = ledgerRange()
       const r = await listPositionHistory(
         me.id,
         key.id,
         num(url.searchParams.get('limit')) ?? 50,
-        str(url.searchParams.get('symbol'), '') || undefined
+        str(url.searchParams.get('symbol'), '') || undefined,
+        {from: rg.from, to: rg.to}
       )
       return sendJson(res, 200, {...r, error: null})
     } catch (e) {
@@ -3499,11 +3536,12 @@ async function route(
       : await getDefaultExchangeKey(me.id)
     if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
     try {
-      /* `days=0` ⇒ 全部历史（`incomeTotals(…, null)`） */
+      /* `days=0` ⇒ 全部历史（`incomeTotals(…, null)`）；`from`/`to` 再叠一层（两个都生效） */
       const days = num(url.searchParams.get('days')) ?? 7
+      const rg = ledgerRange()
       const [totals, rows] = await Promise.all([
-        incomeTotals(me.id, key.id, days || null),
-        listIncome(me.id, key.id, num(url.searchParams.get('limit')) ?? 200)
+        incomeTotals(me.id, key.id, days || null, rg),
+        listIncome(me.id, key.id, num(url.searchParams.get('limit')) ?? 200, rg)
       ])
       return sendJson(res, 200, {totals, rows, days, error: null})
     } catch (e) {

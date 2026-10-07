@@ -20,7 +20,26 @@ const props = defineProps<{
   max?: number
   /** 只显示币种、不要输入框（窄屏用） */
   plain?: boolean
+  /**
+   * 空值时的占位文案。
+   *
+   * ⚠️ 2026-10-07 加：账本三格（仓位历史 / 成交历史 / 资金动向）的筛选器要显示
+   *    **「全部」**（`''` = 不筛），而开单分析那边空值的含义是「还没选币」——
+   *    默认值仍是「选币种」，别改默认行为。
+   */
+  placeholder?: string
+  /**
+   * 给了就在列表**最上面**多一颗「全部」（选中它 emit 空串）。
+   *
+   * ⚠️ 2026-10-07 加：账本三格用 `plain` 模式（一行「全部 ▾」），
+   *    而 plain 模式**没有输入框旁边那颗 ✕** —— 没有这一项就没法从某个币回到「全部」。
+   *    开单分析那边不传，行为一点没变。
+   */
+  allLabel?: string
 }>()
+
+/** 空值时的占位（见 `placeholder` 的说明） */
+const emptyText = computed(() => props.placeholder ?? '选币种')
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: string): void
@@ -69,6 +88,11 @@ function pick(base: string) {
   emit('update:modelValue', base)
   emit('pick', base)
   close()
+}
+
+/** 列表最上面那颗「全部」（`allLabel`）：选中 = 清空筛选 */
+function pickAll() {
+  pick('')
 }
 
 /** 清空输入（叉号）。`pickSub('')` 在开单分析那边会顺手把图表和结论也清掉 */
@@ -156,7 +180,7 @@ onBeforeUnmount(() =>
       @blur="onBlur"
       @click="open ? close() : show()"
     >
-      <span class="combo-plain-t">{{ modelValue || '选币种' }}</span>
+      <span class="combo-plain-t" :class="{empty: !modelValue}">{{ modelValue || emptyText }}</span>
       <span class="combo-plain-caret">▾</span>
     </button>
 
@@ -206,6 +230,13 @@ onBeforeUnmount(() =>
         spellcheck="false"
         @keydown="onKey"
       />
+      <div
+        v-if="allLabel && !filter.trim()"
+        class="combo-item all"
+        @mousedown.prevent="pickAll"
+      >
+        <span>{{ allLabel }}</span>
+      </div>
       <div v-if="!items.length" class="combo-empty">无匹配合约</div>
       <div
         v-for="(c, i) in items"

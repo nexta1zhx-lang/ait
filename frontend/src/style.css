@@ -5290,6 +5290,11 @@ body.fixed-viewport .split {
   padding: 4px;
 }
 
+/* 列表最上面那颗「全部」（账本三格筛选用）——压暗一档，跟真币种区分开 */
+.combo-item.all {
+  color: var(--muted);
+}
+
 .combo-item {
   display: flex;
   justify-content: space-between;
@@ -5351,6 +5356,12 @@ body.fixed-viewport .split {
 
 .combo-plain-t {
   letter-spacing: 0.2px;
+}
+
+/* 空值时的占位（账本三格筛选用：空 = 全部）——压暗一档，跟真选了币区分开 */
+.combo-plain-t.empty {
+  color: var(--muted);
+  font-weight: 400;
 }
 
 /* 箭头：展开后翻过来，能看出「点过了」 */

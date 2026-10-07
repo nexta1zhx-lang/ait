@@ -272,11 +272,25 @@ export interface PositionHistoryResult {
  * ⚠️ **纯本地读**，不打交易所 —— 数据就是成交账本那 27 行级别的东西，
  *    每次算一遍也就几毫秒。
  */
+/**
+ * 一段**时间范围**（毫秒，含端点）。都不给 = 不限。
+ *
+ * ⚠️ 口径：只筛**已平的那些**（`closeAt` 落在范围里）——
+ *    「这条仓位最后平在什么时候」才是列表上看到的那一行。
+ *    到点的那一段是从**全量成交**里算出来的，所以即使它开仓早于 `from`，
+ *    数字仍然是**整段**的（不会变成"半截仓位"）。
+ */
+export interface HistoryRange {
+  from?: number | null
+  to?: number | null
+}
+
 export async function listPositionHistory(
   userId: number,
   keyId: number,
   limit = 50,
-  symbol?: string
+  symbol?: string,
+  range: HistoryRange = {}
 ): Promise<PositionHistoryResult> {
   const rows = await query<Record<string, unknown>>(
     `SELECT trade_id, symbol, side, price, amount, fee, realized, ts
@@ -356,8 +370,18 @@ export async function listPositionHistory(
     .filter(c => !c.closed)
     /* 最近开仓的在最前 */
     .sort((a, b) => String(b.openAt).localeCompare(String(a.openAt)))
+  const from = Number(range.from ?? 0) || 0
+  const to = Number(range.to ?? 0) || 0
   const closed = all
     .filter(c => c.closed)
+    .filter(c => {
+      if (!from && !to) return true
+      const at = c.closeAt ? Date.parse(c.closeAt) : NaN
+      if (!Number.isFinite(at)) return false
+      if (from && at < from) return false
+      if (to && at > to) return false
+      return true
+    })
     /* 最近平的在最前（跟币安仓位历史一致） */
     .sort((a, b) => String(b.closeAt).localeCompare(String(a.closeAt)))
     .slice(0, Math.min(500, Math.max(1, Math.round(limit) || 50)))

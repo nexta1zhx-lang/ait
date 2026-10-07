@@ -214,11 +214,53 @@ export interface FillRow {
  *    跟老接口「币安必须给交易对才能查成交」完全是两码事。
  *    `symbol` 是可选的**过滤**（K 线「订单历史」只要一个币），不是查询条件。
  */
+/**
+ * 账本查询的**时间范围 + 交易对**（都是可选，缺省 = 不限）。
+ *
+ * `from` / `to` 是**毫秒时间戳、含端点** —— 时区的事交给调用方（前端按北京时间
+ * 把「今天 / 近 7 天」算成两个毫秒值传下来），SQL 这边只做 `ts >= to_timestamp(ms/1000)`，
+ * 免得「今天」这种说法在两种时区里解释两遍。
+ */
+export interface LedgerQuery {
+  symbol?: string | null
+  from?: number | null
+  to?: number | null
+  /** 只看这几种 `income_type`（空 / 不给 = 全部） */
+  types?: string[] | null
+  /**
+   * 「其它」那一项（前端资金类型里的 `OTHER`）——**不是**一个真的 `income_type`，
+   * 而是「不在 `KNOWN_INCOME_TYPES` 里的那些」（币安还有 `AUTO_EXCHANGE` 之类）。
+   * 真实条件见下面 SQL：`income_type <> ALL(已知)`。
+   */
+  other?: boolean | null
+}
+
+/**
+ * 「已知」的资金类型 —— 界面上那几个胶囊对应的就是这些；
+ * 不在里面的都归「其它」（跟 `incomeTotals` 分桶的口径一致）。
+ */
+const KNOWN_INCOME_TYPES = [
+  'REALIZED_PNL',
+  'COMMISSION',
+  'COMMISSION_REBATE',
+  'FUNDING_FEE',
+  'TRANSFER',
+  'INSURANCE_CLEAR'
+]
+
+/** 资金类型的 WHERE 片段（`listIncome` 与 `incomeTotals` 共用同一份，别写两遍） */
+const INCOME_TYPE_WHERE = `AND (
+        ($6::text[] IS NULL AND NOT $7::boolean)
+        OR income_type = ANY($6::text[])
+        OR ($7::boolean AND income_type <> ALL($8::text[]))
+      )`
+
 export async function listFills(
   userId: number,
   keyId: number,
   limit = 60,
-  symbol?: string
+  symbol?: string,
+  range: LedgerQuery = {}
 ): Promise<FillRow[]> {
   const cap = Math.min(500, Math.max(1, Math.round(limit) || 60))
   const rows = await query<Record<string, unknown>>(
@@ -227,9 +269,18 @@ export async function listFills(
        FROM exchange_fills
       WHERE user_id = $1 AND key_id = $2
         AND ($4::text IS NULL OR upper(symbol) = upper($4::text))
+        AND ($5::bigint IS NULL OR ts >= to_timestamp($5::bigint / 1000.0))
+        AND ($6::bigint IS NULL OR ts <= to_timestamp($6::bigint / 1000.0))
       ORDER BY ts DESC
       LIMIT $3`,
-    [userId, keyId, cap, symbol ?? null]
+    [
+      userId,
+      keyId,
+      cap,
+      symbol ?? null,
+      Math.round(Number(range.from ?? 0)) || null,
+      Math.round(Number(range.to ?? 0)) || null
+    ]
   )
   return rows.map(r => ({
     id: String(r.trade_id ?? ''),
@@ -334,16 +385,29 @@ export interface IncomeRow {
 export async function listIncome(
   userId: number,
   keyId: number,
-  limit = 200
+  limit = 200,
+  range: LedgerQuery = {}
 ): Promise<IncomeRow[]> {
-  const cap = Math.min(1000, Math.max(1, Math.round(limit) || 200))
+  const cap = Math.min(2000, Math.max(1, Math.round(limit) || 200))
   const rows = await query<Record<string, unknown>>(
     `SELECT id, tran_id, income_type, symbol, asset, amount, ts
        FROM exchange_income
       WHERE user_id = $1 AND key_id = $2
+        AND ($4::bigint IS NULL OR ts >= to_timestamp($4::bigint / 1000.0))
+        AND ($5::bigint IS NULL OR ts <= to_timestamp($5::bigint / 1000.0))
+        ${INCOME_TYPE_WHERE}
       ORDER BY ts DESC, id DESC
       LIMIT $3`,
-    [userId, keyId, cap]
+    [
+      userId,
+      keyId,
+      cap,
+      Math.round(Number(range.from ?? 0)) || null,
+      Math.round(Number(range.to ?? 0)) || null,
+      range.types?.length ? range.types : null,
+      range.other === true,
+      KNOWN_INCOME_TYPES
+    ]
   )
   return rows.map(r => ({
     id: String(r.id),
@@ -381,16 +445,33 @@ export interface IncomeTotals {
 export async function incomeTotals(
   userId: number,
   keyId: number,
-  sinceDays: number | null = null
+  sinceDays: number | null = null,
+  range: LedgerQuery = {}
 ): Promise<IncomeTotals> {
   const days = sinceDays === null ? null : Math.max(1, Math.round(sinceDays))
+  /*
+   * ⚠️ 合计必须跟**列出来的那份**同一个过滤条件 —— 上面那个按钮写着
+   *    「近 7 天 · 12 笔」，列表筛了、合计不筛的话两个数当场对不上。
+   */
   const rows = await query<Record<string, unknown>>(
     `SELECT income_type, sum(amount) AS s, count(*) AS n
        FROM exchange_income
       WHERE user_id = $1 AND key_id = $2
         AND ($3::int IS NULL OR ts >= now() - make_interval(days => $3::int))
+        AND ($4::bigint IS NULL OR ts >= to_timestamp($4::bigint / 1000.0))
+        AND ($5::bigint IS NULL OR ts <= to_timestamp($5::bigint / 1000.0))
+        ${INCOME_TYPE_WHERE}
       GROUP BY income_type`,
-    [userId, keyId, days]
+    [
+      userId,
+      keyId,
+      days,
+      Math.round(Number(range.from ?? 0)) || null,
+      Math.round(Number(range.to ?? 0)) || null,
+      range.types?.length ? range.types : null,
+      range.other === true,
+      KNOWN_INCOME_TYPES
+    ]
   )
   let realized = 0
   let commission = 0
