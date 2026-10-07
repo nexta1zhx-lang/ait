@@ -49,9 +49,8 @@ export const overlaySymbol = ref('')
 /**
  * 当前这个币的持仓（双向持仓模式下多空各一条）。
  *
- * ★ 2026-10-06 改造 P1：**不再自己拉** —— 从共享 store（`./positions`）取，
- *   跟交易所界面 / 下单页**同一份数据**。以前这里每 15 秒独立打一次
- *   `/trade/positions`，于是同一屏左边栏和图上会显示两个不同的持仓数。
+ * 从共享 store（`./positions`）取，跟交易所界面 / 下单页**同一份数据** ——
+ *   ⚠️ 别改回「自己按定时器拉」：那样同一屏的左侧栏和图上会显示两个不同的持仓数。
  */
 export const overlayPositions = computed<TradePositionRow[]>(() =>
   overlaySymbol.value ? positionsOf(overlaySymbol.value) : []
@@ -108,10 +107,10 @@ let stopOverlayEvents: (() => void) | null = null
 /**
  * 挂单 / 成交**刚变过**（SSE 推来的）—— 值一变就说明该重读了。
  *
- * 为什么要有它：图上那几条止盈止损线（`overlayOrders`）原先只靠 **15 秒一轮**的
- * 轮询，手机上挂一张 / 撤一张，图上最多要等 15 秒才动
+ * 为什么要有它：图上那几条止盈止损线（`overlayOrders`）原先只靠一条 **15 秒**的轮询，
+ * 手机上挂一张 / 撤一张，图上最多要等 15 秒才动
  * （用户 2026-10-07：「k线止盈止损渲染感觉慢了一步」；实测确实 **15.3 秒**）。
- * 持仓那条线早就走 SSE 了（`positions.ts`），就剩挂单在原地踏步。
+ * 那条轮询已经删了，现在**全靠这个信号**（持仓那条线早就走 SSE 了）。
  */
 export const overlayBump = ref(0)
 
@@ -137,7 +136,11 @@ export function bindOverlayPositions(keyId?: number): void {
    */
   stopOverlayEvents = exchangeStream(keyId, {
     orders: () => overlayBump.value++,
-    fill: () => overlayBump.value++
+    fill: () => overlayBump.value++,
+    /* 上游用户数据流哑了 / 恢复了：这两下都值得补读一次 */
+    health: () => overlayBump.value++,
+    /* 长连接断够了又连回来：补一次断线期间漏的 */
+    reconnect: () => overlayBump.value++
   })
   boundKey = keyId
 }
@@ -151,13 +154,13 @@ export function unbindOverlayPositions(): void {
   boundKey = null
 }
 
-/** 同一时刻只允许一发在飞（15 秒轮询 + 换币 + 回前台可能撞一起） */
+/** 同一时刻只允许一发在飞（SSE 事件 + 换币 + 回前台可能撞一起） */
 let inflight = false
 /**
  * 在飞的时候又来了新的取数请求 → 先记一笔，等这一发放完**立刻补**。
  *
- * ⚠️ 不能直接扔掉：用户在配置里把「订单历史」打开，要是这一发刚好跟 15 秒轮询
- *    撞上被丢了，图上就得**再等 15 秒**才出现成交点 —— 看着像开关没生效。
+ * ⚠️ 不能直接扔掉：用户在配置里把「订单历史」打开，要是这一发刚好跟别的一发
+ *    撞上被丢了，图上就得等下一个触发点才出现成交点 —— 看着像开关没生效。
  */
 let pendingAsk: {base: string; keyId?: number} | null = null
 /** 请求序号：晚发的赢，早发的回来直接扔掉（防「换币后旧币的数据后到」） */
@@ -266,7 +269,7 @@ export async function refreshTradeOverlay(
     const hasOrphan = overlayOrders.value.some(o => o.reduceOnly && !live.has(closesSide(o)))
     if (hasOrphan) {
       const swept = await cleanOrphans(symbol, keyId)
-      /* 撤掉了就立刻重画一次（不然那几条线要等到下一轮 15 秒才消失） */
+      /* 撤掉了就立刻重画一次（不然那几条线要等下一个触发点才消失） */
       if (swept.cancelled) void refreshTradeOverlay(base, keyId)
     }
   }
@@ -279,7 +282,7 @@ function closesSide(o: TradeOpenOrder): 'long' | 'short' {
   return o.side === 'sell' ? 'long' : 'short'
 }
 
-/** 账户级盘点 / 分币清理：同一时刻只跑一个（15 秒那轮和每分钟那轮可能撞上） */
+/** 账户级盘点 / 分币清理：同一时刻只跑一个（多个触发点可能撞上） */
 let sweeping = false
 
 /** 清一次残留平仓单，返回「撤了几张、哪几个币」——界面上一行提示用 */

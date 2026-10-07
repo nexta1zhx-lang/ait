@@ -1,18 +1,12 @@
 /**
- * 合约持仓的**前端唯一来源**（2026-10-06 改造 P1）。
+ * 合约持仓的**前端唯一来源**。
  *
- * ## 为什么要有它
+ * ⚠️ 别在别处再自己拉一份：以前 K 线叠加、下单页「仓位」格各按自己的定时器打
+ * `/trade/positions`，同一屏的左侧栏和图上会**显示两个不同的持仓数**。
  *
- * 改造前，持仓在同一个页面上有**三个各拉各的**消费者：
- *   · K 线叠加（`trade-overlay.ts`）—— 自己每 15 秒打一次 `/trade/positions`
- *   · 下单页「仓位」格（`OrderPanel.vue`）—— 又自己每 15 秒打一次同一个接口
- *   · 交易所界面（`ExchangeAccountLivePanel.vue`）—— 读库里的快照，靠 WS 事件才更新
- * 结果：同一屏左边栏和图上**显示两个不同的持仓数**，而且是用户报的那个现象
- * 「K 线有仓位了、交易所界面过一会儿才出来」。
- *
- * 现在都读这里：
+ * 三条约定：
  *   · 后端常驻流一有变化就**通过 SSE 推**（事件 `positions`，见 `api.ts` 的 `PositionsPatch`）；
- *   · 只有「一个消费者绑定了、SSE 又一直没来」时才拉一次 REST 兜底（后端那边也有缓存，很便宜）；
+ *   · 只有「有人绑定了、SSE 又一直没来」时才拉一次 REST 兜底（后端有缓存，很便宜）；
  *   · 多个组件用**同一个 key** 只会开一条订阅（引用计数）。
  *
  * ## 形状约定
@@ -32,6 +26,14 @@ import {
 
 /** 兜底轮询间隔：SSE 静默这么久才自己去拉一次 */
 const FALLBACK_MS = 60_000
+
+/**
+ * 「SSE 不可信、刚用 REST 兜了一次」的计数器（只在**兜底轮询真的发出去**时 +1）。
+ *
+ * 谁用：K 线那几条挂单线 —— 它们的数据没有轮询了，全靠 SSE 事件推；
+ * 万一连 SSE 都断着，就跟着这里一起补一次，不至于一直冻着。
+ */
+export const positionsFallbackAt = ref(0)
 /** SSE 数据比这个新就认为「推送还活着」，兜底轮询跳过 */
 const FRESH_MS = 30_000
 
@@ -239,6 +241,12 @@ function syncPoll(): void {
         const cur = perKey.value[keyId]
         if (cur && Date.now() - cur.at < FRESH_MS) continue
         void load(keyId)
+        /*
+         * ★ 这一拍**只有 SSE 哑了才会走到**（上面那句 `continue`）——所以它正好是
+         *   「推送不可信了、谁都得自己 REST 兜底」的信号：K 线的挂单线也挂在这条上
+         *   （见 `KlineChart.scheduleOverlayPull`），免得连 SSE 都断着的时候那几条线一直冻着。
+         */
+        positionsFallbackAt.value++
       }
     }, FALLBACK_MS)
     return

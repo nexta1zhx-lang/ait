@@ -533,9 +533,8 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
  * 用户 2026-10-05：「仓位 平仓是针对每一个仓位的，没有补仓」
  * —— 所以这一格是一个**列表**，每一行自带一颗「平仓」，不再有「补仓」。
  *
- * ★ 2026-10-06 改造 P1：**不再自己每 15 秒拉一次**，改成读共享 store
- *   （`./positions`）—— 常驻流经 SSE 推过来，跟交易所界面 / K 线叠加同源。
- *   这一格从此只负责「显示 + 排序 + 平仓」。
+ * 数据读共享 store（`./positions`，SSE 推）—— 跟交易所界面 / K 线叠加同源。
+ *   这一格只负责「显示 + 排序 + 平仓」。
  */
 const positions = computed<TradePositionRow[]>(() => positionsRows.value)
 /** 还没读到过任何一份数据（`positionsAt` 为 0）= 正在读 */
@@ -740,7 +739,7 @@ async function loadPositions(): Promise<void> {
 }
 
 /**
- * 持仓来源的**绑定**（改造 P1）——替代原来那个 15 秒轮询定时器。
+ * 持仓来源的**绑定**（订阅常驻流的 SSE）。
  *
  * 什么时候绑：
  *   · 在「仓位」那一格（开单页不看持仓，没必要订）
@@ -763,7 +762,7 @@ function syncPosTimer(): void {
   unbindPos = bindPositions([keyId.value])
 }
 
-/** 前后台翻转：回前台立刻补一次（不等到下一个 15 秒），并重排定时器 */
+/** 前后台翻转：回前台立刻补一次，并重排订阅 */
 let stopForeground: (() => void) | null = null
 
 /**
@@ -879,8 +878,8 @@ watch(
 )
 
 /*
- * 切到「仓位」那一格才去订持仓 —— 这是「开单页不看持仓」的那条老规矩，
- * 改造后订的是常驻流（不再每 15 秒打一次交易所），但没必要为它白开一条 SSE。
+ * 切到「仓位」那一格才去订持仓（「开单页不看持仓」那条老规矩）——
+ * 订的是常驻流，但没必要为它白开一条 SSE。
  */
 watch(tab, t => {
   syncPosTimer()

@@ -43,6 +43,7 @@ import {
   sweepOrphanOrders,
   unbindOverlayPositions
 } from '../trade-overlay'
+import {positionsFallbackAt} from '../positions'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
 import {createOverlayLines} from '../overlay-lines'
@@ -746,7 +747,7 @@ function sameLevels(a: Levels, b: Levels): boolean {
  *
  * 四样**各画各的**，跟上面「压力 / 支撑」那两条线**分开存** ——
  * 那两条是「按可见窗口现算」的、跟着平移每帧重画；这几条是账户数据，
- * 15 秒才变一次（`orderLineList()` 现算一份，画线与左标签都按它来）。
+ * **只在账户真的变了才变**（`orderLineList()` 现算一份，画线与左标签都按它来）。
  *
  * 颜色：仓位 / 挂单**按多空分绿红**（用户点名要的），跟蜡烛同一对绿红 ——
  * 靠**线型**分开（仓位实线、挂单虚线、强平红虚线）；强平的红比仓位那根更扎眼。
@@ -1111,12 +1112,12 @@ function dropOrderLines(): void {
 }
 
 /**
- * 重画订单信息那几样。数据变（15 秒轮询）/ 开关变 / 换币 / 图的这一段变
+ * 重画订单信息那几样。数据变（SSE + 各触发点）/ 开关变 / 换币 / 图的这一段变
  * 都要走一遍 —— 但**不是每帧**（跟压力支撑不一样，这个不随平移变）。
  */
 function renderOrderLines(): void {
   if (!refs) return
-  /* ⚠️ 正在拖那条线的时候不许重画：15 秒一轮的数据回来会把左边那几枚标签的下标
+  /* ⚠️ 正在拖那条线的时候不许重画：这一拍的数据回来会把左边那几枚标签的下标
      全打乱（正拖着的标签会指向别人）*/
   if (drag.value) return
   clearDragPreview()
@@ -1436,7 +1437,7 @@ function labelSyncTick(): void {
  *     「止盈 +$0.52 · 100%」—— 这就是「拖动过程中显示预计盈利或亏损」
  *   · 松手 → 弹确认单（`StopSheet`），**确认了才真发单**
  *
- * ⚠️ 拖动期间**不许**重画（`renderOrderLines()` 头上一句挡了）：15 秒一轮的数据回来
+ * ⚠️ 拖动期间**不许**重画（`renderOrderLines()` 头上一句挡了）：这一拍的数据回来
  *    会把正被拖着的那条线拽回原位。松手 / 取消之后再重画。
  */
 /*
@@ -1767,21 +1768,28 @@ function baseToName(symbol: string): string {
 /* ---------------- 订单信息：什么时候去拉 ---------------- */
 
 /**
- * 订单信息 15 秒刷一次（跟「仓位」那一格同频）。
+ * 订单信息**什么时候拉**（没有轮询定时器了）。
  *
  * 只在**这张主图被看着**（`active`）+ 前台 + 四个开关至少开一个的时候拉：
  *   · 桌面端左栏那张小图不传 `active` ⇒ 它一次都不拉（不然一进页面打两遍交易所）
  *   · 全关掉 = 一个请求都不发
+ *
+ * 触发点全是**事件**：
+ *   · 进页面 / 切回来 / 回前台 / 换币 / 换「下单账户」/ 动那四个开关；
+ *   · SSE（`overlayBump`：挂单变动、新成交、上游流哑了或恢复）；
+ *   · 持仓兜底轮询那一拍（`positionsFallbackAt`：连 SSE 都断着的时候，`positions.ts`
+ *     每 60 秒自己 REST 补一次，这里跟着补一次，免得挂单线一直冻着）。
+ *
+ * ⚠️ 以前还有一条 `OVERLAY_MS = 15_000` 的轮询。它才是「止盈止损线慢半拍」的元凶
+ *    （实测挂一张要 **15.3 秒**才画出来），SSE 那条路接上之后就删了。
  */
-const OVERLAY_MS = 15_000
-let overlayTimer: ReturnType<typeof setInterval> | null = null
 let stopOverlayForeground: (() => void) | null = null
 
 /*
  * 「没仓位的残留平仓单」定时盘一遍账户（用户 2026-10-06：仓位平了、单还挂着）。
  *
- * 跟 K 线那 15 秒一轮分开：那一轮只清**当前这个币**（手上刚好有数据，不多打接口），
- * 别的币得等切过去才轮到；这一轮一次把账户清干净。
+ * 平时那次**分币清**（`refreshTradeOverlay` 里手上刚好有这个币的持仓和挂单，
+ * 顺手就清了）只碰当前这个币；这一轮一次把**整个账户**盘干净。
  *
  * ⚠️ 这一轮**重**（不带交易对查挂单是 40 权重/条，两套 = 80）且**跨标签页节流**，
  *    详细原因见 `trade-overlay.ts` 的 `ORPHAN_SWEEP_MS` —— 2026-10-06 就是这么把
@@ -1823,43 +1831,31 @@ async function pullOverlay(): Promise<void> {
     return
   }
   /*
-   * ★ 2026-10-06 改造 P1：持仓改成订阅**共享 store**（常驻流经 SSE 推），
-   *   不再每 15 秒独立打一次 `/trade/positions`。绑一次就一直在，
+   * 持仓订阅**共享 store**（常驻流经 SSE 推）；绑一次就一直在，
    *   换了「下单账户」会自动重绑（`bindOverlayPositions` 里判 keyId）。
    */
   bindOverlayPositions(tradeKey.value?.id)
   await refreshTradeOverlay(props.symbol, tradeKey.value?.id)
 }
 
-function syncOverlayTimer(): void {
-  if (!overlayWanted()) {
-    if (overlayTimer) clearInterval(overlayTimer)
-    overlayTimer = null
-    return
-  }
-  if (overlayTimer) return
-  overlayTimer = setInterval(() => {
-    if (overlayWanted()) void pullOverlay()
-  }, OVERLAY_MS)
-}
-
 /**
- * 挂单 / 成交变了（SSE `orders` / `fill`）⇒ **马上**补一次，别等那一轮的 15 秒。
+ * 挂单 / 成交变了（SSE `orders` / `fill`）⇒ **马上**补一次（以前这里唯一的数据来源是
+ * 一条 15 秒的轮询，已经删了）。
  *
  * 用户 2026-10-07：「k线止盈止损渲染感觉慢了一步」—— 实测（在币安那头挂一张不会成交的
- * 限价单，再从页面上看这条线什么时候出现）**慢了 15.3 秒**，正好是 `OVERLAY_MS` 一轮。
+ * 限价单，再看这条线什么时候出现）**慢了 15.3 秒**（当时唯一的数据来源是 15 秒轮询）。
  * 线本身照旧直连交易所读（带 symbol、权重 1），这里只是**不再干等定时器**。
  *
  * ⚠️ 两段节流，缺一不可：
  *    · **去抖 250ms** —— 一次挂 / 撤单后端会连推几条（NEW → 对账 → …），先合并成一条；
- *    · **最小间隔 1.2s** —— 那几条有时**前后差几百毫秒**（去抖挡不住），
+ *    · **最小间隔 700ms** —— 那几条有时**前后差几百毫秒**（去抖挡不住），
  *      实测一次下单会引来 **3 发**「重读挂单 + 重读成交」；带上最小间隔就只剩 1~2 发，
- *      而慢了的那点（≤1.2s）比 15 秒那一轮根本不算什么。
+ *      而多等的那点（≤0.7s）换掉的是两三发白读。
  * ⚠️ 只当「该重读了」的信号：`pullOverlay()` 自己会判 `overlayWanted()`（不在前台 / 图没被
  *    看着 / 四个开关全关 ⇒ 一次都不打）。
  */
 const ORDERS_PULL_MS = 250
-const ORDERS_PULL_GAP_MS = 1200
+const ORDERS_PULL_GAP_MS = 700
 let ordersPullTimer: ReturnType<typeof setTimeout> | null = null
 let lastOrdersPullAt = 0
 function scheduleOverlayPull(): void {
@@ -1884,7 +1880,6 @@ watch(
   () => {
     if (!overlayEnabled()) clearTradeOverlay()
     renderOrderLines()
-    syncOverlayTimer()
     syncOrphanTimer()
     void pullOverlay()
   }
@@ -1896,19 +1891,23 @@ watch(
   () => {
     renderOrderLines()
     void pullOverlay()
-    syncOverlayTimer()
   }
 )
 
-/* 数据到了就重画（15 秒一次，开销可以忽略） */
+/* 数据到了就重画（一次账户变动一次，开销可以忽略） */
 watch(
   [overlaySymbol, overlayPositions, overlayOrders, overlayFills],
   () => renderOrderLines(),
   {deep: true}
 )
 
-/* 挂单 / 成交刚变过（SSE）⇒ 立刻补一次读（去抖合并同一批事件） */
-watch(overlayBump, () => scheduleOverlayPull())
+/*
+ * 挂单 / 成交刚变过、上游流哑了或恢复（SSE）⇒ 补一次读（去抖合并同一批事件）。
+ *
+ * 第二行是「连 SSE 都断着」那一档：`positions.ts` 每 60 秒自己 REST 兜一次，
+ * 挂单线跟着补一次，不至于一直冻着。
+ */
+watch([overlayBump, positionsFallbackAt], () => scheduleOverlayPull())
 
 /** 图脚那句「挂单」状态：读不到 / 只拿到快照时才出现（正常 `null`，不渲染） */
 const ordNote = computed(() => {
@@ -2948,7 +2947,7 @@ function applyTail(tail: Candle[]): void {
     renderLabels()
     showInfoAt(i)
   }
-  // 头部那条行情的「现价」也吃这一口（比 15 秒轮询快得多，价格才能闪得起来）
+  // 头部那条行情的「现价」也吃这一口（比那档 15 秒的行情缓存快得多，价格才闪得起来）
   setLivePrice(props.symbol, c.close)
   /* 右轴那枚「现价」标签也得跟着走：它按 `priceToCoordinate(现价)` 摆 */
   renderCurLabel()
@@ -3478,11 +3477,10 @@ watch(() => props.active, startStream)
 /*
  * 订单信息（仓位 / 强平 / 仓位委托 / 订单历史）的取数：
  * 进来看见就要有 → 挂载时拉一次；切走 / 切回来（`active`）各对齐一次；
- * 前台翻转立刻补一次；之后 15 秒一轮（见 `syncOverlayTimer`）。
+ * 前台翻转立刻补一次。之后**没有轮询**了，全靠 SSE 事件（见 `scheduleOverlayPull`）。
  */
 onMounted(() => {
   void pullOverlay()
-  syncOverlayTimer()
   /* 进页面先把账户盘一遍（上次在别处平掉的仓位，残单就是这时候清掉的） */
   void sweepOrphans()
   syncOrphanTimer()
@@ -3491,7 +3489,6 @@ onMounted(() => {
       void pullOverlay()
       void sweepOrphans()
     }
-    syncOverlayTimer()
     syncOrphanTimer()
   })
 })
@@ -3500,7 +3497,6 @@ watch(() => props.active, on => {
     void pullOverlay()
     void sweepOrphans()
   }
-  syncOverlayTimer()
   syncOrphanTimer()
 })
 watch(() => props.symbol, load)
@@ -3530,8 +3526,6 @@ onBeforeUnmount(() => {
   labelSyncKey = ''
   /* 订单信息那套（定时器 + 前后台监听）也要收掉，不然切页之后还在打交易所 */
   unbindOverlayPositions()
-  if (overlayTimer) clearInterval(overlayTimer)
-  overlayTimer = null
   if (orphanTimer) clearInterval(orphanTimer)
   orphanTimer = null
   /* 挂单变动那条去抖也要收（收完就不该再补那一发了） */
