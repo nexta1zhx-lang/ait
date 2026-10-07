@@ -1760,7 +1760,12 @@ export const fetchCandles = (
 
 /* ---------------- 头部行情条 ---------------- */
 
-/** 底部涨幅那一行的档位（跟后端 CHANGE_WINDOWS 一一对应） */
+/**
+ * 涨幅那一行的档位（跟后端 `CHANGE_WINDOWS` 一一对应）。
+ *
+ * ⚠️ `d1` = **今日涨跌（UTC 日切：昨收 → 现价）**，跟头部「24h 涨跌」（滚动 24 小时）不是一回事
+ *    —— 用户 2026-10-07 拍的就是「两个都留，别显示成同一个数」。
+ */
 export type ChangeWindow = 'd1' | 'd3' | 'd7' | 'm1' | 'm3' | 'y1'
 
 /** 顶部那条行情（价格 / 24h / 标记指数 / 资金费率 / 持仓量 / 多周期涨幅） */
@@ -1783,6 +1788,8 @@ export interface TickerInfo {
   openInterest: number | null
   openInterestValue: number | null
   changes: Record<ChangeWindow, number | null>
+  /** 每档的基点（第 N 天前那根 1d 的收盘）：配合 `last` 前端可**每秒重算**这一行 */
+  changeBases: Record<ChangeWindow, {at: number; close: number} | null>
   updatedAt: number
 }
 

@@ -1,9 +1,14 @@
 <script setup lang="ts">
 /**
- * K 线块**底部**那一行：1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅。
+ * 头部行情条右侧那一行：1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅。
  *
- * 口径 = 「第 N 天前那根日线的收盘 → 现价」（跟交易所同一个算法，后端算好）。
- * 绿涨红跌；某一档数据不够（新上币）就显示「—」。
+ * 口径 = 「第 N 天前那根日线的收盘 → 现价」（跟交易所同一个算法）。
+ * ⚠️ 「1天」是**今日涨跌（UTC 日切：昨收 → 现价）**，跟头部那条「24h 涨跌」（滚动 24 小时）
+ *    不是一个数 —— 2026-10-07 专门拍的口径：两档都留，且要能看出差别。
+ *
+ * ★ 2026-10-07 还改成**本地算**：后端连基点（`changeBases`）一起给，
+ *    而现价每秒都在被行情增量刷新 ⇒ 这一行跟着秒级跳动（原来要等 60 秒那次 `/api/ticker`）。
+ * 绿涨红跌；某一档数据不够（新上币 / 库里还没那么多日线）就显示「—」。
  */
 import {computed} from 'vue'
 import {fixed} from '../format'
@@ -21,7 +26,15 @@ const LABELS: {key: ChangeWindow; label: string}[] = [
 
 const items = computed(() =>
   LABELS.map(({key, label}) => {
-    const raw = ticker.value?.changes?.[key]
+    /* 现价（每秒被行情增量刷新）+ 基点 ⇒ 本地实时算；基点还没到就退回后端算好的那个 */
+    const t = ticker.value
+    const base = t?.changeBases?.[key]
+    const last = Number(t?.last)
+    const live =
+      base && base.close > 0 && Number.isFinite(last)
+        ? (last / base.close - 1) * 100
+        : null
+    const raw = live ?? t?.changes?.[key]
     const n = Number(raw)
     const ok = raw !== null && raw !== undefined && Number.isFinite(n)
     return {

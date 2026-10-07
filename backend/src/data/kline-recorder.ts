@@ -66,9 +66,19 @@ const BUFFER_MAX = 6_000
 /** 补缺口时单个币最多往前补这么久（首次启动不该把权重全花在历史上） */
 const BACKFILL_MAX_MS = 240 * MIN_MS
 /** 补缺口 / 灌历史的并发 */
-const REPAIR_CONC = 3
+const REPAIR_CONC = 2
 /** 每发 REST 之间至少隔这么久（限速的第一道闸；第二道是 `takeWeight`） */
-const PACE_MS = 120
+const PACE_MS = 400
+/**
+ * ⚠️ K 线一发（ccxt 每次要 1000 根）的**真实权重是 5**，不是 2。
+ *    这里按 5 × 页数算 —— 少算一倍就会超预算、把出口 IP 打进 `-1003`
+ *    （2026-10-07 实测：按 2 记时灌历史，一小时 85 次限流）。
+ */
+const KLINE_WEIGHT_PER_PAGE = 5
+const klineWeight = (maxCandles: number): number =>
+  KLINE_WEIGHT_PER_PAGE * Math.max(1, Math.ceil(maxCandles / 1000))
+/** 灌历史的续跑间隔（限流被打断后不用等重启） */
+const SEED_RETRY_MS = 20 * 60_000
 /** 修复队列：多久扫一次、一次最多几个币、同一个币多久内不重复修 */
 const REPAIR_TICK_MS = 60_000
 const REPAIR_PER_TICK = 5
@@ -150,6 +160,7 @@ const stats = {
   repairedSymbols: 0,
   backfilled1m: 0,
   seeded: 0,
+  seedLimited: 0,
   lastFlushAt: 0,
   lastRepairAt: 0,
   lastError: ''
@@ -157,16 +168,16 @@ const stats = {
 
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
-/** 限速：每发之间隔一下 + 从全局权重预算里取一点（拿不到就等一下再试） */
-async function paced<T>(tag: string, fn: () => Promise<T>): Promise<T> {
+/** 限速：每发之间隔一下 + 按**真实权重**从全局预算里取（拿不到就等一下再试） */
+async function paced<T>(tag: string, weight: number, fn: () => Promise<T>): Promise<T> {
   await sleep(PACE_MS)
   for (let attempt = 0; ; attempt++) {
     try {
-      await takeWeight(2, tag, 5_000)
+      await takeWeight(weight, tag, 5_000)
       return await fn()
     } catch (e) {
-      if (!(e instanceof RateBudgetError) || attempt >= 2) throw e
-      await sleep(5_000)
+      if (!(e instanceof RateBudgetError) || attempt >= 1) throw e
+      await sleep(8_000)
     }
   }
 }
@@ -498,7 +509,13 @@ async function repairTick(): Promise<void> {
           st.repairedAt = Date.now()
         } catch (e) {
           stats.lastError = (e as Error).message
-          console.warn(`[kline] 修 ${symbol} 失败：${(e as Error).message.slice(0, 100)}`)
+          if (e instanceof RateBudgetError) {
+            /* 被限流：把这个币放回队列，等一会儿再来（硬挤只会把 IP 打得更死） */
+            queueRepair(st, from)
+            await sleep(20_000)
+          } else {
+            console.warn(`[kline] 修 ${symbol} 失败：${(e as Error).message.slice(0, 100)}`)
+          }
         }
       }
     }
@@ -517,7 +534,7 @@ async function repairTick(): Promise<void> {
 async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
   if (!cfg) return
   const now = Date.now()
-  const bars = await paced(`补 1m ${st.sym.pair}`, () =>
+  const bars = await paced(`补 1m ${st.sym.pair}`, 15, () =>
     fetchCandlesRange({
       exchangeId: cfg!.exchange,
       symbol: st.sym.symbol,
@@ -560,7 +577,7 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
     if (from < to) await rollupFrom1m(it, [st.sym.symbol], from, to, ms)
 
     /* ③ 同段再问一次交易所（1~2 根的量，很便宜） */
-    const official = await paced(`补 ${it} ${st.sym.pair}`, () =>
+    const official = await paced(`补 ${it} ${st.sym.pair}`, 5, () =>
       fetchCandlesRange({
         exchangeId: cfg!.exchange,
         symbol: st.sym.symbol,
@@ -629,7 +646,7 @@ async function seedHistory1m(): Promise<void> {
       if (!sym || stopped) return
       try {
         const from = Date.now() - 7 * 1440 * MIN_MS
-        const rows = await paced(`灌 1m ${sym.pair}`, () =>
+        const rows = await paced(`灌 1m ${sym.pair}`, klineWeight(11_000), () =>
           fetchCandlesRange({
             exchangeId: cfg!.exchange,
             symbol: sym.symbol,
@@ -684,12 +701,12 @@ async function seedHistory(): Promise<void> {
       )
     )
   }
-  const jobs: {sym: PerpSymbol; it: Timeframe}[] = []
+  const jobs: {sym: PerpSymbol; it: Timeframe; tries: number}[] = []
   for (const s of symbols) {
     for (const it of HIGH_INTERVALS) {
       const last = have.get(it)?.get(s.symbol)
       if (last && now - last < 2 * MS[it]) continue
-      jobs.push({sym: s, it})
+      jobs.push({sym: s, it, tries: 0})
     }
   }
   if (!jobs.length) return
@@ -698,12 +715,15 @@ async function seedHistory(): Promise<void> {
   const worker = async (): Promise<void> => {
     for (;;) {
       const job = jobs[i++]
-      if (!job || stopped) return
+      if (!job || stopped || job.tries > 3) return
       try {
         const ms = MS[job.it]
         const bars = SEED_BARS[job.it]
         const from = Date.now() - bars * ms
-        const rows = await paced(`灌历史 ${job.it} ${job.sym.pair}`, () =>
+        const rows = await paced(
+          `灌历史 ${job.it} ${job.sym.pair}`,
+          klineWeight(bars),
+          () =>
           fetchCandlesRange({
             exchangeId: cfg!.exchange,
             symbol: job.sym.symbol,
@@ -738,11 +758,20 @@ async function seedHistory(): Promise<void> {
         }
       } catch (e) {
         stats.lastError = (e as Error).message
+        if (e instanceof RateBudgetError) {
+          /* 限流：排到队尾、等一会儿（灌历史可以慢慢来，绝不能把 IP 打封） */
+          jobs.push({...job, tries: job.tries + 1})
+          stats.seedLimited++
+          await sleep(20_000)
+        }
       }
     }
   }
   await Promise.all(Array.from({length: Math.min(REPAIR_CONC, jobs.length)}, () => worker()))
-  console.log(`[kline] 灌历史完成：累计 ${stats.seeded} 行`)
+  console.log(
+    `[kline] 灌历史这一轮结束：累计 ${stats.seeded} 行` +
+      (stats.seedLimited ? `（被限流让路 ${stats.seedLimited} 次）` : '')
+  )
 }
 
 async function prune(): Promise<void> {
@@ -792,6 +821,8 @@ async function boot(): Promise<void> {
   timers.push(setInterval(() => void prune(), PRUNE_EVERY_MS))
   timers.push(setInterval(checkWatchdog, WATCHDOG_MS))
   timers.push(setInterval(() => void repairTick(), REPAIR_TICK_MS))
+  /* 灌历史可以被打断（限流让路）⇒ 定期续一轮；幂等：已经跟到现在的币会跳过 */
+  timers.push(setInterval(() => void seedHistory(), SEED_RETRY_MS))
   for (const t of timers) t.unref()
   await prune()
   void repairSweep('启动')
@@ -827,6 +858,7 @@ export interface KlineRecorderStats {
   repairedSymbols: number
   backfilled1m: number
   seeded: number
+  seedLimited: number
   pendingRepairs: number
   openSec: number
   lastFrameSecAgo: number
@@ -848,6 +880,7 @@ export function klineRecorderStats(): KlineRecorderStats {
     repairedSymbols: stats.repairedSymbols,
     backfilled1m: stats.backfilled1m,
     seeded: stats.seeded,
+    seedLimited: stats.seedLimited,
     pendingRepairs: repairQueue.size,
     openSec: openSince ? Math.round((Date.now() - openSince) / 1000) : 0,
     lastFrameSecAgo: lastFrameAt ? Math.round((Date.now() - lastFrameAt) / 1000) : -1,

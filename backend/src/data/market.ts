@@ -7,6 +7,7 @@ import {
 } from './ccxt-markets'
 import {coolingLeftMs, coolingMessage, noteRateLimit} from '../util/rate-cool'
 import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
+import {dailyCloses} from '../db/candle-store'
 import {describeSeries} from '../analysis/describe'
 import {ema42Of} from '../analysis/ema'
 import {
@@ -759,7 +760,13 @@ export async function fetchSnapshot(
 export const CHANGE_WINDOWS = ['d1', 'd3', 'd7', 'm1', 'm3', 'y1'] as const
 export type ChangeWindow = (typeof CHANGE_WINDOWS)[number]
 
-/** 每档往前数多少天（`y1` 要 366 根日线才够，见下面 fetchTickerInfo） */
+/**
+ * 每档往前数多少天（`y1` 要 366 根日线才够，见下面 `dailySeries`）。
+ *
+ * ⚠️ `d1` 是**今日涨跌（UTC 日切）**：基点是**昨天那根 1d 的收盘**。
+ *    它跟头部那条「24h 涨跌」（滚动 24 小时）**不是一回事** —— 2026-10-07 专门拍过这个口径：
+ *    两个数不一样、信息量更大；要是一样就没必要并排显示两个。
+ */
 const CHANGE_DAYS: Record<ChangeWindow, number> = {
   d1: 1,
   d3: 3,
@@ -768,6 +775,14 @@ const CHANGE_DAYS: Record<ChangeWindow, number> = {
   m3: 90,
   y1: 365
 }
+
+/** 基点：第 N 天前那根 1d 的收盘（UTC 零点对齐） */
+export interface ChangeBase {
+  at: number
+  close: number
+}
+
+const utcDayStart = (ms: number): number => Math.floor(ms / DAY_MS) * DAY_MS
 
 /**
  * 头部那条行情（币安期货页顶部那种）。
@@ -807,8 +822,15 @@ export interface TickerInfo {
   openInterest: number | null
   /** 合约持仓量折算成计价币 */
   openInterestValue: number | null
-  /** 1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅 % */
+  /** 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅 % */
   changes: Record<ChangeWindow, number | null>
+  /**
+   * 每档的**基点**（第 N 天前那根 1d 的收盘）。
+   *
+   * 给前端用：现价每秒都在变（行情 SSE 增量），而基点一天才变一次 ⇒
+   * 前端拿基点 + 现价就能**每秒重算**这一行，不必等下一次 `/api/ticker`（原来是 60 秒）。
+   */
+  changeBases: Record<ChangeWindow, ChangeBase | null>
   updatedAt: number
 }
 
@@ -816,9 +838,46 @@ export interface TickerInfo {
  * 拉一次头部行情。
  *
  * 涨跌幅口径：**第 N 天前那根日线的收盘 → 现价**（跟交易所「N 天涨幅」一致）。
- * 日线要 366 根，因为最远的 `y1` 要拿下标 0 那根：
- * 366 根 = 今天 + 往前 365 天。
+ * 日线**先读底座库**（0 权重），库里不够才退回 REST（见 `dailySeries`）。
  */
+/**
+ * 「日线收盘」序列（`UTC 零点 → 收盘价`）：**先读底座库**（`candles` 的 1d，0 权重），
+ * 库里不够才退回 REST 那 366 根。
+ *
+ * 为什么改：以前每个开着的页面每分钟都要现拉一次日线（4 个上游请求里最贵的一发）。
+ * 底座库里已经有 1000+ 根日线（`KLINE_SEED` 灌的 + 自己滚出来的），顺带还能把
+ * 「基点是哪一刻的」一起给前端（`changeBases`）⇒ 现价一动这几档就能秒级重算。
+ *
+ * ⚠️ 退回 REST 的条件：库里少于 `y1 + 2` 根（现货 / 刚上的币 / 历史还没灌）。
+ */
+async function dailySeries(
+  opts: {exchangeId: string; apiBase?: string},
+  symbol: string,
+  marketType: MarketType,
+  exchange: any
+): Promise<Map<number, number>> {
+  const need = CHANGE_DAYS.y1 + 2
+  const fromDb = new Map<number, number>()
+  try {
+    for (const r of await dailyCloses(opts.exchangeId, marketType, symbol, need + 10)) {
+      if (r.close > 0) fromDb.set(r.at, r.close)
+    }
+  } catch {
+    /* 库没起来 / 表还没建 → 直接走 REST */
+  }
+  if (fromDb.size >= need) return fromDb
+
+  const rows =
+    (await safeCall<any[]>(() => exchange.fetchOHLCV(symbol, '1d', undefined, 366))) ?? []
+  const fromRest = new Map<number, number>()
+  for (const r of rows as unknown[][]) {
+    const at = Number(r[0])
+    const close = Number(r[4])
+    if (Number.isFinite(at) && Number.isFinite(close) && close > 0) fromRest.set(at, close)
+  }
+  return fromRest.size > fromDb.size ? fromRest : fromDb
+}
+
 export async function fetchTickerInfo(opts: {
   exchangeId: string
   symbol: string
@@ -841,7 +900,7 @@ export async function fetchTickerInfo(opts: {
         ? exchange.fetchOpenInterest(symbol)
         : null
     ),
-    safeCall<any[]>(() => exchange.fetchOHLCV(symbol, '1d', undefined, 366))
+    dailySeries(opts, symbol, marketType, exchange)
   ])
 
   /** 交易所原始交易对（BTCUSDT），界面上跟交易所对齐 */
@@ -853,18 +912,17 @@ export async function fetchTickerInfo(opts: {
   }
 
   const last = numOrNull(ticker?.last)
-  const closes = ((daily ?? []) as unknown[][])
-    .map(r => Number(r[4]))
-    .filter(v => Number.isFinite(v) && v > 0)
+  const todayStart = utcDayStart(Date.now())
 
   const changes = {} as Record<ChangeWindow, number | null>
+  const changeBases = {} as Record<ChangeWindow, ChangeBase | null>
   for (const w of CHANGE_WINDOWS) {
-    const idx = closes.length - 1 - CHANGE_DAYS[w]
-    const base = idx >= 0 ? closes[idx] : NaN
+    /* 基点 = 「第 N 天前那根 1d」的开盘时间（UTC 零点）对应的收盘价 */
+    const at = todayStart - CHANGE_DAYS[w] * DAY_MS
+    const base = daily.get(at) ?? null
+    changeBases[w] = base && base > 0 ? {at, close: base} : null
     changes[w] =
-      last !== null && Number.isFinite(base) && base > 0
-        ? (last / base - 1) * 100
-        : null
+      last !== null && base && base > 0 ? (last / base - 1) * 100 : null
   }
 
   const nextFundingAt =
@@ -913,6 +971,7 @@ export async function fetchTickerInfo(opts: {
     openInterest,
     openInterestValue,
     changes,
+    changeBases,
     updatedAt: Date.now()
   }
 }

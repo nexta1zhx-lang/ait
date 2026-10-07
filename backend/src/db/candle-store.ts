@@ -195,6 +195,36 @@ export async function pruneCandles(): Promise<number> {
   return res.rowCount ?? 0
 }
 
+/** 1d 收盘序列（**新的在前**）—— 给「N 天涨幅」算基点用 */
+export interface DailyClose {
+  /** 那根 1d 的开盘时间（UTC 零点，毫秒） */
+  at: number
+  close: number
+}
+
+/**
+ * 从底座库里读 1d 收盘。
+ *
+ * ⚠️ 底座只记 U 本位永续（`market_type='swap'`）⇒ 现货 / 币本位这里查不到，
+ *    调用方要退回 REST（见 `market.ts` 的 `fetchTickerInfo`）。
+ */
+export async function dailyCloses(
+  exchange: string,
+  marketType: string,
+  symbol: string,
+  limit = 400
+): Promise<DailyClose[]> {
+  const rows = await query<{t: Date; c: number}>(
+    `SELECT open_time AS t, close AS c
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = '1d'
+      ORDER BY open_time DESC
+      LIMIT $4`,
+    [exchange, marketType, symbol, Math.max(1, Math.round(limit))]
+  )
+  return rows.map(r => ({at: new Date(r.t).getTime(), close: Number(r.c)}))
+}
+
 export interface CandleStoreStats {
   rows: number
   sizeBytes: number
