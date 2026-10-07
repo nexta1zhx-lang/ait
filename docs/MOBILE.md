@@ -282,3 +282,25 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 `platform.ts` 的 `isNativeShell()` 仍靠注入的 `window.Capacitor` 判为 true，
 路由照旧 **hash** 模式（地址形如 `https://bitcoooin.cn/#/analyze`）；
 原生插件（状态栏 / 返回键 / 前后台）照常工作。
+
+### ⚠️⚠️ 装机版跑的是**手机里的 WebView**，不是我们本机的 Chrome
+
+这条是 2026-10-07 用真机日志量出来的，坑很值钱：**页面一样的 CSS，浏览器里正常、App 里不对，
+第一件事不是改 CSS，而是先问「那台手机的 WebView 是几版」。**
+
+那台手机（Android 12 华为机）的 WebView 是 **Chrome 114**：
+
+```
+User-Agent: Mozilla/5.0 (Linux; Android 12; SUP-AL90 …; wv) … Chrome/114.0.5735.196 …
+```
+
+后果：**Chrome 121 才有的 CSS 特性在 App 里一律等于没写**（当时踩到的是 `scrollbar-width: none`
+——「K 线页不要滚动条」在浏览器里好了、在 App 里那条杠还在）。所以：
+
+- 写兼容性关键样式时，**别拿本机 Chrome（150+）当准**，先查一下这个特性在
+  「手机 WebView 的版本」上有没有；要兜底就写**老引擎也认的那种老写法**
+  （例：隐藏滚动条用 `::-webkit-scrollbar { display: none }`，**不要**用 `width: 0`）。
+- 想知道手机上到底是几版：打开 App → **我的 → 个人信息 → 账户信息 → App 信息**
+  （0.2.7 起那张体检单上有壳版本 / **WebView 版本** / 安全区实测值）。
+- 顺带记一条同源的经验：**WebView 的根滚动条是原生控件画的**，
+  CSS（`::-webkit-scrollbar` / `scrollbar-width`）**碰不到它** —— 只能让根视口别滚。

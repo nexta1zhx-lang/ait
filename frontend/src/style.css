@@ -285,7 +285,6 @@ html.scrolling ::-webkit-scrollbar-thumb:hover {
  *
  * ⚠️ 跟上面那条「滚动时出现」不冲突：这一格是**连滚的时候也不画**（用户明确说「不要滚动条」）。
  * ⚠️ 只是不画 —— 滚动照旧（滚轮 / 拖动 / 手指都能滚，内容一样到得了）。
- *    手法跟 `.ord-pos` / §45 那个 `#app` 一样，`::-webkit-scrollbar` 那条给老 Chrome 兜底。
  * ⚠️ 盖的是 `.split` 那棵树（K 线页的主体，含里面的行情列表），**不碰**弹层 / toast ——
  *    那些挂在 `.split` 外面，缩在弹层里滚的时候还是能看见细条的（不然更没方向感）。
  */
@@ -294,10 +293,44 @@ body.fixed-viewport:has(.split.m-chart) .split * {
   scrollbar-width: none;
 }
 
+/*
+ * ⚠️⚠️ 隐藏滚动条**必须靠 `display: none`**，`width: 0` 不管用。
+ *
+ * 2026-10-07 用户在装机版 App（Android 12 华为机，WebView **Chrome 114**）里报「K 线滚动条还在」，
+ * 同一页面在浏览器里是好的 —— 量的 UA 是 `... Chrome/114.0.5735.196 ...`，而
+ * **`scrollbar-width` 要 Chrome 121 才认**，所以那条 `scrollbar-width: none` 在 App 里等于没写。
+ * 兜底那条原来写的是 `width: 0`（老 Chrome 惯例），但按浏览器官方口径
+ * （Firefox：只有 `display: none` 与非零宽度「有作用」；Safari 13+：只有 `display: none` 有效），
+ * **零宽度是会被忽略的** —— 这也正好解释了为什么「行情页那条 5px 细条」在 App 里是正常的
+ * （非零宽度 ✓）、唯独这一页的宽度 0 没生效（✗）。
+ *
+ * ⚠️ 写成 `display: none` 后**等价于「不画」**，不是 `visibility`：滚动条不占空间、
+ *    也不参与布局，滚动行为（触摸 / 滚轮 / 惯性）一模一样。
+ * ⚠️ 桌面 Chrome 也吃这条，实测 K 线页 `#app` 的槽宽 0 ✓。
+ */
 body.fixed-viewport:has(.split.m-chart) :is(#app, .split)::-webkit-scrollbar,
 body.fixed-viewport:has(.split.m-chart) .split ::-webkit-scrollbar {
+  display: none;
   width: 0;
   height: 0;
+}
+
+/*
+ * K 线那一格：**根视口也别滚**。
+ *
+ * 为什么还要这一条：App（WebView）里**根滚动条是原生的** —— 它由 WebView 自己画，
+ * CSS（不管是 `scrollbar-width` 还是 `::-webkit-scrollbar`）**完全管不到**。
+ * 所以只能从源头堵：这一格本来就该在 `#app` 里滚（§45 的 120vh 就是它的内容），
+ * 根视口一滚只会多出一条抹不掉的杠。
+ * ⚠️ 只在这一格挂（`:has(.split.m-chart)`），别的页面照旧由文档自己滚。
+ */
+html:has(.split.m-chart) {
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+html:has(.split.m-chart)::-webkit-scrollbar {
+  display: none;
 }
 
 /*
@@ -4802,6 +4835,8 @@ body.fixed-viewport .split {
 }
 
 .ord-pos::-webkit-scrollbar {
+  /* ⚠️ 必须 `display: none`，`width: 0` 在老引擎（App 的 WebView 114）里会被忽略，见文件上方那段长注释 */
+  display: none;
   width: 0;
   height: 0;
 }
@@ -6496,12 +6531,15 @@ button.badge:disabled {
     flex: 1 1 auto;
   }
   /* 滚动条**不画出来**（用户 2026-10-07：「滚动条不显示」）：
-     手指一划照样滚，惯性滚动照旧。 */
+     手指一划照样滚，惯性滚动照旧。
+     ⚠️ `display: none` 是主力、`scrollbar-width` 只是顺带（App 的 WebView 114 只认前者）——
+        详见文件上半部分那段长注释。 */
   body.fixed-viewport:has(.split.m-chart) #app {
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
   }
   body.fixed-viewport:has(.split.m-chart) #app::-webkit-scrollbar {
+    display: none;
     width: 0;
     height: 0;
   }

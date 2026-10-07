@@ -3824,11 +3824,17 @@ document 自己那点滚动，**列表 / 面板这些子滚动容器全漏掉**�
 ### 50.2 ② K 线那一格：连滚的时候也不画
 
 ```css
+/* ① 新引擎：一句话就够 */
 body.fixed-viewport:has(.split.m-chart) :is(#app, .split),
 body.fixed-viewport:has(.split.m-chart) .split * { scrollbar-width: none; }
-/* 老 Chrome 兜底 */
+
+/* ② 老引擎的兜底：**必须 `display: none`**，`width: 0` 是无效的（见下） */
 body.fixed-viewport:has(.split.m-chart) :is(#app, .split)::-webkit-scrollbar,
-body.fixed-viewport:has(.split.m-chart) .split ::-webkit-scrollbar { width: 0; height: 0; }
+body.fixed-viewport:has(.split.m-chart) .split ::-webkit-scrollbar { display: none; width: 0; height: 0; }
+
+/* ③ 根视口也别滚：App 里根滚动条是**原生画**的，CSS 管不到，只能让它没得滚 */
+html:has(.split.m-chart) { overflow: hidden; scrollbar-width: none; }
+html:has(.split.m-chart)::-webkit-scrollbar { display: none; }
 ```
 
 * **只是不画**：滚动照旧（实测 `#app.scrollTop` 0 → 120 ✓，那 120 就是 §45 那 20vh）。
@@ -3837,6 +3843,37 @@ body.fixed-viewport:has(.split.m-chart) .split ::-webkit-scrollbar { width: 0; h
 * `.m-chart` 是「窄屏那格切到 K 线」时才挂的类（`leftView` = chart）⇒ **桌面 K 线视图不带它**，
   桌面那个行情列表照旧是「细 + 滚动时出现」（两条需求不打架）。
 
+#### ★★ 2026-10-07 事后补修：`width: 0` 在老 WebView 里等于没写
+
+当天用户又报「K 线滚动条还在」，量下来**只在装机版 App 里有**、浏览器里没有。
+从线上 Caddy 日志里抓到 App 的 UA 与请求：
+
+```
+User-Agent: Mozilla/5.0 (Linux; Android 12; SUP-AL90 Build/HUAWEISUP-AL90; wv) … Chrome/114.0.5735.196 …
+Referer:    https://bitcoooin.cn/assets/index-CnM8lKTZ.css      ← 32 次，就是当天刚发的那版
+```
+
+两个结论一起成立：
+
+1. **App 不是缓存的旧页面**（它是远程加载站点，拿到的是刚发的那版 CSS）；
+2. **那台手机是 WebView Chrome 114** —— `scrollbar-width` **要 121 才认**（这条只在 §50.2 里躺着，
+   等于没写），于是只剩 `::-webkit-scrollbar` 这条路，而当时写的是 `width: 0`。
+
+`width: 0` 为什么不顶用：按浏览器自己的口径，**零宽度不算「隐藏」**——
+Firefox 的 BCD 备注写明「只有 `display: none`（隐藏）与非零宽度（关掉覆盖式滚动条）有作用」，
+Safari 13+ 的备注同样是「只有 `display: none` 有效」。反过来也对得上：
+**行情页那条 5px 细条在 App 里是正常的**（非零宽度 ✓），唯独这一页的 0 被忽略了（✗）。
+⇒ 三处（K 线页 `#app` / `.split` 子树、持仓列表 `.ord-pos`）统一改成 `display: none`。
+
+⚠️ 顺带堵掉最后一个漏洞：**根视口**。App 里 WebView 的根滚动条是**原生控件**画的，
+`::-webkit-scrollbar` 与 `scrollbar-width` 都碰不到它 —— 所以干脆让这一格的根视口 `overflow: hidden`
+（这一格本来就该在 `#app` 里滚），从源头断掉。实测加了之后 `#app` 照旧滚（0 → 120）、
+`documentElement` 可滚量 **0**。
+
+⚠️ 这条经验对**以后所有 CSS 都有用**：装机版跑的是手机里的 WebView（这台是 **114**），
+不是我们的构建工具链 —— 写 CSS 时别以「我本机 Chrome 150 好使」为准。
+App 的「我的 → 个人信息 → 账户信息 → App 信息」那张体检单上有 **WebView 版本**，先看它。
+
 ### 50.3 实测
 
 | 场景 | 静止 | 滚动中 | 停手后 |
@@ -3844,3 +3881,4 @@ body.fixed-viewport:has(.split.m-chart) .split ::-webkit-scrollbar { width: 0; h
 | 行情列表 `.mkt-body`（390 / 1280 都测了） | `scrollbar-color: transparent` ✓ 看不见 | `rgba(255,255,255,.2)` ✓ 出现（宽 **5px**） | 800ms 后回到透明 ✓ |
 | K 线页 `#app`（390，`.m-chart`） | `scrollbar-width: none` ✓ | 仍然 none（这一格是「不画」）✓ | none ✓ |
 | K 线页滚不滚得动 | — | `scrollTop 0 → 120` ✓ | — |
+| K 线页加 `html { overflow: hidden }` 之后 | `html/body` 都 hidden、`documentElement` 可滚量 **0** ✓ | `#app` `scrollTop 0 → 120` ✓ | `.ord` 355px / 画布 268px 不变 ✓ |
