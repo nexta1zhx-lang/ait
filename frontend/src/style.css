@@ -4752,9 +4752,14 @@ body.fixed-viewport .split {
    * ⚠️ 加高只影响「一屏能看几条」—— 列表是 `flex: 1 1 0` + 自己滚（见上），
    *    不会把下单区撑高。
    */
-  padding: 9px 0;
+  padding: 10px 0;
   border-top: 1px solid var(--border);
-  font-size: 11px;
+  /*
+   * 行里的字号**比全站的 11px 大一档**（用户 2026-10-07：「仓位…现在看的有点小」
+   * →「行数据」）：这一行是手机上要盯的实时数字，11px 太抠。
+   * 一屏少看约半行（298px 高：6.8 行 → 6.2 行），换来的可读性划算。
+   */
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -4784,13 +4789,22 @@ body.fixed-viewport .split {
 }
 
 .ord-pos .op-sym {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  /*
+   * 币种是**第一个可以让步**的：13px 之后名字长的（`1000CHEEMS`）在 390 宽上
+   * 会把行尾那两颗按钮顶出去 —— 行是 `overflow: hidden`，顶出去就等于点不到。
+   * 所以给它上截断，`op-val`（仓位价值）先被压扁，真不够了才轮到名字。
+   */
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 0;
   border: 0;
   background: none;
   color: var(--text);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: var(--fw-bold);
 }
 
@@ -4810,12 +4824,12 @@ body.fixed-viewport .split {
 /* 杠杆小标签（用户 2026-10-05：「杠杆标签」）：加个底、四条边，跟数字分得开 */
 .ord-pos .op-lev {
   flex: 0 0 auto;
-  padding: 1px 5px;
+  padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -4840,10 +4854,13 @@ body.fixed-viewport .split {
   color: var(--bad);
 }
 
-/* 盈亏顶到这一行的右侧（前面那个 `.spacer` 干的活） */
+/* 盈亏顶到这一行的右侧（前面那个 `.spacer` 干的活）——
+   这一行最该看清的就是它：再大一号 + 加粗一档 */
 .ord-pos .op-pnl {
   flex: 0 0 auto;
   font-family: var(--mono);
+  font-size: 13px;
+  font-weight: var(--fw-mid);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4858,10 +4875,10 @@ body.fixed-viewport .split {
    * 触摸目标加大一点（用户 2026-10-06：「防止误触」）——
    * 原来 4px 上下内边距、一行才二十几像素，手指容易点偏。
    */
-  padding: 6px 9px;
+  padding: 7px 10px;
   border: 0;
   background: none;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: var(--fw-mid);
   line-height: 1.3;
 }
@@ -4888,7 +4905,7 @@ body.fixed-viewport .split {
 /* 没持仓 / 读失败：一句话摆在列表原位（高度由 `.ord-body` 兜住） */
 .ord-empty {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 
