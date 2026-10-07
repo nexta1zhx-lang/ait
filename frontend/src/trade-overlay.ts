@@ -23,6 +23,7 @@
 import {computed, ref} from 'vue'
 import {
   cleanupOrphanOrders,
+  exchangeStream,
   fetchTradeHistory,
   fetchTradeOpenOrders,
   type TradeFill,
@@ -102,6 +103,17 @@ export function clearTradeOverlay(): void {
 /** 现在绑的是哪套 Key（`undefined` = 没绑）。同一个 key 不重复绑 */
 let boundKey: number | undefined | null = null
 let unbindPositions: (() => void) | null = null
+let stopOverlayEvents: (() => void) | null = null
+
+/**
+ * 挂单 / 成交**刚变过**（SSE 推来的）—— 值一变就说明该重读了。
+ *
+ * 为什么要有它：图上那几条止盈止损线（`overlayOrders`）原先只靠 **15 秒一轮**的
+ * 轮询，手机上挂一张 / 撤一张，图上最多要等 15 秒才动
+ * （用户 2026-10-07：「k线止盈止损渲染感觉慢了一步」；实测确实 **15.3 秒**）。
+ * 持仓那条线早就走 SSE 了（`positions.ts`），就剩挂单在原地踏步。
+ */
+export const overlayBump = ref(0)
 
 /**
  * 绑定 / 换绑持仓来源（K 线页调；换「下单账户」时重绑）。
@@ -116,6 +128,17 @@ export function bindOverlayPositions(keyId?: number): void {
   if (boundKey === keyId) return
   unbindOverlayPositions()
   unbindPositions = bindPositions([keyId])
+  /*
+   * 挂单 / 成交的**变动信号**也订上（同一条 SSE，`sharedSse` 按 path 复用，
+   * 不会多开连接）—— 后端 WS 一看到挂单变动 / 新成交就推，我们自己的操作、
+   * 币安 App 上的操作都一样会推。
+   *
+   * ⚠️ 推来的只是「该重读了」这个信号；线本身照旧直连交易所那次读（带 symbol、权重 1）。
+   */
+  stopOverlayEvents = exchangeStream(keyId, {
+    orders: () => overlayBump.value++,
+    fill: () => overlayBump.value++
+  })
   boundKey = keyId
 }
 
@@ -123,6 +146,8 @@ export function bindOverlayPositions(keyId?: number): void {
 export function unbindOverlayPositions(): void {
   unbindPositions?.()
   unbindPositions = null
+  stopOverlayEvents?.()
+  stopOverlayEvents = null
   boundKey = null
 }
 

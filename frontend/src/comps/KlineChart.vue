@@ -38,6 +38,7 @@ import {
   overlayStale,
   overlaySymbol,
   ORPHAN_SWEEP_MS,
+  overlayBump,
   refreshTradeOverlay,
   sweepOrphanOrders,
   unbindOverlayPositions
@@ -1843,6 +1844,38 @@ function syncOverlayTimer(): void {
 }
 
 /**
+ * 挂单 / 成交变了（SSE `orders` / `fill`）⇒ **马上**补一次，别等那一轮的 15 秒。
+ *
+ * 用户 2026-10-07：「k线止盈止损渲染感觉慢了一步」—— 实测（在币安那头挂一张不会成交的
+ * 限价单，再从页面上看这条线什么时候出现）**慢了 15.3 秒**，正好是 `OVERLAY_MS` 一轮。
+ * 线本身照旧直连交易所读（带 symbol、权重 1），这里只是**不再干等定时器**。
+ *
+ * ⚠️ 两段节流，缺一不可：
+ *    · **去抖 250ms** —— 一次挂 / 撤单后端会连推几条（NEW → 对账 → …），先合并成一条；
+ *    · **最小间隔 1.2s** —— 那几条有时**前后差几百毫秒**（去抖挡不住），
+ *      实测一次下单会引来 **3 发**「重读挂单 + 重读成交」；带上最小间隔就只剩 1~2 发，
+ *      而慢了的那点（≤1.2s）比 15 秒那一轮根本不算什么。
+ * ⚠️ 只当「该重读了」的信号：`pullOverlay()` 自己会判 `overlayWanted()`（不在前台 / 图没被
+ *    看着 / 四个开关全关 ⇒ 一次都不打）。
+ */
+const ORDERS_PULL_MS = 250
+const ORDERS_PULL_GAP_MS = 1200
+let ordersPullTimer: ReturnType<typeof setTimeout> | null = null
+let lastOrdersPullAt = 0
+function scheduleOverlayPull(): void {
+  if (ordersPullTimer) return
+  const wait = Math.max(
+    ORDERS_PULL_MS,
+    ORDERS_PULL_GAP_MS - (Date.now() - lastOrdersPullAt)
+  )
+  ordersPullTimer = setTimeout(() => {
+    ordersPullTimer = null
+    lastOrdersPullAt = Date.now()
+    if (overlayWanted()) void pullOverlay()
+  }, wait)
+}
+
+/**
  * 关掉某一样时得**立刻**把它从图上抹掉（不然要等下一次数据到达才消失），
  * 所以四个开关任一变化都重画一遍，并按需要补拉数据。
  */
@@ -1873,6 +1906,9 @@ watch(
   () => renderOrderLines(),
   {deep: true}
 )
+
+/* 挂单 / 成交刚变过（SSE）⇒ 立刻补一次读（去抖合并同一批事件） */
+watch(overlayBump, () => scheduleOverlayPull())
 
 /** 图脚那句「挂单」状态：读不到 / 只拿到快照时才出现（正常 `null`，不渲染） */
 const ordNote = computed(() => {
@@ -3498,6 +3534,9 @@ onBeforeUnmount(() => {
   overlayTimer = null
   if (orphanTimer) clearInterval(orphanTimer)
   orphanTimer = null
+  /* 挂单变动那条去抖也要收（收完就不该再补那一发了） */
+  if (ordersPullTimer) clearTimeout(ordersPullTimer)
+  ordersPullTimer = null
   stopOverlayForeground?.()
   stopOverlayForeground = null
   /* 画叠加线的那个 primitive 挂在蜡烛系列上，图拆掉之前先摘下来 */
