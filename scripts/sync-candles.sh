@@ -6,8 +6,9 @@
 # （实测一次 85 次）。本地那台机器有独立出口 —— 历史在本地拉全，整表导过去，线上零请求。
 #
 # 用法：
-#   bash scripts/sync-candles.sh              # 合并（幂等，可反复跑；适合增量补）★ 默认用它
-#   bash scripts/sync-candles.sh --replace    # 先清空线上 candles 再整表灌（最快，适合一次铺满）
+#   bash scripts/sync-candles.sh                      # 合并（幂等，可反复跑；适合增量补）★ 默认用它
+#   bash scripts/sync-candles.sh --since='30 hours'    # 只导最近 30 小时（补尾洞，几十秒就完）
+#   bash scripts/sync-candles.sh --replace             # 先清空线上 candles 再整表灌（最快，适合一次铺满）
 #
 # ⚠️ 为什么默认是 merge：线上底座在**实时**往 candles 里写（ws/rollup），
 #   `--replace` 的 TRUNCATE 会把「本地还没补到的那段尾」一起清掉 ——
@@ -21,7 +22,18 @@
 set -euo pipefail
 
 MODE="merge"
-if [[ "${1:-}" == "--replace" ]]; then MODE="replace"; fi
+SINCE=""
+for a in "$@"; do
+  case "$a" in
+    --replace) MODE="replace" ;;
+    --since=*) SINCE="${a#--since=}" ;;
+    *) echo "未知参数：$a（可用：--replace / --since='30 hours'）" >&2; exit 2 ;;
+  esac
+done
+if [ "${MODE}" = "replace" ] && [ -n "${SINCE}" ]; then
+  echo "--replace 和 --since 不能一起用：先清空再只灌一段 = 把历史删了" >&2
+  exit 2
+fi
 
 KEY="${HOME}/.ssh/LightsailDefaultKey-ap-northeast-1.pem"
 SRV="ubuntu@52.194.6.144"
@@ -34,8 +46,15 @@ REMOTE_DUMP="/tmp/candles-import.csv.gz"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
 say "本地导出 candles（CSV → gzip）"
+if [ -n "${SINCE}" ]; then
+  # 增量补：只导最近这一段（千万行的整表搬一次要十几分钟，补个尾洞没必要）
+  EXPORT="\\copy (SELECT * FROM candles WHERE open_time >= now() - interval '${SINCE}') TO STDOUT WITH CSV"
+  echo "增量模式：只导 open_time >= now() - interval '${SINCE}'"
+else
+  EXPORT="\\copy candles TO STDOUT WITH CSV"
+fi
 docker exec -e PGTZ=UTC -i "${LOCAL_DB}" psql -U "${LOCAL_USER}" -d "${LOCAL_DBNAME}" -q \
-  -c "\\copy candles TO STDOUT WITH CSV" | gzip -1 > "${LOCAL_DUMP}"
+  -c "${EXPORT}" | gzip -1 > "${LOCAL_DUMP}"
 ls -lh "${LOCAL_DUMP}"
 docker exec -e PGTZ=UTC -i "${LOCAL_DB}" psql -U "${LOCAL_USER}" -d "${LOCAL_DBNAME}" -t -A \
   -c "select '本地行数 ' || count(*) from candles"
@@ -44,29 +63,41 @@ say "传到线上"
 scp -q -i "${KEY}" "${LOCAL_DUMP}" "${SRV}:${REMOTE_DUMP}"
 
 say "线上导入（${MODE}）"
-ssh -i "${KEY}" "${SRV}" "MODE=${MODE} bash -s" <<'EOS'
+# ★ 远端脚本先落成文件、再 `bash 文件`（2026-10-07 实测踩过这个坑）：
+#   `ssh host "bash -s" <<'EOS' … EOS` 这种「脚本内容走 stdin」的写法，只要脚本里有一条命令
+#   也去读 stdin，就能把 bash 还**没读完的脚本文本**一起吞掉。那次导入就是这么静默半途而废的：
+#   退出码 0、没报错、"已合并" 那行没打印，线上只落了零星几行（10.88M 行只进了一小部分）。
+#   落成文件（用 cat 写、cat 明确消费 stdin）再 `bash /tmp/…`，就不存在这个竞争了。
+cat > /tmp/candles-import-remote.sh <<'EOS'
 set -euo pipefail
 cd /opt/crypto-advisor
-PSQL=(sudo docker compose -f docker-compose.prod.yml exec -T -e PGTZ=UTC db psql -U ca -d crypto_advisor -q)
-"${PSQL[@]}" -c 'DROP TABLE IF EXISTS candles_import'
+RUN=(sudo docker compose -f docker-compose.prod.yml exec -T -e PGTZ=UTC db psql -U ca -d crypto_advisor -v ON_ERROR_STOP=1 -q)
+CNT=(sudo docker compose -f docker-compose.prod.yml exec -T -e PGTZ=UTC db psql -U ca -d crypto_advisor -v ON_ERROR_STOP=1 -t -A)
+"${RUN[@]}" -c 'DROP TABLE IF EXISTS candles_import'
 if [ "${MODE}" = "replace" ]; then
-  "${PSQL[@]}" -c 'TRUNCATE candles'
-  zcat /tmp/candles-import.csv.gz | "${PSQL[@]}" -c '\copy candles FROM STDIN WITH CSV'
+  "${RUN[@]}" -c 'TRUNCATE candles'
+  zcat /tmp/candles-import.csv.gz | "${RUN[@]}" -c '\copy candles FROM STDIN WITH CSV'
   echo "已整表替换"
 else
-  "${PSQL[@]}" -c 'CREATE UNLOGGED TABLE candles_import (LIKE candles INCLUDING DEFAULTS)'
-  zcat /tmp/candles-import.csv.gz | "${PSQL[@]}" -c '\copy candles_import FROM STDIN WITH CSV'
-  "${PSQL[@]}" -c 'INSERT INTO candles SELECT * FROM candles_import
+  "${RUN[@]}" -c 'CREATE UNLOGGED TABLE candles_import (LIKE candles INCLUDING DEFAULTS)'
+  zcat /tmp/candles-import.csv.gz | "${RUN[@]}" -c '\copy candles_import FROM STDIN WITH CSV'
+  echo "临时表行数：$("${CNT[@]}" -c 'SELECT count(*) FROM candles_import')"
+  echo "开始合并（千万行级，几分钟，别中断）"
+  "${RUN[@]}" -c 'INSERT INTO candles SELECT * FROM candles_import
       ON CONFLICT (exchange, market_type, symbol, interval, open_time) DO UPDATE SET
         high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
         volume = EXCLUDED.volume, quote_volume = EXCLUDED.quote_volume,
         trades = EXCLUDED.trades, taker_buy_volume = EXCLUDED.taker_buy_volume,
         source = EXCLUDED.source, updated_at = now()
       WHERE NOT (EXCLUDED.quote_volume = 0 AND candles.quote_volume > 0)'
-  "${PSQL[@]}" -c 'DROP TABLE candles_import'
-  echo "已合并（同桶以本地这份为准）"
+  "${RUN[@]}" -c 'DROP TABLE candles_import'
+  echo "已合并（同桶以本地这份为准；但「没成交额」的不许盖「有成交额」的）"
 fi
+echo "线上行数：$("${CNT[@]}" -c 'SELECT count(*) FROM candles')"
 EOS
+scp -q -i "${KEY}" /tmp/candles-import-remote.sh "${SRV}:/tmp/candles-import-remote.sh"
+ssh -i "${KEY}" "${SRV}" "MODE=${MODE} bash /tmp/candles-import-remote.sh" < /dev/null
+rm -f /tmp/candles-import-remote.sh
 
 say "线上核对"
 ssh -i "${KEY}" "${SRV}" "cd /opt/crypto-advisor && sudo docker compose -f docker-compose.prod.yml exec -T db psql -U ca -d crypto_advisor \
