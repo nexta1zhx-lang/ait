@@ -1,31 +1,28 @@
 /**
- * 交易所资产 · **实时层**（M2，方案见 `docs/EXCHANGE.md`）。
+ * 交易所资产 · **实时层**（设计见 `docs/EXCHANGE.md` 第 24 节「实时层设计定稿」）。
  *
- * 干什么：每条「币安合约」的 key 开一条常驻的**用户数据流**，实时收
- *   · `ORDER_TRADE_UPDATE` —— 下单 / 成交 / 撤单 → 成交写进 `exchange_fills`（幂等）
- *   · `ACCOUNT_UPDATE`      —— 余额 / 仓位变了 → 拉一次完整快照落库（节流 20s）
- *   · `listenKeyExpired`    —— 重建
+ * 每条「币安合约」的 key 开一条常驻**用户数据流**，实时收：
+ *   · `ORDER_TRADE_UPDATE` —— 成交 / 挂单生命周期 → `exchange_fills` + 挂单表
+ *   · `ACCOUNT_UPDATE`      —— 钱包余额 `wb` + 持仓 `pa / ep / up` **当场就用**（0 权重）
+ *   · `ALGO_UPDATE`         —— 条件单（字段 `aid` / `o` / `tp` / `X`）
+ *   · `listenKeyExpired`    —— 重建 listenKey
  *
- * ⚠️⚠️ 三个实测/设计上的硬约束（别改）：
- *   ① **ccxt 社区版做不了**（`watchOrders()` 抛 "not supported yet"，ccxt.pro 才有）
- *      ⇒ 自己连裸 WS：`POST /fapi/v1/listenKey` + `wss://fstream.binance.com/private/ws/<key>`
- *      （**必须带 `/private`**：少了它连接照样 101 + 回 ping，但一个业务帧都不推，
- *        见 `streamUrl()` 的注释）。
- *      listenKey 的增删改用 ccxt 的隐式方法（已验证可用），WS 用 `ws` 包。
- *   ② **WS 负责实时，REST 只管兜底**（2026-10-06 第二轮订正，见 docs 第 27 节）：
- *      · 连上（含重连成功）后立刻 REST 拉一次对账 —— **这是真正确定的补账点**（断线期间的事件币安不补发）；
- *      · 平时成交 / 挂单 / 账本 / 快照**各 1 小时**一轮（空转 2 小时、睡着 4 小时），
- *        只当「防我们自己出 bug」的安全网；余额采样守 1 小时（曲线要连续）。
- *      · ⚠️ 流降级时自动退回正常档（见 `tierNow`）。
- *   ③ **C2C 钱包没有 WS 事件**（用户数据流只覆盖合约）⇒ C2C 只能靠那条 1 小时采样。
+ * 分工（**WS 负责实时，REST 只管保底**）：
+ *   · 实时：上面那些事件 + 每秒标记价重算（浮盈 / 强平价 / 保证金率都跟着行情动）；
+ *   · 曲线：每 5 分钟用内存那份算一个点（`source='live'`，**0 权重**，见 `writeLivePoint`）；
+ *   · 校准：REST `overview` 1 小时一轮 —— c2c / 现货 / 可用余额 / 资产明细**只有 REST 有**；
+ *   · 兜底：成交 4h / 挂单 6h / income 8h（`TIER_GAPS`），另有四个确定的补账入口：
+ *     重连后、写操作后（强制对平）、页面打开（数据旧了）、用户手动刷新。
  *
- * 生命周期（2026-10-06 补全，用户：「不能只有启动没有终止」）：
- *   · 起：进程启动 `startExchangeStreams()` 逐套 key 写启动锚点 + 连 WS（错开 1 秒）；
- *   · 止：**只有两种** —— ① 进程退出（写关闭锚点 + DELETE listenKey）；
- *     ② **没人看 + 空仓无挂单**够久（`WS_SLEEP_AFTER_MS`）⇒ 只断连接，
- *     listenKey 照续、随时连回来（见 `sleepWs` / `wakeWs`）。
+ * ⚠️ 三条硬约束（别改）：
+ *   ① `wss://fstream.binance.com/private/ws/<listenKey>` —— **必须带 `/private`**：
+ *      少了它照样返回 101 + 回 ping，但**一个业务帧都不推**（见 `streamUrl()`）；
+ *   ② ccxt 社区版做不了用户数据流（`watchOrders()` 抛 not supported）⇒ 自己连裸 WS，
+ *      listenKey 的增删改用 ccxt 的隐式方法；
+ *   ③ **C2C 钱包没有 WS 事件**（用户数据流只覆盖合约）⇒ 只能靠 1 小时校准。
  *
- * ⚠️ 单实例假设：多副本会重复订阅同一个 key（要分布式锁 / 指定主副本），见 docs。
+ * ⚠️ 单实例假设：多副本会重复订阅同一个 key（要分布式锁 / 指定主副本）。
+ * ⚠️ 别再加「没人看就断 WS」：曲线的数据源就是那条流（WS 不吃权重，断它只换来曲线变稀）。
  */
 import {WebSocket} from 'ws'
 import {
@@ -101,150 +98,61 @@ const KEEPALIVE_MS = 25 * 60 * 1000
 /**
  * `ACCOUNT_UPDATE` 之后**再去问一次 REST 快照**的最小间隔（秒）。
  *
- * ⚠️ 2026-10-06 更正：这个数原来注释写的是「别全写库」，而且**只拦了写库**
- *    （`saveSnapshot` 的 `minGapSec`），**请求本身一次都没拦** ——
- *    一秒来 5 条 `ACCOUNT_UPDATE` 就是 5 发 REST（每发 21 权重）。
- *    现在事件里带的数据**当场就用**（见 `applyAccountUpdate`），REST 只补它没有的
- *    汇总口径，并且**真的按这个间隔拦请求**。
- *
- * ★ 2026-10-06 第三轮（路径修好之后，事件真的会来了）：20 秒 → **180 秒**。
- *    余额 / 持仓在事件里就更新完了（0 权重），快照只为「可用余额 / 保证金余额 /
- *    资产明细 / C2C / 现货」这些**事件里没有的汇总字段**，以及曲线 —— 三分钟一次足够。
+ * ⚠️ 这是对**请求本身**的节流（不只是写库）：事件里带的数据当场就用
+ *    （见 `applyAccountUpdate`），REST 只补它没有的汇总字段 —— 一秒来 5 条事件
+ *    不该变成 5 发 REST。
  */
 const WS_SNAPSHOT_GAP_SEC = 180
 /**
- * **兜底的基准节奏**（有仓 / 有单 / 刚有动静的账户）。
+ * **三条兜底对账**的基准节奏（normal 档）—— 各按自己的冗余度定。
  *
- * ★ 2026-10-06 第二次收敛（用户：「用户在线就没必要频繁对账，用户感觉不对可以刷新页面，
- *   移动端做下滑刷新」「在线不是有推送和计算吗，只有没数据才请求」）。
+ * ⚠️ 它们**不是实时性的来源**（实时那条路是 WS + 本地标记价重算），只当
+ *    「防我们自己出 bug」的安全网。确定的补账入口是四个：**重连后对账、
+ *    写操作后强制对平、页面打开（数据旧了）、用户手动刷新**。
  *
- * 第一版把成交对账钉死在 **60 秒**，理由是「WS 会丢事件，兜底要勤」。但把账算清楚就
- * 发现：**实时那条路本来就是 WS 推送 + 本地标记价重算**，REST 对账只是「怕丢事件」的
- * 保险，而它的代价（成交 5 权重/币 × 最多 8 个币 = ≤40/分钟）是全套最贵的一项之一。
- * 用户给的方案很明确：**在线不靠 REST，感觉不对自己刷（下拉刷新）**。所以：
- *
- *   · 在线 ⇒ **不再全速**，就按这张表的基准走（成交 5 分钟 / 挂单 10 分钟 / 账本 30 分钟）；
- *   · 只在「**没有数据**」时才立刻请求 —— 冷启动没底稿、刚下单/平仓、WS 报哑或重连、
- *     用户手动刷新（含下拉），以及「数据已经旧了」时打开页面（见 `FRESH_MS`）；
- *   · 用户按下刷新 ⇒ `force`，无视一切节流，当场把这套账户的账对平。
- *
- * 各项「为什么是这个数」：
- *   · **成交 5 分钟** —— 丢一笔只影响「盈亏 / 成交」两个列表，而这俩用户随时能刷；
- *   · **挂单 10 分钟** —— 40 权重是全场最贵的一发；挂单的**变动** WS 会推，这里纯兜底；
- *   · **钱账本 30 分钟** —— 资金费 8 小时才结一次，勤也没用。
- */
-/*
- * ★★ 2026-10-06 第二轮（用户数据流的路径修好之后）用户拍的口径：
- *   「更激进：前三个都拉到 1 小时，只留『重连 + 写操作 + 页面打开』」。
- *
- * 为什么敢：
- *   · 实时数据现在**真的走 WS**（`/private/ws/`，成交 18 毫秒落库，实测）；
- *   · 历史上那些「WS 丢事件」的实证，其实全是**路径错**（见 docs 第 26 节）——
- *     「偶发丢帧」很可能根本不存在；
- *   · 真正确定的丢事件场景只有**断线**，而 `reconcile('ws')` 在重连后立刻补一次。
- *
- * ⚠️ 所以这三条只当「防我们自己出 bug 的安全网」，不再是实时性的来源。
- * ⚠️ 但**余额曲线**（`sample`）不跟着拉长：C2C 钱包没有 WS 事件、汇总口径也只有 REST 有，
- *    曲线稀疏了就不好看了（用户明确要「余额要管、曲线不能断」）⇒ 睡觉的账户也照 1 小时采。
- *
- * ★ 2026-10-06 第三轮（用户拍板「挂单/成交/income 三条兜底拉到 4~8 小时」）：
- *   三条**各按自己的冗余度**定，不再一刀切 1 小时 ——
- *
- *   | 项 | 现在 | 为什么敢给这么长 |
- *   |---|---|---|
- *   | 挂单对账（40 权重/次） | **6 小时** | 有**两条**事件流实时维护（`ORDER_TRADE_UPDATE` + `ALGO_UPDATE`），外加写操作后强制对平 + 重连对平 —— 冗余度最高的一项 |
- *   | 成交对账（≤40 权重/次） | **4 小时** | 事件覆盖，但它是**账本**（`exchange_fills` 是盈亏的来源）⇒ 保守一档 |
- *   | 钱账本 income（30 权重/次） | **8 小时** | 只为补资金费**明细**，而资金费本身 8 小时才结一次 |
- *
- *   ⚠️ 它们**不是实时性的来源**：重连后 `reconcile('ws')`、写操作后强制对平、
- *   页面打开 / 下拉刷新 —— 三条兜底一个都没动。真要出账目问题，
- *   这四个入口里任何一个都会把账拉回来。
+ * | 项 | 间隔 | 凭什么敢 |
+ * |---|---|---|
+ * | 成交对账（≤40 权重/次） | 4 小时 | 事件已覆盖，但它是账本（盈亏的来源）⇒ 保守 |
+ * | 挂单对账（40 权重/次） | 6 小时 | 有两条事件流维护（`ORDER_TRADE_UPDATE` + `ALGO_UPDATE`）+ 写操作 / 重连对平 |
+ * | 钱账本 income（30 权重/次） | 8 小时 | 只为补资金费**明细**，而资金费本身 8 小时才结一次 |
  */
 const FILL_RECONCILE_MS = 4 * 60 * 60 * 1000
 const ORDERS_RECONCILE_MS = 6 * 60 * 60 * 1000
 const INCOME_RECONCILE_MS = 8 * 60 * 60 * 1000
 /**
- * 对账 tick 的节拍 —— 只是「到点了吗」的判断，**本身一次交易所都不打**。
- *
- * ⚠️ 别拿某一条的周期当 tick（原来是 `FILL_RECONCILE_MS`）：三条的周期现在不一样
- *    （4/6/8 小时），拿最长的当 tick 会让「6 小时那一档」实际变成 8 小时才轮到一次。
- *    30 分钟一跳，任何一条到点后最多晚 30 分钟被处理，代价是几十次比较。
+ * 对账 tick 的节拍 —— 只做「到点了吗」的判断，**本身不打交易所**。
+ * ⚠️ 别拿某一条的周期当 tick：三条周期不同（4/6/8 小时），拿最长的当节拍
+ *    会让「6 小时那一档」实际变成 8 小时才轮到。
  */
 const RECON_TICK_MS = 30 * 60 * 1000
-/**
- * 打开页面时「数据旧到这个程度」就顺手补一次（用户：「只有没数据才请求」）。
- *
- * ⚠️ 不是「一打开就打交易所」：SSE 刚推过的账户（60 秒内）**一次都不请求**。
- */
+/** 打开页面时「数据旧到这个程度」就顺手补一次（SSE 刚推过的账户一次都不请求） */
 const FRESH_MS = 60 * 1000
-/**
- * 手动刷新（含下拉）的最小间隔 —— 前端也会防抖，这里再兜一道，
- * 免得「连点几下」把这一套账户的权重全花在一秒钟里。
- */
+/** 手动刷新（含下拉）的最小间隔 —— 前端也防抖，这里再兜一道 */
 const FORCED_MIN_MS = 3 * 1000
 /** 每次定期对账往前看多久（重叠靠 `unique(key_id, trade_id)` 去重） */
 const FILL_SAFETY_MS = 24 * 3600 * 1000
-/**
- * **空转时**的对账间隔（2026-10-06，用户问「长时间没有仓位或者用户不在线呢」）。
- *
- * ⚠️ 为什么必须有：币安权重是**按出口 IP** 算的，一台服务器所有用户共用 2400/分钟。
- *    而上面那几个定时器原来是**每套 Key 都跑、不管有没有仓位、不管用户上没上线**：
- *      挂单对账 40/2min + 钱账本 30/10min + 全量快照 ~21/5min ≈ **27 权重/分钟/套**
- *    ⇒ **约 88 套闲置账户就能把整个出口 IP 的额度吃光**。
- *    一个几个月没登录、没有任何仓位的账户，不该跟正在交易的账户花一样多。
- *
- * 判据（`isIdle()`）：**没持仓 + 没挂单 + 最近也没动静**。
- * 空转时把三类对账降到 30 分钟一轮（≈7 权重/分钟/套）。
- *
- * ⚠️ 2026-10-06 补了一档（原来漏了）：**成交对账也必须一起降**。
- *    第一版只降了挂单 / 钱账本 / 快照，`backfillFills` 还是 60 秒一轮，
- *    而它按「最近 30 天交易过的币 ∪ 持仓」逐币查（`fetchMyTrades` 权重 5/币，
- *    最多 8 个币 = 40 权重）—— **空转账户身上最贵的一项恰恰是它**
- *    （≤40/分钟，比挂单那 40/2分钟 还高一倍）。空转账户没有仓位，
- *    真来了新成交靠私有 WS 那条路就够，所以降到 10 分钟一轮。
- *
- * ⚠️ **私有 WS 和 listenKey 照旧连着**，所以「突然来一张新挂单 / 新成交」还是秒级
- *    （币安会推 `ORDER_TRADE_UPDATE`）—— 降频降的是**对账**，不是实时性。
- *    （⚠️ 例外：**空仓 + 无挂单 + 没人看**够久了，那条 WS 会主动断开省连接，
- *      见 `WS_SLEEP_AFTER_MS`；一有人来 / 一有敞口立刻连回去。）
- *
- * ⚠️⚠️ 空转档必须**比正常档更慢**（2026-10-06 差点写成反的）：正常档从 1 小时拉到
- *    4/6/8 小时之后，这里如果还留着老的 2 小时，空转账户反而比活跃账户问得勤 ——
- *    按「正常档 ×2」定：8 / 12 / 16 小时。
- */
+/** **空转档**（没持仓 + 没挂单 + 10 分钟没动静）：三条兜底按「正常档 ×2」再降一档 */
 const FILL_RECONCILE_MS_IDLE = 8 * 60 * 60 * 1000
 const ORDERS_RECONCILE_MS_IDLE = 12 * 60 * 60 * 1000
 const INCOME_RECONCILE_MS_IDLE = 16 * 60 * 60 * 1000
-/** 空转时全量快照的间隔（它是**钱包 / C2C 唯一的取数路**，但空账户的钱不会变） */
-const SAMPLE_IDLE_MS = 60 * 60 * 1000
+/**
+ * REST **校准**的间隔（三档共用）。只刷「只有 REST 有」的那几项
+ * （c2c / 现货 / 可用余额 / 资产明细）并用交易所口径覆盖内存那份防漂移。
+ * ⚠️ **曲线的密度不靠它**（那是 0 权重的 `writeLivePoint`）。
+ */
+const SAMPLE_CALIBRATE_MS = 60 * 60 * 1000
+/**
+ * ★ 曲线的密度从哪来：`writeLivePoint()` 用内存那份（WS 的钱包 + 标记价口径浮盈）
+ * 就地算、以 `source='live'` 落库，**0 权重** ⇒ 5 分钟一个点、24 小时不断，
+ * 与档位 / 有没有人看 / 空不空仓**全都无关**。
+ * ⚠️ 别再改回「曲线靠 REST 保密度」（25 权重/发）或「没人看就断 WS」（断的是曲线的源）。
+ */
 /** 多久没动静才算「空转」（刚下过单 / 刚平过仓的不算） */
 const IDLE_MS = 10 * 60 * 1000
 /**
- * **睡着**——比空转再降一档（2026-10-06，用户：「长时间用户不在线就不用管和合约和订单，
- * 余额要管要做曲线图」）。
- *
- * 判据（`isAsleep()`）：已空转 **且没人订阅**（`listenerCount() === 0`，就是「不在线」）
- * **且**连着 `HIBERNATE_MS` 没动静。睡着之后：
- *
- *   · 成交 / 挂单 / 钱账本三类对账 —— **全部降到 `ASLEEP_MS` 一轮**
- *     （合约和订单不用管了；真来了单子 WS 会推，`onOrder` 会把账户叫醒）；
- *   · **余额照管**：全量快照也 `ASLEEP_MS` 一轮（`sampleIfDue`），资产曲线不断档；
- *   · **私有 WS 只在「空仓无挂单」时才断**（`WS_SLEEP_AFTER_MS`，见下面那段终止流程）——
- *     这一档降的是「我们自己主动去问」的频率，不是实时性。
- *
- * 各档一小时的总权重（一套 Key）：
- *
- * | 档 | 成交 | 挂单 | 钱账本 | 快照 | 合计 | 每分钟 |
- * |---|---|---|---|---|---|---|
- * | 活跃（有仓 / 有单） | ≤2400 | 1200 | 180 | 252 | ≈4000 | ≈67 |
- * | 空转 | 240 | 80 | 60 | 42 | ≈420 | ≈7 |
- * | 睡着 | 40 | 40 | 30 | 21 | ≈131 | ≈2.2 |
- *
- * ⚠️ 为什么**余额必须留下**：`exchange_snapshots` 是资产曲线**唯一**的源，而且曲线是
- *    分档归档的（5m→1h→1d，见 `exchange-archive.ts`）—— 睡着期间断采，
- *    曲线上就会留一段假的空洞（用户明确要求「余额要管」）。
- *    余额其实只有资金费（8 小时一次）会动，1 小时采一次已经很富余；
- *    真嫌贵可以按资金费周期拉到 4 小时，成本再降 4 倍。
+ * **睡着档**：空转 + 没人订阅（`listenerCount() === 0`）+ 2 小时没动静。
+ * 这一档 `reconcileTick` 直接 return（一条对账都不跑，醒来一轮补上），
+ * 但**校准照跑**（c2c / 现货只有 REST 有）、**WS 照连**（曲线点靠它）。
  */
 const ASLEEP_MS = 60 * 60 * 1000
 /** 空转多久、又没人看着，才算「睡着」 */
@@ -253,49 +161,14 @@ const HIBERNATE_MS = 2 * 60 * 60 * 1000
 const INCOME_LOOKBACK_MS = 7 * 24 * 3600 * 1000
 /**
  * 用户数据流多久**毫无动静**（数据帧和 ping 都没有）就当它哑了。
- *
- * ⚠️ 必须**大于币安的 ping 周期（3 分钟）**：币安每 3 分钟发一个 ping 帧，
- *    所以「4 分钟没动静」才算异常。第一版写的 2 分钟会在一段安静期里
- *    把健康的流误报成降级（2026-10-06 我自己就被这个误判带偏过 ——
- *    真正的结论是「空闲时本来就没有数据帧」）。
- *
- * 用途：告诉前端「这套账户现在是降级的，你那边该自己兜底刷」——
- * 前端不用猜（它只看得到我们这条 SSE，看不到上游那条）。
+ * ⚠️ 必须大于币安的 ping 周期（3 分钟）；判断依据只能是 ping ——
+ *    「空闲」和「哑了」的区别就在这里（空闲时本来就没有数据帧）。
  */
 const WS_DEAF_MS = 4.5 * 60 * 1000
-
 /**
- * ★ **上游 WS 的终止流程**（2026-10-06，用户：「不能只有启动没有终止，也要看用户在不在线」）。
- *
- * 条件（全满足才断）：**没人看**（`listenerCount() === 0`）+ **空仓且无挂单** +
- * 安静（账户没动静、也没人来过）超过 `WS_SLEEP_AFTER_MS` ⇒ 关掉到币安的那条 WS。
- *
- * 断的是什么、不断的是什么：
- *   · 断 —— 只是那条 WebSocket 连接（以及跟着它的标记价订阅）；
- *   · **不断** —— listenKey **照旧 25 分钟续一次**（`KEEPALIVE_MS`）。理由两条：
- *     ① 续期只要 1 次/25 分钟，几乎零成本；② 币安一个账户的 listenKey 是**共享**的，
- *     我们停续会让它在 60 分钟后过期，顺手把用户自己那个量化程序的流也踢下线。
- *     留着 key ⇒ 醒来时**一次 REST 都不用打**，直接 `open()` 连回去。
- *
- * ⚠️ 为什么「有持仓 / 有挂单」就**不许**断（用户选的方案）：持仓期间的消息
- *    （止损触发、强平提醒、部分成交）是真要看的 —— 赌「反正有 REST 1 小时兜底」
- *    意味着用户不在线时账本会漂最多 1 小时。空仓无单时没有任何东西可错过，才敢断。
- *
- * 代价就是一条空闲 TCP：WS **不吃权重**（权重只算 REST），币安侧只有
- * 300 次握手 / 5 分钟 / IP 的限制，稳态连着不花钱 —— 所以断的是「整洁」，
- * 不是「省钱」。真金白银的省在 REST 那三档（见 `TIER_GAPS`）。
- */
-const WS_SLEEP_AFTER_MS = Number(
-  process.env.EXCHANGE_WS_SLEEP_MS ?? 10 * 60 * 1000
-)
-
-/**
- * `deaf`（连 ping 都收不到）持续这么久 ⇒ 认定是**半开连接**，强制重连一次。
- *
- * ⚠️ 为什么要（2026-10-06 补）：NAT / 代理 / 负载均衡会**静默**吞掉连接 ——
- *    TCP 还以为活着，我们既不收事件也不收 ping，而 `close` 事件永远不来。
- *    只靠 `deaf` 标记只是「改用 REST 兜底」，那条死连接会一直挂到进程重启，
- *    用户不在线时正好是最需要它自愈的时候。
+ * `deaf` 持续这么久 ⇒ 按**半开连接**处理，强制重连一次。
+ * ⚠️ NAT / 代理会静默吞掉连接（`close` 事件永远不来），只标 deaf 的话那条死连接
+ *    会一直挂到进程重启。另外 `deaf` 期间**曲线点不写**（见 `writeLivePoint`）。
  */
 const WS_DEAF_RESTART_MS = Number(
   process.env.EXCHANGE_WS_DEAF_RESTART_MS ?? 10 * 60 * 1000
@@ -355,7 +228,7 @@ async function listKeys(): Promise<KeyRow[]> {
   /*
    * ⚠️ `id` / `user_id` 是 BIGINT，`pg` 返回的是**字符串** —— 一定要在这里转成数字，
    *    否则 `KeyRow.id: number` 这个类型就在说谎，而下游（`emit` / `streams` 的键）
-   *    会跟别处 `Number()` 过的值对不上（2026-10-06 那个「事件静默丢失」的根因）。
+   *    会跟别处 `Number()` 过的值对不上。
    *    `keyOf()` 那层也兜了一道，但源头也别留着坑。
    */
   return rows.map(r => ({
@@ -387,7 +260,7 @@ function credsOf(r: KeyRow): ExchangeCredentials {
 /**
  * 用户数据流的 WS 地址（沙盒是另一台主机）。
  *
- * ★★ 2026-10-06 实测（真账户 + 真事件）：**必须带 `/private`**。
+ * ★ *必须带 `/private`**。
  *
  * ⚠️ `/ws/<listenKey>` 是个**陷阱**：它会正常返回 101、还会回 ping，
  *    但**一个业务帧都不推** —— 看起来跟「账户没动静」完全一样。
@@ -433,7 +306,7 @@ export type ExchangeEvent =
   /**
    * **挂单变了**（挂上 / 撤了 / 成交了 / 过期了）。
    *
-   * ★ 2026-10-06 加，用户原话：「挂单不是秒级查询啊，有变动才改，其余存库不就行了」——
+   * 「挂单不是秒级查询啊，有变动才改，其余存库不就行了」——
    *   现在挂单**存库**（`exchange_open_orders`），WS 的 `ORDER_TRADE_UPDATE`
    *   负责秒级改，REST 只做兜底对账；前端拿的是本地读（毫秒级）。
    *   前端收到这条就重读一次（本地，几乎零成本）。
@@ -448,7 +321,7 @@ const listenerSets = new Map<number, Set<(ev: ExchangeEvent) => void>>()
  * 把 key_id 归一成**数字**。⚠️⚠️ 这两个函数（`emit` / `subscribeExchange`）**必须**
  * 用同一把钥匙，所以统一走这里。
  *
- * ★ 2026-10-06 查出来的大 bug：`user_exchange_keys.id` 是 **BIGSERIAL（bigint）**，
+ * `user_exchange_keys.id` 是 **BIGSERIAL（bigint）**，
  *   `pg` 为了不丢精度把 bigint 返回成**字符串**（`'7'`），而
  *   `db/exchange-keys.ts` 那边又 `Number()` 回了数字 `7`。
  *   于是 `subscribeExchange(7)` 往 map 里写**数字键**，
@@ -474,13 +347,6 @@ function keyOf(keyId: number | string): number {
  */
 function listenerCount(keyId: number | string): number {
   return listenerSets.get(keyOf(keyId))?.size ?? 0
-}
-
-/** 毫秒 → 「10 分钟 / 45 秒」这种给人看的写法（日志 / 断流原因用） */
-function humanMs(ms: number): string {
-  return ms >= 60_000
-    ? `${Math.round(ms / 60_000)} 分钟`
-    : `${Math.round(ms / 1000)} 秒`
 }
 
 function emit(keyId: number | string, ev: ExchangeEvent): void {
@@ -534,7 +400,7 @@ export function subscribeExchange(
  * | `idle` | 无仓无单 + 10 分钟没动静 | 再降一档 |
  * | `asleep` | 空转 + 2 小时没动静 | 基本不管合约和订单，只留余额采样 |
  *
- * ⚠️ **没有「在线档」**（2026-10-06 用户明确否掉的）：「用户在线就没必要频繁对账，
+ * ⚠️ **没有「在线档」**：「用户在线就没必要频繁对账，
  *    感觉不对可以刷新页面」—— 在线的实时性由 **WS 推送 + 本地标记价重算** 保证，
  *    REST 只是兜底，所以在线**也不提速**。
  *
@@ -555,13 +421,20 @@ const TIER_GAPS: Record<
     fill: FILL_RECONCILE_MS,
     orders: ORDERS_RECONCILE_MS,
     income: INCOME_RECONCILE_MS,
-    sample: 0
+    /*
+     * **活跃档的采样也从「5 分钟一发」改成 1 小时**。
+     *   原来那发 25 权重买的是「曲线的点」，而曲线的点现在由
+     *   **0 权重的 `writeLivePoint`** 提供 ⇒ REST 只需要当**校准**
+     *   （c2c / 现货 / 可用余额 / 资产明细 + 防漂移），1 小时足够。
+     *   实测：每套账户从 ≈6.8 权重/分钟 降到 ≈0.8。
+     */
+    sample: SAMPLE_CALIBRATE_MS
   },
   idle: {
     fill: FILL_RECONCILE_MS_IDLE,
     orders: ORDERS_RECONCILE_MS_IDLE,
     income: INCOME_RECONCILE_MS_IDLE,
-    sample: SAMPLE_IDLE_MS
+    sample: SAMPLE_CALIBRATE_MS
   },
   asleep: {
     /*
@@ -572,8 +445,8 @@ const TIER_GAPS: Record<
     fill: 4 * 60 * 60 * 1000,
     orders: 4 * 60 * 60 * 1000,
     income: 4 * 60 * 60 * 1000,
-    /* ⚠️ 余额**不跟着睡觉**：曲线要连续（用户明确要求），而且 C2C 只有 REST 有 */
-    sample: ASLEEP_MS
+    /* ⚠️ 校准**不跟着睡觉**：C2C / 现货只有 REST 有，曲线要连续 */
+    sample: SAMPLE_CALIBRATE_MS
   }
 }
 
@@ -608,7 +481,7 @@ class KeyStream {
    * 上游最后**任何动静**的时间 —— 数据帧**或**协议级 ping 都算。
    *
    * ⚠️ 判死活只能用它：币安每 3 分钟一个 ping 帧（控制帧，不进 `message` 回调）。
-   *    只看数据帧会把「空闲」误判成「哑了」（2026-10-06 我就这么误判过一次）。
+   *    只看数据帧会把「空闲」误判成「哑了」。
    */
   private lastAliveAt = 0
   /** 收到过几个 ping（排查用：0 = 连上了但连心跳都没收到） */
@@ -631,14 +504,6 @@ class KeyStream {
   private wakeAgain = false
   /** 当前是否处于「哑了」状态（用来只在翻转时发一次通知） */
   private deaf = false
-  /**
-   * 上游 WS 是不是被我们**主动断开**了（见 `WS_SLEEP_AFTER_MS`）。
-   * ⚠️ 跟「断了在等重连」不是一回事：这个状态下**不要**判 deaf、**不要**自动重连，
-   *    只在「有人来 / 账户又有敞口」时才连回去（`wakeWs`）。
-   */
-  private wsSleeping = false
-  /** 最近一次「没人订阅」的开始时刻（0 = 现在有人看）—— 断流条件的计时起点 */
-  private offlineSince = 0
   /** 最近一次因为 `deaf` 强制重连的时刻（防重连风暴） */
   private lastDeafRestartAt = 0
   /** 定期对账的三个水位 */
@@ -669,7 +534,7 @@ class KeyStream {
   /**
    * 事件触发的快照：打了几发 / 因为什么跳过 —— **一分钟一行摘要**。
    *
-   * ⚠️ 为什么需要（2026-10-06 用户要求「放在进程里校验」）：
+   * ⚠️ 为什么需要：
    *    `快照已写（ws）` 只在**真的写库**时打一行；被 180 秒节流（或者按新规则「没人看」跳过）时
    *    日志里**一个字都没有** —— 从外面看跟「压根没触发」完全一样，排查时只能翻库。
    *    有这行就能只看进程日志回答：REST 到底打没打、跳过是因为没人看还是刚写过。
@@ -710,19 +575,12 @@ class KeyStream {
         console.log(`${this.tag} listenKey 就绪（${this.listenKey.length} 位）`)
       }
       setStreamActive(this.row.id, true)
-      /* 要连回去了 ⇒ 不再是「睡着的流」（见 `WS_SLEEP_AFTER_MS`） */
-      this.wsSleeping = false
-      /*
-       * 「没人看」的计时从起流这一刻算 —— 否则要等第一轮健康检查（30 秒后）
-       * 才会记下这个起点，断流条件白等一个周期。
-       */
-      if (!listenerCount(this.row.id)) this.offlineSince = Date.now()
       void this.open()
       if (!this.keepTimer) {
         this.keepTimer = setInterval(() => void this.keepAlive(), KEEPALIVE_MS)
       }
       /*
-       * ★ 定期对账 + 健康检查（2026-10-06 加）。
+       * ★ 定期对账 + 健康检查。
        * ⚠️ 必须**无条件**起，不能等 `open`：`open` 只证明连上了，
        *    证明不了**事件一定都会到**。丢事件有好几种真实原因
        *    （重连空档、listenKey 失效、进程重启、上游偶发丢帧），
@@ -730,8 +588,8 @@ class KeyStream {
        */
       if (!this.reconTimer) {
         /*
-         * ★ 水位不再置 0（2026-10-06 第三轮）：三条兜底拉到 4/6/8 小时之后，
-         *   如果水位还是 0，第一轮 tick 就会把它们**各打一遍**（成交 ≤40 + income 30 + 挂单 40），
+         * ★ 水位不再置 0：三条兜底拉到 4/6/8 小时之后，
+         *   如果水位还是 0， tick 就会把它们**各打一遍**（成交 ≤40 + income 30 + 挂单 40），
          *   而这几件事**起流那会儿刚做过**（`reconcile('boot')` 补快照 + 成交 + 挂单）。
          *   代价从 110 权重变成 40 + 一次性的 income 30（见 `reconcile` 里 boot 那一发）。
          *
@@ -784,7 +642,7 @@ class KeyStream {
     })
     ws.on('message', (d: Buffer) => {
       /*
-       * ⚠️ 必须 `.catch`（2026-10-06 加）：`onMessage` 是 async，里面任何一处抛
+       * ⚠️ 必须 `.catch`：`onMessage` 是 async，里面任何一处抛
        *    （库里报错、解析出 NaN、字段缺失导致的 TypeError）原来都会变成
        *    **一次「没处理的 Promise 拒绝」** —— 事件静默消失，日志一个字没有，
        *    排查时跟「事件根本没到」**完全分不出来**。这个坑跟
@@ -797,7 +655,7 @@ class KeyStream {
       )
     })
     /*
-     * ★ 协议级 ping（2026-10-06 加）—— 这是**判断流死活**的唯一可靠信号。
+     * ★ 协议级 ping—— 这是**判断流死活**的唯一可靠信号。
      *
      * ⚠️ 我一开始把「没有数据帧」当成「流哑了」，那是**错的**：
      *    币安的用户数据流**只在有事件时推数据**，账户半天不动就是一个数据帧都没有。
@@ -839,7 +697,7 @@ class KeyStream {
     /* 刚才补过成交了 ⇒ 水位跟上，别让 30 分钟的 tick 再白打一遍（≤40 权重） */
     this.lastFillReconcileAt = Date.now()
     /*
-     * ★ 起流那一发**顺带把「盈亏」那本账也拉一次**（2026-10-06 第三轮）。
+     * ★ 起流那一发**顺带把「盈亏」那本账也拉一次**。
      *   income 只有 30 权重、每个进程每套 key 一次；不拉的话新账户的「盈亏」tab 会空着，
      *   而它自己的兜底周期已经拉到 8 小时（资金费就是 8 小时结一次）。
      */
@@ -972,7 +830,7 @@ class KeyStream {
       raw: t?.info ?? t
     }
     /*
-     * ★ REST 这条路也顺手把钱账本写上（2026-10-06）。
+     * ★ REST 这条路也顺手把钱账本写上。
      *
      * 为什么不全指望 `reconcileIncome()`：那个接口**权重 30**，10 分钟才跑一轮，
      * 刚减的仓要等最多 10 分钟才进「盈亏」。而这里的数据跟 income 接口同源
@@ -999,7 +857,7 @@ class KeyStream {
       ev = JSON.parse(raw)
     } catch {
       /*
-       * ★ 解析失败**不能静默**（2026-10-06 加）：经出口隧道时帧有可能被截断 / 拼坏，
+       * ★ 解析失败**不能静默**：经出口隧道时帧有可能被截断 / 拼坏，
        *   而「解析失败 → 直接 return」看起来跟「事件没来」**一模一样**，
        *   排查时能白找一整天。把前 120 个字符打出来（限流，别刷屏）。
        */
@@ -1014,7 +872,7 @@ class KeyStream {
     }
     const e = String(ev?.e ?? '')
     /*
-     * ★ 事件帧统一在这儿计数 + 打头几行（2026-10-06 加）。
+     * ★ 事件帧统一在这儿计数 + 打头几行。
      *
      * 为什么值得：用户问过一次「减仓后没有推送事件吗」—— 那会儿**日志答不了**这个问题
      *   （只有订单事件自带一行，`ACCOUNT_UPDATE` 一条都不记）。现在「这条流到底进不进事件」
@@ -1041,7 +899,7 @@ class KeyStream {
       if (e === 'TRADE_LITE') return
       if (e === 'ACCOUNT_UPDATE') {
         /*
-         * ★ 2026-10-06（用户贴了币安文档问「有用到这个吗」）：**用上事件里带的数据**。
+         * **用上事件里带的数据**。
          *
          * 原来这里只把事件当触发信号，收到就去 REST 拉一次完整快照 ——
          * 事件里的 `a.B[].wb`（钱包余额）和 `a.P[]` 的 `pa/ep/up`（持仓量 / 开仓价 /
@@ -1059,7 +917,7 @@ class KeyStream {
          * 那些仍然要靠 REST，但**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
          * 例外：出现了**没见过的**仓位 ⇒ 立刻要一次，否则那一行会缺杠杆/强平价。
          *
-         * ★ 2026-10-06 再收一刀（用户：「没必要每次都请求采集吧」）：**没人看就不打**。
+         * 「没必要每次都请求采集吧」）：**没人看就不打**。
          *   那一发 25 权重纯粹是为了**给人看**的展示字段（可用余额 / 资产明细 / C2C / 现货）；
          *   钱包余额、持仓、浮盈这几项上面已经**就地从事件里改对了**，一秒都不差。
          *   没人看的时候不补展示字段，DB 曲线由 1 小时采样负责；
@@ -1100,7 +958,7 @@ class KeyStream {
       }
     } catch (err) {
       /*
-       * ★ 处理抛错**必须留痕**（2026-10-06 加）：否则一次 TypeError 就等于
+       * ★ 处理抛错**必须留痕**：否则一次 TypeError 就等于
        *   「这笔成交凭空消失」，下次再遇到又只能猜。
        */
       console.warn(
@@ -1111,7 +969,7 @@ class KeyStream {
   }
 
   /**
-   * `ACCOUNT_UPDATE` 里带的数据**当场就用**（2026-10-06）。
+   * `ACCOUNT_UPDATE` 里带的数据**当场就用**。
    *
    * 币安这个事件里有：
    *
@@ -1255,17 +1113,16 @@ class KeyStream {
   /**
    * REST **对账**挂单（兜底）：拿交易所那一份替换本地。
    *
-   * 什么时候跑：连上 / 重连（`reconcile()`）、启动后第一轮、以及每 2 分钟一轮。
+   * 什么时候跑：连上 / 重连（`reconcile()`）、启动后以及每 2 分钟一轮。
    * ⚠️ 带不带 symbol 差 40 倍权重（不带 = 40），所以**不能勤**；
    *    但正因为挂单现在有 WS 那条路，这里本来就只需要兜底。
    */
   /**
-   * 全量采样（外层那个 5 分钟定时器调）——**曲线的源，也是钱包 / C2C 唯一的取数路**。
+   * REST **校准**（`fetchExchangeOverview` ≈ 25 权重）—— 三档现在都是 1 小时一轮。
    *
-   * 三档（`fetchExchangeOverview` ≈ 21 权重）：
-   *   · 活跃 —— 5 分钟一次（外层定时器的节奏，这里不拦）；
-   *   · 空转 —— `SAMPLE_IDLE_MS`（空账户的钱不会变）；
-   *   · 睡着 —— `ASLEEP_MS`（**照采**，用户要求「余额要管要做曲线图」，断采曲线就断档）。
+   * ⚠️ 2026-10-07（方案 A）之前它是**曲线的源**（活跃档 5 分钟一发）；
+   *    现在曲线由 0 权重的 `writeLivePoint` 提供，它退成纯校准：
+   *    刷 c2c / 现货 / 可用余额 / 资产明细 + 用交易所口径覆盖内存那份防漂移。
    */
   async sampleIfDue(): Promise<void> {
     const gap = TIER_GAPS[this.tierNow()].sample
@@ -1286,16 +1143,8 @@ class KeyStream {
   }
 
   /**
-   * 上游 WS 是不是**被我们主动断开**了（省连接，见 `WS_SLEEP_AFTER_MS`）。
-   * ⚠️ 跟「断线在等重连」不是一回事：这个状态下不该判 `deaf`，也不该自动重连。
-   */
-  wsIsSleeping(): boolean {
-    return this.wsSleeping
-  }
-
-  /**
    * 现在按哪一档（见 `Tier` / `TIER_GAPS`）。
-   * ⚠️ **不看有没有人在线** —— 见 `Tier` 那段（用户 2026-10-06 明确否掉在线档）。
+   * ⚠️ **不看有没有人在线** —— 见 `Tier` 那段。
    */
   private tierNow(): Tier {
     /*
@@ -1328,10 +1177,10 @@ class KeyStream {
   /**
    * 有人回来了 —— **按需补账**（订阅 / 写操作 / 用户手动刷新都走这里）。
    *
-   * ★ 2026-10-06 用户定的口径：「**只有没数据才请求**」「用户感觉不对可以刷新页面」。
+   * 「**只有没数据才请求**」「用户感觉不对可以刷新页面」。
    *   所以这里**不是**「一有人打开就打一遍交易所」，而是分两种：
    *
-   *   · `force = true`（用户按了刷新 / 下拉刷新）—— 当场对平，只受 `FORCED_MIN_MS`
+   *   · `force = true`—— 当场对平，只受 `FORCED_MIN_MS`
    *     （3 秒）拦住连点；
    *   · 否则 —— 只在**数据已经旧了**（`FRESH_MS` = 60 秒）时才补一轮。
    *     刚被 SSE 推过的账户一次请求都不发（切个 tab 回来不该打交易所）。
@@ -1356,19 +1205,17 @@ class KeyStream {
       skipFills = false
     } = opts
     this.lastActivityAt = Date.now()
-    /* ★ 有人回来了（打开页面 / 手动刷新 / 写操作）⇒ 睡着的上游 WS 立刻连回去 */
-    this.wakeWs(reason)
     const now = Date.now()
     if (force) {
       /* 连点几下别把这一套账户的权重全花在一秒里（前端另有防抖） */
       if (now - this.lastForcedAt < FORCED_MIN_MS) return
       this.lastForcedAt = now
     } else if (now - this.lastSampleAt < FRESH_MS) {
-      /* 数据还新鲜 ⇒ 一次都不请求（用户：「只有没数据才请求」） */
+      /* 数据还新鲜 ⇒ 一次都不请求 */
       return
     }
     /*
-     * ★ 同一套账户，**同一时刻只跑一轮补账**（2026-10-06 加）。
+     * ★ 同一套账户，**同一时刻只跑一轮补账**。
      *
      * ⚠️ 为什么必须拦：进程刚起来时 `lastSampleAt = 0`，而几个页面（甚至一个页面的
      *    几个订阅）会同时接上 SSE —— 每条订阅都调一次 `wake`、每个都判定「数据旧了」，
@@ -1487,7 +1334,7 @@ class KeyStream {
   /**
    * 有人打开页面 ⇒ 按需补一次（**轻量版**）。
    *
-   * ★ 2026-10-06（WS 路径修好之后）：余额 / 持仓 / 成交 / 挂单现在都由事件**实时**维护
+   * 余额 / 持仓 / 成交 / 挂单现在都由事件**实时**维护
    *   （余额和持仓甚至 0 权重就地更新，见 `applyAccountUpdate`）⇒ 打开页面时
    *   **只有「汇总口径 + 资产曲线」需要 REST**。
    *   原来这里跑的是全量（快照 25 + 成交 ≤40 + 账本 30 + 挂单 40 ≈ 100+ 权重），
@@ -1551,7 +1398,7 @@ class KeyStream {
   /**
    * 有成交落地 ⇒ 持仓集合可能变了 ⇒ 顺手对齐一次。
    *
-   * ★ 2026-10-06 加（用户问「用户不在线怎么办后续数据怎么更新」）：
+   * ★ 2026-10-06 加：
    *   ⚠️ 原来 `syncMarks()` **只在 `snapshot()` 里调**，而快照是 **5 分钟**一次。
    *   所以「开了一个新仓」之后，那 5 分钟里**没有给这个币订标记价** ——
    *   未实现盈亏就一直停在开仓那一刻的数（有人看还是没人看都一样）。
@@ -1569,7 +1416,7 @@ class KeyStream {
   /**
    * `ALGO_UPDATE` —— **条件单（止盈 / 止损）**的生命周期。
    *
-   * ★ 2026-10-06 加：WS 路径修好（`/private/ws/`）之后**第一天就抓到**的第二个坑 ——
+   * WS 路径修好（`/private/ws/`）之后**第一天就抓到**的第二个坑 ——
    *   币安把条件单搬到了 Algo Order 那套接口，它的事件类型是 **`ALGO_UPDATE`**，
    *   字段在 `o` 里、用 **`aid`**（不是普通单的 `i`）：
    *
@@ -1629,18 +1476,18 @@ class KeyStream {
     const tradeId = String(o?.t ?? '')
     const lastQty = Number(o?.l ?? 0)
     /*
-     * ★ 一行把「这个事件到底长什么样」记全（2026-10-06 加）。
+     * ★ 一行把「这个事件到底长什么样」记全。
      *
      * 为什么值得：11:02 那笔减仓没进账本时，我手上**没有任何证据**说
      * 「事件到没到服务端」—— 只能靠猜（还猜错了，见 `checkHealth`）。
-     * 订单事件本来就不多（用户自己下单才有），全记下来不影响日志量，
+     * 订单事件本来就不多，全记下来不影响日志量，
      * 下次再漏就是一行就能定位的事。
      */
     console.log(
       `${this.tag} 订单事件 s=${o?.s} x=${o?.x} X=${o?.X} t=${tradeId} l=${o?.l}`
     )
     /*
-     * ★ 先处理**挂单生命周期**（2026-10-06）：挂单存库、由这条事件流实时维护。
+     * ★ 先处理**挂单生命周期**：挂单存库、由这条事件流实时维护。
      *   `X` = 订单状态：
      *     NEW / PARTIALLY_FILLED  → 还挂着（部分成交也算挂着，量要更新）
      *     FILLED / CANCELED / EXPIRED / REJECTED → 不在了
@@ -1666,7 +1513,7 @@ class KeyStream {
     try {
       const isNew = await upsertFill(this.row.user_id, this.row.id, fill)
       /*
-       * ★ 钱账本同写一份（2026-10-06）：WS 这一帧里其实**同时带着**已实现盈亏和手续费，
+       * ★ 钱账本同写一份：WS 这一帧里其实**同时带着**已实现盈亏和手续费，
        *   以前只把 `rp` 塞进成交表、手续费只留在成交行里没进「盈亏」口径。
        *   `tranId` 用**成交号** —— 跟 REST `/fapi/v1/income` 給的 `tranId` 是同一个，
        *   所以这两条路会自然撞在同一个唯一键上，不会记两遍。
@@ -1734,7 +1581,7 @@ class KeyStream {
   }
 
   /**
-   * **定期 REST 对账**（2026-10-06 加）—— 钱记得对不对不能押在一条 WS 上。
+   * **定期 REST 对账**—— 钱记得对不对不能押在一条 WS 上。
    *
    * 两条线，节奏不同：
    *   · 成交（`fetchMyTrades`，权重 5/币）：`FILL_RECONCILE_MS` 一轮，往前看 24 小时；
@@ -1745,8 +1592,8 @@ class KeyStream {
   /**
    * 这套账户现在**有没有敞口**：有持仓或有挂单。
    *
-   * 用途：断流条件之一（见 `WS_SLEEP_AFTER_MS`）—— 有敞口时 **不许**断，
-   * 因为那正是「一个事件都不能错过」的时候。
+   * 用途：`isIdle()` 降频判据的一部分（有敞口就不算空转）。
+   * ⚠️ 2026-10-07 之前它还兼任「不许断 WS」的判据，那个断流流程已经撤了。
    */
   private hasExposure(): boolean {
     const hasPos = (this.lastOverview?.futures.positions?.length ?? 0) > 0
@@ -1854,19 +1701,6 @@ class KeyStream {
    */
   private checkHealth(): void {
     if (this.stopped) return
-    /* 有人看吗 —— 断流 / 唤醒都靠这个信号（SSE 订阅 = 用户在线） */
-    const watchers = listenerCount(this.row.id)
-    if (watchers > 0) this.offlineSince = 0
-    else if (!this.offlineSince) this.offlineSince = Date.now()
-    if (this.wsSleeping) {
-      /*
-       * 我们**故意**断的：不判 deaf、不打统计（免得 5 分钟一行 0 帧刷屏）。
-       * 一有人来 / 账户重新有敞口就立刻连回去（REST 1 小时兜底期间发现的也算）。
-       */
-      if (watchers > 0) this.wakeWs('有人打开页面')
-      else if (this.hasExposure()) this.wakeWs('账户重新有持仓 / 挂单')
-      return
-    }
     /*
      * ⚠️ 判据是「**任何动静**都没有」（数据帧或 ping），不是「没有数据帧」——
      *    空闲的账户本来就不推数据。
@@ -1874,14 +1708,14 @@ class KeyStream {
     const silentMs = Date.now() - this.lastAliveAt
     const deaf = silentMs > WS_DEAF_MS
     /*
-     * ★ 线级统计（2026-10-06 加，用户问「减仓后没有推送事件吗」）。
+     * ★ 线级统计。
      *
      * 排查「上游到底推没推」时，我们原来的日志**答不了**：
      * `ping` 是控制帧、`dataFrames` 是我们自己数的、`badFrames` 只记解析失败的。
      * **`bytesRead` 才是硬指标**，两种情况一眼分得开：
      *   · 字节只涨几十（心跳每 3 分钟一次，2~7 字节/帧）⇒ 业务帧**根本没到这条连接**；
      *   · 字节涨了不少而 `dataFrames` 还是 0 ⇒ 字节到了、我们没接住，那是**我们自己的问题**。
-     * 第一轮 + 之后每 10 轮（5 分钟）打一行，不刷屏。
+     *  + 之后每 10 轮（5 分钟）打一行，不刷屏。
      */
     this.healthTick++
     if (this.healthTick === 1 || this.healthTick % 10 === 0) {
@@ -1904,77 +1738,88 @@ class KeyStream {
       emit(this.row.id, {type: 'health', deaf})
     }
     if (deaf) this.restartIfStuck()
-    if (this.shouldSleepWs()) this.sleepWs()
   }
 
-  /* ---------------- 上游 WS 的终止 / 唤醒（生命周期） ---------------- */
+  /* ---------------- 曲线（净值点）与 REST 校准 ---------------- */
 
   /**
-   * 现在该不该**断掉**上游 WS —— 见 `WS_SLEEP_AFTER_MS` 的四条判据。
+   * ★ *曲线的一拍**。
    *
-   * ⚠️ 安静计时取「账户最后有动静」和「最后一个人离开」里**更晚**的那个：
-   *    用户刚关页面但账户 1 分钟前才平过仓，两边都不该立刻断。
+   * 由那个 5 分钟定时器调（`startSnapshotSampler`），做两件事，**顺序不能反**：
+   *
+   *   ① `writeLivePoint()` —— 把内存里那份（WS 维护的）净值**就地落库**：**0 权重**。
+   *      这是曲线的**密度来源**，与档位、与有没有人看、与是不是空仓**全都无关**。
+   *   ② `sampleIfDue()` —— 按档位决定要不要再打一发 REST 全量（现在三档都是 **1 小时**）：
+   *      它是**校准**（c2c / 现货 / 可用余额 / 资产明细只有 REST 有）+ 防漂移。
+   *
+   * ⚠️ 为什么曲线要独立于「有没有人看」：原来曲线靠 REST 采样，而采样节奏跟档位绑定
+   *    （活跃 5 分钟 / 空转睡着 1 小时）⇒ 夜里没人看时 1D 图上只有 24 个点，
+   *    而 1D 图的桶宽是 5 分钟（288 个桶）⇒ **看着就是断的**。
+   *    现在密度由 0 权重的 live 点保证，REST 才能安心退到 1 小时。
    */
-  private shouldSleepWs(): boolean {
-    if (this.stopped || this.wsSleeping || !this.ws) return false
-    if (listenerCount(this.row.id) > 0) return false
-    /*
-     * ⚠️ **没拿到过快照就不许断**：`hasExposure()` 靠 `lastOverview` 判「空仓」，
-     *    它为空说明我们**根本不知道**有没有持仓（启动时那一发被限流挡了、或者一直失败）。
-     *    不知道就不动 —— 断流的代价是「持仓期间的事件全丢」，不能靠猜。
-     */
-    if (!this.lastOverview) return false
-    if (this.hasExposure()) return false
-    const quietFrom = Math.max(this.lastActivityAt, this.offlineSince)
-    return Date.now() - quietFrom > WS_SLEEP_AFTER_MS
+  async curveTick(): Promise<void> {
+    if (this.stopped) return
+    await this.writeLivePoint()
+    await this.sampleIfDue()
   }
 
   /**
-   * 断掉上游 WS（**只断连接**，listenKey 照旧续期 —— 理由见 `WS_SLEEP_AFTER_MS`）。
+   * 用**内存里那份**（WS 维护的钱包 + 标记价口径的浮盈）写一个净值点。
    *
-   * ⚠️ `removeAllListeners()` 必须在 `close()` 之前：不然我们自己那个
-   *    `close` 处理函数会把它当成「意外断开」→ `retryLater()` → 白重连一次。
+   * ⚠️ 什么时候**不能**写（否则曲线会骗人）：
+   *   · 还没有底稿（`lastOverview` 为空）—— 不知道有多少钱；
+   *   · **流哑了（`deaf`）/ WS 没连着** —— 内存那份是**冻结**的旧值，
+   *     照写会在曲线上画出一条假的平线（比断档更糟，那是"编数据"）。
+   *     这种情况退回 REST 采样（下面那个 `snapshot('poll')`），也就是**原来的行为**：
+   *     宁可多花 25 权重，也不能让曲线说谎，更不能让它断。
    */
-  private sleepWs(): void {
-    this.wsSleeping = true
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer)
-      this.retryTimer = null
+  private async writeLivePoint(): Promise<void> {
+    const ov = this.lastOverview
+    const wsLive = !this.deaf && this.wsOpen()
+    if (!ov || !wsLive) {
+      await this.snapshot('poll', WS_SNAPSHOT_GAP_SEC)
+      return
     }
-    /* 空仓 + 没人看 ⇒ 标记价（每秒 1 条/币）也没有意义了 */
-    this.stopMarks()
-    /* 流不再是「持仓的权威来源」⇒ 让 REST 别拿缓存里的旧持仓顶事（见 position-cache） */
-    setStreamActive(this.row.id, false)
     try {
-      this.ws?.removeAllListeners()
-      this.ws?.close()
-    } catch {
-      /* 关不干净无所谓 */
+      await saveSnapshot(this.row.user_id, this.row.id, this.liveOverview(ov, true), {
+        source: 'live'
+      })
+    } catch (e) {
+      console.warn(
+        `${this.tag} 曲线点写入失败（不影响别的）：${(e as Error).message.slice(0, 120)}`
+      )
     }
-    this.ws = null
-    this.deaf = false
-    console.log(
-      `${this.tag} 上游 WS 断开（没人看 + 空仓无挂单 ${humanMs(
-        WS_SLEEP_AFTER_MS
-      )}；listenKey 照续，页面一开就重连）`
-    )
+  }
+
+  /** 上游那条 WS 现在是不是**连着**（`readyState === OPEN`） */
+  private wsOpen(): boolean {
+    return (this.ws as unknown as {readyState?: number})?.readyState === 1
   }
 
   /**
-   * 有人回来了 / 账户又有敞口 ⇒ 立刻把上游 WS 连回来。
+   * 把一份快照换成「**当前时刻的口径**」：`useMarks` 时用标记价重算每条持仓的浮盈，
+   * 并把 `unrealized` / `margin` 一起算齐（`margin = wallet + unrealized`，
+   * 跟 REST 的 `totalMarginBalance`、跟 `pushLive` 完全同一个算法）。
    *
-   * 不用 `restart()`：那样会把对账 / 健康 / 续期三个定时器全拆了重建
-   * （顺带把水位清零、多打一轮 income）。这里只要那条连接，
-   * 连上之后 `open()` 里挂的 `on('open')` 会自己 `reconcile('ws')` 把断线期间的账补上。
+   * ⚠️ 一份数、两个用途（曲线点 + 前端推送）都走这里 —— 两处各算一遍迟早会算出两个数。
    */
-  private wakeWs(reason: string): void {
-    if (!this.wsSleeping || this.stopped) return
-    this.wsSleeping = false
-    this.lastAliveAt = Date.now()
-    this.healthTick = 0
-    setStreamActive(this.row.id, true)
-    console.log(`${this.tag} 上游 WS 重连（${reason}）`)
-    void this.open()
+  private liveOverview(ov: ExchangeOverview, useMarks: boolean): ExchangeOverview {
+    const positions = ov.futures.positions.map(p => {
+      const raw = this.rawOf(p.symbol)
+      return withMark(p, useMarks && raw ? this.marks.get(raw) : undefined)
+    })
+    const unrealized = r8(
+      positions.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0)
+    )
+    return {
+      ...ov,
+      futures: {
+        ...ov.futures,
+        positions,
+        unrealized,
+        margin: r8(ov.futures.wallet + unrealized)
+      }
+    }
   }
 
   /**
@@ -1995,11 +1840,9 @@ class KeyStream {
 
   /**
    * 「账户里真有动静」的统一入口 —— **只许在真有事时调**（见 `lastActivityAt` 的告警）。
-   * 睡着的流被它叫醒：REST 兜底期间发现的成交 / 挂单变动也算动静。
    */
   private noteActivity(): void {
     this.lastActivityAt = Date.now()
-    this.wakeWs('账户有动静')
   }
 
   /**
@@ -2177,25 +2020,6 @@ class KeyStream {
       if (typeof this.ex?.fapiPrivatePutListenKey !== 'function') return
       await this.ex.fapiPrivatePutListenKey({listenKey: this.listenKey})
     } catch (e) {
-      /*
-       * ★ 睡着的流（`wsSleeping`，见 `WS_SLEEP_AFTER_MS`）只**换一把新 key**，
-       *   别顺手把连接连回来 —— 那会把「没人看就断」的决定白做一遍。
-       *   key 也不能不管：它是共享的，过期了会连带踢掉用户的量化程序。
-       */
-      if (this.wsSleeping) {
-        console.warn(
-          `${this.tag} 续期失败（${(e as Error).message.slice(0, 100)}），` +
-            `流是睡着的 ⇒ 只重建 listenKey，不连回去`
-        )
-        try {
-          this.listenKey = String(
-            (await this.ex?.fapiPrivatePostListenKey())?.listenKey ?? ''
-          )
-        } catch {
-          /* 拿不到就等下一次续期再试 */
-        }
-        return
-      }
       console.warn(
         `${this.tag} 续期失败（${(e as Error).message.slice(0, 100)}），重建流`
       )
@@ -2305,7 +2129,7 @@ export async function reconcileKeyOrders(keyId: number): Promise<void> {
    * ⚠️ 写操作 = 「这套账户有人在用」⇒ 顺手把它从沉睡里叫醒（`skipOrders`：
    *    下面这句马上就要对一次挂单，别白问两遍那 40 权重）。
    *
-   * ★ `force` + `skipIncome`（2026-10-06 加）：写操作之后**必须当场把持仓也对平**。
+   * ★ `force` + `skipIncome`：写操作之后**必须当场把持仓也对平**。
    *
    * ⚠️ 原来这里不带 `force` ⇒ `wake` 那一套被 `FRESH_MS`（60 秒）拦住：
    *    一分钟内已经采过一次快照，减完仓**就只对了一次挂单**，持仓数量（和由它算出来的
@@ -2321,7 +2145,7 @@ export async function reconcileKeyOrders(keyId: number): Promise<void> {
  * 「有人来 / 用户手动刷新」—— 让某套 key 立刻补账（见 `KeyStream.wake`）。
  *
  * 用途：① SSE 订阅时（有人打开页面）；
- *      ② `POST /api/exchange/refresh`（用户按 ⟳ / 下拉刷新）⇒ `force`。
+ *      ② `POST /api/exchange/refresh`⇒ `force`。
  */
 export function wakeExchangeStream(
   keyId: number | string,
@@ -2336,16 +2160,21 @@ export function wakeExchangeStream(
   streams.get(keyOf(keyId))?.wake(reason, opts)
 }
 
-/** 5 分钟采样（曲线 + 兜底对账；C2C 只能靠它） */
+/**
+ * ★ *曲线的心跳**（5 分钟一拍。
+ *
+ * 一拍做两件事（`curveTick` 里，顺序不能反）：
+ *   ① **写一个净值点**（用内存那份算，**0 权重**）—— 曲线的**密度**靠它，
+ *      与档位 / 有没有人看 / 空不空仓全都无关 ⇒ 1D 图整天都是 288 个点；
+ *   ② 按档位决定要不要再打一发 REST **校准**（三档现在都是 1 小时）。
+ *
+ * ⚠️ 所以 `SAMPLE_MS` 这里只是「写点 + 查一次到点没」的节拍，**不等于**打交易所的频率。
+ */
 export function startSnapshotSampler(): void {
   if (sampler) return
   sampler = setInterval(() => {
     void (async () => {
-      for (const s of streams.values()) {
-        // 采样点就是 REST 全量拉，跟对账是同一件事
-        // ⚠️ 走 `sampleIfDue()`：空转的账户会被拦成 30 分钟一次（见 `SAMPLE_IDLE_MS`）
-        await s.sampleIfDue()
-      }
+      for (const s of streams.values()) await s.curveTick()
     })()
   }, SAMPLE_MS)
 }
@@ -2368,24 +2197,18 @@ export function exchangeStreamStatus(): {
   keys: number
   listeners: number
   asleep: number
-  /** 上游 WS 被主动断开的条数（没人看 + 空仓，见 `WS_SLEEP_AFTER_MS`） */
-  sleeping: number
 } {
   let listeners = 0
   for (const set of listenerSets.values()) listeners += set.size
   let asleep = 0
-  let sleeping = 0
-  for (const s of streams.values()) {
-    if (s.isAsleep()) asleep++
-    if (s.wsIsSleeping()) sleeping++
-  }
-  return {keys: streams.size, listeners, asleep, sleeping}
+  for (const s of streams.values()) if (s.isAsleep()) asleep++
+  return {keys: streams.size, listeners, asleep}
 }
 
 /**
  * 把一条**外部取到的**快照推给订阅者。
  *
- * 为什么需要：`POST /api/exchange/refresh`（用户点 ⟳）是直接「取数 + 落库」，
+ * 为什么需要：`POST /api/exchange/refresh`是直接「取数 + 落库」，
  * 不经过 `KeyStream`，所以它自己不会 emit。不补这一下，用户点了刷新之后
  * **他自己另一个页面 / 另一个 tab 要等 5 分钟采样才看到新数**（只有那个请求的
  * 响应是新的）。

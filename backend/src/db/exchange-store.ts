@@ -14,7 +14,8 @@ import type {ExchangeOverview} from '../data/exchange-overview'
 
 /** 这一条快照是谁写的 */
 export type SnapshotSource =
-  | 'poll' // 5 分钟定时采样
+  | 'live' // ★ 曲线点：用内存那套 WS 数据就地算的，**0 权重**（5 分钟一个）
+  | 'poll' // REST 校准（三档都是 1 小时一轮）
   | 'ws' // WS 事件触发
   | 'manual' // 用户点刷新
   | 'bind' // 刚绑上这套 key（锚点）
@@ -29,7 +30,7 @@ export interface LatestSnapshot {
   source: string
   /** 离现在多少秒（前端显示「3 分钟前」） */
   ageSec: number
-  /** 超过 5 分钟（采样间隔）就算旧了 —— 前端据此决定要不要后台刷新 */
+  /** 超过 1 小时（校准间隔）就算旧了 —— 前端据此决定要不要后台刷新 */
   stale: boolean
   /** 采集时那一侧失败留下的原因（有值说明这条数据不完整） */
   err: string | null
@@ -65,13 +66,24 @@ function num(v: unknown): number {
   return Number.isFinite(x) ? x : 0
 }
 
-/** 上一条快照的时间（用来节流 + 算断档） */
-async function lastTakenAt(userId: number, keyId: number): Promise<number | null> {
+/**
+ * 上一条快照的时间（用来节流 + 算断档）。
+ *
+ * ⚠️ `excludeLive`：曲线点（`source='live'`）每 5 分钟就写一条，而校准的节流门是
+ *    「跟上一条**任意**快照的距离」—— 不排除 live 的话，每小时那发校准会被
+ *    「180 秒内刚写过」永远挡掉（曲线只剩本地算的值，没人跟交易所对过）。
+ */
+async function lastTakenAt(
+  userId: number,
+  keyId: number,
+  excludeLive = false
+): Promise<number | null> {
   const row = await queryOne<{t: string}>(
     `SELECT taken_at AS t FROM exchange_snapshots
       WHERE user_id = $1 AND key_id = $2 AND kind = '5m'
+        AND ($3::bool IS NOT TRUE OR source <> 'live')
       ORDER BY taken_at DESC LIMIT 1`,
-    [userId, keyId]
+    [userId, keyId, excludeLive]
   )
   return row ? new Date(row.t).getTime() : null
 }
@@ -91,7 +103,8 @@ export async function saveSnapshot(
   const {source = 'poll', err = null, minGapSec = 0} = opts
 
   if (minGapSec > 0) {
-    const last = await lastTakenAt(userId, keyId)
+    /* ⚠️ 曲线点不参与节流门（见 `lastTakenAt`）；曲线点自己不用节流（minGapSec = 0） */
+    const last = await lastTakenAt(userId, keyId, source !== 'live')
     if (last !== null && Date.now() - last < minGapSec * 1000) return false
   }
 
@@ -495,6 +508,8 @@ export async function latestSnapshot(
             positions, assets, c2c_total, c2c_detail, spot_usdt
        FROM exchange_snapshots
       WHERE user_id = $1 AND key_id = $2 AND kind = '5m'
+        /* ★ 排除曲线点：它是本地算的净值，缺 c2c 明细 / 资产明细那几列 */
+        AND source <> 'live'
       ORDER BY taken_at DESC LIMIT 1`,
     [userId, keyId]
   )
