@@ -191,7 +191,7 @@ import {
 import {
   STORE_MAX_LIMIT,
   getLatestCandles,
-  startKlineKeepWarm
+  klineStoreStats
 } from './data/kline-store'
 import {
   klineRecorderStats,
@@ -827,10 +827,12 @@ async function handleCandles(
     : `${config.exchange}|${config.marketType}|${symbol}|${timeframe}|${limit}|latest`
 
   /*
-   * 「最新 N 根」走**服务端常驻缓存**（`data/kline-store.ts`）：
-   * 已收盘的 K 线永不变、只有当前那根在动 —— 没必要让每个用户都把 250 根整体重取一遍
-   *（原来走 `candlesCache`，TTL 4 秒 + 528 个币 = 528 次真实上游请求 **× 用户数**）。
-   * 带 from/to 的历史区间、以及超大 limit 照旧走下面那条（很少发生）。
+   * 「最新 N 根」走**三层读路径**（`data/kline-store.ts`）：**内存 → 库 → REST**。
+   *   ① 内存里存的是**已收盘**那串（不变，不设 TTL）；
+   *   ② 跨过一个桶就去**本地库**（底座常驻写）读一份 —— 毫秒级、0 权重；
+   *   ③ 库里没有 / 库太旧（底座挂了）才退回交易所。
+   * 「当前那根」由底座内存现取（`currentBar()`），所以图表上的最后一根永远是活的。
+   * 带 from/to 的历史区间、以及超大 limit 照旧直接打交易所（很少发生）。
    */
   const candles =
     !ranged && limit <= STORE_MAX_LIMIT
@@ -883,12 +885,12 @@ async function handleCandles(
   })
 }
 
-/* ---------------- 启动预热：常用币的 K 线 ---------------- */
+/* ---------------- 启动预热：常用币的头部行情 ---------------- */
 
 /**
  * 只吞不吐的响应壳。
  *
- * ⚠️ 只能喂给 `handleCandles` 这种「只调 `sendJson(res, ...)`」的处理函数
+ * ⚠️ 只能喂给 `handleTicker` 这种「只调 `sendJson(res, ...)`」的处理函数
  *    （`sendJson` 只用到 `writeHead` + `end`）。
  */
 function silentResponse(): http.ServerResponse {
@@ -922,26 +924,6 @@ const WARM_TOP_VOL = 60
 const WARM_BIG_MOVE_PCT = 20
 /** 拿不到行情清单时的兜底名单 */
 const WARM_FALLBACK = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE']
-/**
- * 启动预热哪些周期。
- *
- * ⚠️ 每多一个周期 = 启动时多「名单长度」次上游请求（60 个币 → **+60 次，约 +10s**；
- *    后台跑、不挡启动，但会占带宽与币安权重）。
- *
- * 用户 2026-10-04 在这里反复调整过（「不用全周期」→「只保留 1h」→ 又发现 **15m 慢**），
- * 所以做成可配：`.env` 里写 `WARM_TFS=1h,15m,5m`；不写就用默认的 **1h + 15m**。
- * 不预热的那几个周期，每个 `(币, 周期)` 的**第一次**请求会现打交易所（~160ms，
- * 撞抖动 0.5~2s），之后就常驻内存（`data/kline-store.ts`）。
- */
-const WARM_TIMEFRAMES: Timeframe[] = (() => {
-  const list = (process.env.WARM_TFS ?? '1h,15m')
-    .split(',')
-    .map(s => s.trim())
-    .filter((s): s is Timeframe => (VALID_TFS as string[]).includes(s))
-  return list.length ? list : ['1h']
-})()
-/** ⚠️ 必须跟前端一次拉多少根一致（`frontend/src/analyze.ts` 的 `KLINE_BARS` = 250） */
-const WARM_LIMIT = 250
 
 /** 预热名单 = 成交额前 N ∪ |24h 涨跌| > 20% —— 与前端 `MarketPanel.warmTargets` 同一个口径 */
 async function warmPicks(): Promise<string[]> {
@@ -966,32 +948,6 @@ async function warmPicks(): Promise<string[]> {
     /* 交易所抖了就拿不到清单 —— 退回常用那几个，别因为预热把启动流程搞挂 */
     return WARM_FALLBACK
   }
-}
-
-async function warmCandlesCache(): Promise<{
-  ok: number
-  total: number
-  /** 名单回给调用方，接着用它预热头部行情 */
-  bases: string[]
-}> {
-  const bases = await warmPicks()
-  const total = bases.length * WARM_TIMEFRAMES.length
-  let ok = 0
-  for (const symbol of bases) {
-    for (const timeframe of WARM_TIMEFRAMES) {
-      try {
-        const url = new URL(
-          `/api/candles?symbol=${symbol}&timeframe=${timeframe}&limit=${WARM_LIMIT}`,
-          'http://warm.local'
-        )
-        await handleCandles(url, silentResponse())
-        ok += 1
-      } catch {
-        /* 暖不到就算了 —— 用户真点的时候会自己取 */
-      }
-    }
-  }
-  return {ok, total, bases}
 }
 
 /**
@@ -4460,15 +4416,16 @@ async function route(
   }
   if (p === '/api/kline/recorder' && method === 'GET') {
     /*
-     * 底座自检（读路径还没切过来，P0 期间靠它 + 日志看是否正常）。
-     * `?db=1` 顺带把库里每档的行数与覆盖区间带上。
+     * 底座自检 + 读路径自检（2026-10-07 P1 起读路径就用这座库）。
+     * `?db=1` 顺带把库里每档的行数与覆盖区间带上；`store` 是三层读路径的命中计数
+     * （`memory/db/rest/live`）—— 常态应该是 `db` 涨、`rest` 几乎不动。
      */
     try {
       const st = klineRecorderStats()
       if (url.searchParams.get('db')) {
-        return sendJson(res, 200, {...st, db: await candleStoreStats()})
+        return sendJson(res, 200, {...st, store: klineStoreStats(), db: await candleStoreStats()})
       }
-      return sendJson(res, 200, st)
+      return sendJson(res, 200, {...st, store: klineStoreStats()})
     } catch (e) {
       return fail(res, 'kline/recorder', e)
     }
@@ -4794,17 +4751,15 @@ async function main(): Promise<void> {
       .then(() => {
         console.log('  交易所  实例已预热（loadMarkets 完成）')
         /*
-         * 交易所热了之后，再把常用几个币的 K 线先取好。
-         * 顺序不能反 —— 现在 `getExchange` 不用再等 `loadMarkets`。
+         * 交易所热了之后，把常用几个币的**头部行情条**先取好（点币种顶部不用等交易所）。
+         *
+         * ⚠️ **K 线不再预热**（2026-10-07 P1）：读路径改成「内存 → 库 → REST」，
+         *    冷启第一次点币只是一个本地库读（毫秒级、0 权重），
+         *    没必要再在启动时打 60×2 发上游去暖它。
          */
-        void warmCandlesCache()
-          .then(async r => {
-            console.log(
-              `  K 线    常点币已预热 ${r.ok}/${r.total}（${WARM_TIMEFRAMES.join(
-                '/'
-              )}，点币种跳图不等交易所）`
-            )
-            const t = await warmTickerCache(r.bases)
+        void warmPicks()
+          .then(bases => warmTickerCache(bases))
+          .then(t => {
             console.log(
               `  行情条  已预热 ${t.ok}/${t.total}（点币种顶部行情不等交易所）`
             )
@@ -4826,18 +4781,10 @@ async function main(): Promise<void> {
     .then(() => kickExchange())
 
   /*
-   * K 线缓存的**后台保活**：让「预热过 / 看过一次」的 (币, 周期) 永远停在
-   * 「没跨热线」那条快路上 —— 否则预热只顶一个周期那么久（用户：
-   * 「不是添加了行情预热功能吗 60 个币种怎么还是慢」）。详见 `data/kline-store.ts`。
-   */
-  startKlineKeepWarm()
-
-  /*
-   * ★ K 线底座（常驻 1m 推送流 → 落库 7 天 → 滚出高周期）。
-   *
-   * ⚠️ P0 **影子模式**：它只写不读，读路径还是老那套（`kline-store` + REST）。
-   *    先跑够 24 小时、把「桶连续率 / 权重 / 内存」攒出来，P1 再把读路径切过来
-   *    并删掉预热/保活那两套（见 docs/EXCHANGE.md）。
+   * ★ K 线底座（常驻 1m 推送流 → 落库 7 天 → 滚出高周期）——
+   *   2026-10-07 起它**同时是读路径的第二层**：`/api/candles` 走「内存 → 库 → REST」，
+   *   库里那份（已收盘的桶）+ 底座内存里的当前根（`currentBar()`）就够画图了。
+   *   预热与保活那两套因此一并删掉（见 docs/EXCHANGE.md §37）。
    */
   startKlineRecorder()
 

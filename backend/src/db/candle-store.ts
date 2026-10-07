@@ -1,17 +1,18 @@
 /**
  * K 线底座的库这一层（表结构见 `schema.ts` 的 `candles`）。
  *
- * 只做四件事：**批量写入 / 查最后一个点 / 由 1m 重算高周期 / 分级清理**。
+ * 只做五件事：**批量写入 / 读最近 N 根 / 查最后一个点 / 由 1m 重算高周期 / 分级清理**。
  * 写入用 UPSERT：实时流、补缺口、重算可能覆盖同一个桶，谁最后写谁赢（都以交易所为准）。
  *
  * ⚠️ 保留策略**按周期分级**（`pruneCandles`），别改成"统一 7 天"：
  *    1h 图要看一年、4h/1d 要看更久，砍掉就没得画了。
  *
  * ⚠️ 库里只保证**已收盘**的桶（当前那根只有 1m 有，高周期的当前根由 1m 现算）。
- *    所以 P1 的读路径 = 库里那份（完整桶）+ 由 1m 补出来的当前根，别直接拿库里的当"最后一根"。
+ *    所以读路径 = `readRecentCandles()`（完整桶）+ 底座内存里的当前根（`currentBar()`），
+ *    别直接拿库里的最后一根当"正在走的那根"。
  */
 import {getPool, query, queryOne} from './client'
-import type {Timeframe} from '../types'
+import type {Candle, Timeframe} from '../types'
 
 /** 底座记 1m，高周期由它滚出来 */
 export type KlineInterval = '1m' | Timeframe
@@ -142,6 +143,121 @@ export async function candleCount(
     [interval, symbol]
   )
   return Number(row?.n ?? 0)
+}
+
+/**
+ * 把请求里的币种写法（`BTC` / `BTCUSDT` / `BTC/USDT:USDT`）归一成**库里存的那种**统一形式。
+ *
+ * 底座只覆盖 U 本位永续（`market.ts` 的 `listPerpetualSymbols`：swap + linear + quote=USDT），
+ * ccxt 给它们的统一形式就是 `BASE/USDT:USDT` —— 这既是 `candles.symbol` 存的值，
+ * 也正好是主键（exchange, market_type, symbol, interval, open_time）的**前缀**：
+ * 按它查才走索引（按 `pair` 查是另一个列，会全表扫 1000 万行）。
+ * ⚠️ 非 U 本位永续（现货 / 币本位）没有这层数据，调用方该直接走 REST。
+ */
+export function unifiedPerpSymbol(raw: string): string {
+  const base = raw.trim().toUpperCase().split(/[/:]/)[0]
+  const bare = base.endsWith('USDT') ? base.slice(0, -4) : base
+  return `${bare}/USDT:USDT`
+}
+
+/**
+ * 把某段**已收盘的 1m** 汇总成一根（给「当前根」用）。
+ *
+ * 为什么要它：高周期的当前根在内存里靠累加器合成，可累加器**刚重启 / 漏过分钟就不可信**
+ * （`Agg.partial`）—— 那种时候最后一根的 `open` 会取错、量会小一大截。
+ * 这时用「库里的 1m（已收盘那部分）+ 当前这根活的 1m」现拼一根才是对的。
+ *
+ * ⚠️ `open` 必须是**最早那根**的 open、`close` 是**最晚那根**的 close，
+ *    所以用 `array_agg(... ORDER BY open_time)` 取首尾 —— 别写成 `min(open)/max(close)`，
+ *    那是"这段里的最低开价/最高收价"，不是桶的开收。
+ */
+export async function sumClosed1m(
+  symbol: string,
+  from: number,
+  to: number,
+  scope: {exchange: string; marketType: string}
+): Promise<{
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+} | null> {
+  if (to <= from) return null
+  const row = await queryOne<{
+    open: number | null
+    high: number | null
+    low: number | null
+    close: number | null
+    volume: number | null
+  }>(
+    `SELECT (array_agg(open  ORDER BY open_time ASC ))[1] AS open,
+            max(high) AS high,
+            min(low)  AS low,
+            (array_agg(close ORDER BY open_time DESC))[1] AS close,
+            sum(volume) AS volume
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = '1m'
+        AND open_time >= $4 AND open_time < $5`,
+    [scope.exchange, scope.marketType, symbol, new Date(from), new Date(to)]
+  )
+  if (!row || row.open === null || row.close === null) return null
+  return {
+    open: Number(row.open),
+    high: Number(row.high),
+    low: Number(row.low),
+    close: Number(row.close),
+    volume: Number(row.volume ?? 0)
+  }
+}
+
+/**
+ * 读某个币、某个周期**最近 `limit` 根已收盘的 K 线**（返回时新的在后）。
+ *
+ * 这是 P1 读路径的第二层（`内存 → 库 → REST`）：底座在常驻写它，
+ * 读一次是本地库的毫秒级往返、**0 权重**，比打交易所便宜两个数量级。
+ *
+ * ⚠️ 库里只有**已收盘**的桶 —— 当前那根要调用方自己接上（`kline-recorder.ts` 的
+ *    `currentBar()`），别把这里的最后一根当成"正在走的那根"。
+ * ⚠️ 也只覆盖「底座订阅过的币 × 保留窗口内」：查不到（新上市、非 swap、超窗）
+ *    就返回空数组，让调用方退回 REST。
+ */
+export async function readRecentCandles(
+  interval: KlineInterval,
+  symbol: string,
+  limit: number,
+  scope: {exchange: string; marketType: string}
+): Promise<Candle[]> {
+  if (limit <= 0) return []
+  const rows = await query<{
+    open_time: Date
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+  }>(
+    `SELECT open_time, open, high, low, close, volume
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = $4
+      ORDER BY open_time DESC
+      LIMIT $5`,
+    [scope.exchange, scope.marketType, symbol, interval, limit]
+  )
+  const out: Candle[] = []
+  // DESC 取回来的，翻成时间正序（前端/分析都按"新的在后"用）
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]
+    out.push({
+      timestamp: new Date(r.open_time).getTime(),
+      open: Number(r.open),
+      high: Number(r.high),
+      low: Number(r.low),
+      close: Number(r.close),
+      volume: Number(r.volume)
+    })
+  }
+  return out
 }
 
 /**

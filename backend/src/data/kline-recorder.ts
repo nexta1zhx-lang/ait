@@ -33,12 +33,13 @@ import {
   pruneCandles,
   rollupFrom1m,
   saveCandles,
+  sumClosed1m,
   type HighInterval,
   type KlineInterval,
   type NewCandleRow
 } from '../db/candle-store'
 import {RateBudgetError, takeWeight} from '../util/rate-budget'
-import type {MarketType, Timeframe} from '../types'
+import type {Candle, MarketType, Timeframe} from '../types'
 
 const MIN_MS = 60_000
 const MS: Record<KlineInterval, number> = {
@@ -78,6 +79,23 @@ const PACE_MS = 400
 const KLINE_WEIGHT_PER_PAGE = 5
 const klineWeight = (maxCandles: number): number =>
   KLINE_WEIGHT_PER_PAGE * Math.max(1, Math.ceil(maxCandles / 1000))
+
+/**
+ * 只留**已收盘**的桶。
+ *
+ * ⚠️ 交易所的区间接口一定会把「正在走的那根」也带回来（`openTime + 周期 > now`）——
+ *    直接入库就是一条**残桶**：量/额/笔只会偏小，而再过一会儿权威口径就有了。
+ *    「库里只保证已收盘的桶」这条前提全靠这里守住：读热层（`kline-store`）会把这串
+ *    当作完整桶用，掺一根半成品进去，图表上最后一根的量就是错的。
+ *    （2026-10-07 补：`repairSymbol` / `seedHistory` / `seedHistory1m` 三处都少了这道过滤。）
+ */
+function closedOnly<T extends {timestamp: number}>(
+  bars: T[],
+  ms: number,
+  now = Date.now()
+): T[] {
+  return bars.filter(b => b.timestamp + ms <= now)
+}
 /** 灌历史的续跑间隔（限流被打断后不用等重启） */
 const SEED_RETRY_MS = 20 * 60_000
 /** 修复队列：多久扫一次、一次最多几个币、同一个币多久内不重复修 */
@@ -118,6 +136,18 @@ interface Agg {
   takerBuyVolume: number
 }
 
+/** 读热层要的「当前那根 1m」：底座只把**未收盘**那帧放这里，永远不落库 */
+interface LiveBar {
+  /** 交易所原始 id（`BTCUSDT`）—— `states` 是按它做 key 的，取累加器要用它 */
+  pair: string
+  openTime: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
 interface SymState {
   sym: PerpSymbol
   /** 最后一个已收盘 1m 的开盘时间（用来算有没有漏分钟） */
@@ -149,6 +179,14 @@ let retry = 0
 let lastFrameAt = 0
 let openSince = 0
 const repairQueue = new Map<string, number>()
+
+/**
+ * 每个币**最近一次收到的 1m 帧**（含未收盘那根）—— 读热层的「当前根」就靠它。
+ *
+ * 为什么不落库：未收盘那根每秒变 ~4 次，525 个币就是 2000+ upsert/秒，换不到任何体验；
+ * 而读路径要的是「此刻的值」，内存里这份就是最新最准的。
+ */
+const live1m = new Map<string, LiveBar>()
 const timers: ReturnType<typeof setInterval>[] = []
 
 const stats = {
@@ -279,11 +317,10 @@ function onMessage(d: Buffer): void {
 }
 
 function onKline(k: Record<string, unknown>): void {
-  const st = states.get(String(k.s ?? '').toUpperCase())
+  const sym = String(k.s ?? '').toUpperCase()
+  const st = states.get(sym)
   if (!st || String(k.i) !== '1m') return
   st.coveredAt = Date.now()
-  /* 未收盘那根只在内存里（读热层 P1 再谈），不落库：525 upsert/秒 换不到任何体验 */
-  if (!k.x) return
 
   const openTime = Number(k.t)
   const bar = {
@@ -297,6 +334,18 @@ function onKline(k: Record<string, unknown>): void {
     takerBuyVolume: Number(k.V) || 0
   }
   if (![openTime, bar.open, bar.high, bar.low, bar.close].every(Number.isFinite)) return
+
+  /*
+   * ★ 当前那根（含**未收盘**）留在内存里 —— 读热层拿它接在库的历史后面（见 `currentBar()`）。
+   *   库里只有已收盘的桶，没有它就画不出"正在走的这根"，只能再打一趟交易所。
+   *   525 个币 × 一分钟几帧 ≈ 几千个小对象，几十 KB，可以忽略。
+   *   收盘后**照样留着**：下一帧来之前它就是这个币最新的那根，读路径按时间戳去重，
+   *   不会和库里刚写进去的同一根重复。
+   */
+  /* key 用 ccxt 统一形式 —— 跟库里 `candles.symbol` / `currentBar()` 的调用方同一把钥匙 */
+  live1m.set(st.sym.symbol, {pair: st.sym.pair, openTime, ...bar})
+  /* 未收盘那根不落库：525 upsert/秒 换不到任何体验 */
+  if (!k.x) return
 
   if (st.lastClosedMs && openTime > st.lastClosedMs + MIN_MS) {
     /* 中间漏了分钟（上游抖 / 进程重启）⇒ 排进修复队列，别让它烂在库里 */
@@ -329,6 +378,76 @@ interface Bar {
   quoteVolume: number
   trades: number
   takerBuyVolume: number
+}
+
+/**
+ * 某个币、某个周期**当前正在走的那根**（库里没有，只能在这儿合成；0 I/O、0 权重）。
+ *
+ * 高周期的当前根 = 累加器里**已收盘的 1m**（`Agg`）+ 正在走的那根 1m：
+ *   · 累加器还没轮到这根活的（`agg.nextMs <= live.openTime`）⇒ 把活的并进去；
+ *   · 已经并过（活的那根其实已收盘并 rollup 过了）⇒ 只用累加器，别重复加一遍量。
+ *
+ * ⚠️ 只对「底座订阅过的币」有效：非 swap / 新上市这些没订阅的返回 null，
+ *    调用方该退回 REST（见 `kline-store.ts`）。
+ */
+export async function currentBar(
+  symbol: string,
+  interval: Timeframe
+): Promise<Candle | null> {
+  /* ⚠️ `symbol` 是 ccxt 统一形式（`BTC/USDT:USDT`）—— 跟库里 `candles.symbol` 同一把钥匙，
+     别传交易所原始 id（那套 key 是 `states` 内部用的，见 `boot()`）。 */
+  const live = live1m.get(symbol)
+  if (!live) return null
+  const asCandle = (openTime: number, b: Omit<LiveBar, 'pair' | 'openTime'>): Candle => ({
+    timestamp: openTime,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+    volume: b.volume
+  })
+  if (interval === '1m') return asCandle(live.openTime, live)
+
+  const ms = MS[interval]
+  const bucket = Math.floor(live.openTime / ms) * ms
+  const agg = states.get(live.pair.toUpperCase())?.aggs.get(interval)
+  /*
+   * 累加器可用（这个桶的、且没缺过分钟）⇒ 直接用它 + 活的这根 1m（0 I/O）。
+   */
+  if (agg && agg.bucket === bucket && !agg.partial) {
+    const mergeLive = live.openTime >= agg.nextMs
+    return {
+      timestamp: bucket,
+      open: agg.open,
+      high: mergeLive ? Math.max(agg.high, live.high) : agg.high,
+      low: mergeLive ? Math.min(agg.low, live.low) : agg.low,
+      close: mergeLive ? live.close : agg.close,
+      volume: agg.volume + (mergeLive ? live.volume : 0)
+    }
+  }
+  /*
+   * 累加器**不可信**（刚重启 / 这个桶中间漏过分钟 ⇒ `partial`，或者桶刚开还没有 1m 进来）：
+   * 光拿活的这根 1m 冒充整根是错的 —— `open` 会取成这一分钟的开价、量只有一分钟的量。
+   * 正确的拼法 = 库里**已收盘的 1m**（这个桶里那一段）+ 活的这根。
+   */
+  if (cfg) {
+    const fromDb = await sumClosed1m(symbol, bucket, live.openTime, {
+      exchange: cfg.exchange,
+      marketType: cfg.marketType
+    })
+    if (fromDb) {
+      return {
+        timestamp: bucket,
+        open: fromDb.open,
+        high: Math.max(fromDb.high, live.high),
+        low: Math.min(fromDb.low, live.low),
+        close: live.close,
+        volume: fromDb.volume + live.volume
+      }
+    }
+  }
+  /* 库里也没有（刚装 / 底座还没写过）：只能拿这根活的顶着 */
+  return asCandle(bucket, live)
 }
 
 function push(
@@ -547,8 +666,11 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
       maxCandles: 1500
     })
   )
-  const rows: NewCandleRow[] = bars
-    .filter(b => b.timestamp >= fromMs && b.timestamp < now)
+  const rows: NewCandleRow[] = closedOnly(
+    bars.filter(b => b.timestamp >= fromMs),
+    MIN_MS,
+    now
+  )
     .map(b => ({
       exchange: cfg!.exchange,
       marketType: cfg!.marketType,
@@ -659,7 +781,7 @@ async function seedHistory1m(): Promise<void> {
             maxCandles: 11_000
           })
         )
-        const out: NewCandleRow[] = rows.map(c => ({
+        const out: NewCandleRow[] = closedOnly(rows, MIN_MS).map(c => ({
           exchange: cfg!.exchange,
           marketType: cfg!.marketType,
           symbol: sym.symbol,
@@ -736,7 +858,7 @@ async function seedHistory(): Promise<void> {
             maxCandles: bars
           })
         )
-        const out: NewCandleRow[] = rows.map(c => ({
+        const out: NewCandleRow[] = closedOnly(rows, MS[job.it]).map(c => ({
           exchange: cfg!.exchange,
           marketType: cfg!.marketType,
           symbol: job.sym.symbol,
@@ -836,6 +958,7 @@ export async function stopKlineRecorder(): Promise<void> {
   stopped = true
   for (const t of timers) clearInterval(t)
   timers.length = 0
+  live1m.clear()
   try {
     sock?.close()
   } catch {
@@ -861,6 +984,8 @@ export interface KlineRecorderStats {
   seeded: number
   seedLimited: number
   pendingRepairs: number
+  /** 内存里「当前那根」的币数（读热层从这里取当前根，见 `currentBar()`） */
+  liveBars: number
   openSec: number
   lastFrameSecAgo: number
   lastError: string
@@ -883,6 +1008,7 @@ export function klineRecorderStats(): KlineRecorderStats {
     seeded: stats.seeded,
     seedLimited: stats.seedLimited,
     pendingRepairs: repairQueue.size,
+    liveBars: live1m.size,
     openSec: openSince ? Math.round((Date.now() - openSince) / 1000) : 0,
     lastFrameSecAgo: lastFrameAt ? Math.round((Date.now() - lastFrameAt) / 1000) : -1,
     lastError: stats.lastError
