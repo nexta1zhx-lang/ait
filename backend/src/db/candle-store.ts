@@ -212,6 +212,69 @@ export async function sumClosed1m(
 }
 
 /**
+ * 这个 (币, 周期) 在库里覆盖到哪儿（最早/最晚各一根的开盘时间，毫秒）。
+ *
+ * 干什么用：区间请求（`/api/candles?from=&to=`，前端「往前拖看更早」与「选某一刻」）
+ * 要先问一句「这段库里到底有没有」—— **有就本地读（毫秒级、0 权重），没有才打交易所**。
+ * 走主键前缀（exchange, market_type, symbol, interval），min/max 直接读索引两头，很快。
+ */
+export async function candleSpan(
+  interval: KlineInterval,
+  symbol: string,
+  scope: {exchange: string; marketType: string}
+): Promise<{first: number; last: number} | null> {
+  const row = await queryOne<{a: Date | null; b: Date | null}>(
+    `SELECT min(open_time) AS a, max(open_time) AS b
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = $4`,
+    [scope.exchange, scope.marketType, symbol, interval]
+  )
+  if (!row?.a || !row?.b) return null
+  return {first: new Date(row.a).getTime(), last: new Date(row.b).getTime()}
+}
+
+/**
+ * 读某段区间**已收盘**的 K 线（`from` 起、正序、最多 `limit` 根，含 `to` 那一刻）。
+ *
+ * ⚠️ 语义必须跟 `market.ts` 的 `fetchCandlesRange` **一模一样**（那边是「从 from 正序取满
+ *    maxCandles 根、`ts <= to`」），否则「库内走库、库外走 REST」两段拼起来会错位。
+ */
+export async function readRangeCandles(
+  interval: KlineInterval,
+  symbol: string,
+  limit: number,
+  from: number,
+  to: number,
+  scope: {exchange: string; marketType: string}
+): Promise<Candle[]> {
+  if (limit <= 0 || to < from) return []
+  const rows = await query<{
+    open_time: Date
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+  }>(
+    `SELECT open_time, open, high, low, close, volume
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = $4
+        AND open_time >= $5 AND open_time <= $6
+      ORDER BY open_time ASC
+      LIMIT $7`,
+    [scope.exchange, scope.marketType, symbol, interval, new Date(from), new Date(to), limit]
+  )
+  return rows.map(r => ({
+    timestamp: new Date(r.open_time).getTime(),
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    volume: Number(r.volume)
+  }))
+}
+
+/**
  * 读某个币、某个周期**最近 `limit` 根已收盘的 K 线**（返回时新的在后）。
  *
  * 这是 P1 读路径的第二层（`内存 → 库 → REST`）：底座在常驻写它，

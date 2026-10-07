@@ -701,7 +701,12 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
     const to = Math.floor(now / ms) * ms
     if (from < to) await rollupFrom1m(it, [st.sym.symbol], from, to, ms)
 
-    /* ③ 同段再问一次交易所（1~2 根的量，很便宜） */
+    /*
+     * ③ 同段再问一次交易所（1~2 根的量，很便宜）。
+     * ⚠️ 必须 `closedOnly`：交易所区间接口会把**正在走的那根**也返回，
+     *    而它 `timestamp < now` 一过滤就"合法"了 —— 于是库里多一根量只有半截的
+     *    `source='repair'`（2026-10-07 实测抓到：5 个币 × 5 档全有）。
+     */
     const official = await paced(`补 ${it} ${st.sym.pair}`, 5, () =>
       fetchCandlesRange({
         exchangeId: cfg!.exchange,
@@ -714,8 +719,11 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
         maxCandles: Math.max(3, Math.ceil((now - from) / ms) + 2)
       })
     )
-    const officialRows: NewCandleRow[] = official
-      .filter(c => c.timestamp >= from && c.timestamp < now)
+    const officialRows: NewCandleRow[] = closedOnly(
+      official.filter(c => c.timestamp >= from),
+      ms,
+      now
+    )
       .map(c => ({
         exchange: cfg!.exchange,
         marketType: cfg!.marketType,

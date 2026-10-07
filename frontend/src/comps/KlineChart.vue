@@ -2734,13 +2734,21 @@ async function loadOlder(): Promise<void> {
   const firstMs = candles[0].timestamp
   const step = tfMs()
   const group = historyBars()
-
+  /*
+   * ⚠️ 竞态：这一段是**异步**的（库里 10ms、退回交易所 200~2000ms），
+   *    而它是 append/prepend 进同一个 `candles`。用户拖到左边缘之后马上点了别的币，
+   *    `load()` 已经画上新币了，这一段晚到的**旧币**数据再 prepend 上去，
+   *    图上就是「两个币的价格拼在一起」——而且不会自己恢复（要等下一次 load）。
+   *    所以这里跟 `load()` 用同一个序号：回来时序号变了就整段作废。
+   */
+  const seq = loadSeq
   loadingOlder = true
   try {
     const d = await fetchCandles(symbol, props.timeframe, group, {
       from: firstMs - group * step,
       to: firstMs - 1
     })
+    if (seq !== loadSeq) return
     const older = (d.candles ?? []).filter(c => c.timestamp < firstMs)
     if (!older.length) {
       reachedStart = true

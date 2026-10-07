@@ -191,6 +191,7 @@ import {
 import {
   STORE_MAX_LIMIT,
   getLatestCandles,
+  getRangeCandles,
   klineStoreStats
 } from './data/kline-store'
 import {
@@ -844,7 +845,22 @@ async function handleCandles(
           marketType: config.marketType,
           apiBase: config.apiBase
         })
-      : await candlesCache(cacheKey, () =>
+      : (await getRangeCandles({
+          exchangeId: config.exchange,
+          symbol,
+          timeframe,
+          limit,
+          /*
+           * ⚠️ 这里必须跟下面 REST 那条用**同一对数**：
+           *    库内的那段走库（毫秒级、0 权重），库外的这一段才打交易所。
+           *    两端口径（`rangeFrom`/`rangeTo` 与 maxCandles）必须一模一样，
+           *    否则「库内 + 库外」拼起来会缺一段或重一段。
+           */
+          from: rangeFrom,
+          to: rangeTo,
+          marketType: config.marketType
+        })) ??
+        (await candlesCache(cacheKey, () =>
           ranged || limit > 1000
             ? fetchCandlesRange({
                 exchangeId: config.exchange,
@@ -864,7 +880,7 @@ async function handleCandles(
                 marketType: config.marketType,
                 apiBase: config.apiBase
               })
-        )
+        ))
 
   sendJson(res, 200, {
     symbol,
