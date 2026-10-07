@@ -901,7 +901,17 @@ function orderLabel(
   const pos = orderTargetPos(o)
   const kind = orderKind(o)
   const base = kind === 'profit' ? '止盈' : kind === 'stop' ? '止损' : '委托'
-  const notes: string[] = [`${base} ${priceText(px)}`, `数量 ${fmt(o.amount)}`]
+  /*
+   * ⚠️ 数量 0 = 币安那种 **`closePosition: true` 的「全平型」条件单**
+   *    （接口里就是 `quantity:"0.0"`，App 上那个「全部仓位」）—— 用户 2026-10-07：
+   *    「我在手机下现价全部止损，但是在图表 k 上显示 0%」。
+   *    以前拿 `o.amount`（0）去比持仓量 ⇒ 标签上那个百分比是 **0%**、
+   *    右边「预计收益」也恒等于 $0.00。它其实平的是**整条仓位** ⇒ 按 `pos.amount` 算，
+   *    百分比直接 100%（跟 `tpsl.ts` 的 `tpSlOf` 一个口径，那边早就这么处理了）。
+   */
+  const full = !!pos && !(o.amount > 0)
+  const qty = full ? pos.amount : o.amount
+  const notes: string[] = [`${base} ${priceText(px)}`, `数量 ${fmt(qty)}`]
   /*
    * 这一单是**平仓**（那才有「预计收益」）：
    *   卖单打多头、买单打空头 = 平仓；反过来的那两种是加仓。
@@ -909,7 +919,7 @@ function orderLabel(
   const closing = !!pos && (o.side === 'sell') === (pos.side === 'long')
   if (pos && (o.reduceOnly || closing)) {
     const diff = o.side === 'sell' ? px - pos.entryPrice : pos.entryPrice - px
-    const pnl = diff * o.amount
+    const pnl = diff * qty
     notes.push(`预计收益 ${money(pnl)}（按开仓均价 ${priceText(pos.entryPrice)} 算，不含手续费）`)
     /*
      * 颜色按**赚还是亏**走（绿 / 红）—— 止盈止损一眼看出是保护盈利还是割肉。
@@ -917,7 +927,7 @@ function orderLabel(
     const color = pnl >= 0 ? '#5eba89' : '#e35561'
     const parts = [base, money(pnl)]
     if (pos.amount > 0) {
-      const pct = Math.min(100, (o.amount / pos.amount) * 100)
+      const pct = full ? 100 : Math.min(100, (qty / pos.amount) * 100)
       notes.push(`平掉这条持仓的 ${pct.toFixed(1)}%`)
       parts.push(`${pct.toFixed(0)}%`)
     }

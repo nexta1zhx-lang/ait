@@ -325,26 +325,27 @@ function tpSlLine(p: FuturesPosition): {
 }
 
 /**
- * 这个交易对的**净盈亏**（用户 2026-10-05：「已结盈利小字在下面」；
- * 2026-10-07 改名「已实现盈利」挪到卡片底行右侧）。
+ * **这条持仓自己**的净盈亏（`net` = 已实现 + 手续费 + 资金费，从它开仓那一刻算起）。
  *
- * ⚠️ 数据来自**钱账本**（`/api/exchange/income`：已实现 + 手续费 + 资金费），
- *    所以这是**净**的。
- *    只有账本里有这个币的记录时才有值 —— 没有就返回 `null`，卡片上画「—」
- *    （宁可不说，也别显示成 0 让人以为「这个仓位从来没赚过钱」）。
- * ⚠️ 多套账户合起来看时按 `symbol + keyName` 匹配，别把两套账户的同名币加一起。
+ * ★ 2026-10-07 用户「核对持仓的已实现盈利数值不对」改的：
+ *   以前这里把**这个交易对**账本里的行**全加起来** —— 于是 PUMP 这条刚开的仓位
+ *   （它自己只有手续费 −$0.035）显示成 **−$0.40**，因为同一个币**前面已经平掉的三个来回**
+ *   （−0.09 / −0.28 / …）也被算进来了。币安 App 在持仓行上给的是**这条持仓**的数。
+ *   ⇒ 改成取「还没平完的那个仓位周期」的 `net`：那个周期就是「开仓（0 → 有量）到全平」，
+ *     跟这条持仓一一对应，键（币 + 方向 + 哪套 Key）天然对得上，
+ *     口径（已实现 + 手续费 + 资金费）跟 `仓位历史` 那一格也是同一个。
+ *   ⚠️ 周期拿不到（账本还没覆盖到 / 接口失败）就画「—」——
+ *      宁可不说，也别把「别的来回」或者 0 糊上去。
  */
 function realizedOf(p: FuturesPosition): number | null {
-  const rows = props.income ?? []
-  let sum = 0
-  let hit = false
-  for (const r of rows) {
-    if (pairOf(r.symbol) !== pairOf(p.symbol)) continue
-    if (p.keyName && r.keyName && r.keyName !== p.keyName) continue
-    sum += Number(r.amount ?? 0)
-    hit = true
+  const pair = pairOf(p.raw ?? p.symbol)
+  for (const c of openCycles.value) {
+    if (pairOf(c.symbol) !== pair) continue
+    if (c.side !== p.side) continue
+    if (p.keyName && c.keyName && c.keyName !== p.keyName) continue
+    return c.net
   }
-  return hit ? sum : null
+  return null
 }
 
 /** 只有一个方向时（比如全是多仓），条子别画成 0% —— 那一段独占整条 */
@@ -541,6 +542,28 @@ function triggerOf(o: ExchangeOpenOrder): number | null {
   return v > 0 ? v : null
 }
 
+/** 这张挂单对着的**那条持仓**（「全部」那一格里两套账户可能有同一个币 ⇒ 还要比 Key 名） */
+function positionOfOrder(o: ExchangeOpenOrder): FuturesPosition | undefined {
+  const pair = pairOf(o.symbol)
+  return positions.value.find(x => {
+    if (pairOf(x.raw ?? x.symbol) !== pair) return false
+    return !(x.keyName && o.keyName && x.keyName !== o.keyName)
+  })
+}
+
+/**
+ * 这张单**要平掉多少张**。
+ *
+ * ⚠️ 全平型条件单（币安 `closePosition: true`，接口里 `quantity:"0.0"`，我们存进来就是
+ *    `amount = 0`）**没有自己的数量** —— 它平的是**整条持仓**。所以按持仓量报：
+ *    不然那一格写着「数量 0」，看着像张废单（用户 2026-10-07 在手机挂的「全部止损」就是这种单）。
+ */
+function orderQty(o: ExchangeOpenOrder): number {
+  const amt = Math.abs(Number(o.amount ?? 0))
+  if (amt) return amt
+  return Math.abs(Number(positionOfOrder(o)?.amount ?? 0))
+}
+
 /**
  * 这一张单平掉当前仓位的百分之多少。
  *
@@ -549,12 +572,7 @@ function triggerOf(o: ExchangeOpenOrder): number | null {
  *    · 「全部」那一格里两套账户可能有同一个币 ⇒ 还要比 Key 名。
  */
 function closePctOf(o: ExchangeOpenOrder): number | null {
-  const pair = pairOf(o.symbol)
-  const p = positions.value.find(x => {
-    if (pairOf(x.raw ?? x.symbol) !== pair) return false
-    return !(x.keyName && o.keyName && x.keyName !== o.keyName)
-  })
-  const held = Math.abs(Number(p?.amount ?? 0))
+  const held = Math.abs(Number(positionOfOrder(o)?.amount ?? 0))
   if (!held) return null
   const amt = Math.abs(Number(o.amount ?? 0))
   return amt ? Math.min(999, (amt / held) * 100) : 100
@@ -571,10 +589,7 @@ function closePctOf(o: ExchangeOpenOrder): number | null {
  */
 function orderEditOf(o: ExchangeOpenOrder): OrderEditTarget {
   const pair = pairOf(o.symbol)
-  const p = positions.value.find(x => {
-    if (pairOf(x.raw ?? x.symbol) !== pair) return false
-    return !(x.keyName && o.keyName && x.keyName !== o.keyName)
-  })
+  const p = positionOfOrder(o)
   const base = baseOf(o.symbol)
   return {
     id: o.id,
@@ -585,7 +600,8 @@ function orderEditOf(o: ExchangeOpenOrder): OrderEditTarget {
     side: o.side === 'buy' ? 'buy' : 'sell',
     price: Number(o.price ?? 0) || 0,
     stopPrice: Number(o.stopPrice ?? 0) || 0,
-    amount: Number(o.amount ?? 0) || 0,
+    /* ⚠️ 全平型条件单没有自己的数量 ⇒ 按持仓量带进去（弹层开出来就是 100%，见 `orderQty`） */
+    amount: orderQty(o) || 0,
     held: Math.abs(Number(p?.amount ?? 0)),
     /* 标记价：持仓上有就用它；没有（比如挂着的是**开仓**单、还没仓位）就退回最新成交价 */
     mark: Number(p?.markPrice ?? 0) || props.lastPrice?.[pair] || 0
@@ -1470,10 +1486,10 @@ const RANGES = [
                   <b
                     v-if="realizedOf(p) !== null"
                     :class="tone(realizedOf(p) ?? 0)"
-                    title="这个交易对到现在的净盈亏（已实现 + 手续费 + 资金费，不含划转）"
+                    title="这条持仓开盘至今的净盈亏（已实现 + 手续费 + 资金费，不含划转）"
                     >{{ signedMoney(realizedOf(p) ?? 0) }}</b
                   >
-                  <b v-else class="dim" title="钱账本里还没有这个交易对的记录">—</b>
+                  <b v-else class="dim" title="这条持仓的开仓记录还没进账本">—</b>
                 </span>
               </div>
               <!--
@@ -1556,7 +1572,7 @@ const RANGES = [
                       平 {{ fmt(closePctOf(o), 0) }}%
                     </span>
                     <span class="spacer" />
-                    <span class="o-qty">数量 <b>{{ qty(o.amount) }}</b></span>
+                    <span class="o-qty">数量 <b>{{ qty(orderQty(o)) }}</b></span>
                     <!-- 点得动的提示 -->
                     <span class="o-go" aria-hidden="true">›</span>
                   </div>
