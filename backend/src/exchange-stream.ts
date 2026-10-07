@@ -108,10 +108,17 @@ const WS_SNAPSHOT_GAP_SEC = 180
  * 仓位刚平掉之后，撤它残留平仓单的**去抖间隔**（同一个币这么久内只扫一次）。
  *
  * 为什么要去抖：一次平仓可能连着来好几条 `ACCOUNT_UPDATE`（分批成交），
- * 每条都去撤一次 = 白打几发；30 秒足够覆盖「同一个币被平了又立刻开回来」的场景 ——
- * 那种情况下 `cancelOrphanOrders` 自己会看到持仓还在、**一张也不撤**（安全边界在它那儿）。
+ * 每条都去撤一次 = 白打几发。
+ *
+ * ⚠️ 原来是 30 秒，**实测把真事吞了**：探针清完仓（空扫一发、不过也记了去抖时间）
+ *    11 秒后又平了一次仓 ⇒ 整轮 sweep 被跳过、那张残留止损单一直挂到 2 分钟对账。
+ *    现在两头都收紧了：
+ *      · 间隔缩到 10 秒；
+ *      · 这个币**重新开起来**（`applyAccountUpdate` 的 `newSymbols`）就**清掉**去抖记录
+ *        —— 「又开又平」必须能再扫一次（要的就是用户说的「平了就撤」）。
+ *    被去抖跳掉时打一行日志，免得下次又是「悄悄地没撤」。
  */
-const ORPHAN_SWEEP_GAP_MS = 30_000
+export const ORPHAN_SWEEP_GAP_MS = 10_000
 /**
  * 头一次没撤到东西时的**重试节奏**（毫秒，两次）。
  *
@@ -924,12 +931,17 @@ export class KeyStream {
       console.log(`${this.tag} 收到事件帧 e=${e || '(空)'}`)
     }
     try {
+      /*
+       * ⚠️ 这两条**必须串行**（`queueOrderEvent`）—— 见那个方法的注释：
+       *    WS 的 message 回调不会等上一次的 async 处理做完，同一次成交连着推的
+       *    NEW / PARTIALLY_FILLED / FILLED 三帧互相交错时，「删」会被后面的「写」顶掉。
+       */
       if (e === 'ORDER_TRADE_UPDATE') {
-        await this.onOrder(ev?.o ?? {})
+        this.queueOrderEvent(() => this.onOrder(ev?.o ?? {}))
         return
       }
       if (e === 'ALGO_UPDATE') {
-        await this.onAlgoUpdate(ev?.o ?? {})
+        this.queueOrderEvent(() => this.onAlgoUpdate(ev?.o ?? {}))
         return
       }
       /*
@@ -948,6 +960,12 @@ export class KeyStream {
          * 一个 REST 来回（≈0.5~1 秒、21 权重）才动。
          */
         const {applied, newSymbols, closedSymbols} = this.applyAccountUpdate(ev?.a ?? {})
+        /*
+         * ★ 这个币**又开起来了**（`newSymbols` = 事件里出现了本地列表没有的仓位，
+         *   平掉再开回来也算）⇒ 清掉它的去抖记录：下次再平必须能立刻扫，
+         *   别被上一轮那次平仓的去抖时间挡住（实测踩过，见 `ORPHAN_SWEEP_GAP_MS`）。
+         */
+        for (const s of newSymbols) this.orphanSweptAt.delete(s)
         if (applied) {
           /* 持仓集合可能变了（新开 / 平掉）→ 标记价订阅跟着调，然后立刻推给前端 */
           this.syncMarks()
@@ -1140,8 +1158,25 @@ export class KeyStream {
     const orderId = String(o?.i ?? '')
     const status = String(o?.X ?? '').toUpperCase()
     if (!orderId || !status) return
+    const type = String(o?.o ?? '').toUpperCase()
     try {
       if (status === 'NEW' || status === 'PARTIALLY_FILLED') {
+        /*
+         * ★ **市价单永远不会挂在场**（`MARKET` 那一下 `NEW` 只是「受理了」，紧接着就成交）——
+         *   所以它不该进 `exchange_open_orders`。用户 2026-10-07：
+         *   「我在币安 app 下单市价成交，挂单中出现市价的订单，这是问题」。
+         *   出错的那一行 `raw` 就是 `X=PARTIALLY_FILLED` 的市价单事件
+         *   （`{"o":"MARKET", "X":"PARTIALLY_FILLED", "z":"2096"}`）。
+         * ⚠️ 条件单（`STOP_MARKET` / `TAKE_PROFIT_MARKET`）名字里也带 MARKET，
+         *    但那些是**真会挂着**的 ⇒ 只挡**正好等于** `MARKET` 的。
+         */
+        if (type === 'MARKET') {
+          if (await deleteOpenOrder(this.row.id, orderId)) {
+            this.openOrderCount = Math.max(0, this.openOrderCount - 1)
+            emit(this.row.id, {type: 'orders', reason: 'ws:market'})
+          }
+          return
+        }
         await upsertOpenOrder(this.row.user_id, this.row.id, {
           orderId,
           /* ⚠️ 用 `s`（币安原始符号），跟账本 / 接口一个口径 */
@@ -1491,7 +1526,13 @@ export class KeyStream {
   private sweepOrphans(rawSymbols: string[]): void {
     const now = Date.now()
     const todo = orphanSweepTargets(rawSymbols, this.orphanSweptAt, now)
-    if (!todo.length) return
+    if (!todo.length) {
+      /* 别静默：这个币刚扫过（`ORPHAN_SWEEP_GAP_MS` 内）才跳的，日志里要看得出来 */
+      console.log(
+        `${this.tag} 仓位平掉（${rawSymbols.join('/')}）⇒ 刚扫过，跳过这一轮（去抖）`
+      )
+      return
+    }
     for (const s of todo) this.orphanSweptAt.set(s, now)
     void this.runSweep(todo)
   }
@@ -1609,6 +1650,30 @@ export class KeyStream {
         `${this.tag} 更新条件单失败（先不动本地那张）：${(e as Error).message.slice(0, 140)}`
       )
     }
+  }
+
+  /** 订单 / 条件单事件的**串行队列**（见 `queueOrderEvent`） */
+  private orderChain: Promise<void> = Promise.resolve()
+
+  /**
+   * 把一条订单事件排进队列，**按到帧顺序**写库。
+   *
+   * ★ 为什么非串不可（2026-10-07 用户报「市价成交后挂单里多出一条市价单」查出来的）：
+   *   同一次市价成交会连着推三帧 —— `NEW` → `x=TRADE X=PARTIALLY_FILLED` → `x=TRADE X=FILLED`，
+   *   实测三帧前后只差 1 毫秒；而 WS 的 message 回调**不会等**上一次的 async 处理完，
+   *   于是「FILLED 的删」和「PARTIALLY_FILLED 的写」一交错就 **删完又被写回来**，
+   *   那一行会一直挂在「挂单」里，直到 2 分钟一轮的整表对账才发现它不该在。
+   *   （库里抓到的证据：那一行的 `raw` 正好是 `X=PARTIALLY_FILLED` 那一帧。）
+   *
+   * ⚠️ 这里**不 await**：上游读帧的循环不能被我这些库操作拖住（一帧卡住 = 后面全堵）。
+   *    真正需要「按顺序」的只有写库这几下，排在一条链上就够了。
+   */
+  private queueOrderEvent(job: () => Promise<void>): void {
+    this.orderChain = this.orderChain.then(job).catch(e => {
+      console.warn(
+        `${this.tag} 订单事件处理失败：${(e as Error).message.slice(0, 140)}`
+      )
+    })
   }
 
   private async onOrder(o: any): Promise<void> {

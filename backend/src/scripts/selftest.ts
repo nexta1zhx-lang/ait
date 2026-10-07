@@ -20,7 +20,11 @@
  */
 import {sanitizeRows, type NewCandleRow} from '../db/candle-store'
 import {planContractChanges, type RawContract} from '../data/market'
-import {KeyStream, orphanSweepTargets} from '../exchange-stream'
+import {
+  KeyStream,
+  ORPHAN_SWEEP_GAP_MS,
+  orphanSweepTargets
+} from '../exchange-stream'
 import type {JudgeResult} from '../llm/client'
 import {OUTPUT_CONTRACT} from '../llm/prompt'
 import {judgeSchema} from '../llm/schema'
@@ -342,11 +346,14 @@ function checkCloseSweep(): boolean {
    */
   const swept = new Map<string, number>()
   const t0 = 1_700_000_000_000
+  const GAP = ORPHAN_SWEEP_GAP_MS
   swept.set('BTCUSDT', t0)
+  /* ⚠️ 门槛取的是**常量本身**（`ORPHAN_SWEEP_GAP_MS`）—— 别在这儿写死秒数，
+     不然哪天调了间隔这组夹具还在测老数字（2026-10-07 就从 30 秒改成过 10 秒）。 */
   const debounce: [string, string[], number, string[]][] = [
-    ['刚扫过（10 秒）不再扫', ['BTCUSDT'], t0 + 10_000, []],
-    ['刚好卡在门槛上（30 秒）还不扫', ['BTCUSDT'], t0 + 30_000, []],
-    ['过了 30 秒就再扫', ['BTCUSDT'], t0 + 31_000, ['BTCUSDT']],
+    ['刚扫过（1 秒）不再扫', ['BTCUSDT'], t0 + 1_000, []],
+    ['刚好卡在门槛上还不扫', ['BTCUSDT'], t0 + GAP, []],
+    ['过了门槛就再扫', ['BTCUSDT'], t0 + GAP + 1_000, ['BTCUSDT']],
     ['没扫过的币立刻扫，同批重复只挑一次', ['ETHUSDT', 'ETHUSDT'], t0 + 1_000, ['ETHUSDT']],
     ['空符号忽略', ['', 'ETHUSDT'], t0 + 1_000, ['ETHUSDT']]
   ]
