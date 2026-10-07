@@ -30,11 +30,10 @@
  *   · 每档有自己的目标窗口（见 WINDOWS_DAYS），补到窗口起点就跳过；
  *   · 限流（`-1003` / RateBudgetError）就歇一会儿再来，不丢进度。
  */
-import {ensureSchema, closePool} from '../db/client'
+import {ensureSchema, closePool, query, queryOne} from '../db/client'
 import {saveCandles, type KlineInterval, type NewCandleRow} from '../db/candle-store'
 import {fetchCandlesRange, listPerpetualSymbols} from '../data/market'
 import {loadConfig} from '../config'
-import {queryOne} from '../db/client'
 
 const DAY_MS = 86_400_000
 const MIN_MS = 60_000
@@ -106,30 +105,73 @@ async function rateLimit(rps: number): Promise<void> {
 
 const totals = {requests: 0, rows: 0, skipped: 0, limited: 0, failed: 0}
 
-/** 库里这个 (币, 周期) 最早那根的开盘时间（没有就 null） */
-async function earliestOf(symbol: string, interval: KlineInterval): Promise<number | null> {
-  const row = await queryOne<{t: Date | null}>(
-    `SELECT min(open_time) AS t FROM candles WHERE interval = $1 AND symbol = $2`,
-    [interval, symbol]
-  )
-  return row?.t ? new Date(row.t).getTime() : null
+interface Range {
+  start: number
+  end: number
 }
 
-async function fillOne(
+/**
+ * 库里在 [from, to) 内**缺哪些段**（左闭右开）。
+ *
+ * ★ 为什么不是「看头部够不够就跳过」（2026-10-07 修的）：
+ *   原来只看 `min(open_time) <= from + ms` 就认定「整窗都有」—— 可窗口里可能有**洞**：
+ *   底座只保证「部署之后」的那段（线上实测 1m 只有最近 28 分钟），
+ *   `repairSweep` 也只修**尾**、不修内部洞 ⇒ vision 段（10-05 23:59 止）和实时段之间
+ *   会留下约 27 小时的空洞，而头部检查根本发现不了。
+ *   现在按「头 / 中间 / 尾」三段一起算，只补缺的。
+ */
+async function missingRanges(
+  symbol: string,
+  interval: KlineInterval,
+  from: number,
+  to: number,
+  ms: number
+): Promise<Range[]> {
+  const head = await queryOne<{a: Date | null; b: Date | null; n: number}>(
+    `SELECT min(open_time) AS a, max(open_time) AS b, count(*)::int AS n
+       FROM candles
+      WHERE interval = $1 AND symbol = $2 AND open_time >= $3 AND open_time < $4`,
+    [interval, symbol, new Date(from), new Date(to)]
+  )
+  if (!head?.a || !head?.b || !head.n) return [{start: from, end: to}]
+  const a = new Date(head.a).getTime()
+  const b = new Date(head.b).getTime()
+  const out: Range[] = []
+  if (a > from) out.push({start: from, end: a})
+  if (b + ms < to) out.push({start: b + ms, end: to})
+  // 根数对不上跨度 ⇒ 中间有洞，逐段找出来
+  if (head.n < Math.floor((b - a) / ms) + 1) {
+    const rows = await query<{a: Date; b: Date}>(
+      `WITH s AS (
+         SELECT open_time, lead(open_time) OVER (ORDER BY open_time) AS nxt
+           FROM candles
+          WHERE interval = $1 AND symbol = $2 AND open_time >= $3 AND open_time < $4
+       )
+       SELECT open_time AS a, nxt AS b
+         FROM s
+        WHERE nxt IS NOT NULL AND nxt > open_time + ($5::bigint * interval '1 millisecond')
+        ORDER BY 1`,
+      [interval, symbol, new Date(from), new Date(to), ms]
+    )
+    for (const r of rows) {
+      out.push({start: new Date(r.a).getTime() + ms, end: new Date(r.b).getTime()})
+    }
+  }
+  return out.filter(r => r.end > r.start).sort((x, y) => x.start - y.start)
+}
+
+/** 补一段（从 end 往回一页一页拉） */
+async function fillRange(
   cfg: {exchange: string; marketType: string; apiBase?: string},
   symbol: string,
   pair: string,
   interval: KlineInterval,
+  range: Range,
   rps: number
 ): Promise<void> {
   const ms = MS[interval]
-  const from = Date.now() - WINDOWS_DAYS[interval] * DAY_MS
-  const have = await earliestOf(symbol, interval)
-  if (have !== null && have <= from + ms) {
-    totals.skipped++
-    return
-  }
-  let end = have ?? Date.now()
+  const from = range.start
+  let end = range.end
   let guard = 0
   while (end > from && guard++ < 200) {
     const start = Math.max(from, end - PAGE * ms)
@@ -186,6 +228,33 @@ async function fillOne(
     const earliest = Math.min(...rows.map(r => r.openTime))
     if (earliest >= end) break
     end = earliest
+  }
+}
+
+async function fillOne(
+  cfg: {exchange: string; marketType: string; apiBase?: string},
+  symbol: string,
+  pair: string,
+  interval: KlineInterval,
+  rps: number
+): Promise<void> {
+  const ms = MS[interval]
+  const now = Date.now()
+  /*
+   * ⚠️ 两端都要对齐到**桶栅格**（2026-10-07 修的）：
+   *   · 起点不对齐 ⇒ 头部会算出一个「不到一根」的残缺缺口，白拉一发还被区间过滤掉（写 0 行）；
+   *   · 终点用 now ⇒ 会把**正在走的当前桶**也拉回来写进去（残桶：量偏小、high/low 漏点）。
+   *   对齐到「已收盘的桶」之后，缺口就是整数根，拉回来的每一根都能原样入库。
+   */
+  const from = Math.floor((now - WINDOWS_DAYS[interval] * DAY_MS) / ms) * ms
+  const to = Math.floor(now / ms) * ms
+  const ranges = await missingRanges(symbol, interval, from, to, ms)
+  if (!ranges.length) {
+    totals.skipped++
+    return
+  }
+  for (const range of ranges) {
+    await fillRange(cfg, symbol, pair, interval, range, rps)
   }
 }
 
