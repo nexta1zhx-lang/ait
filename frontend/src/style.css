@@ -226,14 +226,36 @@ body {
  * （比默认淡很多，只略微亮一点），UA 那套就不会盖上来。
  * Firefox 走 `scrollbar-*` 两个属性，`::-webkit-*` 它不认，两边都写。
  */
-html {
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+/*
+ * 2026-10-07 用户：「合约行情页面滚动条细点，**只在滚动时出现**」。
+ * 所以：默认**全透明**（等于没有），一滚起来才画出来 —— `html.scrolling` 由 `main.ts`
+ * 的全局 scroll 监听挂上（捕捉阶段，任何子滚动容器都算），停手 ~800ms 自己摘掉。
+ *
+ * ⚠️ 只在滚动时出现 ≠ 不能滚：滚轮 / 拖动 / 触摸 / 键盘全都照旧，只是不画那条杠。
+ * ⚠️ `scrollbar-width` / `scrollbar-color` **不是继承属性** ⇒ Firefox 那边得挂在
+ *    `html` 上（它是所有滚动容器的根）才管得住；`html.scrolling` 那条同理要写在 `html` 上。
+ * ⚠️ 悬停不能变白（用户：「pc 滚动条触碰会变白」）—— hover 的颜色显式写死，
+ *    只在「滚动中」才生效，停手之后连它一起隐掉。
+ */
+/*
+ * ⚠️ 写成 `*` 而不是只挂 `html`：`scrollbar-width` / `scrollbar-color` **不继承**，
+ *    只写 `html` 的话，`::-webkit-*` 管得到（那条是全局的），但 **Firefox 的
+ *    `scrollbar-*` 两个属性管不到子容器** —— 列表里还是那条默认的粗杠、也不会隐。
+ *    这两条属性只影响滚动条本身，不碰布局。
+ */
+* {
+  scrollbar-color: transparent transparent;
   scrollbar-width: thin;
 }
 
+html.scrolling * {
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+/* 5px：比原来那套（10px 轨道 + 2px 透明边框的 6px 视觉）再细一档 */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -241,20 +263,41 @@ html {
 }
 
 ::-webkit-scrollbar-thumb {
-  /* 2px 透明边框 + content-box 裁剪 = 看着只有 6px 粗，不抢眼 */
-  background: rgba(255, 255, 255, 0.13);
-  background-clip: content-box;
-  border: 2px solid transparent;
+  background: transparent;
   border-radius: 999px;
+  transition: background 0.18s ease-out;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.24);
-  background-clip: content-box;
+html.scrolling ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+html.scrolling ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
 }
 
 ::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/*
+ * 「K 线」那一格：**整页都不要滚动条**（用户 2026-10-07）。
+ *
+ * ⚠️ 跟上面那条「滚动时出现」不冲突：这一格是**连滚的时候也不画**（用户明确说「不要滚动条」）。
+ * ⚠️ 只是不画 —— 滚动照旧（滚轮 / 拖动 / 手指都能滚，内容一样到得了）。
+ *    手法跟 `.ord-pos` / §45 那个 `#app` 一样，`::-webkit-scrollbar` 那条给老 Chrome 兜底。
+ * ⚠️ 盖的是 `.split` 那棵树（K 线页的主体，含里面的行情列表），**不碰**弹层 / toast ——
+ *    那些挂在 `.split` 外面，缩在弹层里滚的时候还是能看见细条的（不然更没方向感）。
+ */
+body.fixed-viewport:has(.split.m-chart) :is(#app, .split),
+body.fixed-viewport:has(.split.m-chart) .split * {
+  scrollbar-width: none;
+}
+
+body.fixed-viewport:has(.split.m-chart) :is(#app, .split)::-webkit-scrollbar,
+body.fixed-viewport:has(.split.m-chart) .split ::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 /*

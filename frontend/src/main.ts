@@ -99,4 +99,33 @@ if (isNativeShell() || coarsePointer) {
   )
 }
 
+/*
+ * 滚动条「**只在滚动时出现**」（用户 2026-10-07）。
+ *
+ * 任何地方一滚就把 `<html>` 挂上 `scrolling`，停手 ~800ms 摘掉；`style.css` 顶部那段
+ * 默认把 thumb 画成**全透明**，所以静止时看着就是「没有滚动条」。
+ *
+ * ⚠️ 必须 **`capture: true`**：`scroll` 事件**不冒泡** —— 挂在 window 上不加捕捉的话，
+ *    只收得到 document 自己那点滚动，列表 / 面板这些子滚动容器的全漏掉。
+ * ⚠️ 用定时器合并，别每次都写 `classList`（滚轮/触摸一秒能来几十次）。
+ * ⚠️ 这个跟触屏分支无关：PC 上也要（用户就是在 PC 上提的）。
+ */
+let scrollHideTimer = 0
+let scrolling = false
+addEventListener(
+  'scroll',
+  () => {
+    if (!scrolling) {
+      document.documentElement.classList.add('scrolling')
+      scrolling = true
+    }
+    clearTimeout(scrollHideTimer)
+    scrollHideTimer = window.setTimeout(() => {
+      document.documentElement.classList.remove('scrolling')
+      scrolling = false
+    }, 800)
+  },
+  {capture: true, passive: true}
+)
+
 app.mount('#app')

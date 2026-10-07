@@ -3789,3 +3789,58 @@ document.addEventListener('touchmove', e => {
 `html.touch` 已挂、viewport meta 已带 `maximum-scale=1, user-scalable=no`。
 
 ★ 老实说：**真手势**（两根手指在真机上捏）没在这台机器上复核过，验的是「事件被不被吃掉」这一层。
+
+## 50. 滚动条：行情页「细 + 只在滚动时出现」，K 线页「整页不画」（2026-10-07 用户）
+
+用户：「先修复 2 个 bug：① 合约行情页面滚动条细点，**只在滚动时出现**；② k 线页面**不要滚动条**。」
+
+### 50.1 ① 全站：5px + 静止时全透明，一滚才画出来
+
+原来那套是「10px 轨道 + 2px 透明边框 ≈ 6px 视觉」，**常驻可见**（macOS 上开了「始终显示滚动条」
+就一直是那条杠）。现在：
+
+```css
+/* 默认全透明 == 看不见；html.scrolling 时才画（不是不能滚，滚轮/拖动/触摸照旧） */
+* { scrollbar-color: transparent transparent; scrollbar-width: thin; }
+html.scrolling * { scrollbar-color: rgba(255, 255, 255, 0.2) transparent; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: transparent; transition: background .18s; }
+html.scrolling ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); }
+```
+
+`html.scrolling` 由 `main.ts` 一条全局监听挂/摘（停手 **800ms** 摘掉）：
+
+```ts
+addEventListener('scroll', () => { /* 挂 .scrolling，800ms 后摘 */ },
+                 {capture: true, passive: true})   // ⚠️ 必须 capture
+```
+
+⚠️ **必须 `capture: true`**：`scroll` 事件**不冒泡** —— 挂在 window 上不加捕捉，只收得到
+document 自己那点滚动，**列表 / 面板这些子滚动容器全漏掉**（实测就是这么发现的）。
+⚠️ 写成 `*` 而不是只挂 `html`：`scrollbar-width` / `scrollbar-color` **不继承**，
+只写 `html` 的话 `::-webkit-*` 管得到、**Firefox 那两个属性管不到子容器**。
+⚠️ hover 不变白那条老规矩保留（只在「滚动中」生效，停手连它一起隐）。
+
+### 50.2 ② K 线那一格：连滚的时候也不画
+
+```css
+body.fixed-viewport:has(.split.m-chart) :is(#app, .split),
+body.fixed-viewport:has(.split.m-chart) .split * { scrollbar-width: none; }
+/* 老 Chrome 兜底 */
+body.fixed-viewport:has(.split.m-chart) :is(#app, .split)::-webkit-scrollbar,
+body.fixed-viewport:has(.split.m-chart) .split ::-webkit-scrollbar { width: 0; height: 0; }
+```
+
+* **只是不画**：滚动照旧（实测 `#app.scrollTop` 0 → 120 ✓，那 120 就是 §45 那 20vh）。
+* 盖的是 `.split` 那棵树（含里面的行情列表）**加上 `#app`**（窄屏滚的是它）；
+  **不碰弹层 / toast** —— 那些挂在 `.split` 外面，缩在弹层里滚还是能看见细条。
+* `.m-chart` 是「窄屏那格切到 K 线」时才挂的类（`leftView` = chart）⇒ **桌面 K 线视图不带它**，
+  桌面那个行情列表照旧是「细 + 滚动时出现」（两条需求不打架）。
+
+### 50.3 实测
+
+| 场景 | 静止 | 滚动中 | 停手后 |
+|---|---|---|---|
+| 行情列表 `.mkt-body`（390 / 1280 都测了） | `scrollbar-color: transparent` ✓ 看不见 | `rgba(255,255,255,.2)` ✓ 出现（宽 **5px**） | 800ms 后回到透明 ✓ |
+| K 线页 `#app`（390，`.m-chart`） | `scrollbar-width: none` ✓ | 仍然 none（这一格是「不画」）✓ | none ✓ |
+| K 线页滚不滚得动 | — | `scrollTop 0 → 120` ✓ | — |
