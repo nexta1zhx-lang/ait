@@ -2339,8 +2339,28 @@ export class KeyStream {
     this.reconTimer = null
     this.healthTimer = null
     try {
-      this.ws?.removeAllListeners()
-      this.ws?.close()
+      const ws = this.ws
+      if (ws) {
+        /*
+         * ⚠️⚠️ 顺序很讲究：**先挂一个吞掉的 error 处理器，再关**。
+         *
+         * `ws.close()` 在 `readyState === CONNECTING`（握手还没完成）时**不会同步抛**，
+         * 而是往下一个 tick **异步 emit 一个 'error'**
+         * （"WebSocket was closed before the connection was established"，见 `ws/lib/websocket.js` 的
+         * `abortHandshake`）。上面那句 `removeAllListeners()` 已经把监听器清空了 ⇒
+         * Node 把「没人接听的 error」直接升级成 **uncaught exception ⇒ 整个后端进程挂掉**。
+         *
+         * 2026-10-07 实测崩过一次（本地，日志见 `docs/EXCHANGE.md`）：
+         * 代理隧道断了 ⇒ 重连一直卡在 CONNECTING ⇒ 10 分钟后 `restartIfStuck()` 来收尾 ⇒ 崩。
+         * 生产上同样会崩，只是被 `restart: unless-stopped` 拉起来（代价是断档 + 一条多余的
+         * `boot` 锚点）。下面那个 `try/catch` **抓不到它** —— 它在下一个 tick 才 emit。
+         */
+        ws.removeAllListeners()
+        ws.on('error', () => {
+          /* 收尾时 socket 自己报的错，忽略即可 */
+        })
+        ws.close()
+      }
     } catch {
       /* 关不干净无所谓 */
     }

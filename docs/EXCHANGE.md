@@ -2140,6 +2140,17 @@ const isProfit = (px >= d.entry) === long      // ← 跟**开仓价**比
    资产明细）的时刻」。`boot` 那份漏推过 —— 5 分钟后第一拍又白打一发 25 权重，
    库里同一秒挤着两条点（线上实测 `live` 02:06:23 + `poll` 02:06:23）。现在写在
    `snapshot()` 里，所有 REST 拉取统一推。
+11. **收尾 WS 时「先 `removeAllListeners()` 再 `close()`」会把整个进程干掉**（2026-10-07 实测崩过）。
+   `ws.close()` 在 `readyState === CONNECTING`（握手没完成）时**不同步抛**，而是下一个 tick
+   **异步 emit `'error'`**（`WebSocket was closed before the connection was established`）；
+   监听器刚被清空 ⇒ Node 把「没人接听的 error」升级成 uncaught exception，
+   下面那个 `try/catch` **抓不到**（它在下一个 tick 才 emit）。
+   触发条件实测很现实：**代理隧道断了 ⇒ 重连一直卡在 CONNECTING ⇒ 10 分钟后
+   `restartIfStuck()` 来收尾 ⇒ 崩**。生产上一样会崩，只是被 `restart: unless-stopped` 拉起来
+   （代价是断档 + 一条多余的 `boot` 锚点）。
+   修法：**先挂一个吞掉的 `error` 处理器，再 `close()`**（见 `cleanup()`，注释里写明了原因）。
+   ⚠️ 同一类坑还有 `onMessage` 的 `void … .catch()`（未处理的 Promise 拒绝 = 事件静默消失）——
+   凡是**异步抛出**的都要显式接住，`try/catch` 只覆盖同步那一段。
 
 ### 点位的时间戳：写侧留真实时刻，读侧才「聚集」
 
