@@ -6,11 +6,17 @@
  *
  * 不依赖网络、不依赖 API Key，也**不需要先编译**（用 tsx 直接跑 TS）。
  *
- * 2026-10-02 大简化之后，护栏 / 仓位 / 止损止盈 / 期望值 / 清单全删了，
- * 所以这里只剩两件必须卡住的事：
+ * 2026-10-02 大简化之后，护栏 / 仓位 / 止损止盈 / 期望值 / 清单全删了。
+ * 2026-10-07 又加进来一件：**K 线写入前校验**（`sanitizeRows`）。
+ * 那是个纯函数，而它的失效方式是"悄悄少一根 / 悄悄多一根坏根"—— 图上不报错，
+ * 只有靠这组固定夹具才卡得住。所以必须离线可跑（不进网络）。
+ *
+ * 现在这里卡三件事：
  *   ① 契约（提示词骨架）和 zod 校验结构**一模一样**
  *   ② 渲染能把这四个字段印出来
+ *   ③ `sanitizeRows` 该丢的丢、该留的留、该覆盖的覆盖
  */
+import {sanitizeRows, type NewCandleRow} from '../db/candle-store'
 import type {JudgeResult} from '../llm/client'
 import {OUTPUT_CONTRACT} from '../llm/prompt'
 import {judgeSchema} from '../llm/schema'
@@ -180,10 +186,79 @@ const judge: JudgeResult = {
 }
 
 /* ------------------------------------------------------------------ */
+/* ③ K 线写入前校验（`db/candle-store.ts` 的 `sanitizeRows`）             */
+/* ------------------------------------------------------------------ */
+
+function row(over: Partial<NewCandleRow>): NewCandleRow {
+  return {
+    exchange: 'binance',
+    marketType: 'swap',
+    symbol: 'BTC/USDT:USDT',
+    pair: 'BTCUSDT',
+    interval: '1h',
+    /* 对齐到小时栅格 */
+    openTime: 1_759_788_000_000 - ((1_759_788_000_000 % 3_600_000) | 0),
+    open: 100,
+    high: 110,
+    low: 90,
+    close: 105,
+    volume: 10,
+    quoteVolume: 1000,
+    trades: 5,
+    takerBuyVolume: 6,
+    source: 'ws',
+    ...over
+  }
+}
+
+type Check = [string, NewCandleRow[], (out: NewCandleRow[]) => boolean]
+
+const badRow = row({openTime: 1_759_788_000_000 - (1_759_788_000_000 % 3_600_000) + 60_000}) // 没对齐钟点
+const checks: Check[] = [
+  ['正常一根：原样放行', [row({})], out => out.length === 1],
+  ['未对齐桶栅格：丢', [badRow], out => out.length === 0],
+  ['high 比 close 还低：丢', [row({high: 99})], out => out.length === 0],
+  ['low 比 open 还高：丢', [row({low: 101})], out => out.length === 0],
+  ['价格是 0：丢', [row({close: 0})], out => out.length === 0],
+  ['量是负的：丢', [row({volume: -1})], out => out.length === 0],
+  ['值是 NaN：丢', [row({high: Number.NaN})], out => out.length === 0],
+  [
+    '同批同桶重复：只留一根（后来的赢）',
+    [row({close: 105}), row({close: 108})],
+    out => out.length === 1 && out[0].close === 108
+  ],
+  [
+    '同批时间倒序：两根都留（幂等，只计数）',
+    [row({openTime: 1_759_788_000_000 - (1_759_788_000_000 % 3_600_000) + 3_600_000}), row({})],
+    out => out.length === 2
+  ],
+  [
+    '两个币各自单调：互不影响',
+    [row({}), row({symbol: 'ETH/USDT:USDT', pair: 'ETHUSDT', openTime: 1_759_788_000_000 - (1_759_788_000_000 % 3_600_000) + 3_600_000})],
+    out => out.length === 2
+  ]
+]
+
+function checkSanitize(): boolean {
+  let ok = true
+  for (const [name, input, want] of checks) {
+    const out = sanitizeRows(input)
+    if (!want(out)) {
+      console.error(`❌ 写入前校验：${name} —— 期望不满足（实际留下 ${out.length} 根）`)
+      ok = false
+    }
+  }
+  if (!ok) console.log('')
+  else console.log(`✅ 写入前校验：${checks.length} 组夹具通过`)
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
 let failed = !checkContract()
+if (!checkSanitize()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)

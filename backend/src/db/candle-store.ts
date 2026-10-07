@@ -1,7 +1,8 @@
 /**
  * K 线底座的库这一层（表结构见 `schema.ts` 的 `candles`）。
  *
- * 只做五件事：**批量写入 / 读最近 N 根 / 查最后一个点 / 由 1m 重算高周期 / 分级清理**。
+ * 只做七件事：**写入前校验 / 批量写入 / 读最近 N 根 / 查最后一个点 / 由 1m 重算高周期 /
+ * 分级清理 / 抽样对账落表**。
  * 写入用 UPSERT：实时流、补缺口、重算可能覆盖同一个桶，谁最后写谁赢（都以交易所为准）。
  *
  * ⚠️ 保留策略**按周期分级**（`pruneCandles`），别改成"统一 7 天"：
@@ -22,6 +23,16 @@ export type HighInterval = Exclude<Timeframe, '1m'>
 
 /** 这些周期都是 1m 的整数倍 ⇒ 从 1m 滚出来的桶边界与交易所完全对齐（UTC 零点起算） */
 export const HIGH_INTERVALS: HighInterval[] = ['5m', '15m', '1h', '4h', '1d']
+
+/** 每个周期一根多少毫秒（桶对齐校验要用；与 `kline-recorder.ts` 的 `MS` 同源） */
+const MS: Record<KlineInterval, number> = {
+  '1m': 60_000,
+  '5m': 5 * 60_000,
+  '15m': 15 * 60_000,
+  '1h': 60 * 60_000,
+  '4h': 240 * 60_000,
+  '1d': 1440 * 60_000
+}
 
 export interface NewCandleRow {
   exchange: string
@@ -82,12 +93,126 @@ function rowParams(r: NewCandleRow): unknown[] {
   ]
 }
 
+/* ---------------- 写入前校验（第 1 档：实时） ----------------
+ *
+ * 所有入库路径（实时流 / rollup / 补缺口 / 灌历史）最后都走 `saveCandles`
+ * ⇒ 校验放在这里，一处实现、四条路自动覆盖。
+ *
+ * 为什么要在**写入前**挡：库里放进一根坏 K 线，读路径（内存 → 库 → REST）会把它当权威
+ * 数据用，图上不会报错、只会悄悄画错；而修它要等下一次 repair 覆盖 —— 不如在门口丢掉。
+ *
+ * ⚠️ **只丢「结构性错误」**，不做业务判断（比如"量突然大了 10 倍"那是异常检测，不是校验）：
+ *    对齐 / OHLC 关系 / 值域，这三类是**一定错**的，丢了只会少一根，留着会污染整张图。
+ */
+
+export type RejectReason = 'align' | 'ohlc' | 'range' | 'dup' | 'unordered'
+
+const REJECT_LABEL: Record<RejectReason, string> = {
+  align: '未对齐桶栅格',
+  ohlc: 'OHLC 关系不成立',
+  range: '值域非法（非正价 / 负量 / 非有限）',
+  dup: '同一批里同桶重复',
+  unordered: '同一批里时间倒序'
+}
+
+const rejects: Record<RejectReason, number> = {
+  align: 0,
+  ohlc: 0,
+  range: 0,
+  dup: 0,
+  unordered: 0
+}
+let lastRejectAt = 0
+const rejectSample: string[] = []
+
+function bumpReject(reason: RejectReason, r: NewCandleRow): void {
+  rejects[reason]++
+  lastRejectAt = Date.now()
+  if (rejectSample.length < 5) {
+    rejectSample.push(
+      `${r.interval} ${r.pair} @${new Date(r.openTime).toISOString()} ` +
+        `o=${r.open} h=${r.high} l=${r.low} c=${r.close} v=${r.volume}（${r.source}）`
+    )
+  }
+}
+
+/** 校验结果（`/api/kline/recorder` 读它） */
+export function candleRejectStats(): Record<RejectReason, number> & {
+  lastAt: number
+  sample: string[]
+} {
+  return {...rejects, lastAt: lastRejectAt, sample: [...rejectSample]}
+}
+
+/** 一根 K 线的结构性校验：返回 null = 合法，否则是被拒的原因 */
+function rejectReason(r: NewCandleRow, ms: number): RejectReason | null {
+  if (!Number.isFinite(r.openTime) || r.openTime % ms !== 0) return 'align'
+  const nums = [r.open, r.high, r.low, r.close, r.volume, r.quoteVolume, r.trades, r.takerBuyVolume]
+  if (!nums.every(Number.isFinite)) return 'range'
+  if (r.open <= 0 || r.high <= 0 || r.low <= 0 || r.close <= 0) return 'range'
+  if (r.volume < 0 || r.quoteVolume < 0 || r.trades < 0 || r.takerBuyVolume < 0) return 'range'
+  if (r.high < r.low) return 'ohlc'
+  if (r.high < r.open || r.high < r.close) return 'ohlc'
+  if (r.low > r.open || r.low > r.close) return 'ohlc'
+  return null
+}
+
+/**
+ * 过一遍校验，返回**能写的那部分**（顺序保持）。
+ *
+ * 单调性只在**同一批内**判（跨批判不了：补缺口 / 灌历史本来就是故意写"更早的一段"）：
+ *   · 同批同桶重复 ⇒ 后来的覆盖前面的（与 UPSERT「谁最后写谁赢」同义），计数但不丢数据；
+ *   · 同批同币同周期时间倒序 ⇒ **只计数不丢** —— 它幂等无害（不同主键各自插入），
+ *     但出现它说明上游/调用方乱了序，值得在自检里看见。
+ */
+export function sanitizeRows(rows: NewCandleRow[]): NewCandleRow[] {
+  const out: NewCandleRow[] = []
+  const seen = new Map<string, number>()
+  const lastOpen = new Map<string, number>()
+  for (const r of rows) {
+    const bad = rejectReason(r, MS[r.interval] ?? 0)
+    if (bad) {
+      bumpReject(bad, r)
+      continue
+    }
+    const key = `${r.exchange}|${r.marketType}|${r.symbol}|${r.interval}|${r.openTime}`
+    const prev = seen.get(key)
+    if (prev !== undefined) {
+      bumpReject('dup', r)
+      out[prev] = r
+      continue
+    }
+    const series = `${r.symbol}|${r.interval}`
+    const last = lastOpen.get(series)
+    if (last === undefined || r.openTime > last) lastOpen.set(series, r.openTime)
+    else if (r.openTime < last) bumpReject('unordered', r)
+    seen.set(key, out.length)
+    out.push(r)
+  }
+  return out
+}
+
+/** 自检用：被拒的构成，压成一行日志 */
+function describeRejects(): string {
+  return (Object.keys(rejects) as RejectReason[])
+    .filter(k => rejects[k] > 0)
+    .map(k => `${REJECT_LABEL[k]} ${rejects[k]}`)
+    .join('、')
+}
+
 /** 批量 UPSERT，返回真正写进去的行数（被同桶覆盖也算） */
 export async function saveCandles(rows: NewCandleRow[]): Promise<number> {
   if (!rows.length) return 0
+  const clean = sanitizeRows(rows)
+  if (clean.length < rows.length) {
+    console.warn(
+      `[kline] 写入前校验丢弃 ${rows.length - clean.length}/${rows.length} 行：${describeRejects()}`
+    )
+  }
+  if (!clean.length) return 0
   let written = 0
-  for (let i = 0; i < rows.length; i += BATCH_ROWS) {
-    const chunk = rows.slice(i, i + BATCH_ROWS)
+  for (let i = 0; i < clean.length; i += BATCH_ROWS) {
+    const chunk = clean.slice(i, i + BATCH_ROWS)
     const values: unknown[] = []
     const tuples = chunk.map((r, n) => {
       values.push(...rowParams(r))
@@ -433,4 +558,216 @@ export async function candleStoreStats(): Promise<CandleStoreStats> {
     }
   }
   return {rows: total, sizeBytes: Number(size?.s ?? 0), byInterval}
+}
+
+/* ---------------- 缺口巡检（第 2 档：定时，0 权重） ----------------
+ *
+ * 「存在性检查」：某个币某一档在窗口内**该有多少根、实际有多少根**。
+ * 一条 SQL 扫完一档（走 candles_ivl_time_idx，`open_time` 是第 4 列 ⇒ 范围扫得动），
+ * 完全在库里算，**0 权重**，所以可以每几分钟跑一次。
+ *
+ * ⚠️ 只覆盖「库里在该窗口有行的币」—— 一根都没有的币不会出现在结果里，
+ *    调用方要拿 `states`（底座订阅清单）来补这一层判断（recorder 的 `gapCheck` 就是这么做的）。
+ */
+
+export interface BucketCoverage {
+  n: number
+  lo: number
+  hi: number
+}
+
+export async function bucketCoverage(
+  interval: KlineInterval,
+  sinceMs: number,
+  scope: {exchange: string; marketType: string}
+): Promise<Map<string, BucketCoverage>> {
+  const rows = await query<{symbol: string; n: string; lo: Date; hi: Date}>(
+    `SELECT symbol, count(*)::text AS n, min(open_time) AS lo, max(open_time) AS hi
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND interval = $3 AND open_time >= $4
+      GROUP BY symbol`,
+    [scope.exchange, scope.marketType, interval, new Date(sinceMs)]
+  )
+  const out = new Map<string, BucketCoverage>()
+  for (const r of rows) {
+    out.set(r.symbol, {
+      n: Number(r.n),
+      lo: new Date(r.lo).getTime(),
+      hi: new Date(r.hi).getTime()
+    })
+  }
+  return out
+}
+
+/* ---------------- 库内自洽：高周期桶 vs 1m 重算（第 2 档的加强） ----------------
+ *
+ * 为什么要有它（2026-10-07 抽样对账第一轮就抓到的真事）：一条**残桶**（写的时候那个桶还没
+ * 收盘）在"只查有没有"的检查里是**看不出来的** —— 它在那儿、根数也对，就是值不对。
+ * 而且它**永远不会自愈**：`seedHistory` 嫌它太新而跳过、`repairSweep` 只看 1m（1m 是新的）。
+ *
+ * 判据（只比「1m 数据一根不缺」的桶，避免把自己的洞算成别人的错）：
+ *   · 该桶最后一根 1m 的 close ≠ 高周期行的 close；或
+ *   · 该桶 1m 的 volume 求和 ≠ 高周期行的 volume
+ * ⇒ 这行是残桶 / 陈旧值，交给 `repairSymbol` 用交易所口径盖回去。
+ *
+ * 成本：走 candles_ivl_symbol_time_idx 的范围扫（每桶读 bucket/1m 行），0 权重。
+ */
+
+export interface StaleBucket {
+  symbol: string
+  interval: string
+  openTime: number
+  ours: {close: number; volume: number}
+  from1m: {close: number; volume: number}
+}
+
+export async function findStaleBuckets(
+  interval: HighInterval,
+  sinceMs: number,
+  scope: {exchange: string; marketType: string},
+  symbols: string[],
+  limit = 50
+): Promise<StaleBucket[]> {
+  if (!symbols.length) return []
+  const minutes = MS[interval] / 60_000
+  const rows = await query<{
+    symbol: string
+    open_time: Date
+    h_close: number
+    h_volume: number
+    m_close: number
+    m_volume: number
+  }>(
+    `SELECT h.symbol, h.open_time, h.close AS h_close, h.volume AS h_volume,
+            m.c AS m_close, m.v AS m_volume
+       FROM candles h
+       JOIN LATERAL (
+         SELECT count(*) AS n,
+                sum(volume) AS v,
+                (array_agg(close ORDER BY open_time DESC))[1] AS c,
+                max(open_time) AS t
+           FROM candles
+          WHERE exchange = h.exchange AND market_type = h.market_type
+            AND interval = '1m' AND symbol = h.symbol
+            AND open_time >= h.open_time
+            AND open_time < h.open_time + ($4 * interval '1 minute')
+       ) m ON true
+      WHERE h.interval = $1 AND h.exchange = $2 AND h.market_type = $3
+        AND h.open_time >= $5
+        -- ⚠️ 必须按币过滤：不过滤就要为**全市场**每个高周期行都做一次 1m 范围扫
+        --    （实测 1575 行 × 240 根 = 1.0 秒），过滤后只剩订阅清单那几个（几十毫秒）。
+        AND h.symbol = ANY($6::text[])
+        -- 这个桶的 1m 一根不缺（最后一根正好落在桶末），否则那是"我们自己的洞"，不算这行的错
+        AND m.n = $4
+        AND m.t = h.open_time + ($4 * interval '1 minute') - interval '1 minute'
+        AND (h.close <> m.c OR abs(h.volume - m.v) > greatest(1e-9, abs(m.v) * 1e-9))
+      ORDER BY h.open_time DESC
+      LIMIT $7`,
+    [interval, scope.exchange, scope.marketType, minutes, new Date(sinceMs), symbols, limit]
+  )
+  return rows.map(r => ({
+    symbol: r.symbol,
+    interval,
+    openTime: new Date(r.open_time).getTime(),
+    ours: {close: Number(r.h_close), volume: Number(r.h_volume)},
+    from1m: {close: Number(r.m_close), volume: Number(r.m_volume)}
+  }))
+}
+
+/* ---------------- 抽样对账落表（第 3 档：每日） ---------------- */
+
+export interface KlineReconRow {
+  symbol: string
+  interval: string
+  fromTime: number
+  toTime: number
+  compared: number
+  mismatched: number
+  missing: number
+  firstBadAt: number | null
+  /** 前几处差异的明细（别存全量：一轮能差上千根） */
+  detail: unknown[]
+  /** daily（定时）/ manual（手动触发） */
+  source: string
+  ok: boolean
+}
+
+export async function saveKlineRecon(rows: KlineReconRow[]): Promise<number> {
+  if (!rows.length) return 0
+  const values: unknown[] = []
+  const tuples = rows.map((r, n) => {
+    const b = n * 11
+    values.push(
+      r.symbol,
+      r.interval,
+      new Date(r.fromTime).toISOString(),
+      new Date(r.toTime).toISOString(),
+      r.compared,
+      r.mismatched,
+      r.missing,
+      r.firstBadAt === null ? null : new Date(r.firstBadAt).toISOString(),
+      JSON.stringify(r.detail),
+      r.source,
+      r.ok
+    )
+    return `($${b + 1}, $${b + 2}, $${b + 3}::timestamptz, $${b + 4}::timestamptz, $${b + 5}::int,
+             $${b + 6}::int, $${b + 7}::int, $${b + 8}::timestamptz, $${b + 9}::jsonb, $${b + 10}, $${b + 11})`
+  })
+  const res = await getPool().query(
+    `INSERT INTO kline_recon
+       (symbol, interval, from_time, to_time, compared, mismatched, missing,
+        first_bad_at, detail, source, ok)
+     VALUES ${tuples.join(',')}`,
+    values
+  )
+  return res.rowCount ?? 0
+}
+
+export interface KlineReconRecord extends Omit<KlineReconRow, 'fromTime' | 'toTime' | 'firstBadAt'> {
+  id: number
+  checkedAt: string
+  fromTime: string
+  toTime: string
+  firstBadAt: string | null
+}
+
+/** 最近几轮对账结果（自检接口读它；默认只回最近 20 条） */
+export async function recentKlineRecon(limit = 20): Promise<KlineReconRecord[]> {
+  const rows = await query<{
+    id: string
+    checked_at: Date
+    symbol: string
+    interval: string
+    from_time: Date
+    to_time: Date
+    compared: number
+    mismatched: number
+    missing: number
+    first_bad_at: Date | null
+    detail: unknown[]
+    source: string
+    ok: boolean
+  }>(
+    `SELECT id, checked_at, symbol, interval, from_time, to_time, compared, mismatched,
+            missing, first_bad_at, detail, source, ok
+       FROM kline_recon
+      ORDER BY checked_at DESC, id DESC
+      LIMIT $1`,
+    [Math.max(1, Math.round(limit))]
+  )
+  return rows.map(r => ({
+    id: Number(r.id),
+    checkedAt: new Date(r.checked_at).toISOString(),
+    symbol: r.symbol,
+    interval: r.interval,
+    fromTime: new Date(r.from_time).toISOString(),
+    toTime: new Date(r.to_time).toISOString(),
+    compared: Number(r.compared),
+    mismatched: Number(r.mismatched),
+    missing: Number(r.missing),
+    firstBadAt: r.first_bad_at ? new Date(r.first_bad_at).toISOString() : null,
+    detail: r.detail,
+    source: r.source,
+    ok: r.ok
+  }))
 }

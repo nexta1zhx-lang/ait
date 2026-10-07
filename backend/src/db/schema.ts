@@ -625,6 +625,29 @@ CREATE INDEX IF NOT EXISTS candles_ivl_symbol_time_idx
   ON candles (exchange, market_type, interval, symbol, open_time);
 CREATE INDEX IF NOT EXISTS candles_ivl_time_idx
   ON candles (exchange, market_type, interval, open_time);
+
+-- ──────────────────────────────── K 线对账（2026-10-07，抽样那一路）
+-- 每天抽几个币、每档取最近 N 根，跟交易所 REST 的官方 K 线逐字段比 OHLCV。
+-- 为什么只比 OHLCV：seed / repair 灌进来的是 ccxt 口径（量 / 额 / 笔数 / 主动买量都没有，
+-- 存 0），所以「量」这一档不可比 —— 要比量只能比 source = 'ws' | 'rollup' 的那些桶，
+-- 而那正是「实时校验 + 缺口巡检」两档在管的事。
+-- 成本：3 币 × 5 档 = 15 发 REST（每发权重 2）⇒ 30 权重 / 轮，一天一轮可忽略。
+CREATE TABLE IF NOT EXISTS kline_recon (
+  id           BIGSERIAL   PRIMARY KEY,
+  checked_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  symbol       TEXT        NOT NULL,
+  interval     TEXT        NOT NULL,
+  from_time    TIMESTAMPTZ NOT NULL,
+  to_time      TIMESTAMPTZ NOT NULL,
+  compared     INTEGER     NOT NULL,   -- 两端都有、真比过的根数
+  mismatched   INTEGER     NOT NULL,   -- 值不一致的根数
+  missing      INTEGER     NOT NULL,   -- 缺口：我们缺的 + 交易所缺的
+  first_bad_at TIMESTAMPTZ,            -- 第一处不一致的开盘时间（排查用）
+  detail       JSONB       NOT NULL DEFAULT '[]'::jsonb,  -- 前几处明细，别存全量
+  source       TEXT        NOT NULL DEFAULT 'daily',      -- daily（定时）/ manual（手动）
+  ok           BOOLEAN     NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kline_recon_time_idx ON kline_recon (checked_at DESC);
 `
 
 /**

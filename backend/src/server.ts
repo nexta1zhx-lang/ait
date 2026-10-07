@@ -139,7 +139,7 @@ import {
   saveSnapshot,
   type OpenOrderInput
 } from './db/exchange-store'
-import {candleStoreStats} from './db/candle-store'
+import {candleRejectStats, candleStoreStats, recentKlineRecon} from './db/candle-store'
 import {
   reconcileKeyOrders,
   wakeExchangeStream,
@@ -196,6 +196,8 @@ import {
 } from './data/kline-store'
 import {
   klineRecorderStats,
+  runGapCheck,
+  runKlineRecon,
   startKlineRecorder,
   stopKlineRecorder
 } from './data/kline-recorder'
@@ -4440,6 +4442,51 @@ async function route(
       return sendJson(res, 200, {...st, store: klineStoreStats()})
     } catch (e) {
       return fail(res, 'kline/recorder', e)
+    }
+  }
+  if (p === '/api/kline/recon' && method === 'GET') {
+    /*
+     * 第 3 档「抽样对账」的查看 / 手动触发。
+     *
+     *   GET /api/kline/recon          → 最近几轮结果 + 写入前校验的丢弃计数
+     *   GET /api/kline/recon?run=1    → 立刻跑一轮（3 币 × 5 档 = 30 权重，十几秒）
+     *
+     * 为什么要手动入口：定时那轮是 24 小时一次，发布后想当场确认"库和交易所是一致的"
+     * 不该等一天。`?run=1` 跟定时那轮走的是同一个函数，结果同样落 `kline_recon`。
+     */
+    try {
+      if (url.searchParams.get('run')) {
+        const r = await runKlineRecon('manual')
+        return sendJson(res, 200, {...r, recent: await recentKlineRecon(15)})
+      }
+      const limit = Number(url.searchParams.get('limit') ?? 20)
+      return sendJson(res, 200, {
+        recon: klineRecorderStats().recon,
+        rejects: candleRejectStats(),
+        recent: await recentKlineRecon(Number.isFinite(limit) ? limit : 20)
+      })
+    } catch (e) {
+      return fail(res, 'kline/recon', e)
+    }
+  }
+  if (p === '/api/kline/gaps' && method === 'GET') {
+    /*
+     * 第 2 档「缺口巡检」的查看 / 手动触发。
+     *
+     *   GET /api/kline/gaps          → 最近一次巡检的统计 + 待修队列长度
+     *   GET /api/kline/gaps?run=1    → 立刻巡一遍（0 权重，只查库；发现缺口会排进修复队列）
+     *
+     * 为什么要有手动入口：定时那轮 5 分钟一次，发布后想当场确认"洞补上没有"不该干等。
+     */
+    try {
+      const before = klineRecorderStats()
+      if (url.searchParams.get('run')) {
+        const r = await runGapCheck('manual')
+        return sendJson(res, 200, {...r, pendingRepairs: klineRecorderStats().pendingRepairs})
+      }
+      return sendJson(res, 200, {gaps: before.gaps, pendingRepairs: before.pendingRepairs})
+    } catch (e) {
+      return fail(res, 'kline/gaps', e)
     }
   }
   if (p === '/api/kline/stream') {

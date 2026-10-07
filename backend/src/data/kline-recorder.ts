@@ -31,13 +31,19 @@ import {loadConfig} from '../config'
 import {fetchCandlesRange, listPerpetualSymbols, type PerpSymbol} from './market'
 import {
   HIGH_INTERVALS,
+  bucketCoverage,
+  candleRejectStats,
+  findStaleBuckets,
   maxOpenTimes,
   pruneCandles,
+  readRecentCandles,
   rollupFrom1m,
   saveCandles,
+  saveKlineRecon,
   sumClosed1m,
   type HighInterval,
   type KlineInterval,
+  type KlineReconRow,
   type NewCandleRow
 } from '../db/candle-store'
 import {RateBudgetError, takeWeight} from '../util/rate-budget'
@@ -107,6 +113,33 @@ const REPAIR_PER_TICK = 5
 const REPAIR_PER_TICK_BACKLOG = 15
 const REPAIR_BACKLOG = 50
 const REPAIR_COOLDOWN_MS = 10 * MIN_MS
+/**
+ * 第 2 档「存在性检查」：多久巡检一次、窗口多长。
+ *
+ * 为什么要有它（`repairSweep` 只管「库里最后一条 vs 现在」）：**窗口中间的洞**它看不见 ——
+ * 漏了 40 分钟又被上游接上，最后一条是新的，扫描就认为"没事"。而那个洞会让图上少一截，
+ * 读路径还会因为"这段库里有覆盖"而**不去问交易所**，于是洞一直摆着。
+ * 0 权重（纯库内聚合，走 candles_ivl_time_idx）⇒ 频率可以给得比较勤。
+ */
+const GAP_CHECK_MS = 5 * 60_000
+const GAP_WINDOW_BARS = 120
+/** 刚落下的那根可能还没 flush（每 4 秒一批）⇒ 判"该有"时给它留一点余量 */
+const GAP_FLUSH_GRACE_MS = 30_000
+/** 库内自洽看最近几个桶（4h 看 4 个就是 16 小时，够覆盖"重启前后写坏的那一个"） */
+const STALE_CHECK_BUCKETS = 4
+/** 一轮最多把几个币排进修复队列（防一次抖动把队列堆爆，剩下的下一轮再来） */
+const GAP_ALERT_MAX = 60
+/**
+ * 第 3 档「抽样对账」：每天抽几个币、每档比多少根、什么时候跑。
+ *
+ * 为什么是抽样而不是全量：全量 525 币 × 5 档 = 2625 发（≈5000 权重），一年跑一次都嫌吵；
+ * 而抽样是**轮换**的（按天序号取模，525 币 175 天一轮），长期下来覆盖面一样是全局。
+ * 为什么放在启动 15 分钟后：那之前 `seedHistory` 还在灌，库本来就不全，比出来全是假差异。
+ */
+const RECON_SYMBOLS = 3
+const RECON_BARS = 200
+const RECON_FIRST_MS = 15 * MIN_MS
+const RECON_EVERY_MS = 24 * 60 * 60_000
 /** 灌历史时每个周期取多少根（够画图 + 一次「加载更多」） */
 const SEED_BARS: Record<HighInterval, number> = {
   '5m': 1000,
@@ -555,10 +588,12 @@ async function flush(): Promise<void> {
 
 /* ---------------- 补缺口 / 灌历史 / 修复 ---------------- */
 
-function queueRepair(st: SymState, fromMs: number): void {
-  if (Date.now() - st.repairedAt < REPAIR_COOLDOWN_MS) return
+/** 返回 true = 真排进去了；false = 在冷却里被挡下（调用方要如实计数，别虚报） */
+function queueRepair(st: SymState, fromMs: number): boolean {
+  if (Date.now() - st.repairedAt < REPAIR_COOLDOWN_MS) return false
   const cur = repairQueue.get(st.sym.symbol)
   if (cur === undefined || fromMs < cur) repairQueue.set(st.sym.symbol, fromMs)
+  return true
 }
 
 /**
@@ -691,8 +726,7 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
       source: 'backfill'
     }))
   if (rows.length) {
-    await saveCandles(rows)
-    stats.backfilled1m += rows.length
+    stats.backfilled1m += await saveCandles(rows)
   }
 
   for (const it of HIGH_INTERVALS) {
@@ -742,6 +776,299 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
         source: 'repair'
       }))
     if (officialRows.length) await saveCandles(officialRows)
+  }
+}
+
+/* ---------------- 三档校验 ----------------
+ *
+ *  ① 实时（写入前）  `sanitizeRows` 在 `db/candle-store.ts` 的 `saveCandles` 里 —— 四条入库路
+ *     （实时流 / rollup / 补缺口 / 灌历史）都走它，所以校验只写了一处。计数读 `candleRejectStats()`。
+ *  ② 定时（存在性）  `runGapCheck`：窗口内该有多少根 vs 实际有多少根 ⇒ 告警 + 排进修复队列。
+ *  ③ 每日（抽样对账）`runKlineRecon`：抽 3 个币 × 5 档 vs 交易所 REST 逐字段比 OHLCV ⇒ 落表。
+ */
+
+const gapStats = {lastAt: 0, lastFound: 0, lastScanned: 0, lastQueued: 0, lastCooling: 0, lastStale: 0}
+let gapChecking = false
+
+/**
+ * 第 2 档：存在性检查（定时、0 权重）。
+ *
+ * 只看**底座订阅过、且收过帧**的币（`coveredAt > 0`）：没收到过帧的币要么是死币、
+ * 要么是刚启动，报警只会是噪音 —— 那件事 `logStats` 的 `覆盖 x/y` 已经在看了。
+ *
+ * 导出是给管理接口手动触发的（`GET /api/kline/gaps?run=1`）：定时那轮 5 分钟一次，
+ * 想当场确认"洞有没有被补上"不该干等。
+ */
+export async function runGapCheck(reason: string): Promise<{
+  scanned: number
+  found: number
+  queued: number
+  cooling: number
+  stale: number
+}> {
+  if (gapChecking || stopped || !cfg) {
+    return {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0}
+  }
+  gapChecking = true
+  const out = {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0}
+  try {
+    const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
+    const now = Date.now()
+    const byInterval: Record<string, number> = {}
+    const samples: string[] = []
+    for (const it of ['1m', ...HIGH_INTERVALS] as KlineInterval[]) {
+      const ms = MS[it]
+      const since = now - GAP_WINDOW_BARS * ms
+      const expectedTo = Math.floor((now - ms - GAP_FLUSH_GRACE_MS) / ms) * ms
+      if (expectedTo < since) continue
+      const cov = await bucketCoverage(it, since, scope)
+      for (const st of states.values()) {
+        if (!st.coveredAt) continue
+        out.scanned++
+        const c = cov.get(st.sym.symbol)
+        /* 窗口里该有多少根：从「它自己最早那根」到「现在该有的最后一根」 */
+        const lo = c ? Math.max(Math.floor(since / ms) * ms, Math.floor(c.lo / ms) * ms) : null
+        const expected = lo === null ? 0 : Math.floor((expectedTo - lo) / ms) + 1
+        const actual = c?.n ?? 0
+        if (expected > 0 && actual >= expected) continue
+        /* `lo === null` 表示窗口里一根都没有（上游在推我们、库里却空着）⇒ 也算缺口 */
+        out.found++
+        byInterval[it] = (byInterval[it] ?? 0) + 1
+        if (samples.length < 5) {
+          samples.push(`${st.sym.pair}/${it} 有 ${actual} 该有 ${expected}`)
+        }
+        if (out.queued < GAP_ALERT_MAX && queueRepair(st, lo ?? now - BACKFILL_MAX_MS)) {
+          out.queued++
+        } else {
+          out.cooling++
+        }
+      }
+    }
+    /*
+     * ② 库内自洽：高周期桶的值对不对（残桶在①里看不出来：它在那儿、根数也对，就是值不对）。
+     *   把 1m 缺根的那些桶排除掉了 —— 那是①的活，不能记到高周期行的账上。
+     */
+    const staleByInterval: Record<string, number> = {}
+    const staleSamples: string[] = []
+    for (const it of HIGH_INTERVALS) {
+      const ms = MS[it]
+      const stale = await findStaleBuckets(
+        it,
+        now - STALE_CHECK_BUCKETS * ms,
+        scope,
+        symbols.map(v => v.symbol)
+      )
+      if (!stale.length) continue
+      out.stale += stale.length
+      staleByInterval[it] = stale.length
+      for (const sv of stale) {
+        if (staleSamples.length < 5) {
+          staleSamples.push(
+            `${sv.symbol}/${it} @${new Date(sv.openTime).toISOString()} ` +
+              `库里 close=${sv.ours.close} 而 1m 重算=${sv.from1m.close}`
+          )
+        }
+        const st = [...states.values()].find(v => v.sym.symbol === sv.symbol)
+        if (!st) continue
+        if (out.queued < GAP_ALERT_MAX && queueRepair(st, sv.openTime)) out.queued++
+        else out.cooling++
+      }
+    }
+    gapStats.lastAt = now
+    gapStats.lastFound = out.found
+    gapStats.lastScanned = out.scanned
+    gapStats.lastQueued = out.queued
+    gapStats.lastCooling = out.cooling
+    gapStats.lastStale = out.stale
+    if (out.found) {
+      const detail = Object.entries(byInterval)
+        .map(([k, v]) => `${k} ${v}`)
+        .join(' / ')
+      console.warn(
+        `[kline] 缺口巡检（${reason}）：${out.scanned} 组里发现 ${out.found} 处缺口（${detail}），` +
+          `排进修复队列 ${out.queued} 个` +
+          /* 冷却期内的要如实说：不然"排队 8 个"却什么都没修，看日志的人会以为是修复坏了 */
+          (out.cooling ? `（${out.cooling} 个在 10 分钟冷却里，下一轮再排）` : '') +
+          ` —— 例：${samples.join('；')}`
+      )
+    }
+    if (out.stale) {
+      const detail = Object.entries(staleByInterval)
+        .map(([k, v]) => `${k} ${v}`)
+        .join(' / ')
+      console.warn(
+        `[kline] 库内自洽（${reason}）：${out.stale} 个高周期桶跟 1m 重算对不上（${detail}）` +
+          `—— 多为残桶/陈旧值，按冷却情况排进修复队列。例：${staleSamples.join('；')}`
+      )
+    }
+  } catch (e) {
+    stats.lastError = (e as Error).message
+    console.warn(`[kline] 缺口巡检失败：${(e as Error).message.slice(0, 120)}`)
+  } finally {
+    gapChecking = false
+  }
+  return out
+}
+
+const reconStats = {
+  lastAt: 0,
+  lastSource: '',
+  checked: 0,
+  compared: 0,
+  mismatched: 0,
+  missing: 0,
+  badSeries: 0,
+  lastError: ''
+}
+let reconning = false
+
+/** 数值比对：价格是同一个数过一遍 IEEE754，量是「60 个 double 相加」vs 交易所自己的和 ⇒ 末位可能差一点 */
+function closeEnough(a: number, b: number): boolean {
+  if (a === b) return true
+  return Math.abs(a - b) <= Math.max(1e-9, Math.abs(b) * 1e-9)
+}
+
+/** 比一个（币 × 周期）：库里最近 `RECON_BARS` 根 vs 交易所同段，逐字段比 OHLCV */
+async function reconOne(
+  sym: PerpSymbol,
+  it: HighInterval,
+  source: string,
+  scope: {exchange: string; marketType: string},
+  now: number
+): Promise<KlineReconRow> {
+  const ms = MS[it]
+  const row: KlineReconRow = {
+    symbol: sym.symbol,
+    interval: it,
+    fromTime: now,
+    toTime: now,
+    compared: 0,
+    mismatched: 0,
+    missing: 0,
+    firstBadAt: null,
+    detail: [],
+    source,
+    ok: true
+  }
+  const ours = await readRecentCandles(it, sym.symbol, RECON_BARS, scope)
+  if (!ours.length) {
+    row.detail = [{note: '库里没有这个币这一档的数据（新上市 / 非 swap / 超出保留窗）'}]
+    return row
+  }
+  row.fromTime = ours[0].timestamp
+  row.toTime = ours[ours.length - 1].timestamp + ms
+  const official = closedOnly(
+    await paced(`对账 ${it} ${sym.pair}`, 2, () =>
+      fetchCandlesRange({
+        exchangeId: cfg!.exchange,
+        symbol: sym.symbol,
+        timeframe: it,
+        from: row.fromTime,
+        to: now,
+        marketType: cfg!.marketType,
+        apiBase: cfg!.apiBase,
+        maxCandles: RECON_BARS + 10
+      })
+    ),
+    ms,
+    now
+  )
+  const theirs = new Map<number, Candle>()
+  for (const b of official) if (b.timestamp >= row.fromTime) theirs.set(b.timestamp, b)
+  for (const b of ours) {
+    const t = theirs.get(b.timestamp)
+    if (!t) {
+      row.missing++
+      row.firstBadAt ??= b.timestamp
+      if (row.detail.length < 5) row.detail.push({at: new Date(b.timestamp).toISOString(), why: '交易所没有这根'})
+      continue
+    }
+    theirs.delete(b.timestamp)
+    row.compared++
+    for (const f of ['open', 'high', 'low', 'close', 'volume'] as const) {
+      if (closeEnough(b[f], t[f])) continue
+      row.mismatched++
+      row.firstBadAt ??= b.timestamp
+      if (row.detail.length < 5) {
+        row.detail.push({at: new Date(b.timestamp).toISOString(), field: f, ours: b[f], theirs: t[f]})
+      }
+      break
+    }
+  }
+  for (const ts of theirs.keys()) {
+    row.missing++
+    row.firstBadAt ??= ts
+    if (row.detail.length < 5) row.detail.push({at: new Date(ts).toISOString(), why: '我们缺这根'})
+  }
+  row.ok = row.mismatched === 0 && row.missing === 0
+  return row
+}
+
+/**
+ * 第 3 档：抽样对账（每日 + 手动）。
+ *
+ * 选币**按天轮换**（`dayIndex * 3 + k` 取模）—— 不随机是为了可复现：出问题能算出"那天比了谁"。
+ */
+export async function runKlineRecon(source: string): Promise<{
+  checked: number
+  compared: number
+  mismatched: number
+  missing: number
+  bad: number
+}> {
+  if (reconning) throw new Error('对账正在跑')
+  if (!cfg || !symbols.length) throw new Error('底座还没就绪（拿不到合约清单）')
+  reconning = true
+  const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
+  const now = Date.now()
+  try {
+    const dayIndex = Math.floor(now / (24 * 60 * 60_000))
+    const picks: PerpSymbol[] = []
+    const taken = new Set<string>()
+    for (let k = 0; picks.length < Math.min(RECON_SYMBOLS, symbols.length) && k < symbols.length; k++) {
+      const s = symbols[(dayIndex * RECON_SYMBOLS + k) % symbols.length]
+      if (taken.has(s.symbol)) continue
+      taken.add(s.symbol)
+      picks.push(s)
+    }
+    const rows: KlineReconRow[] = []
+    for (const s of picks) {
+      for (const it of HIGH_INTERVALS) {
+        rows.push(await reconOne(s, it, source, scope, now))
+      }
+    }
+    await saveKlineRecon(rows)
+    const compared = rows.reduce((a, r) => a + r.compared, 0)
+    const mismatched = rows.reduce((a, r) => a + r.mismatched, 0)
+    const missing = rows.reduce((a, r) => a + r.missing, 0)
+    const bad = rows.filter(r => !r.ok).length
+    reconStats.lastAt = now
+    reconStats.lastSource = source
+    reconStats.checked = rows.length
+    reconStats.compared = compared
+    reconStats.mismatched = mismatched
+    reconStats.missing = missing
+    reconStats.badSeries = bad
+    reconStats.lastError = ''
+    const who = picks.map(p => p.pair).join('/')
+    if (bad) {
+      const first = rows.find(r => !r.ok)!
+      console.warn(
+        `[kline] 对账（${source}）⚠️ ${who}：${rows.length} 组里 ${bad} 组不一致，` +
+          `比了 ${compared} 根（差 ${mismatched} / 缺 ${missing}）—— 首个：` +
+          `${first.interval} ${first.symbol} ${first.firstBadAt ? new Date(first.firstBadAt).toISOString() : ''}`
+      )
+    } else {
+      console.log(
+        `[kline] 对账（${source}）：${who} × 5 档，逐字段比了 ${compared} 根，全部一致 ✅`
+      )
+    }
+    return {checked: rows.length, compared, mismatched, missing, bad}
+  } catch (e) {
+    reconStats.lastError = (e as Error).message
+    throw e
+  } finally {
+    reconning = false
   }
 }
 
@@ -954,6 +1281,25 @@ async function boot(): Promise<void> {
   timers.push(setInterval(() => void prune(), PRUNE_EVERY_MS))
   timers.push(setInterval(checkWatchdog, WATCHDOG_MS))
   timers.push(setInterval(() => void repairTick(), REPAIR_TICK_MS))
+  /* 第 2 档：存在性检查（0 权重）。第一次等一个周期，别跟启动那轮 seed/repair 抢 */
+  timers.push(setInterval(() => void runGapCheck('定时'), GAP_CHECK_MS))
+  /* 第 3 档：抽样对账。启动 15 分钟后第一轮（那之后 seed 基本灌完，比出来才有意义） */
+  if ((process.env.KLINE_RECON ?? '').toLowerCase() !== 'off') {
+    timers.push(
+      setTimeout(() => {
+        void runKlineRecon('daily').catch(e =>
+          console.warn(`[kline] 对账失败：${(e as Error).message.slice(0, 140)}`)
+        )
+      }, RECON_FIRST_MS)
+    )
+    timers.push(
+      setInterval(() => {
+        void runKlineRecon('daily').catch(e =>
+          console.warn(`[kline] 对账失败：${(e as Error).message.slice(0, 140)}`)
+        )
+      }, RECON_EVERY_MS)
+    )
+  }
   /* 灌历史可以被打断（限流让路）⇒ 定期续一轮；幂等：已经跟到现在的币会跳过 */
   timers.push(setInterval(() => void seedHistory(), SEED_RETRY_MS))
   for (const t of timers) t.unref()
@@ -998,6 +1344,12 @@ export interface KlineRecorderStats {
   liveBars: number
   openSec: number
   lastFrameSecAgo: number
+  /** 第 1 档：写入前校验丢了什么（按原因） */
+  rejected: ReturnType<typeof candleRejectStats>
+  /** 第 2 档：最近一次缺口巡检 */
+  gaps: typeof gapStats
+  /** 第 3 档：最近一次抽样对账 */
+  recon: typeof reconStats
   lastError: string
 }
 
@@ -1021,6 +1373,9 @@ export function klineRecorderStats(): KlineRecorderStats {
     liveBars: live1m.size,
     openSec: openSince ? Math.round((Date.now() - openSince) / 1000) : 0,
     lastFrameSecAgo: lastFrameAt ? Math.round((Date.now() - lastFrameAt) / 1000) : -1,
+    rejected: candleRejectStats(),
+    gaps: {...gapStats},
+    recon: {...reconStats},
     lastError: stats.lastError
   }
 }
