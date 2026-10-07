@@ -30,9 +30,9 @@ import {
   type MarketRow,
   type TickerPatch
 } from '../api'
-import {decimalsFor, fmt} from '../format'
+import {bjTime, decimalsFor, fmt} from '../format'
 import {isForeground, onForegroundChange} from '../live'
-import {marketMinVolUsd} from '../settings'
+import {marketMinVolUsd, rankBase, rankSinceMs} from '../settings'
 import {contracts} from '../store'
 
 const props = defineProps<{
@@ -74,7 +74,12 @@ const RESYNC_MS = 5 * 60_000
  * 升序只留跌的），现在就是一个普通排序：两个方向都是**全量**。
  */
 type SortKey = 'volume' | 'change'
-const sortKey = ref<SortKey>('volume')
+/*
+ * 默认排序：**成交额降序**（跟交易所默认榜一致）。
+ * 例外：配了「基准时间」（`rankBase`）—— 那本来就是「按基准涨跌排」，
+ * 直接按涨跌幅降序进入，别让用户自己再点一下表头。
+ */
+const sortKey = ref<SortKey>(rankBase.value.kind === 'off' ? 'volume' : 'change')
 const sortDir = ref<'asc' | 'desc'>('desc')
 
 function setSort(key: SortKey, dir: 'asc' | 'desc'): void {
@@ -170,8 +175,13 @@ let stopped = false
 async function loadSnapshot(): Promise<void> {
   if (loading.value) return
   loading.value = true
+  /*
+   * `since`（基准时刻）在这里取：换了基准等于换了一份底稿（后端要跟着补 `baseClose`），
+   * 所以重拉整表 —— 见底下那个 `watch(rankBase, …)`。
+   */
+  const since = baseSince.value
   try {
-    const d = await fetchMarkets()
+    const d = await fetchMarkets(undefined, since)
     if (stopped) return
     // 以整表为准：新上的币会进来，下架的自然没了
     byPair.clear()
@@ -182,6 +192,12 @@ async function loadSnapshot(): Promise<void> {
     if (!stopped) error.value = (e as Error).message
   } finally {
     loading.value = false
+    /*
+     * ⚠️ 拉的过程中基准被改了（配置里切换 / 行情条上那颗 ✕）：这一份底稿的 `baseClose`
+     * 是按**旧基准**补的 ⇒ 上面那个 watch 的 `loadSnapshot()` 被 `loading` 挡掉了，
+     * 得在这儿补一次 —— 不然整列会停在「—」干等 5 分钟后那次重同步。
+     */
+    if (!stopped && since !== baseSince.value) void loadSnapshot()
   }
 }
 
@@ -495,7 +511,7 @@ const rest = computed<MarketRow[]>(() => {
   const desc = sortDir.value === 'desc'
   // 两列都是**全量排序**（不再按涨/跌筛掉一半）：涨跌幅升序就是「跌得最狠的在前」
   const field = (r: MarketRow) =>
-    (sortKey.value === 'volume' ? r.quoteVolume24h : r.change24hPct) ?? 0
+    (sortKey.value === 'volume' ? r.quoteVolume24h : chgOf(r)) ?? 0
   return [...base].sort((a, b) => {
     const d = field(b) - field(a)
     return desc ? d : -d
@@ -517,6 +533,74 @@ const shown = computed<MarketRow[]>(() => {
 
 const total = computed(() => shown.value.length)
 const visible = computed(() => shown.value.slice(0, MAX_ROWS))
+
+/* ---------------- 基准时间（排行榜换口径） ---------------- */
+
+/**
+ * 排行榜现在是不是「基准时间」口径。
+ * `rankBase.kind === 'off'` = 交易所的滚动 24h（默认，不动）。
+ */
+const baseActive = computed(() => rankBase.value.kind !== 'off')
+
+/**
+ * 基准时刻（毫秒）；`off` 是 `null`。
+ * `tz` 那一档每次现算「该时区当天 00:00」—— 跨零点之后自动走到新的一天。
+ */
+const baseSince = computed(() => rankSinceMs(rankBase.value))
+
+/** `480` → `UTC+8`；`330` → `UTC+5:30`（半小时时区也画得对） */
+function tzLabel(offsetMin: number): string {
+  const sign = offsetMin < 0 ? '-' : '+'
+  const abs = Math.abs(offsetMin)
+  const h = Math.floor(abs / 60)
+  const m = abs % 60
+  return `UTC${sign}${h}${m ? `:${String(m).padStart(2, '0')}` : ''}`
+}
+
+/** 列头文案：时区日切 = 「今日涨跌」；任意时刻 = 「基准涨跌」 */
+const chgLabel = computed(() =>
+  rankBase.value.kind === 'tz' ? '今日涨跌' : '基准涨跌'
+)
+
+/** 表上方那一行要显示的基准（手机上没有悬停，得看得见） */
+const baseText = computed(() => {
+  const b = rankBase.value
+  if (b.kind === 'off') return ''
+  if (b.kind === 'at') return `${bjTime(b.ms)} 起算`
+  return `${tzLabel(b.min)} 00:00 日切`
+})
+
+/**
+ * 这一行**界面上的涨跌幅**（%）—— 换没换基准都走它。
+ *
+ * · 没换基准（默认）→ 交易所给的 `change24hPct`（滚动 24 小时）。
+ * · 换了基准 → `last / baseClose - 1` **现算**：`last` 每秒都在被行情增量刷新，
+ *   而 `baseClose` 是基准时刻的死数 ⇒ 这一列会跟着秒级跳动（跟头部「1天 / 3天…」同一套路）。
+ *   那一刻没有基准价（`baseClose` 是 null）就返回 null → 界面显示「—」。
+ */
+function chgOf(r: MarketRow): number | null {
+  if (rankBase.value.kind === 'off') return r.change24hPct
+  const base = r.baseClose
+  const last = r.last
+  if (base === null || base === undefined || !(base > 0)) return null
+  if (last === null || last === undefined || !Number.isFinite(last)) return null
+  return (last / base - 1) * 100
+}
+
+/** 从行情条上那颗 ✕ 回到默认口径（跟配置里的「24h」是同一件事） */
+function useDefaultBase(): void {
+  rankBase.value = {kind: 'off'}
+}
+
+/*
+ * 换了基准：① 重拉整表（`baseClose` 得跟数据一起回来）② 把排序切到涨跌幅降序 ——
+ * 用户要的就是「按基准涨跌来排」，默认那一下按成交额排等于白选。
+ */
+watch(rankBase, () => {
+  sortKey.value = 'change'
+  sortDir.value = 'desc'
+  if (shouldRun()) void loadSnapshot()
+})
 
 /*
  * ⚠️ 2026-10-04：**「空闲时把一批币的 K 线提前取好」整块删掉了**
@@ -569,6 +653,24 @@ const toneOf = (v: number | null): string =>
         class="mkt-search"
         placeholder="搜币种，如 BTC"
       />
+    </div>
+
+    <!--
+      换了基准就说清「这一榜是哪一刻以来的」—— 手机上没有 hover，得看得见；
+      ✕ 一键回到默认的 24h 口径。
+    -->
+    <div v-if="baseActive" class="mkt-basebar">
+      <span class="mb-k">{{ chgLabel }}</span>
+      <span class="mb-v">{{ baseText }}</span>
+      <button
+        type="button"
+        class="mb-x"
+        title="回到 24h 涨跌幅（默认）"
+        aria-label="回到 24h 涨跌幅"
+        @click="useDefaultBase"
+      >
+        ✕
+      </button>
     </div>
 
     <!-- 星号操作的提示（超上限等）；点一下关掉 -->
@@ -649,7 +751,9 @@ const toneOf = (v: number | null): string =>
               <th class="r">最新价</th>
               <th class="r sortable" :class="{on: sortKey === 'change'}">
                 <span class="scell">
-                  <span class="s-label" @click="sortBy('change')">涨跌幅</span>
+                  <span class="s-label" @click="sortBy('change')">{{
+                    baseActive ? chgLabel : '涨跌幅'
+                  }}</span>
                   <span class="sarr">
                     <button
                       type="button"
@@ -779,9 +883,12 @@ const toneOf = (v: number | null): string =>
               </td>
               <td class="r num">{{ priceText(r.last) }}</td>
               <td class="r num">
-                <!-- 24h 涨跌幅：包一层色块，像交易所那样一眼能扫（用户：加上背景） -->
-                <span class="chg" :class="toneOf(r.change24hPct)">
-                  {{ pctText(r.change24hPct) }}
+                <!--
+                  涨跌幅：包一层色块，像交易所那样一眼能扫（用户：加上背景）。
+                  换基准那一下走 `chgOf(r)`（基准以来的涨跌幅），否则就是交易所的 24h。
+                -->
+                <span class="chg" :class="toneOf(chgOf(r))">
+                  {{ pctText(chgOf(r)) }}
                 </span>
               </td>
             </tr>

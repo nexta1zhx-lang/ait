@@ -994,6 +994,13 @@ export interface MarketRow {
    * 见 `data/marketcap.ts`。
    */
   rank?: number | null
+  /**
+   * 「基准时刻」那一刻的收盘价（只在请求带了 `?since=` 时给，见 `closesAtOrBefore`）。
+   *
+   * 前端拿它 + 实时 `last` 现算「基准时间 → 现在」的涨跌幅（换掉 24h 口径）。
+   * 没换基准、或那一刻查不到就是个 `null`。
+   */
+  baseClose?: number | null
 }
 
 /**

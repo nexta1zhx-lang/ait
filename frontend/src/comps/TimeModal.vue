@@ -146,7 +146,7 @@ function confirm() {
 .modal-mask {
   position: fixed;
   inset: 0;
-  z-index: 200;
+  z-index: 320; /* 压在底部弹层 `.sheet`（301）上面 —— 配置里点「任意…」要能弹出来 */
   display: flex;
   align-items: center;
   justify-content: center;

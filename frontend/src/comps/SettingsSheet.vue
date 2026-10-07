@@ -12,6 +12,8 @@
  *   · 订单设置（2026-10-06）—— 仓位 / 订单历史 / 仓位委托 / 强平价格
  *     这四样画不画在 K 线上（见 `trade-overlay.ts`、`KlineChart` 的叠加层）。
  *   · 持仓明细（2026-10-07）—— 持仓卡上「价值 / 数量」那一格显示哪个数。
+ *   · 基准时间（2026-10-07）—— 合约行情排行榜按哪个时区日切算「今日」涨跌幅（默认 24h）；
+ *     选了就直接改合约区那张表的排名。
  *
  * ★ 2026-10-07 版式（用户：「配置改为图标，内容优化所有都去掉描述，开关有点饱满了
  *   上下瘦一点 行情过滤 一行显示 下单一行显示 测试也是 订单 选项样式修改 一个边框
@@ -26,7 +28,7 @@
  *
  * 值都在 `settings.ts`（落 localStorage），这里只负责画和改。
  */
-import {computed, watch} from 'vue'
+import {computed, ref, watch} from 'vue'
 import {
   chartShowHistory,
   chartShowLiq,
@@ -34,6 +36,7 @@ import {
   chartShowPosition,
   marketMinVolM,
   posShowValue,
+  rankBase,
   testOrder
 } from '../settings'
 import {
@@ -44,6 +47,8 @@ import {
   tradeKeysErr
 } from '../trade-account'
 import {askConfirm} from '../confirm'
+import {bjTime} from '../format'
+import TimeModal from './TimeModal.vue'
 
 const props = defineProps<{
   open: boolean
@@ -152,6 +157,47 @@ function toggleChart(kind: 'position' | 'history' | 'orders' | 'liq'): void {
 function pickPosDisplay(value: boolean): void {
   posShowValue.value = value
 }
+
+/* ---------------- 基准时间（合约行情排行榜） ---------------- */
+
+/**
+ * 可选的基准时区（UTC 偏移**分钟** + 显示名）。北京（UTC+8）放第一个 —— 用户举的例子就是它。
+ * ⚠️ 只有两项：再加「任意…」那颗，390px 上这一行就放不下、会折成两行（用户要的是「每条一行」）。
+ */
+const TIMEZONES: {min: number; label: string; title: string}[] = [
+  {min: 480, label: 'UTC+8', title: '北京时间'},
+  {min: 0, label: 'UTC+0', title: '伦敦时间'}
+]
+
+/** 回到默认（交易所的滚动 24h） */
+function pickOff(): void {
+  rankBase.value = {kind: 'off'}
+}
+
+/** 按某个时区每天 00:00 日切 */
+function pickTz(min: number): void {
+  rankBase.value = {kind: 'tz', min}
+}
+
+/* 「任意时刻」那颗：点开复用「选一个时间点」那个弹窗（自带「现在 / 1 天前 / 7 天前…」快选） */
+const atOpen = ref(false)
+
+/** 当前选中的时区偏移（不在 tz 那一档就是 null）—— 只给模板判高亮用 */
+const pickedTz = computed(() =>
+  rankBase.value.kind === 'tz' ? rankBase.value.min : null
+)
+
+/** 那颗按钮上的字：没设就是「任意…」，设了显示挑中的时刻（省掉年份） */
+const atLabel = computed(() =>
+  rankBase.value.kind === 'at'
+    ? bjTime(rankBase.value.ms).slice(5, 16)
+    : '任意…'
+)
+
+/** 弹窗里确认一个时刻 = 排行榜换基准（`MarketPanel` 盯着这个 ref 重拉 + 重排） */
+function onAtPick(ms: number): void {
+  rankBase.value = {kind: 'at', ms}
+}
 </script>
 
 <template>
@@ -197,6 +243,55 @@ function pickPosDisplay(value: boolean): void {
               {{ p === 0 ? '不限' : p + 'M' }}
             </button>
           </div>
+        </div>
+      </div>
+
+      <!--
+        基准时间（用户 2026-10-07）：「行情排行榜可以自己选一个时刻来排，像币安那样，
+        直接影响合约区」→「基准时间是 24 小时的一个时间，比如北京时间就是 UTC+8」
+        →「可以选择任意时间和 24h」。
+        ⇒ 三档：`24h`（默认，交易所的滚动 24 小时）/ 某时区**每天 00:00 日切** /
+        **任意时刻**（点开选一个时间点，按北京时间）。三种都只改合约区那张表的口径与排名。
+      -->
+      <div class="sheet-row">
+        <span class="rk">基准时间</span>
+        <div
+          class="ctl tk-picks"
+          title="排行榜的涨跌幅从哪算起：24h / 某时区今日 00:00 / 任意时刻"
+        >
+          <button
+            type="button"
+            class="ghost tiny"
+            :class="{on: rankBase.kind === 'off'}"
+            title="交易所的滚动 24 小时（默认）"
+            @click="pickOff"
+          >
+            24h
+          </button>
+          <button
+            v-for="z in TIMEZONES"
+            :key="z.min"
+            type="button"
+            class="ghost tiny"
+            :class="{on: pickedTz === z.min}"
+            :title="`${z.title}（${z.label}）每天 00:00 日切，算今日涨跌幅`"
+            @click="pickTz(z.min)"
+          >
+            {{ z.label }}
+          </button>
+          <button
+            type="button"
+            class="ghost tiny"
+            :class="{on: rankBase.kind === 'at'}"
+            :title="
+              rankBase.kind === 'at'
+                ? `从 ${bjTime(rankBase.ms)}（北京时间）算起，点一下换一个时刻`
+                : '选一个时刻作为排行榜基准'
+            "
+            @click="atOpen = true"
+          >
+            {{ atLabel }}
+          </button>
         </div>
       </div>
 
@@ -309,6 +404,19 @@ function pickPosDisplay(value: boolean): void {
         </div>
       </div>
     </section>
+
+    <!--
+      「任意时刻」：复用「选一个时间点」那个弹窗 —— 它自带「现在 / 1 天前 / 7 天前 / 30 天前」
+      快选 + 一个 datetime 输入（北京时间、精确到分钟），不用另写一个选择器。
+    -->
+    <TimeModal
+      v-model="atOpen"
+      kind="point"
+      title="选排行榜的基准时间"
+      hint="合约区的涨跌幅会改成「这一刻 → 现在」，并据此排名。"
+      :initial="rankBase.kind === 'at' ? rankBase.ms : Date.now()"
+      @confirm="onAtPick"
+    />
   </Teleport>
 </template>
 

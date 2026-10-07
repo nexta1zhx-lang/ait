@@ -281,6 +281,60 @@ export async function lastTradedAt(
   return row?.t ? new Date(row.t).getTime() : null
 }
 
+const DAY_MS = 86_400_000
+
+/**
+ * 「基准时刻」用哪一档、往前扫多宽的窗（见 `closesAtOrBefore`）。
+ *
+ * 按基准时刻离现在多远挑**够用的最细一档**：越细越贴近那一刻，但只有那一档真的
+ * 覆盖到了才行（实测保留：1m ≈ 7 天、15m ≈ 1 个月、1h ≈ 半年、1d ≈ 两年）。
+ * `windowMs` 是往前找的余地 —— 那一刻正好没成交（冷门币）就再往前够一点。
+ */
+function baseProbe(atMs: number): {interval: KlineInterval; windowMs: number} {
+  const age = Date.now() - atMs
+  if (age <= 6 * DAY_MS) return {interval: '1m', windowMs: 3 * 3600_000}
+  if (age <= 25 * DAY_MS) return {interval: '15m', windowMs: DAY_MS}
+  if (age <= 170 * DAY_MS) return {interval: '1h', windowMs: 3 * DAY_MS}
+  return {interval: '1d', windowMs: 20 * DAY_MS}
+}
+
+/**
+ * 某个时刻各币的**收盘价**（`symbol`（`BTC/USDT:USDT`）→ close）。
+ *
+ * 干什么用：合约行情排行榜换基准 —— 把「24h 涨跌幅」换成「**基准时间 → 现在**」的涨跌幅
+ * （见 `server.ts` 的 `handleMarkets` 与前端 `MarketPanel.vue`）。基准时刻可能是某个时区的
+ * 「当天 00:00」（日切看「今日」），也可能是用户在配置里挑的**任意时刻**。
+ *
+ * 口径：每个币取「该档上**已收盘**且开盘时间 ≤ 基准时刻」的最后一根
+ * （`open_time <= atMs - 一个周期`），所以拿到的就是那一刻（或之前最近一刻）的价。
+ * 挑哪一档见 `baseProbe`；库外（太早 / 该档没覆盖）或那一段正好没成交的币
+ * **不出现在 Map 里** —— 调用方该当成「没有基准价」（界面显示「—」）。
+ */
+export async function closesAtOrBefore(
+  atMs: number,
+  scope: {exchange: string; marketType: string}
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  const {interval, windowMs} = baseProbe(atMs)
+  const cutoff = atMs - MS[interval]
+  const rows = await query<{symbol: string; close: number}>(
+    `SELECT DISTINCT ON (symbol) symbol, close
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND interval = $3
+        AND open_time <= $4 AND open_time > $5
+      ORDER BY symbol, open_time DESC`,
+    [
+      scope.exchange,
+      scope.marketType,
+      interval,
+      new Date(cutoff),
+      new Date(cutoff - windowMs)
+    ]
+  )
+  for (const r of rows) out.set(r.symbol, Number(r.close))
+  return out
+}
+
 /** 某个周期上已经记了多少个点（在哪个区间） */
 export async function candleCount(
   interval: KlineInterval,

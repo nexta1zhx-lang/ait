@@ -140,7 +140,12 @@ import {
   saveSnapshot,
   type OpenOrderInput
 } from './db/exchange-store'
-import {candleRejectStats, candleStoreStats, recentKlineRecon} from './db/candle-store'
+import {
+  candleRejectStats,
+  candleStoreStats,
+  closesAtOrBefore,
+  recentKlineRecon
+} from './db/candle-store'
 import {loadSymbols, symbolTableStats} from './db/symbols'
 import {
   reconcileKeyOrders,
@@ -1091,6 +1096,32 @@ const marketsCache = makeCache<{rows: MarketRow[]; at: number}>(
   10
 )
 
+/**
+ * 「基准时刻 → 各币那一刻的收盘价」（`GET /api/markets?since=` 用）。
+ *
+ * 那一刻的价是**库里翻出来的死数**（`closesAtOrBefore`），只有 `last` 在动 ——
+ * 所以这份可以放心多缓一会儿（5 分钟）。
+ * key 用**分钟对齐**的基准时刻：差几秒不该各查一遍库。
+ */
+const baseCloseCache = makeCache<Map<string, number>>(
+  5 * 60_000,
+  30 * 60_000,
+  30
+)
+
+/**
+ * `?since=` 参数（毫秒）→ 分钟对齐的基准时刻；缺省 / 非法返回 `null`。
+ *
+ * 前端传的是**基准时刻** —— 要么是「所选时区**当天 00:00**」（日切看「今日」，
+ * 见前端 `settings.ts` 的 `dayStartMs`），要么是用户挑的**任意时刻**（`rankSinceMs`）。
+ * ⚠️ 夹到「一分钟前」：未来时刻没有意义，不夹的话会算出 ~0% 还白占一档缓存。
+ */
+function baseSince(raw: string | null): number | null {
+  const ms = num(raw)
+  if (ms === undefined || ms <= 0) return null
+  return Math.min(Math.floor(ms / 60_000) * 60_000, Date.now() - 60_000)
+}
+
 async function handleMarkets(
   url: URL,
   res: http.ServerResponse
@@ -1121,9 +1152,32 @@ async function handleMarkets(
      * `marketCapRanks()` 是同步的，拿不到就是空 Map（少一项而已，不影响行情）。
      */
     const ranks = marketCapRanks()
-    const rows = ranks.size
+    let rows = ranks.size
       ? v.rows.map(r => ({...r, rank: rankOf(ranks, r.base)}))
       : v.rows
+    /*
+     * 换了基准（`?since=`）：补上每个币「基准时刻的收盘价」，前端拿它跟实时 `last`
+     * 现算「基准时间 → 现在」的涨跌幅（见 `closesAtOrBefore`）。
+     * ⚠️ 只对 swap 有意义 —— 那本 `candles` 库只覆盖 U 本位永续（见 candle-store 顶部）。
+     */
+    const since = baseSince(url.searchParams.get('since'))
+    if (since && config.marketType === 'swap') {
+      let bases: Map<string, number>
+      try {
+        bases = await baseCloseCache(
+          `${config.exchange}|${config.marketType}|${since}`,
+          () =>
+            closesAtOrBefore(since, {
+              exchange: config.exchange,
+              marketType: config.marketType
+            })
+        )
+      } catch {
+        // 基准价查不到不该让整张表挂掉：那几格显示「—」就是了
+        bases = new Map()
+      }
+      rows = rows.map(r => ({...r, baseClose: bases.get(r.symbol) ?? null}))
+    }
     sendJson(res, 200, {rows, updatedAt: v.at})
   } catch (e) {
     sendJson(res, 502, {error: (e as Error).message})

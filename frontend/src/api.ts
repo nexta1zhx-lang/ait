@@ -1912,6 +1912,11 @@ export interface MarketRow {
    * 不在前 500 名的币是 null（界面就只显示成交额）。
    */
   rank?: number | null
+  /**
+   * 「基准时刻」那一刻的收盘价（请求带了 `?since=` 才有，见后端 `closesAtOrBefore`）。
+   * 前端拿它 + 实时 `last` 现算「基准时间 → 现在」的涨跌幅。查不到就是 `null`。
+   */
+  baseClose?: number | null
 }
 
 /**
@@ -1919,10 +1924,16 @@ export interface MarketRow {
  *
  * 币安那边一次请求就是**全量**（740 个合约 ~100KB），所以别刷太勤：
  * 页面上 5 秒一次刚好，跟后端缓存同一档。
+ *
+ * 传了 `since`（毫秒）＝ 排行榜换基准：一般是「所选时区**当天 00:00**」
+ * （见 `settings.ts` 的 `dayStartMs`）或用户挑的**任意时刻**（`rankSinceMs`）。
+ * 后端会给每行补一个 `baseClose`（那一刻的收盘价），
+ * 前端再把涨跌幅口径换成「基准时间 → 现在」。
  */
-export const fetchMarkets = (market?: string) => {
+export const fetchMarkets = (market?: string, since?: number | null) => {
   const qs = new URLSearchParams()
   if (market) qs.set('market', market)
+  if (since) qs.set('since', String(since))
   const q = qs.toString()
   return get<{rows: MarketRow[]; updatedAt: number}>(
     `/api/markets${q ? `?${q}` : ''}`

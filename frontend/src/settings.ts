@@ -1,8 +1,9 @@
 /**
  * 页面配置（存 localStorage）。
  *
- * 现在只剩一条：
+ * 现在这几条：
  *  · `marketMinVolM` —— 行情过滤：24h 成交额低于这个数的合约不显示
+ *  · `rankBase`    —— 合约行情排行榜的基准时间（24h / 某时区日切 / 任意时刻）
  *
  * ⚠️ 2026-10-04 **删掉了「K 线缩放记忆」那套**（用户：「k 线保持样式缩放逻辑全部删掉」）：
  *    原来有 `keepChartZoom`（保持缩放开关）+ `chartBars`（全局共用的显示根数），
@@ -38,6 +39,8 @@ interface Stored {
   posSort?: PosSort
   /** 排序方向（升 / 降）—— 见 `posSortDir` */
   posSortDir?: 'asc' | 'desc'
+  /** 排行榜的基准时间；缺省 = 滚动 24h —— 见 `rankBase` */
+  rankBase?: StoredRankBase
 }
 
 function read(): Stored {
@@ -59,7 +62,11 @@ function read(): Stored {
           v.posSort === 'pnl' || v.posSort === 'value' || v.posSort === 'liq'
             ? v.posSort
             : 'symbol',
-        posSortDir: v.posSortDir === 'asc' || v.posSortDir === 'desc' ? v.posSortDir : undefined
+        posSortDir: v.posSortDir === 'asc' || v.posSortDir === 'desc' ? v.posSortDir : undefined,
+        rankBase:
+          v.rankBase && Number.isFinite(v.rankBase.v)
+            ? {k: v.rankBase.k === 'at' ? 'at' : 'tz', v: v.rankBase.v}
+            : undefined
       }
     }
     // 老键里已经没有认得的东西了（旧配置全部废弃）
@@ -84,6 +91,69 @@ export const marketMinVolM = ref(Math.max(0, saved.marketMinVolM ?? 0))
 
 /** 阈值换算成 USDT 原值（列表那边直接比） */
 export const marketMinVolUsd = computed(() => marketMinVolM.value * 1e6)
+
+/**
+ * 合约行情**排行榜的基准时间**。
+ *
+ * 用户 2026-10-07：「行情排行榜可以自己选一个时刻来排，像币安那样，直接影响合约区」
+ * →「基准时间是 24 小时的一个时间，比如北京时间就是 UTC+8」→「可以选择任意时间和 24h」。
+ *
+ * 三种（互斥）：
+ * · `off` —— 默认：交易所给的**滚动 24h** 涨跌幅，口径一个字不变；
+ * · `tz`  —— 按该时区**每天 00:00 日切**算「今日」涨跌幅（`min` = UTC 偏移**分钟**，`480` = 北京）；
+ * · `at`  —— **任意时刻**（`ms`）：从那一刻（按北京时间挑）到现在的涨跌幅。
+ *
+ * 三种都只改**合约区那张表**的涨跌幅口径与排名：基准价 = 基准时刻各币的收盘价
+ * （后端从 `candles` 库翻出来，见 `backend/src/db/candle-store.ts` 的 `closesAtOrBefore`），
+ * 前端再拿实时 `last` 跟它现算（见 `MarketPanel.vue`）。
+ *
+ * ⚠️ `t` 里挑的时刻落在最近 24 小时内一定算得出来（1m 那档保留 7 天）；
+ *    再往前 15m 约 1 个月、1h 约半年、1d 约两年，更早的币就显示「—」。
+ */
+export type RankBase =
+  | {kind: 'off'}
+  | {kind: 'tz'; min: number}
+  | {kind: 'at'; ms: number}
+
+/** `rankBase` 落 localStorage 的形状（短键，跟 `Stored` 那堆字段分开） */
+export interface StoredRankBase {
+  k: 'tz' | 'at'
+  v: number
+}
+
+function parseRankBase(raw: StoredRankBase | undefined): RankBase {
+  if (raw?.k === 'tz' && Number.isFinite(raw.v)) return {kind: 'tz', min: raw.v}
+  if (raw?.k === 'at' && Number.isFinite(raw.v) && raw.v > 0)
+    return {kind: 'at', ms: raw.v}
+  return {kind: 'off'}
+}
+
+export const rankBase = ref<RankBase>(parseRankBase(saved.rankBase))
+
+/**
+ * 排行榜的基准时刻 = 所选时区**当天 00:00**（毫秒）；没设时区返回 `null`。
+ *
+ * `now + 偏移` 落进「本地日」再取整到零点、减回偏移 —— 就是该时区的当日零点。
+ */
+export function dayStartMs(
+  offsetMin: number | null,
+  now = Date.now()
+): number | null {
+  if (offsetMin === null) return null
+  const off = offsetMin * 60_000
+  return Math.floor((now + off) / 86_400_000) * 86_400_000 - off
+}
+
+/**
+ * 基准时刻（毫秒）；`off` 返回 `null`。
+ *
+ * `tz` **每次现算** —— 跨零点之后自动就跟着走到新的一天（不用重开页面）。
+ */
+export function rankSinceMs(base: RankBase, now = Date.now()): number | null {
+  if (base.kind === 'off') return null
+  if (base.kind === 'at') return base.ms
+  return dayStartMs(base.min, now)
+}
 
 /**
  * 「交易所账户」那一页用哪种货币看：`usd`（默认，$）/ `cny`（¥）。
@@ -183,7 +253,8 @@ watch(
     chartShowHistory,
     posShowValue,
     posSort,
-    posSortDir
+    posSortDir,
+    rankBase
   ],
   () => {
     try {
@@ -199,7 +270,17 @@ watch(
           chartShowHistory: chartShowHistory.value,
           posShowValue: posShowValue.value,
           posSort: posSort.value,
-          posSortDir: posSortDir.value
+          posSortDir: posSortDir.value,
+          rankBase:
+            rankBase.value.kind === 'off'
+              ? undefined
+              : {
+                  k: rankBase.value.kind,
+                  v:
+                    rankBase.value.kind === 'tz'
+                      ? rankBase.value.min
+                      : rankBase.value.ms
+                }
         })
       )
     } catch {

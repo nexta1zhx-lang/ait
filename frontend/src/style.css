@@ -1745,6 +1745,42 @@ button.danger {
 }
 
 /*
+ * 「基准以来」那一行（用户 2026-10-07：「行情排行榜可以自己选一个时刻来排」）——
+ * 只在换了基准时出现（搜索框和表头之间），把「这一榜是哪一刻以来的」说清楚：
+ * 手机上悬停不出 tooltip，只能靠这一行。✕ 回到默认的 24h 口径。
+ */
+.mkt-basebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  font-size: 11.5px;
+  line-height: 1.2;
+}
+
+.mkt-basebar .mb-k {
+  color: var(--muted);
+}
+
+.mkt-basebar .mb-v {
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.mkt-basebar .mb-x {
+  margin-left: auto;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/*
  * ⚠️ `.mkt-meta`（共 N 个合约 / 刚刚更新 / 刷新）那一行 2026-10-03 已删：
  * 统计挪到「合约行情」标题右侧，数据本来就是实时推的 + 5 分钟自动重拉，
  * 那个「刷新」按钮和「x 秒前更新」都是多余的。
@@ -3162,6 +3198,8 @@ body.fixed-viewport .split {
  *   60      抽屉
  *   200     页面级遮罩（登录、提炼）
  *   300/301 底部弹层 `.sheet-mask` / `.sheet`
+ *   320     「选一个时间点」弹窗 `.modal-mask`（`TimeModal`）—— 配置弹层里会用到，
+ *           所以必须压过 300/301，但仍留在确认框（340）之下
  *   340/341 确认框 `.dlg-mask` / `.dlg` —— **必须压过弹层**（业务里会从弹层里弹确认，
  *           比如「下单弹层里点一键平仓」，见 `OrderPanel`）
  *   400     信息提示 `.toast` —— 永远最上层：操作有反应这件事不能被任何东西盖住
