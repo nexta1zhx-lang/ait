@@ -22,13 +22,20 @@ services:
       POSTGRES_DB: ${PGDATABASE:-crypto_advisor}
       # 中文排序 / 大小写处理
       POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
-    # 目标机器只有 909MB 内存，把 Postgres 的默认值调小：
-    # 默认 shared_buffers=128MB / max_connections=100，这里砍到 64MB / 20。
-    # 应用侧 pg 连接池上限是 10，20 个连接绰绰有余。
+    # 内存相关参数：2026-10-07 从 909MB 那档换到 $12 档（2GB / 2vCPU / 60GB）后重调。
+    #   · shared_buffers 64MB → **384MB**
+    #     （旧值是按 909MB 机器定的；那台 `buffers_backend` 涨到 418 万，即后端频繁自己刷盘）
+    #   · effective_cache_size → **1536MB** 显式写死
+    #     ⚠️ 它**不占内存**，只是「告诉规划器大概有多少缓存可用」。Postgres 的**默认值是
+    #        4GB** —— 在 909MB 的机器上等于谎报，规划器以为索引都住缓存里、偏好索引扫描，
+    #        实测那台的 PSI `io full` 长期 37%。这台 2GB，写 1.5GB 比较贴合。
+    # max_connections 20 不动：应用侧 pg 连接池上限 10，够用。
     command:
       - postgres
       - -c
-      - shared_buffers=64MB
+      - shared_buffers=384MB
+      - -c
+      - effective_cache_size=1536MB
       - -c
       - max_connections=20
     volumes:
