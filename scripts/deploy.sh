@@ -120,8 +120,11 @@ c '构建并启动（首次要拉镜像 + 装依赖，几分钟）'
 # PREBUILT（0/1）：1 ⇒ Dockerfile 跳过 `tsc + vite`，直接用包里带来的
 #   backend/dist / frontend/dist。release.sh 会带 1 过来（实测省 111 秒）；
 #   手工跑不带就是 0 = 老行为：服务器上从源码编译。
-# ⚠️ 必须显式传给 docker（`sudo` 默认会清环境变量，不显式给就丢了）。
-$SUDO PREBUILT="${PREBUILT:-0}" docker compose -f docker-compose.prod.yml up -d --build
+# ⚠️ 用 `env VAR=值 cmd` 这层壳，**不能**写 `$SUDO PREBUILT=1 docker …`：
+#    bash 是在展开**之前**认「赋值」的，`$SUDO` 一旦展开成空串，
+#    那个 `PREBUILT=1` 就被当成**命令名**了 ⇒ `PREBUILT=1: command not found`（踩过）。
+#    而 `$SUDO env PREBUILT=1 docker …` 两种身份（root / sudo）都通，实测过。
+$SUDO env PREBUILT="${PREBUILT:-0}" docker compose -f docker-compose.prod.yml up -d --build
 
 echo
 $SUDO docker compose -f docker-compose.prod.yml ps
