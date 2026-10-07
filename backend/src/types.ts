@@ -1,4 +1,12 @@
-export type Timeframe = '5m' | '15m' | '1h' | '4h' | '1d'
+/**
+ * 图表 / 分析支持的周期。
+ *
+ * ⚠️ `'1m'` 是 2026-10-07 用户要求加进前端的（「一分钟的选项 k 也在前端需要」）。
+ *    它以前的处境很尴尬：请求 `timeframe=1m` 会被 `VALID_TFS` 挡下、**静默按 1h 返回**
+ *    （2026-10-06 就因此把仓位明细那张图变成了一小时 K 线，8 笔成交全挤在一根上）。
+ *    现在 1m 是正式成员：底座常驻存 7 天，`/api/candles` 与 K 线 WS 都认它。
+ */
+export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1d'
 
 /** 市场类型：现货 / U 本位合约 / 币本位合约 */
 export type MarketType = 'spot' | 'swap' | 'coinm'

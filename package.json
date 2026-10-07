@@ -48,7 +48,9 @@
     "app:android": "npm run app:sync && cap open android",
     "app:ios": "npm run app:sync && cap open ios",
     "app:run:android": "npm run app:sync && cap run android",
-    "app:run:ios": "npm run app:sync && cap run ios"
+    "app:run:ios": "npm run app:sync && cap run ios",
+    "candles:seed": "tsx backend/src/scripts/seed-candles.ts",
+    "candles:sync": "bash scripts/sync-candles.sh"
   },
   "dependencies": {
     "ccxt": "^4.4.0",

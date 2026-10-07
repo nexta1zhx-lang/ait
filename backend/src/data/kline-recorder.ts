@@ -33,6 +33,7 @@ import {
   pruneCandles,
   rollupFrom1m,
   saveCandles,
+  type HighInterval,
   type KlineInterval,
   type NewCandleRow
 } from '../db/candle-store'
@@ -87,7 +88,7 @@ const REPAIR_PER_TICK_BACKLOG = 15
 const REPAIR_BACKLOG = 50
 const REPAIR_COOLDOWN_MS = 10 * MIN_MS
 /** 灌历史时每个周期取多少根（够画图 + 一次「加载更多」） */
-const SEED_BARS: Record<Timeframe, number> = {
+const SEED_BARS: Record<HighInterval, number> = {
   '5m': 1000,
   '15m': 1000,
   '1h': 2000,
@@ -392,7 +393,7 @@ function rollup(st: SymState, openTime: number, bar: Bar): void {
   }
 }
 
-function flushAgg(st: SymState, interval: Timeframe, agg: Agg): void {
+function flushAgg(st: SymState, interval: HighInterval, agg: Agg): void {
   push(
     {
       interval,
@@ -691,7 +692,7 @@ async function seedHistory1m(): Promise<void> {
 async function seedHistory(): Promise<void> {
   if (!cfg || (process.env.KLINE_SEED ?? '').toLowerCase() === 'off') return
   const now = Date.now()
-  const have = new Map<Timeframe, Map<string, number>>()
+  const have = new Map<HighInterval, Map<string, number>>()
   for (const it of HIGH_INTERVALS) {
     have.set(
       it,
@@ -701,7 +702,7 @@ async function seedHistory(): Promise<void> {
       )
     )
   }
-  const jobs: {sym: PerpSymbol; it: Timeframe; tries: number}[] = []
+  const jobs: {sym: PerpSymbol; it: HighInterval; tries: number}[] = []
   for (const s of symbols) {
     for (const it of HIGH_INTERVALS) {
       const last = have.get(it)?.get(s.symbol)

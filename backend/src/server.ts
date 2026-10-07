@@ -206,7 +206,7 @@ import {Candle, MarketSnapshot, MarketType, Timeframe} from './types'
 const PORT = Number(process.env.PORT || 8787)
 /** 前端构建产物（npm run ui:build 生成） */
 const PUBLIC_DIR = path.join(ROOT_DIR, 'frontend', 'dist')
-const VALID_TFS: Timeframe[] = ['5m', '15m', '1h', '4h', '1d']
+const VALID_TFS: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d']
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',

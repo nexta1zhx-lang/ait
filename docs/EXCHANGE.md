@@ -2556,3 +2556,24 @@ SSE 的 `positions` 补丁更是把 `p.positions` **原样**盖回去。于是�
 - **P2**：删预热（`warmCandlesCache` / `warmTickerCache` / `warmPicks` / `startKlineKeepWarm`）
   与前端残留注释；SSE 改成由底座合成当前根。
 - **P3**：每日对账（3 币 × 5 周期 vs REST 逐字段）+ 行情层换聚合流。
+
+### 1 分钟周期 + 本地灌历史 → 导入线上（2026-10-07 追加）
+
+**1m 进了前端周期选择器**（用户：「一分钟的选项 k 也在前端需要」）：
+`Timeframe` 加 `'1m'`、`VALID_TFS` 加 `'1m'`、`TF_MS` 加 `'1m'`，前端 `TFS` 加「1分」。
+⚠️ 以前请求 `timeframe=1m` 会被 `VALID_TFS` 挡下、**静默按 1h 返回**（2026-10-06 就是这样把
+仓位明细那张图变成一小时 K 线的）—— 现在 1m 是正式成员，底座也常驻存它。
+
+**历史数据在本地补、整表导线上**（用户：「历史数据用脚本在本地数据库补上…导入线上数据库」）：
+
+| 脚本 | 干什么 |
+|---|---|
+| `npm run candles:seed`（`backend/src/scripts/seed-candles.ts`） | 本地按窗口往前补历史：1m/5m 7 天、15m 31 天、1h 180 天、4h 200 天、1d 1000 天。**从库里已有的最早那根往前补**（断点续跑、重复跑不重复拉），限速 `--rps`，`-1003` 就歇 30 秒再来 |
+| `npm run candles:sync`（`scripts/sync-candles.sh`） | 本地 `candles` → 线上：`\copy … WITH CSV`（两边 `PGTZ=UTC`），`--replace` 整表替换 / 默认走 `candles_import` 临时表 upsert 合并 |
+
+- ⚠️ **为什么不在线上灌**：线上出口 IP 要跟交易/账户共用权重（2400/分钟），2026-10-07 在线灌历史
+  吃到 **85 次 `-1003`**（根因：把 K 线一发的权重按 2 记，实际是 **5**）。历史放本地拉，线上零请求。
+- 体积（实测 259~375 B/行）：本次补 ≈1130 万行 ≈ **3.5~4.3 GB**；CSV gzip ≈250~400 MB；
+  保留策略生效后的稳态 ≈1420 万行 ≈4.3~5.4 GB（线上磁盘 38 G、剩 23 G）。
+- ⚠️ ccxt 的 OHLCV 只有 5 个字段 ⇒ seed 段的 `quote_volume / trades / taker_buy_volume` 是 0，
+  所以「每日对账」只比 OHLCV。

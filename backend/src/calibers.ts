@@ -1,10 +1,11 @@
 import {Calibers, Timeframe} from './types'
 
 /** 支持的全部周期，由短到长（按这个顺序分析 / 展示） */
-export const TIMEFRAMES: Timeframe[] = ['5m', '15m', '1h', '4h', '1d']
+export const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d']
 
 /** 各周期一根 K 线的毫秒数（`data/market.ts` 直接从这 re-export） */
 export const TF_MS: Record<Timeframe, number> = {
+  '1m': 60_000,
   '5m': 5 * 60_000,
   '15m': 15 * 60_000,
   '1h': 60 * 60_000,

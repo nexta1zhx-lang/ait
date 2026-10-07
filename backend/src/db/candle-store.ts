@@ -16,8 +16,11 @@ import type {Timeframe} from '../types'
 /** 底座记 1m，高周期由它滚出来 */
 export type KlineInterval = '1m' | Timeframe
 
+/** 底座自己滚出来的那几档（不含 1m：它就是底座本身） */
+export type HighInterval = Exclude<Timeframe, '1m'>
+
 /** 这些周期都是 1m 的整数倍 ⇒ 从 1m 滚出来的桶边界与交易所完全对齐（UTC 零点起算） */
-export const HIGH_INTERVALS: Timeframe[] = ['5m', '15m', '1h', '4h', '1d']
+export const HIGH_INTERVALS: HighInterval[] = ['5m', '15m', '1h', '4h', '1d']
 
 export interface NewCandleRow {
   exchange: string

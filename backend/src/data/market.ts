@@ -420,11 +420,7 @@ export async function fetchCandles(
 export interface FetchRangeOptions {
   exchangeId: string
   symbol: string
-  /**
-   * `'1m'` 不在 `Timeframe` 里（全站图表周期是 5m/15m/1h/4h/1d），
-   * 但 K 线底座要按 1m 补缺口 —— 见 `data/kline-recorder.ts`。
-   */
-  timeframe: Timeframe | '1m'
+  timeframe: Timeframe
   /** 起始时间（毫秒） */
   from: number
   /** 结束时间（毫秒） */
@@ -443,7 +439,7 @@ export async function fetchCandlesRange(
   opts: FetchRangeOptions
 ): Promise<Candle[]> {
   const marketType = opts.marketType ?? 'swap'
-  const step = opts.timeframe === '1m' ? 60_000 : TF_MS[opts.timeframe]
+  const step = TF_MS[opts.timeframe]
   const maxCandles = opts.maxCandles ?? 3000
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
   const symbol = resolveSymbol(exchange, opts.symbol, marketType)

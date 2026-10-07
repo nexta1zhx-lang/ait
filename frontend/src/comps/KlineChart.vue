@@ -184,6 +184,7 @@ const CENTER_MARGIN = 8
  * 5m≈3.5 天、15m≈10 天、1h≈41 天、4h≈100 天、1d≈400 天。
  */
 const HISTORY_BARS: Record<string, number> = {
+  '1m': 1000,
   '5m': 1000,
   '15m': 1000,
   '1h': 1000,
@@ -229,6 +230,7 @@ function clearRange() {
 /* ---------------- 时间弹窗（选年月日时分） ---------------- */
 
 const TF_MS: Record<string, number> = {
+  '1m': 60_000,
   '5m': 5 * 60_000,
   '15m': 15 * 60_000,
   '1h': 60 * 60_000,
@@ -277,6 +279,7 @@ function onPickTime(ms: number) {
 }
 
 const TFS = [
+  {value: '1m', label: '1分'},
   {value: '5m', label: '5分'},
   {value: '15m', label: '15分'},
   {value: '1h', label: '1时'},
