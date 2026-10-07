@@ -38,6 +38,8 @@ import {
   overlayStale,
   overlaySymbol,
   ORPHAN_SWEEP_MS,
+  addLocalOrder,
+  dropLocalOrder,
   overlayBump,
   refreshTradeOverlay,
   sweepOrphanOrders,
@@ -1213,6 +1215,8 @@ async function cancelOrderAsk(id: string, symbol: string, price: number): Promis
       return
     }
     emit('note', `已撤单：${name} @ ${priceText(price)}`, 'ok')
+    /* 撤成功 = 这张单**已经不在场上**了 ⇒ 线当场抹掉（别等那次直连交易所的读） */
+    dropLocalOrder(id)
     void pullOverlay()
   } catch (e) {
     emit('note', (e as Error).message, 'bad')
@@ -1751,6 +1755,30 @@ async function submitStop(v: {
         : `已挂${what}：${name} ${v.pct}% @ ${priceText(v.price)}${tail}${fixed}`,
       'ok'
     )
+    /*
+     * ★ 让线跟提示**同时**出现：接口已经回了单号，先把这张单塞进叠加层的数据里。
+     *   ⚠️ 只对**真单**做（测试单没真挂上去）；改单要把被撤掉的旧单号一起摘掉。
+     *   紧接着那次重读照发 —— 它是**校准**，真值回来会覆盖这条乐观数据。
+     */
+    if (!r.test && r.orderId) {
+      addLocalOrder(
+        {
+          id: r.orderId,
+          symbol: s.drag.symbol,
+          side: s.drag.side === 'long' ? 'sell' : 'buy',
+          type: sent === 'profit' ? 'TAKE_PROFIT_MARKET' : 'STOP_MARKET',
+          posSide: s.drag.posSide === 'SHORT' ? 'SHORT' : s.drag.posSide === 'LONG' ? 'LONG' : 'BOTH',
+          /* 触发价用**手指放下那个价**（后端会按 tick 取整，重读那次再对齐） */
+          price: null,
+          stopPrice: v.price,
+          amount: (s.drag.amount * v.pct) / 100,
+          filled: 0,
+          reduceOnly: true,
+          time: Date.now()
+        },
+        r.canceled
+      )
+    }
     /* 立刻补一次：新挂的单要马上出现在图上 */
     void pullOverlay()
   } catch (e) {

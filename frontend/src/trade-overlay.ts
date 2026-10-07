@@ -167,6 +167,38 @@ let pendingAsk: {base: string; keyId?: number} | null = null
 let seq = 0
 
 /**
+ * 乐观插入一张**刚挂上去**的单 —— 让图上的线跟提示**同时**出现。
+ *
+ * 用户 2026-10-07：「我挂单成功，止盈止损已经提示出来了。但是感觉绘制那条线的时候，
+ * 有将近 1 秒钟的延迟」—— 那 1 秒全在 `pullOverlay()` 里那次**直连交易所**的读
+ * （本地走 SSH 代理 300~500ms，撞上飞在半路的那一发还要再等）。
+ * 接口本来就回了单号，没必要为了「让线出现」先跑一趟交易所：
+ *
+ *   · 这里先把这张单按**交易所载荷的形状**塞进 `overlayOrders`（提示一弹线就在）；
+ *   · 紧接着那次重读照发（`refreshTradeOverlay`）——那是**校准**（真值回来覆盖这条），
+ *     SSE 的 `orders` 事件也会补一发，所以这条乐观数据活不过一两秒，错了也会被纠正。
+ *
+ * ⚠️ 只在**真单**成功之后调：测试单根本没挂上去，塞进来会画一条假线。
+ * ⚠️ 只收**当前这张图上那个币**：换币的一瞬间可能把别的币插进来。
+ *
+ * @param replaceId 改单时**被撤掉的旧单号**（后端撤旧挂新，两张不会同时在场上）
+ */
+export function addLocalOrder(o: TradeOpenOrder, replaceId?: string): void {
+  if (!o?.id) return
+  if (String(o.symbol).toUpperCase() !== overlaySymbol.value) return
+  overlayOrders.value = [
+    ...overlayOrders.value.filter(x => x.id !== o.id && x.id !== replaceId),
+    o
+  ]
+}
+
+/** 把一条**已经不在场上**的单从列表里摘掉（撤单成功后立刻用，别等重读） */
+export function dropLocalOrder(id: string): void {
+  if (!id) return
+  overlayOrders.value = overlayOrders.value.filter(x => x.id !== id)
+}
+
+/**
  * 拉一次当前交易对的订单信息（只拉**开着的那几样**）。
  *
  * `base` 是界面上那个币种（`1000BONK`），`keyId` 是「配置 → 下单账户」那套 Key。
