@@ -183,11 +183,11 @@ const IDLE_MS = 10 * 60 * 1000
  *    在线的实时性由 WS 推送保证，不需要 REST 提速，所以「有没有人在看」不参与分档。
  *    曲线点靠 0 权重的 `writeLivePoint`（与档位无关），断没人看的 WS 等于掐掉曲线数据源。
  *
- * 这一档 `reconcileTick` 直接 return（一条对账都不跑，醒来一轮补上），
+ * 这一档 `reconcileTick` 直接 return（一条对账都不跑、四类水位也不推进，醒来一轮补上），
  * 但**校准照跑**（c2c / 现货只有 REST 有）、**WS 照连**、**曲线点照写**。
+ * ⚠️ 「睡」只停**我们自己主动去问**（`TIER_GAPS.asleep` 那三项因此永不生效），
+ *    不是断流 —— 早先那版 `sleepWs()`「没人看就关掉上游 WS」已经删了（见第 18 节）。
  */
-const ASLEEP_MS = 60 * 60 * 1000
-/** 空转多久才算「睡着」（判据里**没有**「有没有人看」，见上） */
 const HIBERNATE_MS = 2 * 60 * 60 * 1000
 /** 钱账本每次回看的跨度（币安只给最近 7 天） */
 const INCOME_LOOKBACK_MS = 7 * 24 * 3600 * 1000
@@ -222,7 +222,18 @@ const ALGO_GONE = new Set([
 ])
 /** 多久检查一次「哑了没」 */
 const WS_HEALTH_MS = 30 * 1000
-/** 重连补成交：最多盯几个交易对（每个一次 fetchMyTrades，权重 5） */
+/**
+ * 重连补成交：最多盯几个交易对（每个一次 `fetchMyTrades`，权重 5）。
+ *
+ * 为什么**必须**有上限：币安的 `/fapi/v1/userTrades` **必须带 symbol**，没有
+ * 「一次拉全部」的口子（`openOrders` / `openAlgoOrders` 那种 `noSymbol: 40` 的便利它没有）
+ * ⇒ 成本随「最近交易过的币」**线性涨**，一个玩过 200 个币的账户每次重连能扫 200 发。
+ *
+ * 8 是 M2（`8dd9e40`，2026-10-05）定下的**保守值**，之后没动过 —— 它不是算出来的：
+ * 一轮 ≤8 币 × ≤4 页 × 权重 5 = ≤160 权重，对着 2400/分钟 的额度可以忽略，
+ * 所以当初取「够用就行」，没有更精确的依据。
+ * ⚠️ 它的**代价**（超出的币这一轮不补）与放开时的注意点见 `symbolsToBackfill()`。
+ */
 const BACKFILL_MAX_SYMBOLS = 8
 /** 重连补成交：单页条数 / 最多翻几页（翻满就记日志，不无限翻） */
 const BACKFILL_PAGE = 500
@@ -372,8 +383,12 @@ function keyOf(keyId: number | string): number {
  * 这套 key 现在有几个 SSE 订阅者。
  *
  * 「有没有人看」是「用户在不在这」的**唯一**可靠信号（前端只要有人开着这个账户的
- * 页面就一直挂着 SSE，见 `ExchangeAccountLivePanel.startStreams()`）——
- * 沉睡那一档（见 `ASLEEP_MS`）就靠它：有人在看就绝不省他那一份。
+ * 页面就一直挂着 SSE，见 `ExchangeAccountLivePanel.startStreams()`）。
+ *
+ * ⚠️ 它**只**决定两件事：`applyAccountUpdate` 里那发「纯展示字段」的快照要不要打
+ *    （`WS_SNAPSHOT_GAP_SEC` 那个节流里的 `watching`）、以及 `wakeOnView()` 要不要补一轮。
+ *    **不参与分档** —— 睡着档的判据是「空转 + `HIBERNATE_MS`」，跟有没有人看无关
+ *    （2026-10-06 加过这条、10-07 撤掉，见第 19 节；`tierOf()` 的入参里根本没有它）。
  */
 function listenerCount(keyId: number | string): number {
   return listenerSets.get(keyOf(keyId))?.size ?? 0
@@ -426,9 +441,9 @@ export function subscribeExchange(
  *
  * | 档 | 判据 | 说明 |
  * |---|---|---|
- * | `normal` | 有仓 / 有单 / 10 分钟内有动静 | 按上面那张**基准节奏**走（成交 5 分钟…） |
- * | `idle` | 无仓无单 + 10 分钟没动静 | 再降一档 |
- * | `asleep` | 空转 + 2 小时没动静 | 基本不管合约和订单，只留余额采样 |
+ * | `normal` | 有仓 / 有单 / 10 分钟内有动静 | 按 `TIER_GAPS.normal`：成交 4 / 挂单 6 / 账本 8 小时 |
+ * | `idle` | 无仓无单 + 10 分钟没动静 | 三条都 ×2（8 / 12 / 16 小时） |
+ * | `asleep` | 空转 + 2 小时没动静 | 对账**整条停掉**，只留 1 小时的 REST 校准（余额 / 曲线） |
  *
  * ⚠️ **没有「在线档」**：「用户在线就没必要频繁对账，
  *    感觉不对可以刷新页面」—— 在线的实时性由 **WS 推送 + 本地标记价重算** 保证，
@@ -437,15 +452,16 @@ export function subscribeExchange(
  * ⚠️ 档位只影响「我们自己主动去问」的频率；用户一刷新（`wake(..., force)`）
  *    或者一打开页面（数据旧了，见 `FRESH_MS`）当场就对平。
  */
-type Tier = 'normal' | 'idle' | 'asleep'
+export type Tier = 'normal' | 'idle' | 'asleep'
 
 /**
  * 「这一套账户现在按哪一档」—— **纯函数**，好让离线夹具直接卡它
  * （见 `backend/src/scripts/selftest.ts` 的「有仓 / 有单就永远不睡」那一组）。
  *
  * ⚠️ 判据里**有仓或有单就直接是 normal** —— 这不是速率问题，是**安全**问题：
- *    `asleep` 档会把对账（成交 / 挂单 / 账本）拉到 4 小时一轮，
- *    而「止盈止损还在场、仓位还在」的时候，中间这几个小时正好是最需要算准的。
+ *    `asleep` 档会把对账（成交 / 挂单 / 账本）**整条停掉**（`reconcileTick` 直接 return，
+ *    四类水位也不推进，醒来一轮补上），`idle` 档也要 8 / 12 / 16 小时才轮一次，
+ *    而「止盈止损还在场、仓位还在」的时候，中间那几个小时正好是最需要算准的。
  *    所以哪怕没人看、哪怕 3 天没动静，只要还有仓或还有挂单，就一直是正常档。
  *
  * ⚠️ `deaf`（连 ping 都收不到）也必须退回 normal：低频档的前提是「事件由 WS 实时维护」，
@@ -506,6 +522,31 @@ const TIER_GAPS: Record<
     /* ⚠️ 校准**不跟着睡觉**：C2C / 现货只有 REST 有，曲线要连续 */
     sample: SAMPLE_CALIBRATE_MS
   }
+}
+
+/**
+ * 档位 → 一句人话（**数字从 `TIER_GAPS` 现算**，别手抄 —— 手抄的那两版全过时了，
+ * 一个写着「降频到 30 分钟一轮」，一个写着「对账全 1 小时」）。
+ *
+ * `asleep` 的 `TIER_GAPS` 三项是**永不生效**的（`reconcileTick` 睡着时直接 return），
+ * 所以那一档不列数字，免得又读出一个「以为在跑」的假节奏。
+ */
+export function tierText(tier: Tier): string {
+  const g = TIER_GAPS[tier]
+  const hrs = (ms: number) => Math.round(ms / 3600_000)
+  if (tier === 'asleep') {
+    return (
+      `睡着（空转 ${hrs(HIBERNATE_MS)} 小时）→ 对账全停，` +
+      `余额照 ${hrs(g.sample)} 小时采（曲线不断）`
+    )
+  }
+  const who =
+    tier === 'idle' ? `空转（无仓无单 ${Math.round(IDLE_MS / 60_000)} 分钟没动静）` : '正常档'
+  return (
+    `${who} → 实时靠 WS 推送；对账只当安全网：` +
+    `成交 ${hrs(g.fill)} 小时 / 挂单 ${hrs(g.orders)} 小时 / 账本 ${hrs(g.income)} 小时，` +
+    `余额 ${hrs(g.sample)} 小时（曲线）`
+  )
 }
 
 /* ==================================================================
@@ -604,9 +645,7 @@ export class KeyStream {
    *    新加的沉睡档更是永远进不去。自己问自己「有没有动静」，答案永远是有。
    */
   private lastActivityAt = Date.now()
-  /** 当前是不是空转（只在翻转时打日志） */
-  private idle = false
-  /** 当前档位（见 `Tier`；只在换档时打日志） */
+  /** 当前档位（见 `Tier`；只在换档时打日志，文案见 `tierText()`） */
   private tier: Tier = 'normal'
   /** 上一次**用户手动**刷新（含下拉）的时间（节流用，见 `FORCED_MIN_MS`） */
   private lastForcedAt = 0
@@ -856,7 +895,21 @@ export class KeyStream {
     return added
   }
 
-  /** 要补哪些交易对（**交易所原始符号**，如 `BTCUSDT`；最多 8 个） */
+  /**
+   * 要补哪些交易对（**交易所原始符号**，如 `BTCUSDT`）。
+   *
+   * 两拨人**共用** `BACKFILL_MAX_SYMBOLS` 这 8 个名额，顺序是：
+   *   ① 账本里最近 30 天有成交的币，按**最后成交时间倒序**（SQL 里 `LIMIT` 就截到 8 了）；
+   *   ② 再并上当前持仓（不会新增名字，只是去重）。
+   *
+   * ⚠️ 所以**持仓币不保证进得来**：① 先把 8 个占满时，末尾 `slice()` 会把持仓全挤掉 ——
+   *    典型是「开了仓但 30 天内没再成交过」的币。仓位周期是从 `exchange_fills` **推**出来的
+   *    （见 `data/position-history.ts`），漏了它的成交就等于那一段周期画不出来。
+   *    真要放开，别只调大这个数（每一轮的成本会跟着线性涨），应该给持仓留固定名额
+   *    或者加个轮转游标。
+   *
+   * 一轮的代价：≤8 币 × ≤4 页 × 权重 5。
+   */
   private async symbolsToBackfill(): Promise<string[]> {
     const rows = await query<{symbol: string}>(
       `SELECT symbol
@@ -1263,7 +1316,7 @@ export class KeyStream {
   /**
    * 这套账户是不是**睡着**了：空转（无仓无单）+ 连着 `HIBERNATE_MS` 没动静。
    *
-   * ⚠️ 跟**有没有人在线无关**（见 `ASLEEP_MS` 那段）：有仓 / 有挂单时永远不是睡着档。
+   * ⚠️ 跟**有没有人在线无关**（见 `HIBERNATE_MS` 那段）：有仓 / 有挂单时永远不是睡着档。
    *    「没人看」只影响那发展示快照（`listenerCount() > 0` 才打），不影响分档。
    */
   isAsleep(): boolean {
@@ -1288,13 +1341,7 @@ export class KeyStream {
     if (tier === this.tier) return
     const from = this.tier
     this.tier = tier
-    const text: Record<Tier, string> = {
-      normal:
-        '正常档 → 实时靠 WS 推送；对账只当安全网：成交/挂单/账本全 1 小时，余额 1 小时（曲线）',
-      idle: '空转（无仓无单 10 分钟没动静）→ 对账全 2 小时，余额照 1 小时采',
-      asleep: '睡着（空转 2 小时）→ 对账全 4 小时，余额照 1 小时采（曲线不断）'
-    }
-    console.log(`${this.tag} 档位 ${from} → ${tier}：${text[tier]}`)
+    console.log(`${this.tag} 档位 ${from} → ${tier}：${tierText(tier)}`)
   }
 
   /**
@@ -1826,32 +1873,13 @@ export class KeyStream {
   /**
    * 这套账户现在**有没有敞口**：有持仓或有挂单。
    *
-   * 用途：`isIdle()` 降频判据的一部分（有敞口就不算空转）。
-   * ⚠️ 2026-10-07 之前它还兼任「不许断 WS」的判据，那个断流流程已经撤了。
+   * ⚠️ **现在没人调它**：判据已经收进 `tierOf()`（`positions` / `openOrders` 两个入参），
+   *    而它当年另一个用途「没敞口 ⇒ 断掉上游 WS」已经撤了（见第 18 节）。
+   *    要么哪天用上，要么删 —— 别对着它加新判据。
    */
   private hasExposure(): boolean {
     const hasPos = (this.lastOverview?.futures.positions?.length ?? 0) > 0
     return hasPos || this.openOrderCount > 0
-  }
-
-  /** 这套账户是不是**空转**：没持仓、没挂单、最近也没动静。
-   * 空转 ⇒ 对账降频（见 `ORDERS_RECONCILE_MS_IDLE`）。WS 不动。
-   */
-  private isIdle(): boolean {
-    /* 跟 `tierOf` 同一个判据（别两处各写一份）：有仓或有单就永远不算空转 */
-    return this.tierNow() !== 'normal'
-  }
-
-  /** 翻转时打一行 —— 不然「到底有没有在降频」完全看不见 */
-  private noteIdle(): void {
-    const now = this.isIdle()
-    if (now === this.idle) return
-    this.idle = now
-    console.log(
-      now
-        ? `${this.tag} 空转（无持仓无挂单）→ 对账降频到 30 分钟一轮`
-        : `${this.tag} 有动静 → 对账恢复 2 分钟一轮`
-    )
   }
 
   private async reconcileTick(): Promise<void> {
@@ -1859,7 +1887,6 @@ export class KeyStream {
     const now = Date.now()
     try {
       /* ⚠️ 先判档再干活：下面的 gap 全看这一档 */
-      this.noteIdle()
       const tier = this.tierNow()
       this.noteTier(tier)
       /*
@@ -1926,10 +1953,13 @@ export class KeyStream {
    * ⚠️ 前端只能看到**我们这条 SSE**（心跳一直有），看不到上游那条 ——
    *    所以「SSE 活着」不等于「数据在动」，这个判断必须在后端做。
    *
-   * 顺带承担两件**生命周期**的事（都是 2026-10-06 加的，跑在这里是因为它本来
+   * 顺带承担一件**生命周期**的事（2026-10-06 加的，跑在这里是因为它本来
    * 就是唯一的 30 秒心跳）：
-   *   · **终止流程** —— 没人看 + 空仓无挂单够久 ⇒ `sleepWs()` 断掉上游 WS；
    *   · **半开连接自愈** —— `deaf` 持续够久 ⇒ 强制重连一次（`close` 事件可能永远不来）。
+   *
+   * ⚠️ 另一件「没人看 + 空仓无挂单够久 ⇒ `sleepWs()` 断掉上游 WS」**已经删了**
+   *    （见第 18 节）：睡着档只停「我们自己主动去问」，WS 一直连着 ——
+   *    断了它就等于掐掉曲线点的来源（`writeLivePoint` 靠事件驱动）。
    */
   private checkHealth(): void {
     if (this.stopped) return
@@ -1957,7 +1987,8 @@ export class KeyStream {
       /*
        * ★ 带上**观察者数**与**档位**：这两个是回答「人不在线的时候流还开着吗」的关键 ——
        *   观察者 0 而 `事件/ping` 照涨 = 没人看流也开着；
-       *   档位只要不是 `asleep` 就说明「有仓 / 有单」把它顶着（见 `isIdle()`）。
+       *   档位不是 `asleep` ⇒ 要么有仓 / 有单把它顶着，要么 10 分钟内有动静
+       *   （判据就那三条，见 `tierOf()`）。
        */
       console.log(
         `${this.tag} 用户数据流统计：事件 ${this.dataFrames} 帧 / ping ${this.pings} 个 / ` +

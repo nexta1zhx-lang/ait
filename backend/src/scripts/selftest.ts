@@ -11,12 +11,13 @@
  * 那是个纯函数，而它的失效方式是"悄悄少一根 / 悄悄多一根坏根"—— 图上不报错，
  * 只有靠这组固定夹具才卡得住。所以必须离线可跑（不进网络）。
  *
- * 现在这里卡三件事：
+ * 现在这里卡六件事：
  *   ① 契约（提示词骨架）和 zod 校验结构**一模一样**
  *   ② 渲染能把这四个字段印出来
  *   ③ `sanitizeRows` 该丢的丢、该留的留、该覆盖的覆盖
  *   ④ `planContractChanges` 该加的加、该摘的摘（新币 / 下架 / 待上线）
  *   ⑤ 「这个币刚被平仓」判得对不对 + 撤残留单的去抖（平了就撤，见 `docs/EXCHANGE.md`）
+ *   ⑥ 三档（normal / idle / asleep）的判据 + 换档日志里的数字（见 `tierOf` / `tierText`）
  */
 import {sanitizeRows, type NewCandleRow} from '../db/candle-store'
 import {planContractChanges, type RawContract} from '../data/market'
@@ -24,6 +25,8 @@ import {
   KeyStream,
   ORPHAN_SWEEP_GAP_MS,
   tierOf,
+  tierText,
+  type Tier,
   orphanSweepTargets
 } from '../exchange-stream'
 import type {JudgeResult} from '../llm/client'
@@ -311,8 +314,9 @@ function checkDiff(): boolean {
  *
  * 用户 2026-10-07 问：「现在我的合约有仓位的情况下，后端还会关闭 ws 吗」——
  * 答案必须是「不会」，而且**有仓 / 有单时连降档都不该发生**：
- * 降档会把成交 / 挂单 / 账本的对账拉到 2~4 小时一轮，而止盈止损还在场的时候，
- * 中间那几个小时正好是最需要算准的。夹具用**真的那份 `tierOf()`**，别另写一份判断。
+ * 降档后成交 / 挂单 / 账本变成 8~16 小时才轮一次（睡着档干脆全停），
+ * 而止盈止损还在场的时候，中间那几个小时正好是最需要算准的。
+ * 夹具用**真的那份 `tierOf()`**，别另写一份判断。
  */
 function checkTier(): boolean {
   const H = 60 * 60 * 1000
@@ -340,6 +344,38 @@ function checkTier(): boolean {
     }
   }
   if (ok) console.log(`✅ 档位：${cases.length} 组夹具通过（有仓/有单永不降档）`)
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
+/* ④c 换档日志的文案：数字必须跟真节奏一致                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 卡「日志里那句话跟真的节奏一致」。
+ *
+ * 为什么值得单独卡：这段文案**被手抄过两版，两版都过时了**，而且只有人去读代码才发现 ——
+ * 一版写「对账降频到 30 分钟一轮」（真的早就是 8 / 12 / 16 小时），
+ * 另一版写「对账全 1 小时」（真的早就是 4 / 6 / 8 小时）。
+ * 现在文案由 `tierText()` 从 `TIER_GAPS` 现算，这组夹具就是那个「现算」的守卫：
+ * 谁改了节奏这里先红，逼你顺手把 `docs/EXCHANGE.md` 的档位表也改掉。
+ */
+function checkTierText(): boolean {
+  const want: [Tier, string][] = [
+    ['normal', '成交 4 小时 / 挂单 6 小时 / 账本 8 小时'],
+    ['idle', '成交 8 小时 / 挂单 12 小时 / 账本 16 小时'],
+    /* 睡着档只许说「停」—— `TIER_GAPS.asleep` 那三项永不生效，不许报出一个假节奏 */
+    ['asleep', '对账全停']
+  ]
+  let ok = true
+  for (const [tier, needle] of want) {
+    const text = tierText(tier)
+    if (!text.includes(needle)) {
+      console.error(`❌ 档位文案：${tier} 该含「${needle}」，实际「${text}」`)
+      ok = false
+    }
+  }
+  if (ok) console.log(`✅ 档位文案：${want.length} 档的数字跟真节奏对得上`)
   return ok
 }
 
@@ -420,6 +456,7 @@ if (!checkSanitize()) failed = true
 if (!checkDiff()) failed = true
 if (!checkCloseSweep()) failed = true
 if (!checkTier()) failed = true
+if (!checkTierText()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)
