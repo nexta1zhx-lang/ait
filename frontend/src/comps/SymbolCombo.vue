@@ -180,7 +180,12 @@ onBeforeUnmount(() =>
       @blur="onBlur"
       @click="open ? close() : show()"
     >
-      <span class="combo-plain-t" :class="{empty: !modelValue}">{{ modelValue || emptyText }}</span>
+      <!--
+        ⚠️ 占位那档的类名**不能叫 `empty`**：全站 `.empty` 是「空态块」（`padding: 22px 0` +
+           `text-align: center`），套到这颗标签上会把表头那一行整个顶成 65px 高
+           （用户 2026-10-07：「标题栏间距太大了」））。
+      -->
+      <span class="combo-plain-t" :class="{ph: !modelValue}">{{ modelValue || emptyText }}</span>
       <span class="combo-plain-caret">▾</span>
     </button>
 

@@ -1693,6 +1693,7 @@ const RANGES = [
             -->
             <SymbolCombo
               plain
+              class="pn-sym"
               placeholder="全部"
               all-label="全部"
               :model-value="cyclesSymbol"
@@ -1905,6 +1906,7 @@ const RANGES = [
           <div class="pn-h">
             <SymbolCombo
               plain
+              class="pn-sym"
               placeholder="全部"
               all-label="全部"
               :model-value="fillsSymbol"
@@ -2011,6 +2013,7 @@ const RANGES = [
           <div class="pn-h">
             <SymbolCombo
               plain
+              class="pn-sym"
               placeholder="全部"
               all-label="全部"
               :model-value="flowSymbol"
@@ -2469,6 +2472,19 @@ const RANGES = [
   line-height: 1.2;
   cursor: pointer;
   white-space: nowrap;
+}
+/*
+ * 账本三格表头里那颗币种下拉：字号压到跟旁边「N 笔 / 近 7 天」同一档。
+ *
+ * ⚠️ `SymbolCombo` 的 `plain` 模式默认 **15px / 中粗** —— 那是给合约页那个当标题用的
+ *    币种名准备的，塞进表头就是「全部 字体过大」（用户 2026-10-07）。
+ *    用 `:deep()` 是因为 `.combo-plain` 长在子组件模板里，拿不到本组件的 scope 属性。
+ */
+.pn-sym :deep(.combo-plain) {
+  font-size: 12px;
+}
+.pn-sym :deep(.combo-plain-caret) {
+  font-size: 10px;
 }
 /* 范围/类型不是默认值时高亮（提示「现在不是全部」） */
 .pn-range.on {

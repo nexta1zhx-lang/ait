@@ -5358,8 +5358,12 @@ body.fixed-viewport .split {
   letter-spacing: 0.2px;
 }
 
-/* 空值时的占位（账本三格筛选用：空 = 全部）——压暗一档，跟真选了币区分开 */
-.combo-plain-t.empty {
+/*
+ * 空值时的占位（账本三格筛选用：空 = 全部）——压暗一档，跟真选了币区分开。
+ * ⚠️ 类名是 `ph` **不是 `empty`**：`.empty` 是全站的空态块（`padding: 22px 0`），
+ *    撞上就会把这颗标签撑到 57px 高、把表头那一行顶起来（2026-10-07 用户的「标题栏间距太大」）。
+ */
+.combo-plain-t.ph {
   color: var(--muted);
   font-weight: 400;
 }
