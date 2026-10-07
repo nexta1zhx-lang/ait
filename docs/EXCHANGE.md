@@ -2575,5 +2575,45 @@ SSE 的 `positions` 补丁更是把 `p.positions` **原样**盖回去。于是�
   吃到 **85 次 `-1003`**（根因：把 K 线一发的权重按 2 记，实际是 **5**）。历史放本地拉，线上零请求。
 - 体积（实测 259~375 B/行）：本次补 ≈1130 万行 ≈ **3.5~4.3 GB**；CSV gzip ≈250~400 MB；
   保留策略生效后的稳态 ≈1420 万行 ≈4.3~5.4 GB（线上磁盘 38 G、剩 23 G）。
-- ⚠️ ccxt 的 OHLCV 只有 5 个字段 ⇒ seed 段的 `quote_volume / trades / taker_buy_volume` 是 0，
-  所以「每日对账」只比 OHLCV。
+- ⚠️ ccxt 的 OHLCV 只有 5 个字段 ⇒ **`seed` 段**的 `quote_volume / trades / taker_buy_volume` 是 0
+  （`vision` 段有，见下），所以「每日对账」只比 OHLCV。
+
+**换数据源：1m/5m/15m/1h/4h 改走币安官方历史包**（用户：「灌历史有点慢 能否本地跑不走代理」
+「能否调多个数据源，也有其他第三方数据有的吧」）
+
+先实测问题：本地出口把 `fapi.binance.com` 解析到假 IP ⇒ REST 必须走代理；一发权重 5；
+把并发提到 `--conc=8 --rps=14` **反而被 `-1003` 反复拦**（3.2 分钟只走完 42 币 ⇒ 全量要 40+ 分钟），
+即**提速就撞墙**。于是换 `data.binance.vision`（**币安官方历史数据包，不是第三方**）——
+同一个 IP 直连它 HTTP/2 200，直连 `fapi.binance.com` 是空响应。
+
+| 项 | 实测 |
+|---|---|
+| URL | `…/data/futures/um/{monthly,daily}/klines/{PAIR}/{interval}/{PAIR}-{interval}-{YYYY-MM\|YYYY-MM-DD}.zip` |
+| 权重 | **0**（不占 2400/分钟，跟交易/账户不抢） |
+| 体重 | 1m 月包 1.8 MB（43,200 行，共 43,201 行含表头）/ 1m 日包 57~62 KB；15m 月包 138 KB；5m 月包 390 KB；4h 月包 10 KB；1d 月包 2 KB |
+| CSV | 12 列**带表头**：`open_time,open,high,low,close,volume,close_time,quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore` |
+| 发布延迟 | 日包 T+1（2026-10-07 03:13 时最新只到 10-05 的包）；**当月没有月包**（月末后才发）⇒ 当月逐日拿 |
+| 速度 | 并发 16 实测 **1,067 包/分钟**（24,150 个包 ≈ 23 分钟、0 失败） |
+
+`npm run candles:seed:vision`（`backend/src/scripts/seed-vision.ts`）：
+
+- **1m/5m/15m/1h/4h 走官方包；1d 仍走 `candles:seed` 的 REST**（1d 包是 34 个文件/币，
+  REST 一发 1000 根显然更便宜）⇒ 两个脚本分工跑，互不重叠；
+- 只设 `EXCHANGE_PROXY`（ccxt 认它）、**不要**设 `HTTPS_PROXY` / `NODE_USE_ENV_PROXY`
+  —— 后两个会把裸 `fetch` 也塞进代理，恰好毁掉「包直连」（原因见 `exchange-account.ts` 里那段注释：
+  ccxt 自己挂显式 dispatcher，绕过环境变量代理）；
+- 断点续跑（库里已覆盖的包直接跳过）、只写**已收盘**的桶、`--dry` 只列计划、`--force` 忽略断点。
+
+**验证（跨源逐字段对照 + 包内自洽）**：同一批 bar 用 REST 再拉一遍 —— 1m/5m/15m/1h 的
+`open/high/low/close/volume` 与包**精确相同**；包内自洽：5m 的 `volume/quote_volume/trades`
+= 它自己那 5 根 1m 的**精确求和**（571.437 / 48,436,713.86 / 10,660），15m = 3 × 5m，
+OHLC 也对（5m high = 5 根 1m 的最高）。
+⇒ 包还额外给了 `quote_volume / trades / taker_buy_volume`（REST seed 只能塞 0），
+所以 **`candles.source` 多了 `vision` 这个值**，且导入线上后能让那些桶的成交额字段从 0 变成真值。
+
+⚠️ 合并导入的护栏：`candles:sync` 的 upsert 是 `DO UPDATE`（同桶以本地为准），
+但本地 `seed` 行的成交额是 0，会把线上那份带成交额的行打坏 ⇒ 加了
+`WHERE NOT (EXCLUDED.quote_volume = 0 AND candles.quote_volume > 0)`：
+**只允许「有成交额」的覆盖「没成交额」的**，反向一律不动。
+同理 `--replace` 的 `TRUNCATE` 会连线上实时在写的尾段一起清掉，**默认就该用 merge**。
+

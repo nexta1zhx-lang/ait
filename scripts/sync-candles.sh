@@ -6,8 +6,15 @@
 # （实测一次 85 次）。本地那台机器有独立出口 —— 历史在本地拉全，整表导过去，线上零请求。
 #
 # 用法：
-#   bash scripts/sync-candles.sh              # 合并（幂等，可反复跑；适合增量补）
+#   bash scripts/sync-candles.sh              # 合并（幂等，可反复跑；适合增量补）★ 默认用它
 #   bash scripts/sync-candles.sh --replace    # 先清空线上 candles 再整表灌（最快，适合一次铺满）
+#
+# ⚠️ 为什么默认是 merge：线上底座在**实时**往 candles 里写（ws/rollup），
+#   `--replace` 的 TRUNCATE 会把「本地还没补到的那段尾」一起清掉 ——
+#   只有在本地确实包含完整尾段时才能用 replace。
+#   而 merge 又反过来有另一个坑：本地 REST 灌的 `seed` 行没有成交额（ccxt OHLCV 只有 5 字段），
+#   同桶合并会把线上那份带成交额的行打坏 ⇒ 合并语句里加了护栏：
+#   **只允许「有成交额」的覆盖「没成交额」的**，反向一律不动（见下面 ON CONFLICT 的 WHERE）。
 #
 # 导出/导入都用 `\copy ... WITH CSV`（两边列顺序都按 `schema.ts` 那张表），
 # 并且**两边都锁 UTC**（PGTZ=UTC）—— 否则 timestamptz 会按各自时区写成墙钟时间、整体偏几小时。
@@ -54,7 +61,8 @@ else
         high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
         volume = EXCLUDED.volume, quote_volume = EXCLUDED.quote_volume,
         trades = EXCLUDED.trades, taker_buy_volume = EXCLUDED.taker_buy_volume,
-        source = EXCLUDED.source, updated_at = now()'
+        source = EXCLUDED.source, updated_at = now()
+      WHERE NOT (EXCLUDED.quote_volume = 0 AND candles.quote_volume > 0)'
   "${PSQL[@]}" -c 'DROP TABLE candles_import'
   echo "已合并（同桶以本地这份为准）"
 fi

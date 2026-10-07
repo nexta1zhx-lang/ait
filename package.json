@@ -50,6 +50,7 @@
     "app:run:android": "npm run app:sync && cap run android",
     "app:run:ios": "npm run app:sync && cap run ios",
     "candles:seed": "tsx backend/src/scripts/seed-candles.ts",
+    "candles:seed:vision": "tsx backend/src/scripts/seed-vision.ts",
     "candles:sync": "bash scripts/sync-candles.sh"
   },
   "dependencies": {
