@@ -4919,22 +4919,9 @@ body.fixed-viewport .split {
 }
 
 /*
- * 「真单」章 —— **只在配置里把「测试下单」关掉时出现**（`OrderPanel.vue` 里
- * `v-if="!testOrder"`）。真单是会真扣保证金的模式，所以给个一直红着的标记，
- * 别让人在真单模式下以为自己还在测试。
+ * ⚠️ 这里原来有一条 `.ord-live`（常驻的「真单」章）—— 2026-10-07 用户
+ *    「都是真单」「也去掉，那个章现在只是噪音」⇒ 章和样式一起删了。
  */
-.ord-live {
-  flex: 0 0 auto;
-  padding: 1px 7px;
-  border: 1px solid color-mix(in srgb, var(--bad, #e55361) 55%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bad, #e55361) 14%, transparent);
-  color: var(--bad, #e55361);
-  font-size: 10px;
-  font-weight: var(--fw-bold);
-  letter-spacing: 0.5px;
-}
-
 /* 杠杆小标签：跟在「市价 / 限价」后面那颗 */
 .ord-head .ord-lev {
   padding: 4px 9px;

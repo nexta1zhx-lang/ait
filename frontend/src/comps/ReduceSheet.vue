@@ -127,7 +127,7 @@ function money(v: number): string {
         type="button"
         class="tr-go"
         :disabled="busy"
-        :title="testOrder ? '测试平仓（只校验、不真平）' : '平仓（真单）'"
+        :title="testOrder ? '测试平仓（只校验、不真平）' : '平仓'"
         @click="emit('confirm', pct)"
       >
         {{ busy ? '提交中…' : testOrder ? `测试平仓 ${pct}%` : `平仓 ${pct}%` }}
