@@ -7,7 +7,7 @@
 密钥     ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem
 代码     /opt/crypto-advisor
 域名     bitcoooin.cn（A 记录已指向该 IP，NS 在阿里云）
-机器     Ubuntu 24.04 / 2 核 / 909MB 内存 / 36G 盘
+机器     Ubuntu 24.04 / 2 核 / 2GB 内存 / 60G 盘（2026-10-07 由 909MB / 36G 升档）
 ```
 
 一台 AWS Lightsail（东京）+ Docker Compose，**宿主机除了 Docker 什么都不用装**：
@@ -106,7 +106,7 @@ sudo bash scripts/deploy.sh
 
 `scripts/deploy.sh` 幂等，按顺序做：
 
-1. 内存 < 1.9G 就加 2GB swap（这台机器 909MB，**必须加**，否则 Postgres / Node 容易被 OOM 杀）
+1. 内存 < 1.9G 就加 2GB swap（现在的 2GB 档够用、不加；老 909MB 机器**必须加**，否则 Postgres / Node 容易被 OOM 杀）
 2. 没装 Docker 就装
 3. `.env` 不存在就从 `.env.example` 生成；
    `PGPASSWORD` 还是默认值就**换成随机密码**
@@ -389,6 +389,9 @@ sudo docker compose -f docker-compose.prod.yml up -d                 # ⑤ 重�
 
 ## 换机器（换更大的 bundle：$5 → $12）
 
+> **状态：2026-10-07 已执行完毕**（2GB / 60G，静态 IP 没变，域名与证书都没动）。
+> 回头看这套流程是有效的，实测结论见本节末尾「本次实测」。
+>
 > 2026-10-07 起因：量下来 CPU 很闲（PSI `cpu full = 0%`）、**内存紧**（909MB，swap 已用 268MB）、
 > **磁盘 I/O 是瓶颈**（PSI `io full avg10 ≈ 37%`、`wa ≈ 39`、PG `buffers_backend` 418 万 ⇒
 > `shared_buffers` 64MB 太小）。带宽根本不是事：`ca-app` 实测 入 3.4MB/分 + 出 2.0MB/分
@@ -414,14 +417,31 @@ sudo docker compose -f docker-compose.prod.yml up -d                 # ⑤ 重�
    curl -s localhost:8787/api/health                      # {"ok":true,...}
    df -h /                                                # ← 看是不是 60GB
    ```
-   ⚠️ **磁盘十有八九还是 38GB**（快照把分区一起搬过去了）：`sudo growpart /dev/xvda 1 && sudo resize2fs /dev/xvda1`
+   ⚠️ 磁盘**不用手扩**：Lightsail 用快照建新实例时会按新计划把分区一起放大（实测 38G → **58G**，36% 已用）。
+   万一没自动扩再来一刀：`sudo growpart /dev/xvda 1 && sudo resize2fs /dev/xvda1`
    （NVMe 机型是 `/dev/nvme0n1`，先用 `lsblk` 看一眼）。
    顺带核一下防火墙（22 / 80 / 443 三条，从快照建的实例一般会带过来，但**要亲眼看一下**）。
 4. **切静态 IP**：控制台 → 网络 → 静态 IP → 先从**旧**实例 detach → 再 attach 到**新**实例。
    （切换期间几十秒不可用。）然后本机 `curl https://bitcoooin.cn/api/health` 验收。
 5. **旧实例 stop**（先别删，留几天当后悔药）→ 稳定后再 delete；顺手删掉旧快照（快照按 GB 计费）。
 6. **按新内存调 PG**（我这边改 `docker-compose.prod.yml` 的 db `command`，再 `npm run release` 生效，
-   重建 db 容器 ≈ 几秒）：`shared_buffers` 64MB → **384MB**、`effective_cache_size` 4GB（错值）→ **1.5GB**。
+   重建 db 容器 ≈ 几秒）：`shared_buffers` 64MB → **384MB**、`effective_cache_size` 4GB（错值）→ **1536MB**。
    这才是治 `io full` 的那一刀：内存翻倍 → 页面缓存能住下更多 5.3GB 的库 → 少读盘。
 7. 收尾：`sudo docker builder prune -f`（快照会把这 9GB 构建缓存一起搬过来）、
    `/opt/crypto-advisor/.env` 在不在（快照里有，PGPASSWORD 必须跟 pgdata 匹配）。
+
+### 本次实测（2026-10-07，2GB / 60G）
+
+| 项 | 迁移前 909MB 档 | 迁移后 2GB 档 |
+| --- | --- | --- |
+| 内存 / swap | 909MB，swap 已用 268MB | 1906MB，swap 已用 40MB（available 849MB） |
+| 磁盘 | 38G / 36G 用满风险 | 58G，prune 后 13G 用（22%） |
+| `buffers_backend`（PG 后端自己刷的缓冲） | 4.18M | 3.0 万（↓ 99%+） |
+| PSI `io full avg10` | ≈ 37%（`wa`≈39） | 29%（开机 9 分钟内，含 rollup 追赶） |
+| PSI `cpu full` | 0% | 0% |
+| 证书 | Let's Encrypt | **没重签**（`ca-caddy-data` 卷跟着快照过来了） |
+| `.env` / `downloads/` / `tinyproxy` | — | 全在，`tinyproxy` 仍是 active（本地开发的隧道照旧可用） |
+| candles | — | 1m 落后 ~2 分（ws 实时）、5m/15m/1h/4h/1d 全部追平（各周期最新一根都是「当前还没收的那根」的上一根） |
+
+换算下来这次花的钱全在「内存」上：`shared_buffers` 涨 6 倍 + 宿主机页面缓存翻倍，
+把原来那一刀磁盘 I/O 直接压下去；`docker builder prune` 一次回收 **8.66GB** 构建缓存 + 156MB 悬空镜像。
