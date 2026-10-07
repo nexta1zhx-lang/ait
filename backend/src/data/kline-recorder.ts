@@ -446,8 +446,17 @@ async function repairSweep(reason: string): Promise<void> {
     let queued = 0
     for (const st of states.values()) {
       const last = stored.get(st.sym.symbol)
-      /* 库里没有过的币不补历史（P0 影子期从现在开始记就够，省权重） */
-      if (!last) continue
+      if (!last) {
+        /*
+         * 库里一根 1m 都没有（第一次跑 / 刚清过库）：只补最近半小时。
+         * 为什么要排而不是跳过：**跨启动那一刻的高周期桶**（比如今天那根 1d）
+         * 是 seed 写的「启动时刻快照」，我们自己的 rollup 因为没从桶头开始会被判残而丢弃 ——
+         * 不修的话它会一直错下去。`repairSymbol` 的第③步会用交易所口径把它盖回去。
+         */
+        queueRepair(st, now - 30 * MIN_MS)
+        queued++
+        continue
+      }
       const newest = Math.max(last, st.lastClosedMs)
       if (now - newest <= 2 * MIN_MS) continue
       queueRepair(st, Math.max(newest + MIN_MS, now - BACKFILL_MAX_MS))
@@ -594,6 +603,74 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
  * ⚠️ 灌进来的是 ccxt 的口径（只有 OHLCV，量/笔数/主动买量没有）⇒ 存 0，
  *    对账只比 OHLCV（`docs/EXCHANGE.md` 的每日对账）。
  */
+/**
+ * 可选：把 1m 的**7 天历史**一次灌满（`KLINE_SEED_1M=on`，默认关）。
+ *
+ * 为什么默认关：11 发/币 × 525 ≈ 5800 发（≈29k 权重，等于 24 分钟的整站预算）。
+ * 不灌的话 1m 的 7 天窗口靠实时流自然攒满 —— 读路径本来就要为「库没覆盖到的那段」兜 REST。
+ */
+async function seedHistory1m(): Promise<void> {
+  if (!cfg || (process.env.KLINE_SEED_1M ?? '').toLowerCase() !== 'on') return
+  const now = Date.now()
+  const have = await maxOpenTimes(
+    '1m',
+    symbols.map(s => s.symbol)
+  )
+  const jobs = symbols.filter(s => {
+    const last = have.get(s.symbol)
+    return !last || now - last > 60 * MIN_MS
+  })
+  if (!jobs.length) return
+  console.log(`[kline] 灌 1m 历史（7 天）：${jobs.length} 个币，限速后台跑`)
+  let i = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const sym = jobs[i++]
+      if (!sym || stopped) return
+      try {
+        const from = Date.now() - 7 * 1440 * MIN_MS
+        const rows = await paced(`灌 1m ${sym.pair}`, () =>
+          fetchCandlesRange({
+            exchangeId: cfg!.exchange,
+            symbol: sym.symbol,
+            timeframe: '1m',
+            from,
+            to: Date.now(),
+            marketType: cfg!.marketType,
+            apiBase: cfg!.apiBase,
+            maxCandles: 11_000
+          })
+        )
+        const out: NewCandleRow[] = rows.map(c => ({
+          exchange: cfg!.exchange,
+          marketType: cfg!.marketType,
+          symbol: sym.symbol,
+          pair: sym.pair,
+          interval: '1m' as KlineInterval,
+          openTime: c.timestamp,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume,
+          quoteVolume: 0,
+          trades: 0,
+          takerBuyVolume: 0,
+          source: 'seed'
+        }))
+        if (out.length) {
+          await saveCandles(out)
+          stats.seeded += out.length
+        }
+      } catch (e) {
+        stats.lastError = (e as Error).message
+      }
+    }
+  }
+  await Promise.all(Array.from({length: REPAIR_CONC}, () => worker()))
+  console.log('[kline] 灌 1m 历史完成')
+}
+
 async function seedHistory(): Promise<void> {
   if (!cfg || (process.env.KLINE_SEED ?? '').toLowerCase() === 'off') return
   const now = Date.now()
@@ -719,6 +796,7 @@ async function boot(): Promise<void> {
   await prune()
   void repairSweep('启动')
   void seedHistory()
+  void seedHistory1m()
 }
 
 export async function stopKlineRecorder(): Promise<void> {
