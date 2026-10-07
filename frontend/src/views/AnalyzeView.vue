@@ -318,7 +318,7 @@ const onChartError = (msg: string) => {
  * 图是单独一格，选完直接跳过去看图 —— 不然在手机上点完像没反应。
  */
 function onPickMarket(base: string): void {
-  // 兜底：正常早就被「全量预热」暖好了，这里命中即返回
+  // 先发出去：等切过去画图时直接命中（服务端是内存/本地库，很快）
   prefetchSymbol(base)
   pickSymbol(base)
   if (isMobile.value) leftTab.value = 'chart'

@@ -49,7 +49,7 @@ onDeactivated(() => {
  * 「合约页只搬合约行情列表，K 线留在开单分析里」）。
  */
 function onPickMarket(base: string): void {
-  // 兔底：正常早就被「全量预热」暖好了，这里命中即返回
+  // 先发出去：跳到 /analyze 画图时直接命中（服务端是内存/本地库，很快）
   prefetchSymbol(base)
   pickSymbol(base)
   void router.push('/analyze')

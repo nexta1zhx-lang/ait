@@ -522,14 +522,13 @@ const visible = computed(() => shown.value.slice(0, MAX_ROWS))
  * ⚠️ 2026-10-04：**「空闲时把一批币的 K 线提前取好」整块删掉了**
  *（原来这里有 `warmTargets` / `warmKey` / 一个 5 秒节流的 watch，向父组件 emit `warm`）。
  *
- * 那是「后端还没有 K 线缓存」年代的做法。现在后端有常驻缓存
- *（`backend/src/data/kline-store.ts`）并在**启动时**把「成交额前 60 ∪ 异动」
- * 预热带好（`server.ts` 的 `warmCandlesCache`），前端再暖一遍只是**重复劳动**：
- * 服务器每个 2ms 命中，但 60 个币 × 250 根 ≈ **1.5MB 白传给浏览器** ——
+ * 那是「后端还没有 K 线缓存」年代的做法：60 个币 × 250 根 ≈ **1.5MB 白传给浏览器** ——
  * 一进 `/contracts` 一个都还没点，先下 1.5MB。
  * 用户 2026-10-04：「前端为什么要请求这么多 candles」。
  *
- * 现在只有「**真点了某一行**」才发一次请求（`@pick` → `prefetchSymbol`）。
+ * 现在只有「**真点了某一行**」才发一次请求（`@pick` → `prefetchSymbol`），
+ * 而且服务端那一下已经是「内存 → 库 → REST」三层里的**本地库读**（毫秒级、0 权重，
+ * 见 `backend/src/data/kline-store.ts`）—— 没有「预热」这个环节了。
  */
 
 /* 总数要报给父组件（它拿去做标题右侧的「共 N 个合约」） */

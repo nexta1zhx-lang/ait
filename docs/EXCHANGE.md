@@ -1205,7 +1205,7 @@ WS 一旦不推（连接问题 / 币安没派 `ACCOUNT_UPDATE`），最长等 **
 
 限流按**出口 IP**算，而一台服务器只有一个出口 IP 给所有用户用。
 新增 `backend/src/util/rate-budget.ts`：滑动窗口，默认 **1200 权重/分钟**
-（币安是 2400，故意留一半给 K 线预热 / 行情 REST 兜底 / 划转那些路径）。
+（币安是 2400，故意留一半给 K 线底座的灌历史/回补、行情 REST 兜底、划转那些路径）。
 
 | 调用点 | 记多少权重 | 理由 |
 |---|---|---|
@@ -2488,14 +2488,21 @@ SSE 的 `positions` 补丁更是把 `p.positions` **原样**盖回去。于是�
 **别改坏的地方**：`keyName` 仍然**只在多套**时才写 —— 它一出现，板子每行就会多一个
 `.ktag`（`v-if="p.keyName"`）。所以单套视图「补 keyId 不补 keyName」是**故意**的。
 
-## 37. 实时 K 线底座（P0 影子模式，2026-10-07）
+## 37. 实时 K 线底座（2026-10-07，P1 读路径已上线）
 
 用户口径：「合约行情和 k 线渲染我想重构，不需要预热那一套，相关的备注方法删掉防止以后
 记忆错乱，改为实时的，存储 7 天 1 分钟的，后端不间断的用推送流计算，这样就可以实现
 合约界面和 k 线最近的数据秒开」。
 
-> P0 = **只写不读**：底座已在跑，读路径还是老那套（`kline-store` + REST）。
-> 跑够 24 小时后按下面「P1」把读路径切过来，并把预热/保活整块删掉。
+> **P0（已完成）**：底座先只写不读，攒够连续率/权重/内存的实测。
+> **P1（2026-10-07 已上线）**：`/api/candles` 的「最新 N 根」改成
+> **内存 → 库 → REST**，「当前那根」由底座内存现取；启动预热（`warmCandlesCache`）、
+> 10 秒保活（`startKlineKeepWarm`）、跨热线阻塞（`TAIL_MAX_AGE`/`MAX_WAIT_MS`）整块删除。
+> 详见下面「P1 落地」一节。
+>
+> **P2（已做）**：前端与注释里对已删机制的残留引用都清了（`warmCandlesCache` /
+> 「全量预热」/「保活」），并把「为什么行情条还预热、K 线不预热」写在该写的地方。
+> **P3（待做）**：每日对账 + 行情层换 `!miniTicker@arr` + `!markPrice@arr`。
 
 ### 定稿（实测数字都是这台机器上真跑出来的）
 
@@ -2552,10 +2559,47 @@ SSE 的 `positions` 补丁更是把 `p.positions` **原样**盖回去。于是�
 - **P0（已完成）**：`candles` 表（`db/candle-store.ts`）、`data/kline-recorder.ts`
   （常驻订阅、收盘落库、rollup、修复队列、灌历史、分级清理）、
   `GET /api/kline/recorder?db=1` 自检、`market.ts` 抽出 `listPerpetualSymbols()` 当**唯一一把尺子**。
-- **P1**：`/api/candles` 改成「内存 → 库 → REST」，删 `kline-store` 的保活与跨总线阻塞。
-- **P2**：删预热（`warmCandlesCache` / `warmTickerCache` / `warmPicks` / `startKlineKeepWarm`）
-  与前端残留注释；SSE 改成由底座合成当前根。
-- **P3**：每日对账（3 币 × 5 周期 vs REST 逐字段）+ 行情层换聚合流。
+- **P1（已完成，2026-10-07）**：`/api/candles` 改成「内存 → 库 → REST」；删 `kline-store`
+  的保活（`startKlineKeepWarm`/`keepWarmRound`）与跨热线阻塞（`TAIL_MAX_AGE`/`MAX_WAIT_MS`）。
+- **P2（已完成，2026-10-07）**：删启动的 K 线预热（`warmCandlesCache` + `WARM_TIMEFRAMES`
+  + `WARM_LIMIT`），清掉前端与注释里对已删机制的残留引用。
+  ⚠️ **保留**了行情条预热（`warmPicks`/`warmTickerCache`）—— `/api/ticker` 一个币要并发打
+  4 趟交易所、冷启 ~1.07s，跟 K 线读路径无关；也保留 `market.ts` 的 `warmExchange`
+  （ccxt `loadMarkets` 每个进程只付一次，删了就是让第一个用户付 2.7s）。
+  **SSE 仍按需直订上游**（没改成由底座合成）：底座只收 1m，高周期的当前根若由它合成，
+  那根就只会**每分钟**动一次（现在是每帧动），画图手感会变差 —— 不值得。
+- **P3（待做）**：每日对账（3 币 × 5 周期 vs REST 逐字段）+ 行情层换聚合流。
+
+### P1 落地（2026-10-07）：`/api/candles` 三层读路径
+
+```
+GET /api/candles?symbol=&timeframe=&limit=（不带 from/to 且 limit<=600）
+        │
+        ├─① 内存（kline-store，只存「已收盘」那串，不设 TTL）
+        │     还没跨过一个桶 ⇒ 直接切 300 根（hits.memory）
+        │
+        ├─② 库（candles 表，底座常驻写）——跨过桶了才来读一次
+        │     本地库毫秒级、**0 权重**（hits.db）
+        │
+        ├─③ REST —— 库里没有（非 swap / 新上市 / 超窗）或库太旧（底座挂了，hits.rest）
+        │
+        └─ 末根 = 底座内存现取的「当前那根」（hits.live，0 I/O）
+              · 高周期：累加器可信 ⇒ 累加器 + 活的 1m；
+                       不可信（`Agg.partial`：刚重启/漏过分钟）⇒ 库里 1m + 活的 1m 现拼
+```
+
+| 实测（本地，库里全量历史） | 改前 | 改后 |
+|---|---|---|
+| `/api/candles` 首次（冷） | 180~255 ms | **6.7~28 ms** |
+| 第二次起 | 同上（TTL 4s 或补尾巴） | **内存命中** |
+| 上游权重 | 每冷启 528 币 × 每 4 秒 | **0**（只有库里没有才发） |
+| 末根 | REST 里那根 | 底座内存合成（1m 连打三次量 33.985→34.936→42.299） |
+| `store.hits`（一次六周期请求） | — | `db 10 / rest 0 / live 11` |
+
+配套修掉三个挡路问题（详见 commit `feb7aaa`）：当前根合成的 key 用错（`states` 按原始 id
+建 key、`currentBar()` 拿统一符号查 ⇒ 恒 null）、**残桶入库**（回补/灌历史三处只按
+`timestamp < now` 过滤）、**candles 缺非主键索引**（`maxOpenTimes`/`pruneCandles` 全表扫
+1100 万行 ⇒ 库 CPU 300%、连接超时）。
 
 ### 1 分钟周期 + 本地灌历史 → 导入线上（2026-10-07 追加）
 

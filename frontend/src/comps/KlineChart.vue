@@ -258,7 +258,7 @@ function barsToLoad(): number {
   /*
    * 至少够铺满默认那一屏（再多给一点，缩放时不用立刻又去拉）。
    * ⚠️ 必须用 `KLINE_BARS`：`candles.ts` 的预取按**同一个数**拼 key，
-   *    这里换个算法，提前取好的那份就对不上了（服务端缓存 key 里也带 limit）。
+   *    这里换个算法，提前取好的那份就对不上了（`candles.ts` 的 memo key 里带 limit）。
    */
   return KLINE_BARS
 }

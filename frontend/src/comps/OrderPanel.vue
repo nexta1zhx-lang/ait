@@ -640,7 +640,7 @@ const SORT_OPTIONS: {v: PosSort; label: string; hint: string}[] = [
  * 走的是分析页那套全局币种（`analyze.ts` 的 `pickSymbol`）——
  * 跟「合约」页点一行、顶部币种下拉选一个，是**同一条路**：
  * 换完 K 线 / 行情条 / 历史结论一起跟着走。
- * `prefetchSymbol` 先把这只币的行情预热上，免得切过去先白一屏。
+ * `prefetchSymbol` 先把这只币的 K 线发出去，免得切过去的第一屏等网络。
  */
 function gotoChart(p: TradePositionRow): void {
   const base = baseOf(p.symbol)
