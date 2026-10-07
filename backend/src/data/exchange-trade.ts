@@ -68,6 +68,13 @@ export function humanizeTrade(e: unknown): string {
      */
     case -4192:
       return '币安那边在「冷静期」：这把 Key 暂时不许下单（新 Key / 刚开合约权限常见），过一阵再试'
+    /*
+     * 撤单时最常见的一条：这张单**在交易所已经没了**（刚被撤过 / 刚成交，
+     * 或者两个页面同时点了「全部撤单」）—— 说白了是「已经达到目的了」，
+     * 别把 `binance {"code":-2011,...}` 原样甩给用户。
+     */
+    case -2011:
+      return '这张单在交易所已经不存在了（可能刚撤过或刚成交）'
     case -1021:
       return '本机时间和服务器差太多（时间戳校验失败）'
     case -4048:
@@ -1394,6 +1401,86 @@ export async function cancelTradeOrder(
   const spec = await specFor(c, symbol)
   await cancelAnyOrder(ex, spec.symbol, orderId)
   return {orderId, symbol: spec.symbol}
+}
+
+/**
+ * 一次撤掉**一串**挂单（「挂单」那一格右上角那颗「全部撤单」用）。
+ *
+ * ⚠️ 真动作，**没有测试版**（跟单张撤单一样）—— 前端点之前必须二次确认。
+ * ⚠️ 一张失败**不停下**（后面接着撤），但「这把 Key 根本不行」那类错
+ *    （限流 / IP 白名单 / Key 不对 / 没权限 / 网络不通）会**当场收手**：
+ *    那不是一个币的问题，硬撤只会把出口 IP 打进 `-1003`。
+ * ⚠️ 一张一张来（`CANCEL_GAP_MS`）：币安撤单 weight 1，但用户可能一次挂十几张，
+ *    并发轰出去是最容易被限速的姿势。
+ */
+export interface CancelOrderItem {
+  /** 币安原始符号（`1000BONKUSDT`） */
+  symbol: string
+  orderId: string
+}
+
+export interface CancelOrdersResult {
+  cancelled: {symbol: string; orderId: string}[]
+  failed: {symbol: string; orderId: string; error: string}[]
+}
+
+/** 两张撤单之间歇多久 */
+const CANCEL_GAP_MS = 120
+/** 一次最多撤几张（前端那颗按钮本来就跟着列表走，这里只是兜底） */
+const CANCEL_MAX = 200
+
+/** 这个错是不是「整把 Key 都不行了」（跟单个币无关）——是就别再往下打了 */
+function isFatalCancelError(human: string): boolean {
+  return /限流|白名单|API Key|Secret|权限|接口调不通|网络/.test(human)
+}
+
+const sleepMs = (ms: number): Promise<void> =>
+  new Promise(r => setTimeout(r, ms))
+
+export async function cancelTradeOrders(
+  c: ExchangeCredentials,
+  items: CancelOrderItem[]
+): Promise<CancelOrdersResult> {
+  assertTradable(c)
+  /* 去重（同一张单被列两遍就只撤一次）+ 掐上限 */
+  const uniq = new Map<string, CancelOrderItem>()
+  for (const it of items ?? []) {
+    const symbol = String(it?.symbol ?? '').trim()
+    const orderId = String(it?.orderId ?? '').trim()
+    if (!symbol || !orderId) continue
+    uniq.set(`${symbol.toUpperCase()}|${orderId}`, {symbol, orderId})
+  }
+  const list = [...uniq.values()].slice(0, CANCEL_MAX)
+  const cancelled: CancelOrdersResult['cancelled'] = []
+  const failed: CancelOrdersResult['failed'] = []
+  if (!list.length) return {cancelled, failed}
+
+  const ex = createExchange(c)
+  /** 符号 → 币安原始符号（同一个币撤好几张时不用反复解析） */
+  const cache = new Map<string, string>()
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i]!
+    if (i) await sleepMs(CANCEL_GAP_MS)
+    try {
+      const k = it.symbol.toUpperCase()
+      let symbol = cache.get(k)
+      if (!symbol) {
+        symbol = (await specFor(c, it.symbol)).symbol
+        cache.set(k, symbol)
+      }
+      await cancelAnyOrder(ex, symbol, it.orderId)
+      cancelled.push(it)
+    } catch (e) {
+      const error = humanizeTrade(e)
+      failed.push({...it, error})
+      if (isFatalCancelError(error)) {
+        for (const rest of list.slice(i + 1))
+          failed.push({...rest, error: '前面那张撤失败后收手了'})
+        break
+      }
+    }
+  }
+  return {cancelled, failed}
 }
 
 /**

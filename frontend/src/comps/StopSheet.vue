@@ -187,7 +187,7 @@ function onPrice(v: unknown): void {
             ? '触发价就在现价上，币安会判「立即触发」—— 往上/往下挪一点'
             : testOrder
               ? '测试单：只校验，不会真挂上去'
-              : `真单：触发后按市价平掉 ${pct}%`
+              : `触发后按市价平掉 ${pct}%`
         "
         @click="emit('confirm', {kind, price, pct})"
       >

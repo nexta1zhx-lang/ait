@@ -39,6 +39,7 @@ import LedgerRangeSheet from './LedgerRangeSheet.vue'
 import {bjDayStart, TYPE_NAME, type RangeKey} from '../ledger'
 import {
   cancelTradeOrder,
+  cancelTradeOrders,
   closeTradePositions,
   exchangeStream,
   fetchExchangeCurve,
@@ -655,6 +656,58 @@ async function cancelOrderEdit(): Promise<void> {
   }
 }
 
+/** 「全部撤单」正在提交 */
+const cancellingAll = ref(false)
+
+/** 这个 keyId 是哪套账户（理论上一定找得到，兜底给个说法） */
+function keyNameOf(id?: number): string {
+  return keys.value.find(k => k.id === id)?.name ?? '默认账户'
+}
+
+/**
+ * 撤掉「挂单」列表里**现在这些**（用户 2026-10-07：「右侧加全部撤仓」+「需二次确认」）。
+ *
+ * 口径：**列表里有什么就撤什么** —— 跟着 tab 选中的账户、也跟着那一格的
+ * 币种 / 类型筛选走（`items` 由 board 从筛过的列表里拼好，每项自带 `keyId`，
+ * 因为「全部」那一格可能横跨两套账户）。
+ *
+ * ⚠️ 确认框里**不再写「真单 / 真撤」那类前缀**（用户 2026-10-07：「提示层真单的那种
+ *    去掉，都是真单」）—— 只留一句人话说明代价（平仓保护没了），确认键走 `danger` 就够。
+ */
+async function cancelListedOrders(p: {
+  items: {keyId?: number; symbol: string; orderId: string}[]
+  what: string
+}): Promise<void> {
+  if (!p.items.length || cancellingAll.value) return
+  const names = [...new Set(p.items.map(i => keyNameOf(i.keyId)))].join(' + ')
+  const ok = await askConfirm({
+    title: `撤掉这 ${p.items.length} 张挂单？`,
+    body: [
+      {t: `账户：${names}`, tone: 'num'},
+      {t: `范围：${p.what}`, tone: 'num'},
+      {t: '撤掉之后这些平仓保护就没了。', tone: 'warn'}
+    ],
+    okText: '全部撤单',
+    danger: true
+  })
+  if (!ok) return
+  cancellingAll.value = true
+  try {
+    const r = await cancelTradeOrders(p.items)
+    if (r.failed?.length)
+      sayMsg(
+        `撤掉 ${r.cancelled} 张，${r.failed.length} 张没撤掉：${r.failed[0]?.error ?? ''}`,
+        'bad'
+      )
+    else sayMsg(`已撤掉 ${r.cancelled} 张挂单`, 'ok')
+  } catch (e) {
+    sayMsg(`撤单失败：${msg(e)}`, 'bad')
+  } finally {
+    cancellingAll.value = false
+    void loadOrders()
+  }
+}
+
 /** 那条持仓现在多大（从当前视图里找；找不到就 0，弹层只是少显示一行估算） */
 const reducePos = computed<FuturesPosition | null>(() => {
   const r = reduceRow.value
@@ -727,7 +780,7 @@ async function closeRow(p: PositionRef): Promise<void> {
     title: `全平 ${name} 这一条持仓？`,
     body: test
       ? {t: '测试单只发到币安测试接口，不进撮合、不会真平。', tone: 'num'}
-      : {t: '真单：按市价全平这一条，会真的成交。', tone: 'warn'},
+      : {t: '按市价全平这一条，会真的成交。', tone: 'warn'},
     okText: '全平',
     danger: !test
   })
@@ -794,7 +847,7 @@ async function closeAllRows(rows: PositionRef[]): Promise<void> {
     body: [
       test
         ? {t: '测试单只发到币安测试接口，不进撮合、不会真平。', tone: 'num'}
-        : {t: `真单：${names} 全部按市价平掉，会真的成交。`, tone: 'warn'},
+        : {t: `${names} 全部按市价平掉，会真的成交。`, tone: 'warn'},
       ...(ids.length > 1 ? [`分 ${ids.length} 套账户各平一次`] : [])
     ],
     okText: test ? '测试一遍' : '全部平掉',
@@ -1286,7 +1339,11 @@ async function loadOrders(opts: {silent?: boolean} = {}): Promise<void> {
     if (!r) return
     if (r.error) errs.push(many ? `${k.name}：${r.error}` : r.error)
     if (r.stale) stale = true
-    for (const o of r.openOrders ?? []) out.push(many ? {...o, keyName: k.name} : o)
+    /*
+     * ⚠️ `keyId` 是**这里**贴上去的（后端那份载荷里没有）：挂单那一格的
+     *    「全部撤单」要按账户把单分回各家，一条请求里可能混着两套账户。
+     */
+    for (const o of r.openOrders ?? []) out.push({...o, keyId: k.id, ...(many ? {keyName: k.name} : {})})
   })
   openOrders.value = out
   ordersErr.value = errs.join('；')
@@ -1889,8 +1946,10 @@ onUnmounted(stopWork)
         filtered: filtered('flow'),
         rangeOn: rangeOn('flow')
       }"
+      :cancelling-orders="cancellingAll"
       @filter="onLedgerFilter"
       @range="onLedgerRange"
+      @cancel-all="cancelListedOrders"
     />
 
     <!--

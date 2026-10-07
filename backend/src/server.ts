@@ -111,6 +111,7 @@ import {RateBudgetError, takeWeight} from './util/rate-budget'
 import {
   cancelOrphanOrders,
   cancelTradeOrder,
+  cancelTradeOrders,
   closePositions,
   collectTradeInfo,
   humanizeTrade,
@@ -3964,6 +3965,73 @@ async function route(
     } catch (e) {
       return failTrade(res, '改单', key.id, e)
     }
+  }
+
+  /*
+   * 一次撤掉**一串**挂单（用户 2026-10-07：「挂单顶部也加过滤条件，右侧加全部撤仓」）。
+   *
+   * ⚠️ 真动作、**没有测试版**（跟单张撤单一样）⇒ 前端点之前必须二次确认；
+   *    这条接口自己**不认**「测试下单」开关，也没有金额概念 —— 撤了就是撤了。
+   *
+   * 载荷：`{items: [{keyId?, symbol, orderId}]}`。
+   * ⚠️ 每项**各自带 `keyId`**：挂单那一格在「全部」时横跨两套账户，
+   *    一条请求里就混着两家，得按账户分开撤（也顺便各撤各的缓存）。
+   */
+  if (p === '/api/exchange/trade/cancel-orders' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const raw = Array.isArray(body.items) ? body.items : []
+    const groups = new Map<number | null, {symbol: string; orderId: string}[]>()
+    for (const it of raw.slice(0, 200)) {
+      const symbol = str(it?.symbol, '')
+      const orderId = str(it?.orderId, '')
+      if (!symbol || !orderId) continue
+      const kid = num(it?.keyId) || null
+      const list = groups.get(kid) ?? []
+      list.push({symbol, orderId})
+      groups.set(kid, list)
+    }
+    const cancelled: {symbol: string; orderId: string}[] = []
+    const failed: {symbol: string; orderId: string; error: string}[] = []
+    for (const [kid, list] of groups) {
+      const key = kid
+        ? await getExchangeKey(me.id, kid)
+        : await getDefaultExchangeKey(me.id)
+      if (!key) {
+        for (const it of list) failed.push({...it, error: '找不到这一套账户'})
+        continue
+      }
+      if (!key.apiKey || !key.secret) {
+        for (const it of list)
+          failed.push({...it, error: `${key.name} 还没填 API Key`})
+        continue
+      }
+      try {
+        const r = await cancelTradeOrders(
+          {
+            exchange: key.exchange,
+            apiKey: key.apiKey,
+            secret: key.secret,
+            password: key.password,
+            marketType: key.marketType,
+            sandbox: key.sandbox
+          },
+          list
+        )
+        cancelled.push(...r.cancelled)
+        failed.push(...r.failed)
+        /* 撤完立刻作废缓存（别让 K 线上那些线还画着） */
+        void reconcileKeyOrders(key.id)
+      } catch (e) {
+        return failTrade(res, '批量撤单', key.id, e)
+      }
+    }
+    return sendJson(res, 200, {
+      ok: failed.length === 0,
+      cancelled: cancelled.length,
+      failed,
+      error: null
+    })
   }
 
   /*

@@ -1003,6 +1003,11 @@ export interface ExchangeOpenOrder {
   time: number
   /** 哪套 Key 的（只有「全部」那一格会带，见 `FuturesPosition.keyName`） */
   keyName?: string
+  /**
+   * 哪套 Key 的 id —— 面板取数时**按账户贴上去**的（后端那份载荷里没有）。
+   * 「全部撤单」要撤的每一张都得知道自己归谁（一条请求里可能混着两套账户）。
+   */
+  keyId?: number
 }
 
 /* ---------------- 钱账本（`/fapi/v1/income`） ---------------- */
@@ -1661,6 +1666,23 @@ export const cancelTradeOrder = (symbol: string, orderId: string, id?: number) =
     `/api/exchange/trade/cancel-order${id ? `?id=${id}` : ''}`,
     {symbol, orderId}
   )
+
+/**
+ * 一次撤掉一串挂单（「挂单」那一格右上角那颗「全部撤单」）。
+ *
+ * ⚠️ **真动作，没有测试版** —— 调用前必须二次确认（见
+ *    `ExchangeAccountLivePanel.cancelListedOrders`）。
+ * ⚠️ 每项各自带 `keyId`：挂单那一格在「全部」时横跨两套账户。
+ */
+export const cancelTradeOrders = (
+  items: {keyId?: number; symbol: string; orderId: string}[]
+) =>
+  post<{
+    ok: boolean
+    cancelled: number
+    failed: {symbol: string; orderId: string; error: string}[]
+    error: string | null
+  }>('/api/exchange/trade/cancel-orders', {items})
 
 /**
  * 清掉「仓位已经没了、单却还挂着」的残留平仓单（**真动作**）。

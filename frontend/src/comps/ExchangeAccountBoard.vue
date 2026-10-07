@@ -135,6 +135,8 @@ const props = defineProps<{
    * · `rangeOn`：范围/类型不是默认值时按钮高亮（只改币种不高亮 —— 币种在左边下拉里看得见）
    */
   cyclesFilter?: {symbol: string; range: string; filtered?: boolean; rangeOn?: boolean}
+  /** 「挂单」那一格正在批量撤单（开关按钮 + 防连点） */
+  cancellingOrders?: boolean
   fillsFilter?: {symbol: string; range: string; filtered?: boolean; rangeOn?: boolean}
   flowFilter?: {
     symbol: string
@@ -178,6 +180,12 @@ const emit = defineEmits<{
    * 交出去的是**币种简写**（`1000BONK`），跟分析页那套全局币种同一个写法。
    */
   (e: 'openChart', base: string): void
+  /**
+   * 点「全部撤单」（挂单那一格右上角）——交出去的是**列表里现在这些**：
+   * 跟着当前账户 + 那一格的币种/类型筛选走，每项自带 `keyId`（「全部」可能横跨两套）。
+   * 真正的二次确认 + 调接口在外层（只有它知道账户名、也只有它能提示结果）。
+   */
+  (e: 'cancelAll', v: {items: {keyId?: number; symbol: string; orderId: string}[]; what: string}): void
   /**
    * 点「挂单」列表里的一行 = 改这张单。
    * 交出去的是**这一张单 + 它对应的仓位 / 标记价**（见 `orderEditOf`）——
@@ -658,6 +666,78 @@ const orderGroups = computed(() => {
   return [...m.values()]
 })
 
+/* ---------------- 挂单那一格的筛选（币种 + 类型） ---------------- */
+
+/**
+ * 类型三档（跟 `orderKind()` 同一个口径：普通委托 / 止损 / 止盈）。
+ * ⚠️ 币安那边类型一长串（`LIMIT` / `STOP_MARKET` / `TAKE_PROFIT_MARKET` /
+ *    `TRAILING_STOP_MARKET`…），这里按**这单是干什么的**分三档就够了
+ *    （`TRAILING_STOP` 也算止损）。
+ */
+type OrdKind = 'plain' | 'stop' | 'profit'
+/** 胶囊的固定顺序（不按出现顺序，免得跳来跳去） */
+const ORD_KINDS: OrdKind[] = ['plain', 'stop', 'profit']
+const ORD_KIND_TEXT: Record<OrdKind, string> = {
+  plain: '限价',
+  stop: '止损',
+  profit: '止盈'
+}
+
+/** 挂单那一格选中的币种（`''` = 全部）与类型（`'all'` = 全部） */
+const ordSymbol = ref('')
+const ordKind = ref<'all' | OrdKind>('all')
+
+/** 下拉里能选哪些币（跟账本三格同一个口径：从当前这批挂单里取） */
+const ordOptions = computed(() => symbolOptions(props.openOrders ?? []))
+
+/** 这批挂单里**真出现过**的档位（没出现过的档不占位置） */
+const ordKinds = computed(() => {
+  const seen = new Set<string>()
+  for (const o of props.openOrders ?? []) seen.add(orderKind(o))
+  return ORD_KINDS.filter(k => seen.has(k))
+})
+
+/** 这一档现在有几张（胶囊上的数字） */
+function ordKindCount(k: OrdKind): number {
+  return (props.openOrders ?? []).filter(o => orderKind(o) === k).length
+}
+
+/** 筛过之后的挂单（币种 + 类型）—— **分页要铺的是这一份** */
+const filteredOrderGroups = computed(() =>
+  orderGroups.value
+    .map(g => ({
+      ...g,
+      rows: g.rows.filter(o => ordKind.value === 'all' || orderKind(o) === ordKind.value)
+    }))
+    .filter(g => g.rows.length && hitSymbol(g.symbol, ordSymbol.value))
+)
+
+/** 这一格现在筛出几张（「全部撤单」上那个数就是它） */
+const shownOrderCount = computed(() =>
+  filteredOrderGroups.value.reduce((n, g) => n + g.rows.length, 0)
+)
+
+/** 空列表 / 「撤单」文案里那句「范围」 */
+const ordRangeText = computed(() => {
+  const parts: string[] = []
+  if (ordSymbol.value) parts.push(ordSymbol.value)
+  if (ordKind.value !== 'all') parts.push(ORD_KIND_TEXT[ordKind.value])
+  return parts.join(' · ')
+})
+
+/** 交给外层的撤单载荷（列表里现在这些） */
+function cancelAllPayload(): {
+  items: {keyId?: number; symbol: string; orderId: string}[]
+  what: string
+} {
+  return {
+    items: filteredOrderGroups.value.flatMap(g =>
+      g.rows.map(o => ({keyId: o.keyId, symbol: o.symbol, orderId: o.id}))
+    ),
+    what: ordRangeText.value || '全部挂单'
+  }
+}
+
 /**
  * 仓位历史 —— **开仓到全平算一笔**。
  *
@@ -755,8 +835,7 @@ const cap = computed(() =>
 /** 当前 tab 一共多少条 —— 决定还能不能再「加载更多」 */
 const tabTotal = computed(() => {
   if (tab.value === 'pos') return positions.value.length
-  if (tab.value === 'ord')
-    return orderGroups.value.reduce((n, g) => n + g.rows.length, 0)
+  if (tab.value === 'ord') return shownOrderCount.value
   if (tab.value === 'inc') return shownCycles.value.length
   if (tab.value === 'trades') return props.trades?.length ?? 0
   if (tab.value === 'flow') return props.income?.length ?? 0
@@ -885,13 +964,17 @@ const visibleCycles = computed(() => {
   }
 })
 
-/** 挂单是按交易对分组的 —— 按组的顺序一条条数，凑满额度就停 */
+/**
+ * 挂单是按交易对分组的 —— 按组的顺序一条条数，凑满额度就停。
+ * ⚠️ 数的是**筛过的那份**（`filteredOrderGroups`）：筛在前、铺在后，
+ *    「筛出 3 张却只铺 20 条里的 1 条」那种对不上就不会发生。
+ */
 const visibleOrderGroups = computed(() => {
   const c = cap.value
-  if (c === Number.POSITIVE_INFINITY) return orderGroups.value
-  const out: typeof orderGroups.value = []
+  if (c === Number.POSITIVE_INFINITY) return filteredOrderGroups.value
+  const out: typeof filteredOrderGroups.value = []
   let left = c
-  for (const g of orderGroups.value) {
+  for (const g of filteredOrderGroups.value) {
     if (left <= 0) break
     const rows = g.rows.slice(0, left)
     left -= rows.length
@@ -1617,6 +1700,56 @@ const RANGES = [
 
         <!-- 挂单 -->
         <section v-show="tab === 'ord'" class="panel">
+          <!--
+            挂单的筛选（用户 2026-10-07：「挂单顶部也加过滤条件，右侧加全部撤仓」+「需二次确认」）：
+              · 左边 = 币种下拉（跟账本三格同一套，默认「全部」）
+              · 中间 = **类型**胶囊（只画这批挂单里真出现过的档：限价 / 止损 / 止盈）
+              · 右边 = 「全部撤单 N」—— 撤的是**列表里现在这些**（跟着账户 + 上面两个筛选走），
+                点下去外层还会弹一次二次确认（撤单没有测试版）。
+          -->
+          <div class="pn-h ord-h">
+            <SymbolCombo
+              plain
+              class="pn-sym"
+              placeholder="全部"
+              all-label="全部"
+              :model-value="ordSymbol"
+              :contracts="ordOptions"
+              @pick="v => (ordSymbol = v)"
+            />
+            <div class="o-flt">
+              <button
+                type="button"
+                class="o-fchip"
+                :class="{on: ordKind === 'all'}"
+                title="不按类型筛"
+                @click="ordKind = 'all'"
+              >
+                全部
+              </button>
+              <button
+                v-for="k in ordKinds"
+                :key="k"
+                type="button"
+                class="o-fchip"
+                :class="{on: ordKind === k}"
+                :title="`只看${ORD_KIND_TEXT[k]}（${ordKindCount(k)} 张）`"
+                @click="ordKind = k"
+              >
+                {{ ORD_KIND_TEXT[k] }}
+              </button>
+            </div>
+            <span class="spacer" />
+            <button
+              type="button"
+              class="o-cancel-all"
+              :disabled="!shownOrderCount || cancellingOrders"
+              :title="`撤掉列表里这 ${shownOrderCount} 张（${ordRangeText || '全部挂单'}）—— 点下去还要确认一次`"
+              @click="emit('cancelAll', cancelAllPayload())"
+            >
+              全部撤单<b>{{ shownOrderCount }}</b>
+            </button>
+          </div>
           <div v-if="loadingOrders" class="dim load">
             <span class="spin" />正在查询挂单…
           </div>
@@ -1676,7 +1809,9 @@ const RANGES = [
               </ul>
             </div>
           </div>
-          <p v-else class="dim">当前没有挂单</p>
+          <p v-else class="dim">
+            {{ shownOrderCount || ordRangeText ? '这个筛选条件下没有挂单' : '当前没有挂单' }}
+          </p>
         </section>
 
         <!--
@@ -2454,6 +2589,75 @@ const RANGES = [
 .pn-h h2 {
   margin: 0;
   font-size: 14px;
+}
+/*
+ * 「挂单」那一格的表头（用户 2026-10-07：「挂单顶部也加过滤条件，右侧加全部撤仓」）。
+ * 一行三段：币种下拉 ｜ 类型胶囊 ｜ 全部撤单。
+ * ⚠️ 窄屏那一行挤不下时，让**胶囊那边**横向缩（`min-width: 0` + `overflow-x: auto`），
+ *    右边那颗撤单始终整颗露在外面 —— 它是要点的。
+ */
+.ord-h {
+  gap: 6px;
+}
+.o-flt {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  /* 横向滚动条别把这一行撑高 */
+  scrollbar-width: none;
+}
+.o-flt::-webkit-scrollbar {
+  display: none;
+}
+.o-fchip {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.o-fchip.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/*
+ * 「全部撤单」做成跟左边那两颗同一档的小胶囊（`ghost tiny` 那套是列表行里的按钮，
+ * 31px 高，摆在表头比旁边高一截）。平时压淡，**hover 才红** —— 撤单是危险动作，
+ * 但没必要一直红着（跟 `OrderEditSheet` 那颗撤单一个调子）。
+ */
+.o-cancel-all {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 11.5px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.o-cancel-all:not(:disabled):hover {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+.o-cancel-all:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* 按钮上那个数（要撤几张）—— 等宽数字，跟正文分得开 */
+.o-cancel-all b {
+  margin-left: 4px;
+  font-weight: var(--fw-mid);
+  font-variant-numeric: tabular-nums;
 }
 /*
  * 账本三格表头右侧那颗「周期范围」（2026-10-07 用户：「右侧配置一个按钮

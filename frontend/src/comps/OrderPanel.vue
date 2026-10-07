@@ -810,13 +810,14 @@ async function closeOne(p: TradePositionRow): Promise<void> {
  * 一键平仓：不指定交易对 → 后端把**有持仓的全平一遍**。
  *
  * ⚠️ **必须二次确认**（用户 2026-10-05）：这是整账户级别的动作，一次误触就全没了。
- *    真单模式下措辞也要跟着变 —— 不能让人以为还是「只校验」。
+ * ⚠️ 确认框里**不写「（真单）」**（用户 2026-10-07：「提示层真单的那种去掉，都是真单」）
+ *    —— 只有真·测试单那一档才标注「测试单」。
  */
 async function closeAll(): Promise<void> {
   if (busy.value || levBusy.value) return
   const test = testOrder.value
   const ok = await askConfirm({
-    title: test ? '一键平仓（测试单）？' : '一键平仓（真单）？',
+    title: test ? '一键平仓（测试单）？' : '一键平仓？',
     body: test
       ? [
           '把账户里有持仓的币种全部平一遍。',
