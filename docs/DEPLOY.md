@@ -386,3 +386,42 @@ dmesg | grep -i 'killed process' | tail -5                           #    内存
 sudo docker stats --no-stream                                        # ④ 资源占用
 sudo docker compose -f docker-compose.prod.yml up -d                 # ⑤ 重启
 ```
+
+## 换机器（换更大的 bundle：$5 → $12）
+
+> 2026-10-07 起因：量下来 CPU 很闲（PSI `cpu full = 0%`）、**内存紧**（909MB，swap 已用 268MB）、
+> **磁盘 I/O 是瓶颈**（PSI `io full avg10 ≈ 37%`、`wa ≈ 39`、PG `buffers_backend` 418 万 ⇒
+> `shared_buffers` 64MB 太小）。带宽根本不是事：`ca-app` 实测 入 3.4MB/分 + 出 2.0MB/分
+> ≈ **233GB/月**，连旧档的 2TB 都只用了 12%，**别为传输加钱**。
+> 所以换机器买的是「**内存**」，CPU（2 vCPU）不用加。
+
+⚠️ Lightsail **不能原地换 bundle**，标准做法就是「**快照 → 用快照建新实例（选大计划）→ 把静态 IP 挪过去**」。
+静态 IP 是**独立资源**，可以 detach/attach ⇒ **域名不用改、TLS 证书不用重签**（证书在卷 `ca-caddy-data` 里，
+快照里就有）；`scripts/release.sh` / `scripts/sync-candles.sh` 里写死的 `52.194.6.144` 也**不用动**。
+
+### 步骤（控制台那几步我做不了，命令行的我来）
+
+0. **先清一手**（可选，让快照小 8GB）：`sudo docker builder prune -f`
+1. **快照**：控制台 → 实例 → 「快照」→ 创建。
+   * 想绝对干净：先 `sudo docker compose -f docker-compose.prod.yml stop`（停机 = 快照那几分钟），快照完再 `up -d`；
+   * 图省事就直接快照（相当于崩溃一致性快照，**Postgres 会自己恢复**，正常都没事）。
+2. **用快照建新实例**：控制台 → 创建实例 → **区域必须选东京（跟现在一致）** → 「从快照」→ 选刚那台
+   → 计划选 **$12（2GB / 2vCPU / 60GB / 3TB）** → AZ 尽量跟现在这台一致。
+   **先不要动静态 IP**（新实例先用它自己的动态公网 IP）。
+3. **在新实例上验收**（用它的动态 IP ssh 进去）：
+   ```bash
+   sudo docker compose -f docker-compose.prod.yml ps      # 三个都 Up/healthy
+   curl -s localhost:8787/api/health                      # {"ok":true,...}
+   df -h /                                                # ← 看是不是 60GB
+   ```
+   ⚠️ **磁盘十有八九还是 38GB**（快照把分区一起搬过去了）：`sudo growpart /dev/xvda 1 && sudo resize2fs /dev/xvda1`
+   （NVMe 机型是 `/dev/nvme0n1`，先用 `lsblk` 看一眼）。
+   顺带核一下防火墙（22 / 80 / 443 三条，从快照建的实例一般会带过来，但**要亲眼看一下**）。
+4. **切静态 IP**：控制台 → 网络 → 静态 IP → 先从**旧**实例 detach → 再 attach 到**新**实例。
+   （切换期间几十秒不可用。）然后本机 `curl https://bitcoooin.cn/api/health` 验收。
+5. **旧实例 stop**（先别删，留几天当后悔药）→ 稳定后再 delete；顺手删掉旧快照（快照按 GB 计费）。
+6. **按新内存调 PG**（我这边改 `docker-compose.prod.yml` 的 db `command`，再 `npm run release` 生效，
+   重建 db 容器 ≈ 几秒）：`shared_buffers` 64MB → **384MB**、`effective_cache_size` 4GB（错值）→ **1.5GB**。
+   这才是治 `io full` 的那一刀：内存翻倍 → 页面缓存能住下更多 5.3GB 的库 → 少读盘。
+7. 收尾：`sudo docker builder prune -f`（快照会把这 9GB 构建缓存一起搬过来）、
+   `/opt/crypto-advisor/.env` 在不在（快照里有，PGPASSWORD 必须跟 pgdata 匹配）。
