@@ -1944,17 +1944,22 @@ class KeyStream {
    *
    * `live` = 这一份有没有叠过行情重算（`false` 就是刚拉回来的 REST 快照口径）。
    */
+  /**
+   * 把当前持仓写进**统一来源**（`position-cache`）—— 写一次就广播一次。
+   *
+   * ⚠️ 口径跟曲线点（`writeLivePoint` → `liveOverview`）**共用同一个 `withMark`**：
+   *    两边各算一遍迟早会算出两个数（页面上一个、曲线上一段）。
+   */
   private pushLive(live: boolean): void {
     const ov = this.lastOverview
     if (!ov) return
-    const positions: LivePosition[] = ov.futures.positions.map(p => {
+    const liveOv = this.liveOverview(ov, live)
+    const positions: LivePosition[] = liveOv.futures.positions.map(p => {
       const raw = this.rawOf(p.symbol)
-      const mark = raw ? this.marks.get(raw) : undefined
-      const row = withMark(p, live ? mark : undefined)
-      return {...row, raw: raw || p.symbol}
+      return {...p, raw: raw || p.symbol}
     })
     publishLive(this.row.id, {
-      wallet: ov.futures.wallet,
+      wallet: liveOv.futures.wallet,
       positions,
       live: live && this.marks.size > 0
     })
