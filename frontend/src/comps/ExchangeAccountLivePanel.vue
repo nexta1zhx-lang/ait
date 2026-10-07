@@ -1058,8 +1058,24 @@ async function loadCycles(): Promise<void> {
       if (!isAuthError(e)) err.value = `读取仓位历史失败：${msg(e)}`
     }
   }
-  cycles.value = closed
-  openCycles.value = open
+  /*
+   * ⚠️ 合并完**必须自己再排一次**，不然「全部」是**按 key 一段一段接起来**的：
+   *    后端每套返回的已经排好了（已平的按**平仓时间**倒序、没平完的按**开仓时间**倒序），
+   *    但上面那个 for-循环是逐套 push ⇒ 顺序变成「第一套的全部，然后第二套的全部」。
+   *    而 `keys` 的顺序是 `is_default DESC, id`，默认那套（本机是「测试」）永远在前面。
+   *
+   *    实测（2026-10-07 用户「选择全部显示的还是测试账户下的」，390px 窄屏）：
+   *      测试 35 笔 + 币安 7 笔 = 42 笔，而窄屏默认只铺 20 条 ⇒ **第一屏 20 条
+   *      100% 是「测试」的**，得滚到底才看得到「币安」那 7 笔（还沉在最底下）。
+   *    成交历史 / 资金动向早就在合并后 `sort()` 了，这里漏了 —— 现在补齐。
+   *    排序键照抄 `data/position-history.ts` 里那两个 `.sort()`，别自己发明一个。
+   */
+  const byClose = (a: ExchangePositionCycle, b: ExchangePositionCycle) =>
+    String(b.closeAt ?? '').localeCompare(String(a.closeAt ?? ''))
+  const byOpen = (a: ExchangePositionCycle, b: ExchangePositionCycle) =>
+    String(b.openAt ?? '').localeCompare(String(a.openAt ?? ''))
+  cycles.value = closed.sort(byClose)
+  openCycles.value = open.sort(byOpen)
   cyclesSince.value = since
 }
 
