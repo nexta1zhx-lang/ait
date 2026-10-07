@@ -435,6 +435,34 @@ export function subscribeExchange(
 type Tier = 'normal' | 'idle' | 'asleep'
 
 /**
+ * 「这一套账户现在按哪一档」—— **纯函数**，好让离线夹具直接卡它
+ * （见 `backend/src/scripts/selftest.ts` 的「有仓 / 有单就永远不睡」那一组）。
+ *
+ * ⚠️ 判据里**有仓或有单就直接是 normal** —— 这不是速率问题，是**安全**问题：
+ *    `asleep` 档会把对账（成交 / 挂单 / 账本）拉到 4 小时一轮，
+ *    而「止盈止损还在场、仓位还在」的时候，中间这几个小时正好是最需要算准的。
+ *    所以哪怕没人看、哪怕 3 天没动静，只要还有仓或还有挂单，就一直是正常档。
+ *
+ * ⚠️ `deaf`（连 ping 都收不到）也必须退回 normal：低频档的前提是「事件由 WS 实时维护」，
+ *    流一哑这个前提就没了，而且哑着的时候 `lastActivityAt` 不会再更新 ⇒
+ *    会一路停在睡档，账本能滞后 4 小时。这条耦合别拆。
+ */
+export function tierOf(o: {
+  positions: number
+  openOrders: number
+  idleMs: number
+  deaf: boolean
+  hibernateMs?: number
+  idleAfterMs?: number
+}): Tier {
+  if (o.deaf) return 'normal'
+  const flat = o.positions <= 0 && o.openOrders <= 0
+  if (!flat) return 'normal'
+  if (o.idleMs <= (o.idleAfterMs ?? IDLE_MS)) return 'normal'
+  return o.idleMs > (o.hibernateMs ?? HIBERNATE_MS) ? 'asleep' : 'idle'
+}
+
+/**
  * 三档的对账间隔（毫秒）—— **一张表看全**，别散成一堆三元表达式。
  * `sample: 0` = 快照不拦（就是外层那个 5 分钟定时器的节奏）。
  */
@@ -1243,17 +1271,12 @@ export class KeyStream {
    * ⚠️ **不看有没有人在线** —— 见 `Tier` 那段。
    */
   private tierNow(): Tier {
-    /*
-     * ★ 流降级（`deaf`：连 ping 都收不到）时必须用**正常档**兜底。
-     *
-     * ⚠️ 为什么：低频档的前提是「事件由 WS 实时维护，对账只是安全网」。
-     *    流一哑，这个前提就没了 —— 而且哑的时候正好是「再没有事件来告诉我们账户有动静」，
-     *    `lastActivityAt` 也不会更新 ⇒ 会一直停在空转/沉睡档，对账拉到 4 小时一轮，
-     *    账本能滞后 4 小时。这条耦合别拆。
-     */
-    if (this.deaf) return 'normal'
-    if (!this.isIdle()) return 'normal'
-    return Date.now() - this.lastActivityAt > HIBERNATE_MS ? 'asleep' : 'idle'
+    return tierOf({
+      positions: this.lastOverview?.futures.positions?.length ?? 0,
+      openOrders: this.openOrderCount,
+      idleMs: Date.now() - this.lastActivityAt,
+      deaf: this.deaf
+    })
   }
 
   /** 换档时打一行 —— 不然「到底有没有在省」完全看不见 */
@@ -1811,10 +1834,8 @@ export class KeyStream {
    * 空转 ⇒ 对账降频（见 `ORDERS_RECONCILE_MS_IDLE`）。WS 不动。
    */
   private isIdle(): boolean {
-    const hasPos = (this.lastOverview?.futures.positions?.length ?? 0) > 0
-    return (
-      !hasPos && this.openOrderCount === 0 && Date.now() - this.lastActivityAt > IDLE_MS
-    )
+    /* 跟 `tierOf` 同一个判据（别两处各写一份）：有仓或有单就永远不算空转 */
+    return this.tierNow() !== 'normal'
   }
 
   /** 翻转时打一行 —— 不然「到底有没有在降频」完全看不见 */
@@ -1929,9 +1950,16 @@ export class KeyStream {
       const sock = (this.ws as unknown as {_socket?: {bytesRead?: number}})?._socket
       const kb = ((sock?.bytesRead ?? 0) / 1024).toFixed(1)
       const upMin = Math.round((Date.now() - this.connAt) / 60000)
+      /*
+       * ★ 带上**观察者数**与**档位**：这两个是回答「人不在线的时候流还开着吗」的关键 ——
+       *   观察者 0 而 `事件/ping` 照涨 = 没人看流也开着；
+       *   档位只要不是 `asleep` 就说明「有仓 / 有单」把它顶着（见 `isIdle()`）。
+       */
       console.log(
         `${this.tag} 用户数据流统计：事件 ${this.dataFrames} 帧 / ping ${this.pings} 个 / ` +
-          `收 ${kb} KB（连上 ${upMin} 分钟，已解析不了 ${this.badFrames}）`
+          `收 ${kb} KB（连上 ${upMin} 分钟，已解析不了 ${this.badFrames}）` +
+          ` · 观察者 ${listenerCount(this.row.id)} · 档位 ${this.tierNow()}` +
+          ` · 持仓 ${this.lastOverview?.futures.positions?.length ?? 0} / 挂单 ${this.openOrderCount}`
       )
     }
     if (deaf !== this.deaf) {

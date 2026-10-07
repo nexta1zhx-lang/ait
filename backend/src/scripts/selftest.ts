@@ -23,6 +23,7 @@ import {planContractChanges, type RawContract} from '../data/market'
 import {
   KeyStream,
   ORPHAN_SWEEP_GAP_MS,
+  tierOf,
   orphanSweepTargets
 } from '../exchange-stream'
 import type {JudgeResult} from '../llm/client'
@@ -302,6 +303,47 @@ function checkDiff(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ④b 档位：有仓 / 有挂单就永远不睡（人不在线也一样）                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 卡「后端会不会因为没人看就把流/对账关小」的那条底线。
+ *
+ * 用户 2026-10-07 问：「现在我的合约有仓位的情况下，后端还会关闭 ws 吗」——
+ * 答案必须是「不会」，而且**有仓 / 有单时连降档都不该发生**：
+ * 降档会把成交 / 挂单 / 账本的对账拉到 2~4 小时一轮，而止盈止损还在场的时候，
+ * 中间那几个小时正好是最需要算准的。夹具用**真的那份 `tierOf()`**，别另写一份判断。
+ */
+function checkTier(): boolean {
+  const H = 60 * 60 * 1000
+  const cases: [{p: number; o: number; idle: number; deaf?: boolean; why: string}, string][] = [
+    [{p: 1, o: 0, idle: 5 * H, why: '有仓 5 小时没动静'}, 'normal'],
+    [{p: 0, o: 1, idle: 5 * H, why: '没仓但有一张挂在场的条件单'}, 'normal'],
+    [{p: 1, o: 2, idle: 30 * 24 * H, why: '有仓 + 两张单，一个月没人管'}, 'normal'],
+    [{p: 0, o: 0, idle: 5 * 60 * 1000, why: '空仓空单但才 5 分钟'}, 'normal'],
+    [{p: 0, o: 0, idle: 30 * 60 * 1000, why: '空仓空单 30 分钟'}, 'idle'],
+    [{p: 0, o: 0, idle: 5 * H, why: '空仓空单 5 小时'}, 'asleep'],
+    [{p: 1, o: 0, idle: 5 * H, deaf: true, why: '有仓 + 流哑了'}, 'normal'],
+    [{p: 0, o: 0, idle: 5 * H, deaf: true, why: '空仓 + 流哑了（哑了就不许睡）'}, 'normal']
+  ]
+  let ok = true
+  for (const [c, want] of cases) {
+    const got = tierOf({
+      positions: c.p,
+      openOrders: c.o,
+      idleMs: c.idle,
+      deaf: c.deaf === true
+    })
+    if (got !== want) {
+      console.error(`❌ 档位：${c.why} 应为 ${want}，实际 ${got}`)
+      ok = false
+    }
+  }
+  if (ok) console.log(`✅ 档位：${cases.length} 组夹具通过（有仓/有单永不降档）`)
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* ⑤ 平仓 ⇒ 当场撤残留止盈止损单：判据 + 去抖                          */
 /* ------------------------------------------------------------------ */
 
@@ -377,6 +419,7 @@ let failed = !checkContract()
 if (!checkSanitize()) failed = true
 if (!checkDiff()) failed = true
 if (!checkCloseSweep()) failed = true
+if (!checkTier()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)
