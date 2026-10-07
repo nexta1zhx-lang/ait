@@ -91,7 +91,7 @@ function r8(x: number): number {
  */
 const MARK_BATCH_MS = 1000
 
-/** 采样间隔：5 分钟（曲线用；同时兼作 REST 兜底对账） */
+/** 曲线心跳：5 分钟一个点（对齐挂钟栅格，见 `untilGrid`），同时兼作 REST 兜底对账 */
 const SAMPLE_MS = 5 * 60 * 1000
 /** listenKey 30 分钟过期，25 分钟续一次留点余量 */
 const KEEPALIVE_MS = 25 * 60 * 1000
@@ -1991,6 +1991,13 @@ class KeyStream {
       })
       this.lastOverview = ov
       /*
+       * ⚠️ 拉过 REST 就把**采样时钟**推到现在 —— 它是全量口径（c2c / 现货 / 可用余额 /
+       *    资产明细）的时间戳。漏推的后果实测过：`boot` 02:01:24 拉完没推，
+       *    5 分钟后第一拍 `curveTick` 又白打一发 25 权重，库里同一秒挤两条点
+       *    （`live` 02:06:23 + `poll` 02:06:23）。
+       */
+      this.lastSampleAt = Date.now()
+      /*
        * 持仓可能变了 → 标记价订阅跟着变；顺手把这一份（**REST 口径**）
        * 写进统一来源，前端三个页面立刻同步到同一个数。
        */
@@ -2174,21 +2181,35 @@ export function wakeExchangeStream(
  *   ② 按档位决定要不要再打一发 REST **校准**（三档现在都是 1 小时）。
  *
  * ⚠️ 所以 `SAMPLE_MS` 这里只是「写点 + 查一次到点没」的节拍，**不等于**打交易所的频率。
+ *
+ * ⚠️ 点位必须**对齐挂钟栅格**（:00 / :05 / :10…），不能用 `setInterval` 从启动时刻起算：
+ *    那样相位跟着**进程启动时刻**走（实测桶内漂 93～254 秒），写出来的点在图上就是
+ *    「时刻跟桶起点差最多 5 分钟」，而且重启一次换一个相位。
  */
 export function startSnapshotSampler(): void {
   if (sampler) return
-  sampler = setInterval(() => {
+  const tick = (): void => {
     void (async () => {
       for (const s of streams.values()) await s.curveTick()
-    })()
-  }, SAMPLE_MS)
+    })().finally(() => {
+      /* 每轮都按**当前**时间重算 ⇒ 相位钉死在栅格上，也不会累积漂移 */
+      if (sampler) sampler = setTimeout(tick, untilGrid())
+    })
+  }
+  sampler = setTimeout(tick, untilGrid())
+}
+
+/** 距**下一个挂钟栅格边界**还有多少毫秒（正好在边界上就回 0，别白等一轮） */
+function untilGrid(): number {
+  const d = SAMPLE_MS - (Date.now() % SAMPLE_MS)
+  return d === SAMPLE_MS ? 0 : d
 }
 
 /** 进程退出：写**关闭锚点** + 断流删 listenKey */
 export async function stopExchangeStreams(): Promise<void> {
   if (stopping) return
   stopping = true
-  if (sampler) clearInterval(sampler)
+  if (sampler) clearTimeout(sampler)
   sampler = null
   for (const s of streams.values()) {
     await s.snapshot('shutdown')
