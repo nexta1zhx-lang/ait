@@ -4949,39 +4949,6 @@ body.fixed-viewport .split {
  * ⚠️ 这里原来有一条 `.ord-live`（常驻的「真单」章）—— 2026-10-07 用户
  *    「都是真单」「也去掉，那个章现在只是噪音」⇒ 章和样式一起删了。
  */
-/*
- * 头行那颗「当前下单账户」（用户 2026-10-07：「加上当前账户放在 tab 旁」→
- * 位置又调成「放在一键平仓旁」）：**顶到行尾、紧挨「一键平仓」**，`开单` / `仓位` 两页都在。
- *
- * · `margin-left: auto` 把它连同后面的「一键平仓」一起推到右边；
- *   有它在的时候要把「一键平仓」自己的 `margin-left: auto` 关掉 ——
- *   两个 auto 会把空档劈成两半，这颗就飘到中间去了。
- * · 尺寸跟这一行其它小章一档（`.ord-lev` / `.ord-sort` / 一键平仓 都是 `4px 9px` + 11px），
- *   不然这一行会高 1~2px、下面的 K 线跟着跳（`.ord-sort` 那段踩过）。
- * · 底色 / 字色用 `.ktag`（交易所账户页那种标签）那一套，跟价格行尾那颗同款；
- *   这是颗 `<button>`（点一下开「配置」），所以按钮那几条默认样要自己清掉。
- */
-.ord-head .head-acct {
-  margin-left: auto;
-  padding: 4px 9px;
-  border: 0;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: var(--fw-mid);
-  line-height: 1.5;
-}
-
-.ord-head:has(.head-acct) .ord-close-all {
-  margin-left: 0;
-}
-
-/* 悬停：触屏不应用（跟 `.balance` 那颗徽标一个手法 —— 别被通用的「悬停变蓝」抢走） */
-@media (hover: hover) {
-  .ord-head .head-acct:hover:not(:disabled) {
-    filter: brightness(1.12);
-  }
-}
 /* 杠杆小标签：跟在「市价 / 限价」后面那颗 */
 .ord-head .ord-lev {
   padding: 4px 9px;

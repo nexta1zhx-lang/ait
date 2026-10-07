@@ -1134,11 +1134,7 @@ const heatRows = computed(() => {
             腾出来的位置给下单用。
           -->
           <template #bottom>
-            <OrderPanel
-              :symbol="symbol"
-              :active="pageAlive && chartActive"
-              @config="cfgOpen = true"
-            />
+            <OrderPanel :symbol="symbol" :active="pageAlive && chartActive" />
           </template>
         </KlineChart>
       </aside>
