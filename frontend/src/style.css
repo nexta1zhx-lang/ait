@@ -355,6 +355,17 @@ summary,
   touch-action: manipulation;
 }
 
+/*
+ * 捏合缩放（pinch）**不用 CSS 关**（用户 2026-10-07：「移动端不要让双指撮合等手势生效」
+ * → 紧跟一句「我是说整体页面，**不是 k 线**」）：`touch-action` 是**沿祖先链取交集**的，
+ * 一挂在 `html`/`body` 上，图那块自己的「双指缩放」（LWC 的 `handleScale.pinch`）也一起没了
+ * —— 所以改成在 `main.ts` 里挂一个 `touchmove`：**两根手指、且目标不在图上**才 `preventDefault()`
+ * （见那边 `blockPinch()` 的注释）。这样：
+ *   · 页面上任何地方双指都放不大（iOS 忽略 viewport 里的 `user-scalable=no`，只能靠这个）；
+ *   · K 线那块双指缩放照旧（它缩的是时间轴，不是浏览器缩放，两回事）。
+ * ⚠️ 别「顺手」在这里补一条 `touch-action: pan-x pan-y` —— 图会跟着废。
+ */
+
 #app {
   /* 全屏铺满：分析页要同时放表格、图表和步骤清单，限宽会到处挤 */
   width: 100%;

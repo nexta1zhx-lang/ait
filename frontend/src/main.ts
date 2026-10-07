@@ -70,6 +70,33 @@ if (isNativeShell() || coarsePointer) {
     },
     {passive: true, capture: true}
   )
+  /*
+   * 挡住整页的「**双指捏合缩放**」（用户 2026-10-07：「移动端不要让双指撮合等手势生效」
+   * → 「我是说整体页面，**不是 k 线**」）。
+   *
+   * 为什么不用 CSS：`touch-action` 是**沿祖先链取交集**的 —— 只要给 `html`/`body` 写
+   * `pan-x pan-y`，K 线那块自己的双指缩放（LWC 的 `handleScale.pinch`）也一起没了。
+   * 所以在这儿判：**两根手指以上、且起手的位置不在图上**，才吃掉这个手势。
+   *
+   * ⚠️ 必须 `{passive: false}`：默认（或 `passive: true`）时 `preventDefault()` 是**空操作**，
+   *    手势照走 —— 这条只能这么写，别跟上面那条 `touchend` 一样图省事。
+   * ⚠️ 只认 `.chart-wrap` 这**一个**白名单：整页别处（列表 / 行情表 / 下单区）都是「放大
+   *    只能把版式搞乱」的地方；图上那双指缩放是缩时间轴、要留就留它一个。
+   * ⚠️ 单指滑动完全不受影响（`touches.length > 1` 才动手）⇒ 滚动、拖图、画范围照旧。
+   * ⚠️ iOS Safari **忽略** viewport 里的 `user-scalable=no`（从 10 起，无障碍考虑），
+   *    所以这条不是「锦上添花」，是钉死捏合的那一下（iOS 13+ 支持 preventDefault 拦捏合）；
+   *    `index.html` 那条 viewport 留着，是给 Android Chrome / 老 WebView 兜底。
+   */
+  document.addEventListener(
+    'touchmove',
+    e => {
+      if (e.touches.length < 2) return
+      const el = e.target as Element | null
+      if (el?.closest?.('.chart-wrap')) return
+      e.preventDefault()
+    },
+    {passive: false}
+  )
 }
 
 app.mount('#app')

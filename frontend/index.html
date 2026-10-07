@@ -6,10 +6,16 @@
       viewport-fit=cover 是**必须的**：打包成 App 后 WebView 铺满整屏，
       不写这一条，`env(safe-area-inset-*)` 会**恒为 0**，
       现有的底部导航安全区（style.css 的 --tabbar-h 那段）就白做了。
+
+      `maximum-scale=1, user-scalable=no`（2026-10-07 用户：「移动端不要让双指撮合等手势生效」）：
+      挡住浏览器的**捏合缩放**（整页被放大之后回不来，密密麻麻的可点区域全错位）。
+      ⚠️ 光靠这一条**不够**：iOS Safari 从 10 起就忽略 `user-scalable=no`（无障碍考虑），
+         真正干活的是 style.css 里那两条 `touch-action: pan-x pan-y`（iOS 13+ 支持）。
+         这条留着是给 Android Chrome / 老 WebView 兜底。
     -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
     />
     <!--
       theme-color：浏览器 / PWA 顶栏和「添加到主屏幕」后的状态栏取这个色。

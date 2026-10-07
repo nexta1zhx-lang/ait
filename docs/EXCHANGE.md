@@ -3740,3 +3740,52 @@ body.fixed-viewport:has(.split.m-chart) #app { scrollbar-width: none; -webkit-ov
 
 跟候选页第 ② 组**逐值一致** ✓；120 个涨跌幅方块全部吃到（`.mkt-table .chg` 一把梭）。
 做多 / 做空按钮仍是 `--ok-fill` / `--bad-fill`（4.56 / 4.60 那套），没被牵连 ✓。
+
+## 49. 移动端：整页不给「双指捏合缩放」，图上的留着（2026-10-07 用户）
+
+用户：「移动端不要让双指撮合等手势生效」→ 紧跟一句「**我是说整体页面，不是 k 线**」。
+也就是：页面上任何地方双指都不能把整页放大（放大之后回不到原样、密密麻麻的按钮全错位），
+但 **K 线自己的双指缩放要留着**（那是缩时间轴，不是浏览器缩放）。
+
+### 49.1 为什么不用 CSS
+
+`touch-action` 是**沿祖先链取交集**的（命中元素 → 一路往上到根）。所以只要给
+`html` / `body` 写一句 `touch-action: pan-x pan-y`，K 线那块的双指缩放（LWC 的
+`handleScale.pinch`，默认开）也一起没了 —— **CSS 没法「整页都关、只留图」**。
+
+### 49.2 改法：`main.ts` 里拦手势（只拦「双指以上 + 不在图上」）
+
+```ts
+document.addEventListener('touchmove', e => {
+  if (e.touches.length < 2) return            // 单指：滚动 / 拖图 / 画范围，一律放行
+  const el = e.target as Element | null
+  if (el?.closest?.('.chart-wrap')) return     // 白名单：只放 K 线那一块
+  e.preventDefault()
+}, {passive: false})                           // ⚠️ 必须 false，否则 preventDefault 是空操作
+```
+
+* 只挂给**触屏判据命中的**那些设备（就是上面 `document.documentElement.classList.add('touch')`
+  那个分支里 —— 原生壳或粗指针），PC 一动不动。
+* `index.html` 的 viewport 顺手加上 `maximum-scale=1, user-scalable=no`：
+  **iOS Safari 从 10 起就忽略它**（无障碍考虑），真正干活的是上面这条 `touchmove`（iOS 13+ 支持
+  用 preventDefault 拦捏合）；viewport 那条留着是给 **Android Chrome / 老 WebView** 兜底。
+* 双击缩放 / 长按弹菜单**早就关了**（2026-10-03 的 `touch-action: manipulation` + 2026-10-05 的
+  `-webkit-user-select: none` / `-webkit-touch-callout: none`），这次只补「捏合」这一种。
+* **Android App 不用管**：Capacitor 的 `android.zoomableWebView` 默认 false ⇒
+  `WebSettings.setBuiltInZoomControls(false)`（在 `node_modules/@capacitor/android` 的
+  `Bridge.java:618` 里核过）—— WebView 本来就没有捏合缩放。iOS 壳不在这个仓库里。
+
+### 49.3 实测（390×844 触屏仿真，key 7）
+
+手势没法在这台 Mac 上真用两根手指按（没触摸屏），所以用合成 `TouchEvent` 直接探**处理逻辑**：
+
+| 起手位置 | 手指 | `defaultPrevented` | 意思 |
+|---|---|---|---|
+| 下单区 / 行情表 / 别的页面区域 | 2 | **true** ✓ | 手势被吃掉，整页不会放大 |
+| `.chart-wrap`（K 线） | 2 | **false** ✓ | 放行 ⇒ 图自己的双指缩放还在 |
+| 任意位置 | 1 | false ✓ | 单指永远不拦（滚动、拖图、画范围照旧） |
+
+另外核过：`body` 的 `touch-action` 还是 `manipulation`（没被 CSS 钉死 ⇒ 图的捏合没被祖先链卡住）、
+`html.touch` 已挂、viewport meta 已带 `maximum-scale=1, user-scalable=no`。
+
+★ 老实说：**真手势**（两根手指在真机上捏）没在这台机器上复核过，验的是「事件被不被吃掉」这一层。
