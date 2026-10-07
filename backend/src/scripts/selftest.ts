@@ -15,8 +15,10 @@
  *   ① 契约（提示词骨架）和 zod 校验结构**一模一样**
  *   ② 渲染能把这四个字段印出来
  *   ③ `sanitizeRows` 该丢的丢、该留的留、该覆盖的覆盖
+ *   ④ `planContractChanges` 该加的加、该摘的摘（新币 / 下架 / 待上线）
  */
 import {sanitizeRows, type NewCandleRow} from '../db/candle-store'
+import {planContractChanges, type RawContract} from '../data/market'
 import type {JudgeResult} from '../llm/client'
 import {OUTPUT_CONTRACT} from '../llm/prompt'
 import {judgeSchema} from '../llm/schema'
@@ -254,11 +256,52 @@ function checkSanitize(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ④ 合约发现的 diff（`data/market.ts` 的 `planContractChanges`）         */
+/* ------------------------------------------------------------------ */
+
+function raw(pair: string, status: string, onboardAt: number | null = null): RawContract {
+  const base = pair.replace(/USDT$/, '')
+  return {pair, symbol: `${base}/USDT:USDT`, base, status, onboardAt}
+}
+const sub = (pair: string): {pair: string} => ({pair})
+
+type DiffCheck = [
+  string,
+  RawContract[],
+  Array<{pair: string}>,
+  (r: {add: RawContract[]; drop: Array<{pair: string}>}) => boolean
+]
+
+const diffChecks: DiffCheck[] = [
+  ['完全同步：什么都不做', [raw('BTCUSDT', 'TRADING'), raw('ETHUSDT', 'TRADING')], [sub('BTCUSDT'), sub('ETHUSDT')], r => !r.add.length && !r.drop.length],
+  ['新上线：加', [raw('BTCUSDT', 'TRADING'), raw('NEWUSDT', 'TRADING', 1)], [sub('BTCUSDT')], r => r.add.length === 1 && r.add[0].pair === 'NEWUSDT'],
+  ['待上线（PENDING_TRADING）：**不加** —— 还不能交易', [raw('BTCUSDT', 'TRADING'), raw('NEWUSDT', 'PENDING_TRADING')], [sub('BTCUSDT')], r => !r.add.length && !r.drop.length],
+  ['下架（从清单里消失）：摘', [raw('BTCUSDT', 'TRADING')], [sub('BTCUSDT'), sub('GONEUSDT')], r => r.drop.length === 1 && r.drop[0].pair === 'GONEUSDT'],
+  ['下架（还在清单里但 status 变了）：摘', [raw('BTCUSDT', 'TRADING'), raw('OMGUSDT', 'SETTLING')], [sub('BTCUSDT'), sub('OMGUSDT')], r => !r.add.length && r.drop.length === 1 && r.drop[0].pair === 'OMGUSDT'],
+  ['下架的币又回到 TRADING：不摘也不重复加', [raw('BTCUSDT', 'TRADING'), raw('BACKUSDT', 'TRADING')], [sub('BTCUSDT'), sub('BACKUSDT')], r => !r.add.length && !r.drop.length],
+  ['大小写不敏感（上游大小写变了不算新币）', [raw('BTCUSDT', 'TRADING')], [sub('btcusdt')], r => !r.add.length && !r.drop.length]
+]
+
+function checkDiff(): boolean {
+  let ok = true
+  for (const [name, rawList, subscribed, want] of diffChecks) {
+    const got = planContractChanges(rawList, subscribed)
+    if (!want(got)) {
+      console.error(`❌ 合约 diff：${name} —— 期望不满足（加 ${got.add.length} / 摘 ${got.drop.length}）`)
+      ok = false
+    }
+  }
+  if (ok) console.log(`✅ 合约 diff：${diffChecks.length} 组夹具通过`)
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
 let failed = !checkContract()
 if (!checkSanitize()) failed = true
+if (!checkDiff()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)

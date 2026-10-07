@@ -1127,3 +1127,89 @@ export async function fetchMarkPrices(opts?: {
   }
   return out
 }
+
+/* ------------------------------------------------------------------ */
+/* 合约发现（生命周期）：原始 exchangeInfo + diff                        */
+/* ------------------------------------------------------------------ */
+
+/** 币安原始 `exchangeInfo` 里我们关心的一行（**保留所有 status**，生命周期要用） */
+export interface RawContract {
+  /** 交易所原始符号（`BTCUSDT`） */
+  pair: string
+  /** ccxt 统一符号（`BTC/USDT:USDT`）—— 跟库里 `candles.symbol` 同一把钥匙 */
+  symbol: string
+  base: string
+  /** `TRADING` / `PENDING_TRADING` / `SETTLING` / `CLOSE` … */
+  status: string
+  /** 上线时间（毫秒）；拿不到就是 null */
+  onboardAt: number | null
+}
+
+/**
+ * 拉**原始** `exchangeInfo`（U 本位永续 + USDT 结算，**不过滤 status**）。
+ *
+ * 为什么不复用现有的两条路：
+ *  · `contracts.ts` 那条是**裸 fetch**（本地要过代理，直连不通）；这里走 ccxt 实例，
+ *    跟其它所有调用共用同一套代理配置 ⇒ 本地和线上行为一致。实测确认 `applyApiBase`
+ *    只换掉了**现货**那套 origin，`fapi.binance.com` 保持原样，所以本地也能通。
+ *  · `listPerpetualSymbols`（ccxt `markets`）把 `status` 压成了一个 `active` 布尔，
+ *    **并且丢掉 `onboardDate`** —— 而"这币什么时候上线的"正是生命周期要的。
+ *
+ * 权重 1（实测响应头 `x-mbx-used-weight-1m: 1`），体约 1.1 MB。
+ */
+export async function fetchExchangeInfoRaw(opts: {
+  exchangeId: string
+  apiBase?: string
+}): Promise<RawContract[]> {
+  const exchange = await getExchange(opts.exchangeId, 'swap', opts.apiBase)
+  /* ccxt 的隐式方法：binance 上就是 `/fapi/v1/exchangeInfo` */
+  const raw = (await exchange.fapiPublicGetExchangeInfo()) as {
+    symbols?: Array<Record<string, unknown>>
+  }
+  const out: RawContract[] = []
+  for (const s of raw?.symbols ?? []) {
+    if (String(s.contractType ?? '').toUpperCase() !== 'PERPETUAL') continue
+    if (String(s.quoteAsset ?? '').toUpperCase() !== 'USDT') continue
+    if (String(s.marginAsset ?? '').toUpperCase() !== 'USDT') continue
+    const base = String(s.baseAsset ?? '')
+    const pair = String(s.symbol ?? '')
+    if (!base || !pair) continue
+    const onboard = Number(s.onboardDate)
+    out.push({
+      pair,
+      symbol: `${base}/USDT:USDT`,
+      base,
+      status: String(s.status ?? ''),
+      onboardAt: Number.isFinite(onboard) && onboard > 0 ? onboard : null
+    })
+  }
+  return out
+}
+
+/**
+ * 合约清单 diff（**纯函数**，离线可测）：谁该加进来、谁该摘掉。
+ *
+ *  · 加：原始清单里 `status === 'TRADING'` 且我们没订阅；
+ *  · 摘：我们订阅了，但原始清单里**没有它**、或者它的 `status` 不再是 `TRADING`。
+ *
+ * ⚠️ 这里只判定**不动作** —— 摘除是有代价的（要先用交易所口径把最后一段补完，
+ *    见 `kline-recorder.ts` 的 `dropSymbol`），加进来也要考虑订阅配额。
+ */
+export function planContractChanges(
+  raw: RawContract[],
+  subscribed: Array<{pair: string}>
+): {add: RawContract[]; drop: Array<{pair: string}>} {
+  const have = new Set(subscribed.map(s => s.pair.toUpperCase()))
+  const seen = new Map<string, RawContract>()
+  for (const r of raw) seen.set(r.pair.toUpperCase(), r)
+  const add: RawContract[] = []
+  for (const r of raw) {
+    if (r.status === 'TRADING' && !have.has(r.pair.toUpperCase())) add.push(r)
+  }
+  const drop: Array<{pair: string}> = []
+  for (const s of subscribed) {
+    const r = seen.get(s.pair.toUpperCase())
+    if (!r || r.status !== 'TRADING') drop.push({pair: s.pair})
+  }
+  return {add, drop}
+}

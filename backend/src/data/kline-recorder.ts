@@ -28,12 +28,20 @@
 import {WebSocket} from 'ws'
 import {wsAgent} from './exchange-account'
 import {loadConfig} from '../config'
-import {fetchCandlesRange, listPerpetualSymbols, type PerpSymbol} from './market'
+import {
+  fetchCandlesRange,
+  fetchExchangeInfoRaw,
+  listPerpetualSymbols,
+  planContractChanges,
+  type PerpSymbol,
+  type RawContract
+} from './market'
 import {
   HIGH_INTERVALS,
   bucketCoverage,
   candleRejectStats,
   findStaleBuckets,
+  lastTradedAt,
   maxOpenTimes,
   pruneCandles,
   readRecentCandles,
@@ -46,6 +54,7 @@ import {
   type KlineReconRow,
   type NewCandleRow
 } from '../db/candle-store'
+import {loadSymbols, upsertSymbols} from '../db/symbols'
 import {RateBudgetError, takeWeight} from '../util/rate-budget'
 import type {Candle, MarketType, Timeframe} from '../types'
 
@@ -127,6 +136,14 @@ const GAP_WINDOW_BARS = 120
 const GAP_FLUSH_GRACE_MS = 30_000
 /** 库内自洽看最近几个桶（4h 看 4 个就是 16 小时，够覆盖"重启前后写坏的那一个"） */
 const STALE_CHECK_BUCKETS = 4
+/**
+ * 「静默」判定：上游超过这么久没推某个币，就当它停牌/下架（或我们那条流死了）。
+ * 1m 流在交易的币上每秒都有帧，所以 15 分钟已经很宽松。
+ */
+const SILENT_MS = 15 * 60_000
+/** 静默的币最多重订几个 / 同一个币多久重订一次（别把入站消息限制打爆） */
+const SILENT_RETRY_MAX = 20
+const SILENT_RETRY_MS = 10 * 60_000
 /** 一轮最多把几个币排进修复队列（防一次抖动把队列堆爆，剩下的下一轮再来） */
 const GAP_ALERT_MAX = 60
 /**
@@ -136,6 +153,17 @@ const GAP_ALERT_MAX = 60
  * 而抽样是**轮换**的（按天序号取模，525 币 175 天一轮），长期下来覆盖面一样是全局。
  * 为什么放在启动 15 分钟后：那之前 `seedHistory` 还在灌，库本来就不全，比出来全是假差异。
  */
+/**
+ * 合约发现（生命周期）：多久拉一次原始 `exchangeInfo`（权重 1，体 1.1MB）。
+ *
+ * 每天一次就够了（用户 2026-10-07 定的口径：「改为每日」）—— 新币晚一天上线的影响是
+ * 「点开它走 REST」，功能不降级；而**按需发现**（读路径遇到没订阅的币时顺手触发一次，
+ * 见 `kline-store.ts`）把"你正在看的那个"提前到"你点它的那一刻"，两边合起来就够用。
+ * 另外启动时也跑一次：进程重启通常比 24 小时频繁，等于多了几次免费的对齐机会。
+ */
+const DISCOVERY_EVERY_MS = 24 * 60 * 60_000
+/** 按需发现之间的最小间隔（一次就拿到全市场，重复打没有意义） */
+const DISCOVERY_MIN_GAP_MS = 5 * 60_000
 const RECON_SYMBOLS = 3
 const RECON_BARS = 200
 const RECON_FIRST_MS = 15 * MIN_MS
@@ -193,6 +221,8 @@ interface SymState {
   coveredAt: number
   /** 上次被排进修复队列的时刻 */
   repairedAt: number
+  /** 上次因为"上游好久没推它"而重订它那条流的时刻（见 `runGapCheck` 的静默分支） */
+  silentRetryAt: number
 }
 
 interface Cfg {
@@ -214,6 +244,41 @@ let retry = 0
 let lastFrameAt = 0
 let openSince = 0
 const repairQueue = new Map<string, number>()
+/** 动态订阅/退订用的请求 id（跟启动那批批量订阅的 id 分开，便于看回执） */
+let subSeq = 1000
+
+/**
+ * 合约**生命周期**的内存镜像（读路径要 0 I/O 查它，别让它去查库）。
+ * 启动时从 `symbols` 表灌一次，之后每次发现都覆盖。
+ */
+interface Lifecycle {
+  status: string
+  onboardAt: number | null
+  delistedAt: number | null
+}
+const lifecycle = new Map<string, Lifecycle>()
+/** 已订阅币的 ccxt 统一符号集合（按 pair 建的 `states` 查起来不方便） */
+const subscribedSymbols = new Set<string>()
+
+const discoveryStats = {
+  lastAt: 0,
+  lastReason: '',
+  /** 上游原始清单里有多少个 U 本位永续 USDT 合约 */
+  lastRaw: 0,
+  /** 其中 TRADING 的 */
+  lastTrading: 0,
+  added: 0,
+  dropped: 0,
+  lastError: ''
+}
+let discovering = false
+let lastDiscoveryAt = 0
+/**
+ * `KLINE_RECORDER_MAX` 的上限（本地只订 8 个币减轻内存压力）。
+ * ⚠️ 发现那条路**必须**尊重它 —— 否则本地一跑发现就"补齐"到 525 个，把上限打穿。
+ */
+let maxSymbols = 0
+let capWarned = false
 
 /**
  * 每个币**最近一次收到的 1m 帧**（含未收盘那根）—— 读热层的「当前根」就靠它。
@@ -227,6 +292,8 @@ const timers: ReturnType<typeof setInterval>[] = []
 const stats = {
   closedBars: 0,
   minuteGaps: 0,
+  /** 上游好久没推帧的币数（多半是停牌/下架；也可能是我们那条流静默死了） */
+  silentSymbols: 0,
   partialAggs: 0,
   rowsWritten: 0,
   rowFailures: 0,
@@ -625,6 +692,8 @@ async function repairSweep(reason: string): Promise<void> {
         queued++
         continue
       }
+      /* 上游好久没推它 = 停牌/下架（或这条流死了）：别排队 —— `repairSymbol` 也会自保跳过 */
+      if (st.coveredAt && now - st.coveredAt > SILENT_MS) continue
       const newest = Math.max(last, st.lastClosedMs)
       if (now - newest <= 2 * MIN_MS) continue
       queueRepair(st, Math.max(newest + MIN_MS, now - BACKFILL_MAX_MS))
@@ -691,6 +760,21 @@ async function repairTick(): Promise<void> {
 async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
   if (!cfg) return
   const now = Date.now()
+  /*
+   * ⚠️ 自保：**很久没有真实成交的币一律不补**（停牌 / 下架 / 上游不再推它）。
+   *
+   * 为什么必要：币安对**已下架**（`status = SETTLING`）的币**还会继续返回 K 线**，
+   * 只是那些全是**量 0 的水平线**（实测 OMG/WAVES 下架后最近 5 根 1h 量全是 0、价格冻住）。
+   * 补这种币 = 往 **4h/1d（永久保留）** 里塞假 K 线 —— 而且下架可能发生在两次合约发现之间
+   * （最长 24 小时），这段时间 `repairSweep`/缺口巡检都会来碰它。
+   * 判据用「最后一次 volume > 0 的 1m」而不是"上游有没有推帧"：推帧可能是订阅时的快照帧。
+   */
+  const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
+  const lastTrade = await lastTradedAt('1m', st.sym.symbol, scope)
+  if (lastTrade !== null && now - lastTrade > SILENT_MS) {
+    stats.silentSymbols++
+    return
+  }
   const bars = await paced(`补 1m ${st.sym.pair}`, 15, () =>
     fetchCandlesRange({
       exchangeId: cfg!.exchange,
@@ -787,7 +871,15 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
  *  ③ 每日（抽样对账）`runKlineRecon`：抽 3 个币 × 5 档 vs 交易所 REST 逐字段比 OHLCV ⇒ 落表。
  */
 
-const gapStats = {lastAt: 0, lastFound: 0, lastScanned: 0, lastQueued: 0, lastCooling: 0, lastStale: 0}
+const gapStats = {
+  lastAt: 0,
+  lastFound: 0,
+  lastScanned: 0,
+  lastQueued: 0,
+  lastCooling: 0,
+  lastStale: 0,
+  lastSilent: 0
+}
 let gapChecking = false
 
 /**
@@ -805,12 +897,14 @@ export async function runGapCheck(reason: string): Promise<{
   queued: number
   cooling: number
   stale: number
+  /** 上游好久没推帧的币（停牌/下架，或者我们那条流静默死了 —— 已顺手重订一次） */
+  silent: number
 }> {
   if (gapChecking || stopped || !cfg) {
-    return {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0}
+    return {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0, silent: 0}
   }
   gapChecking = true
-  const out = {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0}
+  const out = {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0, silent: 0}
   try {
     const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
     const now = Date.now()
@@ -824,6 +918,28 @@ export async function runGapCheck(reason: string): Promise<{
       const cov = await bucketCoverage(it, since, scope)
       for (const st of states.values()) {
         if (!st.coveredAt) continue
+        /*
+         * 上游好久没推这个币了：要么它停牌/下架了，要么**我们这条流静默死了**。
+         * 两种都不该算成"缺口"（缺口巡检会去补数据，而停牌币补出来是量 0 的假 K 线）。
+         * 但值得重订一次 —— 若是流死了，重订就自愈；若是币停了，重订没有副作用。
+         */
+        if (now - st.coveredAt > SILENT_MS) {
+          out.silent++
+          if (out.silent <= SILENT_RETRY_MAX && now - st.silentRetryAt > SILENT_RETRY_MS) {
+            st.silentRetryAt = now
+            send({
+              method: 'UNSUBSCRIBE',
+              params: [`${st.sym.pair.toLowerCase()}@kline_1m`],
+              id: ++subSeq
+            })
+            send({
+              method: 'SUBSCRIBE',
+              params: [`${st.sym.pair.toLowerCase()}@kline_1m`],
+              id: ++subSeq
+            })
+          }
+          continue
+        }
         out.scanned++
         const c = cov.get(st.sym.symbol)
         /* 窗口里该有多少根：从「它自己最早那根」到「现在该有的最后一根」 */
@@ -880,6 +996,7 @@ export async function runGapCheck(reason: string): Promise<{
     gapStats.lastQueued = out.queued
     gapStats.lastCooling = out.cooling
     gapStats.lastStale = out.stale
+    gapStats.lastSilent = out.silent
     if (out.found) {
       const detail = Object.entries(byInterval)
         .map(([k, v]) => `${k} ${v}`)
@@ -890,6 +1007,12 @@ export async function runGapCheck(reason: string): Promise<{
           /* 冷却期内的要如实说：不然"排队 8 个"却什么都没修，看日志的人会以为是修复坏了 */
           (out.cooling ? `（${out.cooling} 个在 10 分钟冷却里，下一轮再排）` : '') +
           ` —— 例：${samples.join('；')}`
+      )
+    }
+    if (out.silent) {
+      console.warn(
+        `[kline] 静默合约（${reason}）：${out.silent} 个币上游好久没推帧（停牌/下架，` +
+          `或我们那条流死了）—— 已顺手重订，且**不**去补数据`
       )
     }
     if (out.stale) {
@@ -1070,6 +1193,209 @@ export async function runKlineRecon(source: string): Promise<{
   } finally {
     reconning = false
   }
+}
+
+/* ---------------- 合约发现（生命周期：新币 / 下架） ----------------
+ *
+ * 用户 2026-10-07 的口径：「如果行情有更新，比如有新币，或者新币种下架了，再去调整它的历史
+ * 然后订阅」。所以这里只做三件事：
+ *   ① 发现（每天一次 + 启动一次 + 读路径按需触发一次）
+ *   ② 新币：加进清单 + 追加 SUBSCRIBE（**不用重连**）+ 让它进灌历史那一轮
+ *   ③ 下架：**先用交易所口径把最后一段补完**，再退订 + 摘除；库里历史一行不删
+ *
+ * ⚠️ 摘除前"补完最后一段"不是可选项：高周期的最后一根可能是**桶没走完就断流**的残桶，
+ *    而 4h/1d 是**永久保留**的 —— 不补就会在永久档位里留下一条错的收盘价
+ *    （2026-10-07 那次 4h `83850.1` vs 交易所 `84104.9` 就是同一类问题的"遗留版"）。
+ */
+
+/**
+ * 加一个刚上线（或我们之前漏掉）的合约：进清单 + 追加订阅 + 交给灌历史。
+ * 返回 true = 真加进去了 —— 调用方**必须**按它计数（被上限挡下不算"新增"，
+ * 不然日志会写"新增 3 个"实际一个没加，跟缺口巡检那次是同一个教训）。
+ */
+function addSymbol(c: RawContract): boolean {
+  const key = c.pair.toUpperCase()
+  if (states.has(key)) return false
+  if (maxSymbols > 0 && symbols.length >= maxSymbols) {
+    if (!capWarned) {
+      capWarned = true
+      console.warn(
+        `[kline] 发现到新合约 ${c.pair}，但订阅数已到上限 ${maxSymbols}（KLINE_RECORDER_MAX）⇒ 不加`
+      )
+    }
+    return false
+  }
+  const sym: PerpSymbol = {symbol: c.symbol, pair: c.pair, base: c.base}
+  symbols.push(sym)
+  states.set(key, {
+    sym,
+    lastClosedMs: 0,
+    aggs: new Map(),
+    coveredAt: 0,
+    repairedAt: 0,
+    silentRetryAt: 0
+  })
+  subscribedSymbols.add(c.symbol)
+  lifecycle.set(c.symbol, {status: c.status, onboardAt: c.onboardAt, delistedAt: null})
+  if (sock?.readyState === 1) {
+    send({
+      method: 'SUBSCRIBE',
+      params: [`${c.pair.toLowerCase()}@kline_1m`],
+      id: ++subSeq
+    })
+    console.log(
+      `[kline] 新合约 ${c.pair} → 已追加订阅 1m（上线 ${
+        c.onboardAt ? new Date(c.onboardAt).toISOString() : '时间未知'
+      }）`
+    )
+  } else {
+    /* 连接还没开：`open()` 的 `on('open')` 会按当时的 `symbols` 重新订一遍 ⇒ 覆盖到它 */
+    console.log(`[kline] 新合约 ${c.pair} → 已加进清单（连接没开，重连时一起订）`)
+  }
+  return true
+}
+
+/**
+ * 摘掉一个不再交易的合约：退订 → 从清单和内存里拿掉。返回 true = 真摘了。
+ *
+ * 用户 2026-10-07 的口径：「下线就不需要了，k 线也没必要统计」⇒ **不补最后一段**。
+ * 这一版最初想"摘之前先用交易所口径补完"，实测发现那是错的：币安对已下架的币**照样返回
+ * K 线**，但全是**量 0 的水平线** —— 补下去等于往 4h/1d（永久保留）里塞假数据。
+ * 所以现在的规矩是：**它停在哪就是哪**，一条也不补。
+ */
+async function dropSymbol(pair: string, why: string): Promise<boolean> {
+  const key = pair.toUpperCase()
+  const st = states.get(key)
+  if (!st || !cfg) return false
+  states.delete(key)
+  live1m.delete(st.sym.symbol)
+  subscribedSymbols.delete(st.sym.symbol)
+  const i = symbols.findIndex(v => v.pair.toUpperCase() === key)
+  if (i >= 0) symbols.splice(i, 1)
+  const prev = lifecycle.get(st.sym.symbol)
+  /* 表里那份（`upsertSymbols`）已经按"TRADING → 非 TRADING 那一刻"记了时间；
+     这里只是把内存镜像也标上，省得读路径还要为它去问发现结果 */
+  lifecycle.set(st.sym.symbol, {
+    status: 'DELISTED',
+    onboardAt: prev?.onboardAt ?? null,
+    delistedAt: prev?.delistedAt ?? Date.now()
+  })
+  if (sock?.readyState === 1) {
+    send({
+      method: 'UNSUBSCRIBE',
+      params: [`${st.sym.pair.toLowerCase()}@kline_1m`],
+      id: ++subSeq
+    })
+  }
+  console.log(
+    `[kline] 合约下架 ${st.sym.pair}（${why}）：已退订、已从清单摘除（不补数据 —— ` +
+      `下架后交易所给的是量 0 的假 K 线）；库里已有的历史不动`
+  )
+  return true
+}
+
+/**
+ * 跑一次合约发现（**不要直接调它**，读路径要用 `requestDiscovery` 走去抖那条）。
+ *
+ * 也导出给管理接口手动触发（`GET /api/kline/contracts?run=1`）。
+ */
+export async function discoverContracts(
+  reason: string
+): Promise<{raw: number; trading: number; added: number; dropped: number}> {
+  if (discovering) throw new Error('合约发现正在跑')
+  if (!cfg) throw new Error('底座还没就绪')
+  discovering = true
+  try {
+    const raw = await paced('合约发现', 1, () =>
+      fetchExchangeInfoRaw({exchangeId: cfg!.exchange, apiBase: cfg!.apiBase})
+    )
+    const {add, drop} = planContractChanges(raw, symbols)
+    let added = 0
+    for (const c of add) if (addSymbol(c)) added++
+    let dropped = 0
+    for (const d of drop) dropped += (await dropSymbol(d.pair, '不在 TRADING 清单里')) ? 1 : 0
+    const capBlocked = add.length - added
+    /* 内存镜像跟着原始清单走（**注意在 add/drop 之后**，别被上面覆盖掉） */
+    for (const c of raw) {
+      const prev = lifecycle.get(c.symbol)
+      lifecycle.set(c.symbol, {
+        status: c.status,
+        onboardAt: c.onboardAt ?? prev?.onboardAt ?? null,
+        delistedAt: c.status === 'TRADING' ? null : (prev?.delistedAt ?? Date.now())
+      })
+    }
+    const written = await upsertSymbols(
+      raw.map(c => ({
+        exchange: cfg!.exchange,
+        marketType: cfg!.marketType,
+        pair: c.pair,
+        symbol: c.symbol,
+        base: c.base,
+        status: c.status,
+        onboardAt: c.onboardAt
+      }))
+    )
+    const trading = raw.filter(c => c.status === 'TRADING').length
+    discoveryStats.lastAt = Date.now()
+    discoveryStats.lastReason = reason
+    discoveryStats.lastRaw = raw.length
+    discoveryStats.lastTrading = trading
+    discoveryStats.added += added
+    discoveryStats.dropped += dropped
+    discoveryStats.lastError = ''
+    /* ⚠️ 别把币名全列出来：本地只订 8 个时，"新增"会是 517 个 —— 一行日志几十 KB */
+    const show = (pairs: string[]): string =>
+      pairs.length > 8 ? `${pairs.slice(0, 8).join('/')}…（共 ${pairs.length}）` : pairs.join('/')
+    const tail =
+      add.length || drop.length
+        ? `，新增 ${added} 个${add.length ? `（${show(add.map(a => a.pair))}）` : ''}` +
+          `，下架 ${dropped} 个${drop.length ? `（${show(drop.map(d => d.pair))}）` : ''}` +
+          (capBlocked ? `，其中 ${capBlocked} 个被订阅上限挡住` : '')
+        : '，没有变化'
+    console.log(
+      `[kline] 合约发现（${reason}）：原始 ${raw.length} 个（TRADING ${trading}），` +
+        `订阅 ${symbols.length} 个，落表 ${written} 行${tail}`
+    )
+    if (added) void seedHistory()
+    return {raw: raw.length, trading, added, dropped}
+  } catch (e) {
+    discoveryStats.lastError = (e as Error).message
+    throw e
+  } finally {
+    discovering = false
+  }
+}
+
+/**
+ * **按需发现**：读路径遇到一个"在合约范围里、但底座没订阅"的币时顺手调它。
+ *
+ * 为什么要有：新币上线后的头几个小时正是最想看图的时候，而每天一次那轮最多晚 24 小时。
+ * 它不加轮询 —— 只是把"每天那一次判定"提前到"你关心的那一刻"。
+ * 全局去抖 `DISCOVERY_MIN_GAP_MS`（一次就拿到全市场，重复打没意义）；
+ * 单币的去抖在读路径那边（负缓存），两边合起来把成本压到 ~0。
+ */
+export function requestDiscovery(reason: string): void {
+  if (stopped || !cfg || discovering) return
+  if (Date.now() - lastDiscoveryAt < DISCOVERY_MIN_GAP_MS) return
+  lastDiscoveryAt = Date.now()
+  void discoverContracts(reason).catch(e =>
+    console.warn(`[kline] 合约发现失败（${reason}）：${(e as Error).message.slice(0, 120)}`)
+  )
+}
+
+/** 这个（统一符号）币底座订阅了吗 —— 读路径用它决定要不要按需发现 */
+export function isSymbolSubscribed(symbol: string): boolean {
+  return subscribedSymbols.has(symbol)
+}
+
+/** 生命周期查询（内存，0 I/O）：读路径用它避开"已下架"的币 */
+export function symbolLifecycleOf(symbol: string): Lifecycle | undefined {
+  return lifecycle.get(symbol)
+}
+
+/** 当前订阅了几个合约（自检用；`symbols` 会随发现增删，别缓存） */
+export function subscribedSymbolCount(): number {
+  return symbols.length
 }
 
 /**
@@ -1265,14 +1591,34 @@ async function boot(): Promise<void> {
   const max = Number(process.env.KLINE_RECORDER_MAX || 0)
   if (Number.isFinite(max) && max > 0) symbols = symbols.slice(0, max)
   if (!symbols.length) throw new Error('拿不到合约清单（markets 里没有 U 本位永续）')
+  maxSymbols = max
   for (const s of symbols) {
     states.set(s.pair.toUpperCase(), {
       sym: s,
       lastClosedMs: 0,
       aggs: new Map(),
       coveredAt: 0,
-      repairedAt: 0
+      repairedAt: 0,
+      silentRetryAt: 0
     })
+    subscribedSymbols.add(s.symbol)
+  }
+  /*
+   * 生命周期镜像：先读库里那份（上次发现的结果）—— 这样**第一次发现跑完之前**，
+   * 读路径就已经知道哪些币是下架的（省掉一轮没用的按需发现）。
+   */
+  try {
+    const rows = await loadSymbols(c.exchange, c.marketType)
+    for (const r of rows) {
+      lifecycle.set(r.symbol, {
+        status: r.status,
+        onboardAt: r.onboardAt ? r.onboardAt.getTime() : null,
+        delistedAt: r.delistedAt ? r.delistedAt.getTime() : null
+      })
+    }
+    if (rows.length) console.log(`[kline] 生命周期：从库里读回 ${rows.length} 个合约`)
+  } catch (e) {
+    console.warn(`[kline] 读生命周期表失败（不影响运行）：${(e as Error).message.slice(0, 100)}`)
   }
   console.log(`[kline] 底座启动：${symbols.length} 个合约，1 条上游连接（只订 1m）`)
   await open()
@@ -1303,6 +1649,11 @@ async function boot(): Promise<void> {
   /* 灌历史可以被打断（限流让路）⇒ 定期续一轮；幂等：已经跟到现在的币会跳过 */
   timers.push(setInterval(() => void seedHistory(), SEED_RETRY_MS))
   for (const t of timers) t.unref()
+  /* 合约发现：启动一次（进程重启通常比 24 小时频繁，等于多几次免费对齐）+ 之后每天一次 */
+  timers.push(setInterval(() => requestDiscovery('定时'), DISCOVERY_EVERY_MS))
+  void discoverContracts('启动').catch(e =>
+    console.warn(`[kline] 合约发现失败（启动）：${(e as Error).message.slice(0, 120)}`)
+  )
   await prune()
   void repairSweep('启动')
   void seedHistory()
@@ -1331,6 +1682,8 @@ export interface KlineRecorderStats {
   covered: number
   closedBars: number
   minuteGaps: number
+  /** 上游好久没推帧的币数（多半是停牌/下架；也可能是我们那条流静默死了） */
+  silentSymbols: number
   partialAggs: number
   rowsWritten: number
   rowFailures: number
@@ -1350,6 +1703,8 @@ export interface KlineRecorderStats {
   gaps: typeof gapStats
   /** 第 3 档：最近一次抽样对账 */
   recon: typeof reconStats
+  /** 合约发现（生命周期）：最近一次的结果 + 累计增删 */
+  discovery: typeof discoveryStats & {subscribed: number; lifecycle: number}
   lastError: string
 }
 
@@ -1361,6 +1716,7 @@ export function klineRecorderStats(): KlineRecorderStats {
     covered: [...states.values()].filter(s => s.coveredAt > 0).length,
     closedBars: stats.closedBars,
     minuteGaps: stats.minuteGaps,
+    silentSymbols: stats.silentSymbols,
     partialAggs: stats.partialAggs,
     rowsWritten: stats.rowsWritten,
     rowFailures: stats.rowFailures,
@@ -1376,6 +1732,7 @@ export function klineRecorderStats(): KlineRecorderStats {
     rejected: candleRejectStats(),
     gaps: {...gapStats},
     recon: {...reconStats},
+    discovery: {...discoveryStats, subscribed: symbols.length, lifecycle: lifecycle.size},
     lastError: stats.lastError
   }
 }

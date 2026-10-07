@@ -648,6 +648,29 @@ CREATE TABLE IF NOT EXISTS kline_recon (
   ok           BOOLEAN     NOT NULL
 );
 CREATE INDEX IF NOT EXISTS kline_recon_time_idx ON kline_recon (checked_at DESC);
+
+-- ──────────────────────────────── 合约生命周期（2026-10-07）
+-- 「这个币该不该有实时数据」的唯一依据：每天拉一次原始 exchangeInfo 落这里，
+-- 并在 TRADING → 其它 的那一刻打上 delisted_at（**只在那一刻写**，之后不再改，
+-- 这样「什么时候下架的」是准的；重新上架会把它清回 NULL）。
+--
+-- 为什么要一张表而不是只看 ccxt 的 markets：markets 把 status 压成了一个 active 布尔、
+-- 并且**丢掉 onboardDate** —— 而「这币什么时候上线的」决定了"它该有多少历史"。
+-- 唯一索引按 pair（交易所原始符号）—— 订阅、退订、上游流名都用它。
+CREATE TABLE IF NOT EXISTS symbols (
+  exchange     TEXT        NOT NULL,
+  market_type  TEXT        NOT NULL DEFAULT 'swap',
+  pair         TEXT        NOT NULL,   -- 币安交易对（BTCUSDT）
+  symbol       TEXT        NOT NULL,   -- ccxt 统一符号（BTC/USDT:USDT）
+  base         TEXT        NOT NULL,
+  status       TEXT        NOT NULL,   -- TRADING / PENDING_TRADING / SETTLING / CLOSE
+  onboard_at   TIMESTAMPTZ,            -- 币安 onboardDate（上线时间）
+  delisted_at  TIMESTAMPTZ,            -- 第一次看到它不是 TRADING 的时刻
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),  -- 最后一次在原始清单里看到它
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (exchange, market_type, pair)
+);
+CREATE INDEX IF NOT EXISTS symbols_status_idx ON symbols (exchange, market_type, status);
 `
 
 /**

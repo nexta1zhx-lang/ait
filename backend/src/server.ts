@@ -140,6 +140,7 @@ import {
   type OpenOrderInput
 } from './db/exchange-store'
 import {candleRejectStats, candleStoreStats, recentKlineRecon} from './db/candle-store'
+import {loadSymbols, symbolTableStats} from './db/symbols'
 import {
   reconcileKeyOrders,
   wakeExchangeStream,
@@ -195,6 +196,7 @@ import {
   klineStoreStats
 } from './data/kline-store'
 import {
+  discoverContracts,
   klineRecorderStats,
   runGapCheck,
   runKlineRecon,
@@ -4469,6 +4471,46 @@ async function route(
       return fail(res, 'kline/recon', e)
     }
   }
+  if (p === '/api/kline/contracts' && method === 'GET') {
+    /*
+     * 合约**生命周期**（新币 / 下架）：清单、最近一次发现的结果、表里的统计。
+     *
+     *   GET /api/kline/contracts            → 最近一次发现 + 表统计（0 权重）
+     *   GET /api/kline/contracts?list=1     → 顺便把**非 TRADING** 的那些列出来（排查用）
+     *   GET /api/kline/contracts?run=1      → 立刻跑一次发现（权重 1，约 1.1MB，十几秒）
+     *
+     * 为什么要有手动入口：定时那轮 24 小时一次，想当场确认"新币有没有被订上"不该等一天。
+     */
+    try {
+      if (url.searchParams.get('run')) {
+        const r = await discoverContracts('manual')
+        return sendJson(res, 200, {
+          ...r,
+          discovery: klineRecorderStats().discovery,
+          table: await symbolTableStats()
+        })
+      }
+      const out: Record<string, unknown> = {
+        discovery: klineRecorderStats().discovery,
+        table: await symbolTableStats()
+      }
+      if (url.searchParams.get('list')) {
+        const cfg = loadConfig()
+        const rows = await loadSymbols(cfg.exchange, cfg.marketType)
+        out.gone = rows
+          .filter(r => r.status !== 'TRADING')
+          .map(r => ({
+            pair: r.pair,
+            status: r.status,
+            onboardAt: r.onboardAt ? r.onboardAt.toISOString() : null,
+            delistedAt: r.delistedAt ? r.delistedAt.toISOString() : null
+          }))
+      }
+      return sendJson(res, 200, out)
+    } catch (e) {
+      return fail(res, 'kline/contracts', e)
+    }
+  }
   if (p === '/api/kline/gaps' && method === 'GET') {
     /*
      * 第 2 档「缺口巡检」的查看 / 手动触发。
@@ -4666,6 +4708,17 @@ async function main(): Promise<void> {
   try {
     await ensureSchema()
     /*
+     * markets（`exchangeInfo`，1.1MB）**必须最先**从库里灌进内存 —— 底下每一路
+     * （交易所资产流 / 快照采样 / K 线底座 / 预热）都会 `getExchange()` 建实例，
+     * 而 `attachMarkets()` 判"够不够新"看的是**内存里这份缓存**：
+     * 抢在它之前建实例 ⇒ `fresh()` 为假 ⇒ **开机白下 1.1MB**（本地隧道 25 秒）。
+     * 2026-10-07 实测抓到的就是这条：`startExchangeStreams()` 排在灌缓存之前，
+     * `ccxt_markets.updated_at` 每次开机都被刷成启动那一刻。
+     */
+    await hydrateMarketsCache().catch((e: Error) =>
+      console.warn(`  交易所  markets 读库失败：${e.message.slice(0, 80)}`)
+    )
+    /*
      * 交易所资产的实时层（M2，方案 docs/EXCHANGE.md）：
      * 给每套合约账户写一条「启动锚点」快照并起用户数据流（listenKey + 裸 WS），
      * 再起 5 分钟采样（兼作 REST 对账；C2C 钱包没有 WS 事件，只能靠它）。
@@ -4829,16 +4882,17 @@ async function main(): Promise<void> {
    * markets（`exchangeInfo`，1.1MB）先从库里灌进内存，再预热实例 —— 顺序不能反：
    * 反了预热就会真去下 1.1MB（本地隧道 25 秒）。见 `data/ccxt-markets.ts`。
    */
-  void hydrateMarketsCache()
-    .catch((e: Error) => console.warn(`  交易所  markets 读库失败：${e.message.slice(0, 80)}`))
-    .then(() => kickExchange())
-
   /*
    * ★ K 线底座（常驻 1m 推送流 → 落库 7 天 → 滚出高周期）——
    *   2026-10-07 起它**同时是读路径的第二层**：`/api/candles` 走「内存 → 库 → REST」，
    *   库里那份（已收盘的桶）+ 底座内存里的当前根（`currentBar()`）就够画图了。
    *   预热与保活那两套因此一并删掉（见 docs/EXCHANGE.md §37）。
+   *
+   * ⚠️ 它第一步就是 `listPerpetualSymbols()`（要 `markets`）—— 所以必须排在开头那次
+   *   `hydrateMarketsCache()` 之后（现在天然满足）。
    */
+  /* markets 已经在 `main()` 最开头灌进内存了（见那儿的说明），这里不重复读一次库 */
+  kickExchange()
   startKlineRecorder()
 
   /*

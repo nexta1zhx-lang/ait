@@ -258,6 +258,29 @@ export async function lastOpenTime(
   return row?.t ? new Date(row.t).getTime() : null
 }
 
+/**
+ * 这个币「最后一次**真实成交**」的时刻（该周期上 volume > 0 的最大开盘时间）。
+ *
+ * 为什么需要它：币下架（币安 `status = SETTLING`）之后**K 线接口还会继续给数据**，
+ * 但那些是**量 0 的水平线**（实测 OMG/WAVES 下架后最近 5 根 1h 量全是 0、价格冻住）。
+ * 下架时"把最后一段补完"如果补到 `now`，就会往 **4h/1d 永久档**塞一堆假 K 线
+ * ⇒ 必须用这个当补数据的**上界**。
+ */
+export async function lastTradedAt(
+  interval: KlineInterval,
+  symbol: string,
+  scope: {exchange: string; marketType: string}
+): Promise<number | null> {
+  const row = await queryOne<{t: Date | null}>(
+    `SELECT max(open_time) AS t
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = $4
+        AND volume > 0`,
+    [scope.exchange, scope.marketType, symbol, interval]
+  )
+  return row?.t ? new Date(row.t).getTime() : null
+}
+
 /** 某个周期上已经记了多少个点（在哪个区间） */
 export async function candleCount(
   interval: KlineInterval,

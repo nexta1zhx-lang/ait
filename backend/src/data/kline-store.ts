@@ -28,7 +28,12 @@ import {
   readRecentCandles,
   unifiedPerpSymbol
 } from '../db/candle-store'
-import {currentBar} from './kline-recorder'
+import {
+  currentBar,
+  isSymbolSubscribed,
+  requestDiscovery,
+  symbolLifecycleOf
+} from './kline-recorder'
 
 /** 首次取多少根（比 `limit` 多留一点，缩放时不必马上再取） */
 const INIT_BARS = 300
@@ -52,6 +57,41 @@ const DB_MIN_BARS = 50
  * 正常情况最后一根的收盘时刻离现在最多一个周期。
  */
 const STALE_AFTER = (tf: Timeframe): number => 2 * TF_MS[tf] + 5 * 60_000
+
+/**
+ * 负缓存：同一个币**一小时**内最多触发一次"按需发现"。
+ * 没有它的话，一个"真的没有数据"的 symbol（拼错 / 已下架）会被用户反复点、反复触发。
+ */
+const MISS_TTL_MS = 60 * 60_000
+const missCache = new Map<string, number>()
+
+/**
+ * 读路径要退 REST 之前顺手做的事（**不阻塞这次请求**）。
+ *
+ * 为什么放这儿：这是全站**唯一**能察觉到"用户要了一个底座没订阅的币"的地方 ——
+ * 而这个时刻恰好就是应该去做合约发现的时刻（新币上线后头几个小时正是最想看图的）。
+ * 发现是异步的，这次照样走 REST；成功的话**下一次**请求就有实时 1m 了。
+ */
+function noteSymbolMiss(a: LatestArgs): void {
+  if (!inRecorderScope(a)) return
+  const key = unifiedPerpSymbol(a.symbol)
+  const now = Date.now()
+  const until = missCache.get(key)
+  if (until !== undefined && until > now) return
+  /* 缓存别无限涨（上限远大于合约数，真到了就直接清 —— 它只是去抖用的） */
+  if (missCache.size > 2000) missCache.clear()
+  missCache.set(key, now + MISS_TTL_MS)
+  if (isSymbolSubscribed(key)) return
+  /*
+   * 已知**不是 TRADING** 的币别再去发现。
+   * ⚠️ 用 `status` 而不是 `delistedAt`：那 134 个"我们从没见过它是 TRADING"的币
+   *    （第一次发现时就已经在下架状态）永远走不到 TRADING → 非 TRADING 这个转变，
+   *    所以 `delisted_at` 天然是空的 —— 拿它当判据会漏掉整整一批。
+   */
+  const lc = symbolLifecycleOf(key)
+  if (lc && lc.status !== 'TRADING') return
+  requestDiscovery(`按需 ${key}`)
+}
 
 export interface LatestArgs {
   exchangeId: string
@@ -145,6 +185,8 @@ async function doRefresh(a: LatestArgs, e: Entry, bars: number): Promise<void> {
       return
     }
   }
+  /* 走到这儿 = 库里没有 / 不够 / 太旧：退 REST 之前先让底座去看看是不是新币 */
+  noteSymbolMiss(a)
   const fresh = await loadFull(a, Math.max(bars, INIT_BARS))
   if (fresh.length) {
     // REST 会把「正在走的那根」也带回来 ⇒ 按当前那根的桶边界切掉
