@@ -1221,12 +1221,16 @@ export async function candleStoreStats(
   opts: {exact?: boolean} = {}
 ): Promise<CandleStoreStats> {
   /*
-   * ⚠️ 分区表的父表自身 size = 0 ⇒ 必须把**叶子**加起来（`pg_partition_tree` 对普通表
-   *    也能用，返回它自己一行 isleaf=true，所以两种形态同一条 SQL 都成立）。
+   * ⚠️ 分区表的父表自身 size = 0 ⇒ 必须把**叶子**加起来。
+   * ⚠️ 但 `pg_partition_tree()` 对**普通表返回 0 行**（实测；不是"返回它自己一行"），
+   *    而 `sum()` 在没有行时是 NULL ⇒ 用 `coalesce` 兜回 `pg_total_relation_size`：
+   *    分区表走前者、迁移前的普通表走后者，两种形态都报得对。
    */
   const size = await queryOne<{s: string | null}>(
-    `SELECT coalesce(sum(pg_total_relation_size(relid)), 0)::text AS s
-       FROM pg_partition_tree('candles') WHERE isleaf`
+    `SELECT coalesce(
+              (SELECT sum(pg_total_relation_size(relid)) FROM pg_partition_tree('candles') WHERE isleaf),
+              pg_total_relation_size('candles')
+            )::text AS s`
   )
   const byInterval: CandleStoreStats['byInterval'] = {}
   for (const it of ALL_INTERVALS) byInterval[it] = {rows: null, from: null, to: null}
