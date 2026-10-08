@@ -129,14 +129,37 @@ c '构建并启动（首次要拉镜像 + 装依赖，几分钟）'
 # 构建放前面能让停机窗口只覆盖「迁移」，不覆盖「编译镜像」。
 $SUDO env PREBUILT="${PREBUILT:-0}" docker compose -f docker-compose.prod.yml build app
 
-c 'candles 分区迁移（幂等；换表要在应用停止时做）'
-# 为什么要停机：迁移会把 candles 改名成 candles_old、再建同名的分区表 ——
-# 换表那一刻如果还有写入，那些行会写进旧表然后被丢掉。
-# 脚本本身幂等：已经迁移过就只补时间子分区（几十毫秒），所以每次发布都跑它没成本。
-# 详见 docs/EXCHANGE.md 第 53 节。
-$SUDO docker compose -f docker-compose.prod.yml stop app || true
+c '检查 candles 分区状态（只读）'
+# 先演练迁移脚本并解析它报告的状态。已经是分区表时，--apply 只做幂等维护，
+# 不会改名/搬表，可以让线上 app 继续写；普通表或迁移续跑仍必须先停 app。
+if ! PARTITION_STATUS=$(
+  $SUDO docker compose -f docker-compose.prod.yml run --rm --no-deps app \
+    node backend/dist/scripts/migrate-candles-partitions.js 2>&1
+); then
+  printf '%s\n' "$PARTITION_STATUS"
+  die '分区状态演练失败 —— 未停止应用，先查数据库/迁移日志'
+fi
+printf '%s\n' "$PARTITION_STATUS"
+if ! grep -q '当前状态：candles 已分区=' <<<"$PARTITION_STATUS"; then
+  die '迁移演练没有报告 candles 分区状态 —— 未停止应用，拒绝猜测'
+fi
+
+APP_STOPPED=0
+if grep -q '当前状态：candles 已分区=true' <<<"$PARTITION_STATUS"; then
+  ok 'candles 已是分区表；在线执行幂等维护，不停 app'
+else
+  c '停止 app（普通表/迁移续跑需要停写）'
+  $SUDO docker compose -f docker-compose.prod.yml stop app || true
+  APP_STOPPED=1
+fi
+
+c 'candles 分区维护/迁移'
 if ! $SUDO docker compose -f docker-compose.prod.yml run --rm --no-deps app \
       node backend/dist/scripts/migrate-candles-partitions.js --apply; then
+  # 即便原先走在线维护，失败也可能留下未完成的分区变更；失败时停写，避免继续写入。
+  if (( APP_STOPPED == 0 )); then
+    $SUDO docker compose -f docker-compose.prod.yml stop app || true
+  fi
   warn '分区迁移失败 —— 应用先不启，避免它对着半迁移的库写'
   printf '      看上面输出；库里的 candles / candles_old 都还在，没丢数据\n'
   exit 1
