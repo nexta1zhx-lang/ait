@@ -1632,6 +1632,13 @@ function startStreams(): void {
              */
             void loadOrders({silent: true})
             void loadCycles()
+            /*
+             * ⚠️ 资金动向也要补（2026-10-08）—— 断线期间**手续费/已实现盈亏**会写进账本
+             *    （后端从成交帧里就地写），重连时这份就旧了；而原来这里只补了
+             *    快照/成交/曲线/挂单/仓位历史，**漏了它**（日常靠 20 秒兜底盖住，
+             *    但那意味着"最久迟 20 秒才动"）。
+             */
+            void loadIncome()
           }
         }
       })
@@ -1746,6 +1753,15 @@ function startSnapTimer(): void {
     void loadCycles()
     /* 钱账本也读库（成交 / 资金费 / 划转都会往里写）⇒ 一并兜底 */
     void loadIncome()
+    /*
+     * ⚠️ 成交历史也要兜底（2026-10-08 补）—— 它原来是这三格里**唯一没有兜底**的：
+     *    只靠 SSE 的 `fill` / `backfill` 事件触发重读。事件一丢（SSE 重连、后端重启、
+     *    后端那条用户流哑了），列表就**停在旧数据**，只能切 tab 或刷新页面 ——
+     *    用户报的「成交历史不是实时刷新的」就是这个。
+     *    读的是我们自己的库（`exchange_fills`），毫秒级、零交易所权重，敢放这儿。
+     *    这一格本来就没有加载态（不像挂单那条），所以不用传 `silent`。
+     */
+    void loadFills()
 
     const now = Date.now()
     const need = activeTargets.value.some(k => {

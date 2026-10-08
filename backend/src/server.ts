@@ -1123,6 +1123,49 @@ function baseSince(raw: string | null): number | null {
   return Math.min(Math.floor(ms / 60_000) * 60_000, Date.now() - 60_000)
 }
 
+/**
+ * 只回「基准时刻那一刻各币的收盘价」—— **换基准时那条轻量路**（2026-10-08）。
+ *
+ * 为什么要有它（用户 2026-10-08：「涨跌幅基准周期，切换慢是什么原因」）：
+ * 原来换基准走的是 `?since=` 的整表重拉 —— 500+ 行 / ≈100KB，
+ * 前端还要 `byPair.clear()` 重建、全表重渲染、顺便重排一次序。
+ * 而"换基准"真正变的东西只有**一列**（`baseClose`）：`last` 是行情增量在刷、
+ * 其余列一个都没动。所以这里只回那一列（525 个数 ≈ 10KB），前端就地替换。
+ *
+ * ⚠️ 跟 `handleMarkets` 共用 `baseCloseCache`（同一个 key 口径）⇒ 先整表后单查、
+ *    或者来回切基准，都不会重复打库。
+ */
+async function handleMarketBase(
+  url: URL,
+  res: http.ServerResponse
+): Promise<void> {
+  const marketParam = url.searchParams.get('market')
+  const market =
+    marketParam && ['spot', 'swap', 'coinm'].includes(marketParam)
+      ? (marketParam as MarketType)
+      : undefined
+  const config = loadConfig({marketType: market})
+  const since = baseSince(url.searchParams.get('since'))
+  if (!since) {
+    sendJson(res, 400, {error: '需要一个基准时刻（?since=毫秒）'})
+    return
+  }
+  if (config.marketType !== 'swap') {
+    /* `candles` 只覆盖 U 本位永续（见 candle-store 顶部）⇒ 别的市场类型没有基准价 */
+    sendJson(res, 200, {since, closes: {}})
+    return
+  }
+  try {
+    const bases = await baseCloseCache(
+      `${config.exchange}|${config.marketType}|${since}`,
+      () => closesAtOrBefore(since, {exchange: config.exchange, marketType: config.marketType})
+    )
+    sendJson(res, 200, {since, closes: Object.fromEntries(bases)})
+  } catch (e) {
+    sendJson(res, 502, {error: (e as Error).message})
+  }
+}
+
 async function handleMarkets(
   url: URL,
   res: http.ServerResponse
@@ -4585,6 +4628,10 @@ async function route(
 
   if (p === '/api/ticker') {
     await handleTicker(url, res)
+    return
+  }
+  if (p === '/api/markets/base') {
+    await handleMarketBase(url, res)
     return
   }
   if (p === '/api/markets') {

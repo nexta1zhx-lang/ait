@@ -37,7 +37,8 @@ import {
   marketMinVolM,
   posShowValue,
   rankBase,
-  testOrder
+  testOrder,
+  UTC_OFFSETS
 } from '../settings'
 import {
   loadTradeKeys,
@@ -47,8 +48,6 @@ import {
   tradeKeysErr
 } from '../trade-account'
 import {askConfirm} from '../confirm'
-import {bjTime} from '../format'
-import TimeModal from './TimeModal.vue'
 
 const props = defineProps<{
   open: boolean
@@ -161,42 +160,49 @@ function pickPosDisplay(value: boolean): void {
 /* ---------------- 基准时间（合约行情排行榜） ---------------- */
 
 /**
- * 可选的基准时区（UTC 偏移**分钟** + 显示名）。北京（UTC+8）放第一个 —— 用户举的例子就是它。
- * ⚠️ 只有两项：再加「任意…」那颗，390px 上这一行就放不下、会折成两行（用户要的是「每条一行」）。
+ * 「任意」那颗点开后的时区选择器：**UTC −12 … +12 整点**，共 25 个。
+ *
+ * ⚠️ 用户 2026-10-08 定的口径：「**任意时间指的是 UTC 的任意 ±12**」——
+ *    所以这里挑的是**时区偏移**（该时区的当天 00:00 日切），不是某个历史时刻。
+ *    原来那颗"任意…"点开是个**时刻戳**弹窗，语义不对，已按这条改掉（`settings.ts` 的
+ *    `RankBase` 也跟着只剩 `off` / `tz` 两种）。
+ *
+ * ⚠️ 25 个**不能铺成按钮**：390px 上多一颗就折行（用户要的是「每条一行」）。
+ *    所以收进一个子弹层（`.tz-pop`），网格排布 + 可滚。
  */
-const TIMEZONES: {min: number; label: string; title: string}[] = [
-  {min: 480, label: 'UTC+8', title: '北京时间'},
-  {min: 0, label: 'UTC+0', title: '伦敦时间'}
-]
+const tzOpen = ref(false)
 
 /** 回到默认（交易所的滚动 24h） */
 function pickOff(): void {
   rankBase.value = {kind: 'off'}
 }
 
-/** 按某个时区每天 00:00 日切 */
+/** 按某个时区偏移每天 00:00 日切 */
 function pickTz(min: number): void {
   rankBase.value = {kind: 'tz', min}
+  tzOpen.value = false
 }
-
-/* 「任意时刻」那颗：点开复用「选一个时间点」那个弹窗（自带「现在 / 1 天前 / 7 天前…」快选） */
-const atOpen = ref(false)
 
 /** 当前选中的时区偏移（不在 tz 那一档就是 null）—— 只给模板判高亮用 */
 const pickedTz = computed(() =>
   rankBase.value.kind === 'tz' ? rankBase.value.min : null
 )
 
-/** 那颗按钮上的字：没设就是「任意…」，设了显示挑中的时刻（省掉年份） */
-const atLabel = computed(() =>
-  rankBase.value.kind === 'at'
-    ? bjTime(rankBase.value.ms).slice(5, 16)
-    : '任意…'
-)
+/** 那颗按钮上的字：没设就是「任意…」，设了显示偏移（`480` → `UTC+8`） */
+const tzLabel2 = computed(() => {
+  const m = pickedTz.value
+  if (m === null) return '任意…'
+  const sign = m < 0 ? '-' : '+'
+  const abs = Math.abs(m)
+  const h = Math.floor(abs / 60)
+  const mm = abs % 60
+  return `UTC${sign}${h}${mm ? `:${String(mm).padStart(2, '0')}` : ''}`
+})
 
-/** 弹窗里确认一个时刻 = 排行榜换基准（`MarketPanel` 盯着这个 ref 重拉 + 重排） */
-function onAtPick(ms: number): void {
-  rankBase.value = {kind: 'at', ms}
+/** 选择器里每一项的字（`−12 … +12`） */
+function offsetLabel(min: number): string {
+  if (min === 0) return 'UTC 0'
+  return `UTC${min < 0 ? '−' : '+'}${Math.abs(min) / 60}`
 }
 </script>
 
@@ -255,43 +261,50 @@ function onAtPick(ms: number): void {
       -->
       <div class="sheet-row">
         <span class="rk">基准时间</span>
-        <div
-          class="ctl tk-picks"
-          title="排行榜的涨跌幅从哪算起：24h / 某时区今日 00:00 / 任意时刻"
-        >
-          <button
-            type="button"
-            class="ghost tiny"
-            :class="{on: rankBase.kind === 'off'}"
-            title="交易所的滚动 24 小时（默认）"
-            @click="pickOff"
+        <div class="ctl tk-picks-wrap">
+          <div
+            class="ctl tk-picks"
+            title="排行榜的涨跌幅从哪算起：交易所滚动 24h / 某个 UTC 偏移的当天 00:00"
           >
-            24h
-          </button>
-          <button
-            v-for="z in TIMEZONES"
-            :key="z.min"
-            type="button"
-            class="ghost tiny"
-            :class="{on: pickedTz === z.min}"
-            :title="`${z.title}（${z.label}）每天 00:00 日切，算今日涨跌幅`"
-            @click="pickTz(z.min)"
-          >
-            {{ z.label }}
-          </button>
-          <button
-            type="button"
-            class="ghost tiny"
-            :class="{on: rankBase.kind === 'at'}"
-            :title="
-              rankBase.kind === 'at'
-                ? `从 ${bjTime(rankBase.ms)}（北京时间）算起，点一下换一个时刻`
-                : '选一个时刻作为排行榜基准'
-            "
-            @click="atOpen = true"
-          >
-            {{ atLabel }}
-          </button>
+            <button
+              type="button"
+              class="ghost tiny"
+              :class="{on: rankBase.kind === 'off'}"
+              title="交易所的滚动 24 小时（默认）"
+              @click="pickOff"
+            >
+              24h
+            </button>
+            <button
+              type="button"
+              class="ghost tiny"
+              :class="{on: rankBase.kind === 'tz'}"
+              :title="
+                rankBase.kind === 'tz'
+                  ? `${tzLabel2} 每天 00:00 日切，算该时区的今日涨跌幅（点一下换一个）`
+                  : '选一个 UTC 偏移（−12 … +12）作为排行榜基准'
+              "
+              @click="tzOpen = !tzOpen"
+            >
+              {{ tzLabel2 }}
+            </button>
+          </div>
+          <!--
+            时区选择器：25 个（UTC −12 … +12）铺成网格收在子弹层里。
+            ⚠️ 别改成"一行按钮" —— 390px 上放不下、会折行（见脚本里 `tzOpen` 的说明）。
+          -->
+          <div v-if="tzOpen" class="tz-pop">
+            <button
+              v-for="min in UTC_OFFSETS"
+              :key="min"
+              type="button"
+              class="ghost tiny tz-cell"
+              :class="{on: pickedTz === min}"
+              @click="pickTz(min)"
+            >
+              {{ offsetLabel(min) }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -405,18 +418,6 @@ function onAtPick(ms: number): void {
       </div>
     </section>
 
-    <!--
-      「任意时刻」：复用「选一个时间点」那个弹窗 —— 它自带「现在 / 1 天前 / 7 天前 / 30 天前」
-      快选 + 一个 datetime 输入（北京时间、精确到分钟），不用另写一个选择器。
-    -->
-    <TimeModal
-      v-model="atOpen"
-      kind="point"
-      title="选排行榜的基准时间"
-      hint="合约区的涨跌幅会改成「这一刻 → 现在」，并据此排名。"
-      :initial="rankBase.kind === 'at' ? rankBase.ms : Date.now()"
-      @confirm="onAtPick"
-    />
   </Teleport>
 </template>
 
@@ -456,6 +457,38 @@ function onAtPick(ms: number): void {
   min-width: 0;
   flex-wrap: wrap;
 }
+/*
+ * 「基准时间」那一格：24h + 一颗显示当前偏移的按钮，点开是 25 个 UTC 偏移的子弹层。
+ *
+ * ⚠️ 为什么收进子弹层而不是直接铺一排：`UTC−12 … +12` 有 25 个，390px 上排不下
+ *    （用户要的是「每条一行」）。网格 4 列 + 可滚，弹层不撑破 sheet。
+ */
+.tk-picks-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+.tz-pop {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  width: 100%;
+  max-height: 168px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--panel-2, var(--panel));
+}
+.tz-pop .tz-cell {
+  padding: 5px 6px;
+  font-size: 12px;
+  text-align: center;
+}
+
 /*
  * 按钮圆角小一档（用户 2026-10-07：「按钮圆角小一点」）——
  * 这一层里的按钮本来两套：胶囊是 999px（`--tk-picks`）、其余 `ghost` 是 10px；

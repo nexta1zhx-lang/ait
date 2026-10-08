@@ -110,21 +110,41 @@ export const marketMinVolUsd = computed(() => marketMinVolM.value * 1e6)
  * ⚠️ `t` 里挑的时刻落在最近 24 小时内一定算得出来（1m 那档保留 7 天）；
  *    再往前 15m 约 1 个月、1h 约半年、1d 约两年，更早的币就显示「—」。
  */
-export type RankBase =
-  | {kind: 'off'}
-  | {kind: 'tz'; min: number}
-  | {kind: 'at'; ms: number}
+/**
+ * 排行榜的基准口径。
+ *
+ * ⚠️ 2026-10-08 按用户的口径**砍掉了"任意时刻戳"那一档**（原来还有 `{kind:'at'; ms}`）：
+ *    用户原话「**任意时间指的是 UTC 的任意 ±12**」—— 要的是**任选一个时区偏移**，
+ *    不是一个历史时刻。语义因此简化成两种：交易所滚动 24h，或"某个 UTC 偏移的当天 00:00"。
+ *
+ * 顺带也把后端那三段只服务"很久以前"的挑档分支（15m / 1h / 1d）变成了**到不了的路**：
+ * 日切最多只到 1 天前，永远落在 `1m` 那一档（后端 `baseProbe` 保留着，手动 `?since=` 还能用）。
+ */
+export type RankBase = {kind: 'off'} | {kind: 'tz'; min: number}
 
-/** `rankBase` 落 localStorage 的形状（短键，跟 `Stored` 那堆字段分开） */
+/**
+ * 「任意时区」能挑的偏移（**整小时**，UTC−12 … UTC+12，共 25 个）。
+ *
+ * 为什么是整小时：用户说的是"UTC 的任意 ±12"；而且日切口径用半小时时区（如 UTC+5:30）
+ * 意义不大。`tzLabel()` 仍然会画 `:30`，将来要放开这里加值就行。
+ */
+export const UTC_OFFSETS: number[] = Array.from({length: 25}, (_, i) => (i - 12) * 60)
+
+/**
+ * `rankBase` 落 localStorage 的形状（短键，跟 `Stored` 那堆字段分开）。
+ * `k` 只有 `'tz'` 认了（老的 `'at'` 会被忽略 ⇒ 退回默认 24h，见 `parseRankBase`）。
+ */
 export interface StoredRankBase {
   k: 'tz' | 'at'
   v: number
 }
 
 function parseRankBase(raw: StoredRankBase | undefined): RankBase {
+  /*
+   * 只有 `tz` 认；老的 `k: 'at'`（时刻戳）**直接退回默认 24h** ——
+   * 那个语义已经不存在了，硬映射成某个偏移会凭空改掉用户看到的口径。
+   */
   if (raw?.k === 'tz' && Number.isFinite(raw.v)) return {kind: 'tz', min: raw.v}
-  if (raw?.k === 'at' && Number.isFinite(raw.v) && raw.v > 0)
-    return {kind: 'at', ms: raw.v}
   return {kind: 'off'}
 }
 
@@ -151,7 +171,6 @@ export function dayStartMs(
  */
 export function rankSinceMs(base: RankBase, now = Date.now()): number | null {
   if (base.kind === 'off') return null
-  if (base.kind === 'at') return base.ms
   return dayStartMs(base.min, now)
 }
 
@@ -274,13 +293,7 @@ watch(
           rankBase:
             rankBase.value.kind === 'off'
               ? undefined
-              : {
-                  k: rankBase.value.kind,
-                  v:
-                    rankBase.value.kind === 'tz'
-                      ? rankBase.value.min
-                      : rankBase.value.ms
-                }
+              : {k: 'tz' as const, v: rankBase.value.min}
         })
       )
     } catch {

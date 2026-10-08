@@ -1940,6 +1940,24 @@ export const fetchMarkets = (market?: string, since?: number | null) => {
   )
 }
 
+/**
+ * **只取基准时刻各币的收盘价**（换基准用的轻量路，≈10KB，2026-10-08）。
+ *
+ * 为什么不复用 `fetchMarkets(…, since)`：那要整表（500+ 行 / ≈100KB）重来一遍，
+ * 而换基准真正变的只有 `baseClose` 一列 —— `last` 是行情增量在刷，别的列一个都没动。
+ * 所以前端拿到这份之后**就地替换** `baseClose`，不重建整表、不重排。
+ *
+ * 返回的 `closes` 是 `{symbol: close}`（`symbol` 就是 `MarketRow.symbol`，
+ * 如 `BTC/USDT:USDT`）；那一刻没成交的币不在里面 ⇒ 调用方该当成"没有基准价"。
+ */
+export const fetchMarketBase = (since: number, market?: string) => {
+  const qs = new URLSearchParams({since: String(since)})
+  if (market) qs.set('market', market)
+  return get<{since: number; closes: Record<string, number>}>(
+    `/api/markets/base?${qs.toString()}`
+  )
+}
+
 /** 一批行情增量里的一个币（后端把币安的字符串都转成数字了） */
 export interface TickerPatch {
   /** 交易所原始交易对（BTCUSDT），拿来跟 `MarketRow.pair` 对上 */

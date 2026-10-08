@@ -22,6 +22,7 @@
  */
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
+  fetchMarketBase,
   fetchMarkets,
   fetchPins,
   iconUrl,
@@ -170,6 +171,9 @@ let resyncTimer: ReturnType<typeof setInterval> | null = null
 let aliveTimer: ReturnType<typeof setInterval> | null = null
 let lastEventAt = 0
 let stopped = false
+
+/** 正在补「基准价」那一列（换基准的轻量路，见 `loadBase`） */
+const loadingBase = ref(false)
 
 /** 拉一次全表（初载 / 兜底 / 重同步都用它） */
 async function loadSnapshot(): Promise<void> {
@@ -566,7 +570,6 @@ const chgLabel = computed(() =>
 const baseText = computed(() => {
   const b = rankBase.value
   if (b.kind === 'off') return ''
-  if (b.kind === 'at') return `${bjTime(b.ms)} 起算`
   return `${tzLabel(b.min)} 00:00 日切`
 })
 
@@ -592,14 +595,62 @@ function useDefaultBase(): void {
   rankBase.value = {kind: 'off'}
 }
 
-/*
- * 换了基准：① 重拉整表（`baseClose` 得跟数据一起回来）② 把排序切到涨跌幅降序 ——
- * 用户要的就是「按基准涨跌来排」，默认那一下按成交额排等于白选。
+/**
+ * 换基准 = **只补那一列**（`baseClose`），**不重拉整表、不清表**。
+ *
+ * ⚠️ 2026-10-08 改（用户：「切换慢是什么原因」+「前端缓存还是有必要的，但是数据不会被清」）：
+ *    原来这里 `loadSnapshot()` —— 整表 500+ 行 / ≈100KB 重来一遍，还 `byPair.clear()`
+ *    重建、`version++` 全表重渲染。而换基准真正变的只有**一列**：
+ *    `last` 是行情增量每秒在刷、其余列一个都没动。
+ *    现在走 `fetchMarketBase()`（后端只回 `{symbol: close}`，≈10KB）**就地替换** ——
+ *    表格、滚动位置、已有数据都留着，只有涨跌幅那一列换个算法重算。
+ *
+ * 排序仍然切到「涨跌幅降序」：用户要的就是"按基准涨跌排"，默认那一下按成交额排等于白选。
+ * 但**不重拉数据**，所以看着就是"当场重排"，没有白屏 / 骨架闪。
  */
-watch(rankBase, () => {
+async function loadBase(): Promise<void> {
+  const since = baseSince.value
+  if (since === null || loadingBase.value) return
+  loadingBase.value = true
+  try {
+    const d = await fetchMarketBase(since)
+    if (stopped) return
+    /*
+     * 拉的过程中基准又被改了 ⇒ 这一份是旧的，丢掉（下一发会带着新 `since` 来）。
+     * ⚠️ 别把 `since` 记成"已应用"再走缓存那套 —— 基准每秒都在算（日切会变），
+     *    这里只按"当前 ref"判，简单且不会用错口径。
+     */
+    if (since !== baseSince.value) return
+    for (const r of byPair.values()) r.baseClose = d.closes[r.symbol] ?? null
+    /* 就地改完对象字段不会自己触发渲染 ⇒ 抬一下 version（表里就是拿它当依赖的） */
+    version.value++
+    error.value = ''
+  } catch (e) {
+    if (!stopped) error.value = (e as Error).message
+  } finally {
+    loadingBase.value = false
+  }
+}
+
+watch(rankBase, (next, prev) => {
+  /* 值没变就直接 return —— 点已经选中的那颗不该再打一次 */
+  const same =
+    next.kind === prev.kind &&
+    (next.kind !== 'tz' || prev.kind !== 'tz' || next.min === prev.min)
+  if (same) return
   sortKey.value = 'change'
   sortDir.value = 'desc'
-  if (shouldRun()) void loadSnapshot()
+  if (!shouldRun()) return
+  if (next.kind === 'off') {
+    /*
+     * 回到 24h：这一列变成交易所给的 `change24hPct`（本来就在行里）⇒
+     * **一个请求都不用发**，清掉那份快照即可。
+     */
+    for (const r of byPair.values()) r.baseClose = null
+    version.value++
+    return
+  }
+  void loadBase()
 })
 
 /*
