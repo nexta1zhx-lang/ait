@@ -91,10 +91,26 @@ async function main(): Promise<void> {
    * 每一步都是幂等的，所以这里按状态决定从哪一步接着走 —— 迁移这种一次性动作
    * 不该因为中途一个报错就得人工收拾。
    */
-  if (!partitioned && hasOld) {
+  /*
+   * ⚠️⚠️ 「已经是分区表、但 `candles_old` 不存在」**不代表要重来一遍**（2026-10-08 修）。
+   *
+   * 这个状态有两个正常来源：
+   *   ① 迁移完、观察够了、按文档跑了 `--drop-old`（老表已删）；
+   *   ② 整库是从别处灌进来的（例如把本地库整体同步上来）。
+   * 而原逻辑只认 `!partitioned` 才叫"要迁移"，`hasOld` 那两个分支管不到这一格 ⇒
+   * 它会**直接走到步骤 ① 把线上正在用的分区表改名成 `candles_old`，然后当成首次迁移
+   * 重新搬 1000 多万行**（发布窗口内 = 几小时停机 + 多占一倍磁盘）。
+   *
+   * 所以显式判一次：没有老表可搬 ⇒ 根本没有"迁移"这件事，只做 ③ 的幂等维护。
+   */
+  const needMigrate = !partitioned
+  if (partitioned && !hasOld) {
+    log('  已经是分区表、且没有 candles_old ⇒ 没有要迁移的东西，只做幂等维护')
+  }
+  if (needMigrate && hasOld) {
     log('（续跑）candles_old 在、分区父表还没建好 ⇒ 直接从「建父表」接着走')
   }
-  if (!partitioned && !hasOld) {
+  if (needMigrate && !hasOld) {
     const before0 = await snapshot('candles')
     let total0 = 0
     for (const it of INTERVALS) total0 += before0.get(it)?.rows ?? 0
@@ -121,7 +137,9 @@ async function main(): Promise<void> {
   log(`  合计 ${total} 行`)
 
   /* ① 老表让位（数据与索引都跟着走）。已经让过了就跳过 */
-  if (!hasOld) {
+  if (!needMigrate) {
+    log('\n① 跳过（已经是分区表，不需要让位）')
+  } else if (!hasOld) {
     log('\n① candles → candles_old')
     await query('ALTER TABLE candles RENAME TO candles_old')
   } else {
@@ -130,7 +148,9 @@ async function main(): Promise<void> {
 
   /* ② 建分区父表 + 骨架 + 索引（DDL 与 schema.ts 同一份） */
   log('② 建分区父表 + 骨架 + 索引')
-  if (!(await isCandlesPartitioned())) {
+  if (!needMigrate) {
+    log('  （已经是分区表，跳过）')
+  } else if (!(await isCandlesPartitioned())) {
     if (!(await tableExists('candles'))) {
       await query(`CREATE TABLE candles (${CANDLES_COLUMNS}\n) PARTITION BY LIST (interval)`)
     }
@@ -153,18 +173,26 @@ async function main(): Promise<void> {
    */
   const source = hasOld ? 'candles_old' : 'candles'
   const mins = await minOpenTimeByInterval(source)
-  const fromMs = mins.size ? Math.min(...mins.values()) : undefined
-  log(
-    `  最早一行：${fromMs ? new Date(fromMs).toISOString() : '（空表）'}` +
-      `（读自 ${source}）`
-  )
-  const created = await ensureCandlePartitions({fromMs})
+  log(`  最早一行（读自 ${source}）：`)
+  for (const it of INTERVALS) {
+    const t = mins.get(it)
+    log(`    ${it.padEnd(4)} ${t ? new Date(t).toISOString() : '（无数据）'}`)
+  }
+  /*
+   * ⚠️ 按档各给各的下界。**别用全档最小值**：1d 的最早一行是 2024-01，
+   *    拿它当 1m 的下界会白造两年多的日切片；反过来拿 1m 的下界去铺 15m，
+   *    又会给那些"那几天 15m 根本没数据"的日子造一堆空分区。
+   */
+  const created = await ensureCandlePartitions({fromByInterval: mins})
   log(`  建了 ${created.length} 个子分区`)
 
   /* ④ 分批搬运：粗档按 30 天、细档按 1 天，一批一个事务。
          `ON CONFLICT DO NOTHING` ⇒ 幂等，中断了重跑不会插重（也不会报键冲突）。 */
-  log('④ 搬数据（按时间格分批；幂等，可重复跑）')
-  for (const it of INTERVALS) {
+  /** 本次真的搬了多少行 —— ⑤ 靠它判断该做严格核对还是放宽（见那段 ⚠️⚠️） */
+  let movedTotal = 0
+  if (needMigrate) log('④ 搬数据（按时间格分批；幂等，可重复跑）')
+  else log('④ 跳过（没有要搬的东西）')
+  for (const it of needMigrate ? INTERVALS : []) {
     const range = await queryOne<{a: Date | null; b: Date | null}>(
       `SELECT min(open_time) AS a, max(open_time) AS b FROM candles_old WHERE interval = $1`,
       [it]
@@ -188,39 +216,107 @@ async function main(): Promise<void> {
       moved += res.rowCount ?? 0
       process.stdout.write(`\r  ${it.padEnd(4)} 已搬 ${String(moved).padStart(10)} 行`)
     }
+    movedTotal += moved
     process.stdout.write(
       `\r  ${it.padEnd(4)} 已搬 ${String(moved).padStart(10)} 行` +
         `（用时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒）\n`
     )
   }
 
-  /* ⑤ 核对：行数 + sum(close) 逐档比（与 candles_old 比，不是与"迁移前快照"比 —— 续跑也准） */
-  log('⑤ 核对（对 candles_old）')
-  const after = await snapshot('candles')
-  const fromOld = await snapshot('candles_old')
+  /*
+   * ⑤ 核对。
+   *
+   * ⚠️⚠️ **只有在「本次真的搬了行」时才能拿 `candles` 去和 `candles_old` 严格比**（2026-10-08 修）。
+   *
+   * 原来这里无条件严格比，注释还写着「与 candles_old 比，续跑也准」—— 那个判断是**错的**：
+   * `candles_old` 是**迁移那一刻的冻结快照**，而迁移完成后 `candles` 一直在被实时写入
+   * ⇒ 之后任何一次重跑都会算出 `candles` 比 `candles_old` **多**，
+   * 于是脚本报「迁移失败」退出非零。而 `scripts/deploy.sh` 里是：
+   *
+   *     if ! ... migrate-candles-partitions.js --apply; then
+   *       warn '分区迁移失败 —— 应用先不启，避免它对着半迁移的库写'
+   *       exit 1
+   *     fi
+   *
+   * ⇒ **下一次发布就会因为这个假警报把应用起不来**（首次迁移撞不到，因为那时还没有"之后"）。
+   * 本地实测撞到：5 档全部报 ✗（1m 4,791,218 → 4,852,876，多的正是迁移后实时写入的）。
+   *
+   * 所以按「本次搬了几行」分两种核对：
+   *   · 搬过（`movedTotal > 0`）⇒ 严格比（刚搬完、且发布时应用是停着的，就该逐位相等）；
+   *   · 没搬（幂等维护）⇒ 只要求 `candles` **不少于** `candles_old`，多的那部分是
+   *     迁移之后的实时写入，如实打出来。「少了」才是真信号（有数据被弄丢），必须报错。
+   */
   let bad = 0
-  for (const it of INTERVALS) {
-    const a = fromOld.get(it) ?? {rows: 0, sum: 0}
-    const b = after.get(it) ?? {rows: 0, sum: 0}
-    const rowsOk = a.rows === b.rows
-    /* 浮点求和顺序变了 ⇒ 允许相对误差；量级 1e-9 足够抓出"搬运丢行/改值" */
-    const tol = Math.max(1e-6, Math.abs(a.sum) * 1e-9)
-    const sumOk = Math.abs(a.sum - b.sum) <= tol
-    if (!rowsOk || !sumOk) bad++
-    log(
-      `  ${it.padEnd(4)} 行 ${a.rows} → ${b.rows} ${rowsOk ? '✓' : '✗'}` +
-        `   Σclose ${a.sum.toFixed(2)} → ${b.sum.toFixed(2)} ${sumOk ? '✓' : '✗'}`
-    )
+  if (!hasOld) {
+    /*
+     * 根本没有 `candles_old` ⇒ 这一次没发生"迁移"，没有可比的对象。
+     * 只报事实 + 查一个**真正有用的不变量**：DEFAULT 兜底里不该留行
+     * （DEFAULT 里的行永远不会被清理，见 docs/EXCHANGE.md 第 58 节）。
+     */
+    log('⑤ 核对（没有 candles_old 可比：本次没有发生迁移）')
+    const now = await snapshot('candles')
+    for (const it of INTERVALS) {
+      log(`  ${it.padEnd(4)} ${String(now.get(it)?.rows ?? 0).padStart(10)} 行`)
+    }
+    let defRows = 0
+    for (const it of INTERVALS) {
+      const row = await queryOne<{n: string}>(
+        `SELECT count(*)::text AS n FROM candles_${it}_def`
+      )
+      const n = Number(row?.n ?? 0)
+      defRows += n
+      if (n) log(`  ⚠️ candles_${it}_def 里还有 ${n} 行 —— 下一轮维护会搬进具名子分区`)
+    }
+    log(defRows ? '  （DEFAULT 有残留，属可自愈状态，见第 58 节）' : '  DEFAULT 兜底干净 ✓')
+  } else if (movedTotal > 0) {
+    log(`⑤ 核对（严格：本次搬了 ${movedTotal} 行）`)
+    const fromOld = await snapshot('candles_old')
+    const after = await snapshot('candles')
+    for (const it of INTERVALS) {
+      const a = fromOld.get(it) ?? {rows: 0, sum: 0}
+      const b = after.get(it) ?? {rows: 0, sum: 0}
+      const rowsOk = a.rows === b.rows
+      /* 浮点求和顺序变了 ⇒ 允许相对误差；量级 1e-9 足够抓出"搬运丢行/改值" */
+      const tol = Math.max(1e-6, Math.abs(a.sum) * 1e-9)
+      const sumOk = Math.abs(a.sum - b.sum) <= tol
+      if (!rowsOk || !sumOk) bad++
+      log(
+        `  ${it.padEnd(4)} 行 ${a.rows} → ${b.rows} ${rowsOk ? '✓' : '✗'}` +
+          `   Σclose ${a.sum.toFixed(2)} → ${b.sum.toFixed(2)} ${sumOk ? '✓' : '✗'}`
+      )
+    }
+    if (bad) throw new Error(`有 ${bad} 档对不上 —— 别删 candles_old，先查清楚`)
+  } else {
+    log('⑤ 核对（幂等维护：本次没有搬运 ⇒ 不严格比，只查有没有"变少"）')
+    const fromOld = await snapshot('candles_old')
+    const after = await snapshot('candles')
+    for (const it of INTERVALS) {
+      const a = fromOld.get(it) ?? {rows: 0, sum: 0}
+      const b = after.get(it) ?? {rows: 0, sum: 0}
+      const lost = a.rows > b.rows
+      if (lost) bad++
+      log(
+        `  ${it.padEnd(4)} 行 ${a.rows} → ${b.rows} ${lost ? '✗ 少行，数据丢了' : '✓'}` +
+          `（+${b.rows - a.rows} = 迁移之后的实时写入）`
+      )
+    }
+    if (bad) {
+      throw new Error(
+        `有 ${bad} 档比 candles_old **少** —— 这才是有数据被弄丢，别删 candles_old，先查清楚`
+      )
+    }
   }
-  if (bad) throw new Error(`有 ${bad} 档对不上 —— 别删 candles_old，先查清楚`)
 
   /* ⑥ 统计信息（刚搬完 planner 手里还是空的） */
   log('⑥ ANALYZE')
   await query('ANALYZE candles')
 
-  log('\n✓ 迁移完成。candles_old 先留着；线上观察一两天后：')
-  log('    npm run candles:partition -- --drop-old')
-  log('  ⚠️ 老表还占着 ~5.5GB，确认无误前别急着删。')
+  log('\n✓ 完成。')
+  if (hasOld) {
+    log('  candles_old 先留着；线上观察一两天后：')
+    log('    npm run candles:partition -- --drop-old')
+    log('  ⚠️ 老表还占着几个 GB，确认无误前别急着删。')
+  }
 }
 
 main()

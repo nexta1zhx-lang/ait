@@ -959,7 +959,15 @@ export async function isCandlesPartitioned(): Promise<boolean> {
  * @param opts.coverExisting 迁移/历史灌数据用：按**库里已有的最早一行**铺，别漏掉老数据
  */
 export async function ensureCandlePartitions(
-  opts: {fromMs?: number; coverExisting?: boolean} = {}
+  opts: {
+    /**
+     * 按档给下界（毫秒）—— **迁移脚本专用**，见下面那段 ⚠️⚠️。
+     * 缺省不传 ⇒ 下界 = `now − 该档保留期`（再够到 DEFAULT 里最早那一行）。
+     */
+    fromByInterval?: Map<KlineInterval, number>
+    /** 只按 `now − 保留期` 往前铺（还要按 `candles` 里的真实最早一行往前够） */
+    coverExisting?: boolean
+  } = {}
 ): Promise<string[]> {
   if (!(await isCandlesPartitioned())) return []
   const rows = await query<{relname: string}>(
@@ -967,13 +975,14 @@ export async function ensureCandlePartitions(
       WHERE relnamespace = current_schema()::regnamespace AND relname LIKE 'candles\\_%'`
   )
   const existing = new Set(rows.map(r => r.relname))
-  const mins = opts.coverExisting && opts.fromMs === undefined ? await minOpenTimeByInterval() : null
+  const mins = opts.coverExisting && opts.fromByInterval === undefined ? await minOpenTimeByInterval() : null
   /*
    * ⚠️⚠️ 下界还要算上**每个 `*_def`（DEFAULT 兜底）里的最早一行**（2026-10-08 加）。
    *
    * 为什么必须有这一条：`pruneByPartition` 只 DROP **具名**子分区 —— **DEFAULT 里的行
    * 永远不会过期、永远清不掉**，那是条只增不减的泄漏。而迁移时若下界算窄了
    * （历史上正好踩过一次，见 `minOpenTimeByInterval` 的 ⚠️），超期的行就会堆在 DEFAULT 里。
+   * `fromByInterval`（迁移传进来的）同理：那就是"数据真正在哪儿"的权威答案。
    * 把下界一直往前够到 DEFAULT 里最早那一行，这些行就会被搬进具名子分区、随后被正常 DROP 掉。
    *
    * 收敛性：搬完 DEFAULT 就空了 ⇒ 下一轮不再往前够，不会反复建了又删。
@@ -987,7 +996,7 @@ export async function ensureCandlePartitions(
     const keep = KLINE_RETENTION[it]
     const floor = now - (keep ? keepMs(keep) : FOREVER_LOOKBACK_MS)
     const since = Math.min(
-      opts.fromMs ?? Infinity,
+      opts.fromByInterval?.get(it) ?? Infinity,
       mins?.get(it) ?? Infinity,
       defMin.get(it) ?? Infinity,
       floor
