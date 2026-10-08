@@ -52,7 +52,8 @@
     "candles:seed": "tsx backend/src/scripts/seed-candles.ts",
     "candles:seed:vision": "tsx backend/src/scripts/seed-vision.ts",
     "candles:sync": "bash scripts/sync-candles.sh",
-    "candles:partition": "tsx backend/src/scripts/migrate-candles-partitions.ts"
+    "candles:partition": "tsx backend/src/scripts/migrate-candles-partitions.ts",
+    "candles:audit": "tsx backend/src/scripts/audit-candles.ts"
   },
   "dependencies": {
     "ccxt": "^4.4.0",

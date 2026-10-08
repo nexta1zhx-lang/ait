@@ -72,7 +72,10 @@ export interface NewCandleRow {
   quoteVolume: number
   trades: number
   takerBuyVolume: number
-  /** ws（实时流）/ rollup（由 1m 滚出）/ backfill（补缺口）/ seed（首灌历史） */
+  /**
+   * ws（实时流）/ rollup（由 1m 滚出）/ backfill（补缺口）/ seed（首灌历史）
+   * / repair（直连某一档官方口径）/ audit（`candles:audit` 脚本回路）
+   */
   source: string
 }
 
@@ -108,6 +111,14 @@ const UPSERT = `ON CONFLICT (exchange, market_type, symbol, interval, open_time)
      OR candles.trades           IS DISTINCT FROM EXCLUDED.trades
      OR candles.taker_buy_volume IS DISTINCT FROM EXCLUDED.taker_buy_volume
      OR candles.source           IS DISTINCT FROM EXCLUDED.source`
+
+/**
+ * 只补"库里没有的那个桶"（`ON CONFLICT DO NOTHING`）。
+ *
+ * 跟 `onlyMissing()` 是同一件事的两种落地方式：那个是"先在 JS 里滤掉"，这个是"让数据库挡掉"。
+ * 用在 rollup 那条兜底路上 —— 它没法先滤（行是 SQL 里现算的）。
+ */
+const INSERT_MISSING_ONLY = `ON CONFLICT (exchange, market_type, symbol, interval, open_time) DO NOTHING`
 
 function rowParams(r: NewCandleRow): unknown[] {
   return [
@@ -351,6 +362,53 @@ export async function maxOpenTimes(
     if (r.t) out.set(r.symbol, new Date(r.t).getTime())
   }
   return out
+}
+
+/**
+ * 把一批「准备写进去的行」滤成**只留库里确实没有的那些**。
+ *
+ * ## 为什么必须有它（2026-10-08 实测抓到的一次真事故）
+ *
+ * `saveCandles` 是**覆盖写**（UPSERT），而不同来源的字段完整度**不一样**：
+ *
+ * | 来源 | `trades` / `quote_volume` | 说明 |
+ * | --- | --- | --- |
+ * | `vision`（币安官方历史包） | **有** | 15m 953,828 行**全部**非 0 |
+ * | `rollup`（由 ws 的 1m 滚出） | **有**（1m 是 ws 时） | 同一桶 523 行里 468 行非 0 |
+ * | `ws`（实时 1m） | **有** | 1m 65,648 行里只有 280 行是 0 |
+ * | `seed` / `backfill` / `repair` / `audit`（ccxt REST） | **一律 0** | `fetchOHLCV` 只有 OHLCV |
+ *
+ * 而"补洞"用的 REST 正好是**最不全**的那一种。所以「拿 REST 去补一个其实存在的桶」
+ * 不是补数据，是**降级**：实测一次 `candles:audit --repair` 就把 15m 的 05:00 桶
+ * （原本 468/523 行带真实笔数）里那两个币的 `trades` / `quote_volume` 抹成了 0。
+ *
+ * 结论：**补存量洞一律 insert-only** —— 只补"库里没有的那个桶"。
+ * 要"修一个存在的桶"是另一件事（`kline_pending_check` 那条残桶复核路），
+ * 那种情况**必须**覆盖，不能走这个函数。
+ *
+ * 代价：一条走索引的查询（`open_time` 在主键里 ⇒ 纯索引扫描），而且只在真要写之前跑一次。
+ */
+export async function onlyMissing(
+  rows: NewCandleRow[],
+  scope: {exchange: string; marketType: string}
+): Promise<NewCandleRow[]> {
+  if (!rows.length) return rows
+  const symbols = [...new Set(rows.map(r => r.symbol))]
+  const intervals = [...new Set(rows.map(r => r.interval))]
+  const lo = new Date(Math.min(...rows.map(r => r.openTime)))
+  const hi = new Date(Math.max(...rows.map(r => r.openTime)))
+  const have = await query<{symbol: string; interval: string; open_time: Date}>(
+    `SELECT symbol, interval, open_time
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2
+        AND symbol = ANY($3::text[]) AND interval = ANY($4::text[])
+        AND open_time >= $5 AND open_time <= $6`,
+    [scope.exchange, scope.marketType, symbols, intervals, lo, hi]
+  )
+  const present = new Set(
+    have.map(r => `${r.symbol}|${r.interval}|${new Date(r.open_time).getTime()}`)
+  )
+  return rows.filter(r => !present.has(`${r.symbol}|${r.interval}|${r.openTime}`))
 }
 
 export async function lastOpenTime(
@@ -652,7 +710,17 @@ export async function rollupFrom1m(
   fromMs: number,
   toMs: number,
   bucketMs: number,
-  scope: {exchange: string; marketType: string}
+  scope: {exchange: string; marketType: string},
+  /**
+   * `true` = **只补缺的**（`ON CONFLICT DO NOTHING`），不覆盖已存在的桶。
+   *
+   * ⚠️ 「补洞」那条路必须传 `true`：rollup 是从库里的 1m 现算的，而 1m 自己可能是
+   *    `seed` / `backfill` 来的（只有 OHLCV、`trades` / `quote_volume` 存 0），
+   *    也可能是 ws 来的（笔数是真的）。**算出来的值不一定比库里那行好**，
+   *    覆盖写就可能拿 0 盖掉真值（实测见 `onlyMissing` 的说明）。
+   *    只有"修一个已经存在但值不对的桶"（残桶裁决）才该覆盖。
+   */
+  fillOnly = false
 ): Promise<number> {
   if (!symbols.length || fromMs >= toMs) return 0
   const res = await getPool().query(
@@ -671,7 +739,7 @@ export async function rollupFrom1m(
         AND open_time <  to_timestamp($5 / 1000.0)
       GROUP BY exchange, market_type, symbol, pair,
                floor(extract(epoch FROM open_time) * 1000 / $2)
-     ${UPSERT}`,
+     ${fillOnly ? INSERT_MISSING_ONLY : UPSERT}`,
     [interval, bucketMs, symbols, fromMs, toMs, scope.exchange, scope.marketType]
   )
   /*
@@ -1317,6 +1385,112 @@ export async function bucketCoverage(
       hi: new Date(r.hi).getTime()
     })
   }
+  return out
+}
+
+/* ---------------- 连续性审计（第 2 档的兜底：整条序列自洽，2026-10-08） ----------------
+ *
+ * ## 为什么必须另起一个检查（`runGapCheck` 天然看不见的那一类洞）
+ *
+ * `runGapCheck` 的 `expected` 是**从「这个币在窗口里最早那根」开始数**的
+ * （`lo = max(floor(since/ms)*ms, floor(c.lo/ms)*ms)`）—— 这么做是为了不冤枉新上市的币，
+ * 但副作用是：**洞只要顶到窗口左沿就完全隐形**。而 `queueRepair` 的起点用的就是同一个
+ * 锚点 ⇒ 连修也不会去修它。于是「掉线 / 重启」造出来的洞，只要巡检下一次跑到时已经
+ * 晚了（1m 的窗口只有 120 根 = 2 小时），就**永远不会被发现、也永远不会被补**。
+ *
+ * 2026-10-08 实测（本地，事故后）：1m 缺 **620,603 分钟（11.4%）**，
+ * 而巡检报出来的 1m 缺口全是「差 1 根」的边界噪音。逐日拆开：
+ *   10-07（磁盘风暴）520,006 分钟 / 5,427 个洞；10-08（掉线 3.6 小时）100,579 分钟 / 855 个洞。
+ *
+ * ## 为什么它能便宜到可以定时跑
+ *
+ * 判据是「**行数 vs 跨度**」：`count(*)` vs `(max-min)/step + 1`。
+ * `min` / `max` / `count` 三列**都在主键索引里**（`(exchange, market_type, symbol,
+ * interval, open_time)`）⇒ **纯索引扫描、零堆访问**。实测全 6 档 **5.6 秒**（1m 单独 0.9 秒）。
+ *
+ * ⚠️ 别顺手把 `sum(volume)` / `array_agg(close)` 加进来 —— 那两列不在索引里，每行都要回堆取页，
+ *    老的「库内自洽」全市场扫描就是这么变成 **4 分 40 秒** 的（见 docs/EXCHANGE.md 第 52/53 节）。
+ *
+ * ## 返回什么
+ *
+ * 每个「有洞的（币 × 档）」一行，带**最老那个洞**的起止时刻 ——
+ * 也就是说调用方拿到的是「**从哪一刻起往后补**」的锚点（`repairSymbol` 只会往后补，
+ * 所以必须给它最老的那个洞，一次覆盖后面所有洞）。
+ */
+
+export interface ContiguityGap {
+  interval: KlineInterval
+  symbol: string
+  /** 整条序列缺几根 */
+  missing: number
+  /** 整条序列的跨度（根）—— `missing / expected` 就是缺的比例 */
+  expected: number
+  /** 最老的洞：**第一根缺的**桶的 open_time（毫秒）——补的起点 */
+  holeFrom: number
+  /** 最老的洞：洞后第一根**在库里的**桶（毫秒，仅用于日志展示与跨度计算） */
+  holeTo: number
+}
+
+/**
+ * 逐（币 × 档）审「整条序列连不连续」，返回**有洞的**那些，按「洞越老越靠前」排序。
+ *
+ * 一条 SQL 搞定：`lag()` 窗口函数同时给出「行数」和「最老的洞」。
+ * 走主键索引 ⇒ 增量排序，不需要额外排序 1000 万行。
+ */
+export async function auditContiguity(
+  scope: {exchange: string; marketType: string},
+  intervals: KlineInterval[] = ALL_INTERVALS,
+  /** 只看这几个币（ccxt 统一符号）。给了就**按币走索引**，比全市场快得多 */
+  symbols: string[] = []
+): Promise<ContiguityGap[]> {
+  const out: ContiguityGap[] = []
+  for (const interval of intervals) {
+    const ms = MS[interval]
+    const rows = await query<{
+      symbol: string
+      n: string
+      lo: Date
+      hi: Date
+      hole_from: Date | null
+      hole_to: Date | null
+    }>(
+      `WITH s AS (
+         SELECT symbol, open_time,
+                lag(open_time) OVER (PARTITION BY symbol ORDER BY open_time) AS p
+           FROM candles
+          WHERE exchange = $1 AND market_type = $2 AND interval = $3
+            AND ($5::text[] IS NULL OR symbol = ANY($5::text[]))
+       ), g AS (
+         SELECT symbol, count(*) AS n, min(open_time) AS lo, max(open_time) AS hi,
+                min(p) FILTER (WHERE open_time - p > $4::interval) AS hole_from,
+                min(open_time) FILTER (WHERE open_time - p > $4::interval) AS hole_to
+           FROM s GROUP BY symbol
+       )
+       SELECT symbol, n::text, lo, hi, hole_from, hole_to
+         FROM g WHERE hole_from IS NOT NULL`,
+      [
+        scope.exchange,
+        scope.marketType,
+        interval,
+        `${ms} milliseconds`,
+        symbols.length ? symbols : null
+      ]
+    )
+    for (const r of rows) {
+      const lo = new Date(r.lo).getTime()
+      const hi = new Date(r.hi).getTime()
+      out.push({
+        interval,
+        symbol: r.symbol,
+        expected: Math.round((hi - lo) / ms) + 1,
+        missing: Math.round((hi - lo) / ms) + 1 - Number(r.n),
+        holeFrom: new Date(r.hole_from!).getTime() + ms,
+        holeTo: new Date(r.hole_to!).getTime()
+      })
+    }
+  }
+  /* 洞越老越先修：掉线后的老洞最可能被永久丢掉（1m 只有 7 天保留期） */
+  out.sort((a, b) => a.holeFrom - b.holeFrom || a.interval.localeCompare(b.interval))
   return out
 }
 

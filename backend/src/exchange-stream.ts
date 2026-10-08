@@ -158,6 +158,16 @@ const FRESH_MS = 60 * 1000
 const FORCED_MIN_MS = 3 * 1000
 /** 每次定期对账往前看多久（重叠靠 `unique(key_id, trade_id)` 去重） */
 const FILL_SAFETY_MS = 24 * 3600 * 1000
+/**
+ * 账本（income）反查"缺哪些成交"时往前看多久。
+ *
+ * ⚠️ 必须对齐 `/fapi/v1/userTrades` 的**实际上限（最近 7 天）**：比它更老的缺口
+ *    **取不回来**，放在候选里只会每轮白占一个名额（`BACKFILL_MAX_SYMBOLS` 只有 8 个）
+ *    并把后面的币饿死。所以要补的是"能补的"，不是"全部缺的"。
+ */
+const BACKFILL_LOOKBACK_MS = 7 * 24 * 3600 * 1000 - 3600 * 1000
+/** 按某个币自己的起点回补时，再往前留一点重叠（跨时钟/边界，靠唯一键去重） */
+const FILL_OVERLAP_MS = 5 * 60 * 1000
 /** **空转档**（没持仓 + 没挂单 + 10 分钟没动静）：三条兜底按「正常档 ×2」再降一档 */
 const FILL_RECONCILE_MS_IDLE = 8 * 60 * 60 * 1000
 const ORDERS_RECONCILE_MS_IDLE = 12 * 60 * 60 * 1000
@@ -851,29 +861,41 @@ export class KeyStream {
   private async backfillFills(sinceOverride?: number): Promise<void> {
     let added = 0
     try {
-      const syms = await this.symbolsToBackfill()
-      if (!syms.length) return
+      const jobs = await this.symbolsToBackfill()
+      if (!jobs.length) return
       const fromLedger = await this.lastFillTs()
-      const since = Math.min(sinceOverride ?? fromLedger, fromLedger)
-      for (const raw of syms) {
+      /*
+       * 账户级起点（老口径）：`min(定期窗口, 库里最新一笔成交)`。
+       * 每个币再按**它自己的起点**往前拉 —— 账本说得出"X 在 01:00 缺一笔"时，
+       * 不能被别的币 02:00 那笔成交顶到 02:00 去（见 `symbolsToBackfill` 的 ⚠️）。
+       * `min` 保证只会**更早**，不会比账户级起点更窄。
+       */
+      const base = Math.min(sinceOverride ?? fromLedger, fromLedger)
+      for (const job of jobs) {
+        const since =
+          job.from === undefined ? base : Math.min(base, job.from - FILL_OVERLAP_MS)
         try {
-          added += await this.backfillSymbol(raw, since)
+          added += await this.backfillSymbol(job.symbol, since)
         } catch (e) {
           console.warn(
-            `${this.tag} 补 ${raw} 失败（跳过它继续）：${(e as Error).message.slice(0, 120)}`
+            `${this.tag} 补 ${job.symbol} 失败（跳过它继续）：${(e as Error).message.slice(0, 120)}`
           )
         }
         // 限速：userTrades 权重 5，合约总权重 2400/分钟 —— 慢一点无所谓
         await sleep(250)
       }
       if (added) {
-        console.log(`${this.tag} REST 补成交 ${added} 笔（查了 ${syms.length} 个币：${syms.join('、')}）`)
+        console.log(
+          `${this.tag} REST 补成交 ${added} 笔（查了 ${jobs.length} 个币：${jobs.map(j => j.symbol).join('、')}）`
+        )
         emit(this.row.id, {type: 'backfill', added})
         /* 补回来的成交同样可能改变持仓集合（离线期间开的仓就在这里被发现） */
         this.resyncAfterFill()
       } else {
         /* 查了、但确实没有新成交也要留一行 —— 不然「没查」和「查了没漏」在日志里长得一样 */
-        console.log(`${this.tag} 补成交：查了 ${syms.length} 个币（${syms.join('、')}），没有遗漏`)
+        console.log(
+          `${this.tag} 补成交：查了 ${jobs.length} 个币（${jobs.map(j => j.symbol).join('、')}），没有遗漏`
+        )
       }
     } catch (e) {
       console.warn(`${this.tag} 补成交失败：${(e as Error).message.slice(0, 140)}`)
@@ -899,23 +921,47 @@ export class KeyStream {
   }
 
   /**
-   * 要补哪些交易对（**交易所原始符号**，如 `BTCUSDT`）。
+   * 要补哪些交易对（**交易所原始符号**，如 `BTCUSDT`）+ **每个币各自的起点**。
    *
    * 三拨人**共用** `BACKFILL_MAX_SYMBOLS` 这 8 个名额，顺序就是优先级：
    *   ① **账本（income）里有、成交明细我们没有的币** —— 见下面那段 ⚠️⚠️；
    *   ② 当前持仓（无条件进，别被后面的挤掉）；
-   *   ③ 账本里最近 30 天有成交的币，按最后成交时间倒序。
+   *   ③ 账本里最近有成交的币，按最后成交时间倒序。
+   *
+   * ## 为什么必须是"其他接口"给出币种清单（用户 2026-10-08 问的点）
+   *
+   * `/fapi/v1/userTrades`（成交明细）**必须带 `symbol`**，币安没有"我的全部成交"这种接口
+   * ⇒ 整件事的难点就是「**在还不知道符号的时候，怎么列出符号**」。能用的三个：
+   *
+   * | 来源 | 接口 | 要符号参数吗 | 覆盖面 |
+   * | --- | --- | --- | --- |
+   * | 持仓 | `/fapi/v2/positionRisk` | **不要** | 只有"现在的"仓 |
+   * | 钱账本 | `/fapi/v1/income` | **不要** | **每次成交都有一行 `COMMISSION`** ⇒ 覆盖全部交易过的币 |
+   * | 我们自己记的成交 | 本地 `exchange_fills` | —— | 只有"已经记下来的" ⇒ **鸡生蛋** |
+   *
+   * 关键那条：币安对**每一笔成交**都会记一行 `COMMISSION`（手续费），行里带 `symbol`
+   * 和 `trade_id` ⇒ 钱账本是「这辈子交易过的所有币」的**完整**清单，而且它**按时间拉、
+   * 不需要币**，所以掉线期间也一定是对的。实测（本地 17 个币）：
+   * `COMMISSION` 148 行 **148 行都有 `trade_id`**，`REALIZED_PNL` 76 行同样全有。
    *
    * ⚠️⚠️ **① 是 2026-10-08 补的，它修的是一整类"永久丢失"**：
    *    掉线期间在某个币上成交、事后又平掉 ⇒ 它**没有持仓**、`exchange_fills` 里也**没有它**
    *    ⇒ 原来的两条路（③ 已知成交 + ② 持仓）都看不见它，那几笔成交明细永远补不回来。
-   *    实测踩到：掉线 3.5 小时，JUP / MET 上成交了 23 笔（income 账本正确记着），
-   *    而 `exchange_fills` 这两个币是 **0 条**；`symbolsToBackfill()` 只返回 RAYSOL /
-   *    PUMP / 1000FLOKI / 1000CHEEMS ⇒ 那 23 笔一直补不回来。
-   *    income 行带 `symbol` + `trade_id`，正好能定位"哪些币有我们没记的成交"，
-   *    而且**不用打交易所**（本地一条 SQL）。
-   *    ① 天然**轮转**：补完前 8 个币之后它们的 income 不再"比成交新"，
-   *    下一轮就轮到后面的币 —— 不需要额外的游标。
+   *    实测踩到：掉线 3.5 小时，JUP / MET / PROM / RESOLV 上成交了 15 笔（income 正确记着），
+   *    而 `exchange_fills` 这几个币是 **0 条** ⇒ 一直补不回来。
+   *
+   * ⚠️ 2026-10-08 二次收紧：① 原来比的是 `max(income.ts) > max(fills.ts)`（**最大对最大**），
+   *    那对**夹在中间的洞**是瞎的 —— 只要某个币在洞之后还有一笔成交，`i.ts > f.t` 就不成立，
+   *    这个币永远不进候选；而"进不进候选"决定了**会不会去查它**，24 小时的扫描窗口再宽也没用
+   *    （窗口只在**被选中之后**才生效）。现在改成 `trade_id` 精确反连接：
+   *    「账本里这一笔，成交明细里没有」⇒ 既**精确**判缺，又顺手拿到**每个币自己的起点**
+   *    （`min(i.ts)` = 最老那一笔缺的成交）。
+   *
+   * ⚠️ 起点必须**按币各给各的**：原来所有币共用 `lastFillTs()`（**整个账户**最新一笔成交），
+   *    于是"账本说 X 在 01:00 缺一笔、但别的币 02:00 有成交"时，X 会从 02:00 开始查
+   *    —— **那笔 01:00 的正好被跳过**。发现得了、却取不回来，等于没修。
+   *
+   * ① 天然**轮转**：补完之后 `trade_id` 对得上了，反连接不再返回它，下一轮轮到后面的币。
    *
    * ⚠️ ② 的顺序也重要：原来 ③ 先 `LIMIT 8` 占满、末尾 `slice()` 会把持仓全挤掉 ——
    *    典型是「开了仓但 30 天内没再成交过」的币。仓位周期是从 `exchange_fills` **推**出来的
@@ -923,40 +969,50 @@ export class KeyStream {
    *
    * 一轮的代价：≤8 币 × ≤4 页 × 权重 5。
    */
-  private async symbolsToBackfill(): Promise<string[]> {
-    const set = new Set<string>()
+  private async symbolsToBackfill(): Promise<{symbol: string; from?: number}[]> {
+    const jobs = new Map<string, {symbol: string; from?: number}>()
 
-    /* ① 账本里有、成交里没有的币（= 掉线期间成交、我们一条明细都没记下来的） */
-    const missing = await query<{symbol: string}>(
-      `SELECT i.symbol
+    /* ① 账本里有、成交明细里没有的币 —— 用 `trade_id` 精确定位（不是比 max(ts)） */
+    const missing = await query<{symbol: string; from_ts: string; n: string}>(
+      `SELECT i.symbol,
+              min(i.ts) FILTER (WHERE i.ts > now() - $3::interval) AS from_ts,
+              count(*)::text AS n
          FROM exchange_income i
-         LEFT JOIN (
-           SELECT symbol, max(ts) AS t FROM exchange_fills WHERE key_id = $1 GROUP BY symbol
-         ) f ON f.symbol = i.symbol
-        WHERE i.key_id = $1 AND i.symbol IS NOT NULL AND i.symbol <> ''
-          AND i.ts > now() - interval '30 days'
-          AND (f.t IS NULL OR i.ts > f.t)
+         LEFT JOIN exchange_fills f ON f.key_id = i.key_id AND f.trade_id = i.trade_id
+        WHERE i.key_id = $1 AND i.trade_id <> '' AND f.trade_id IS NULL
+          AND i.symbol IS NOT NULL AND i.symbol <> ''
+          AND i.ts > now() - $3::interval
         GROUP BY i.symbol
         ORDER BY max(i.ts) DESC
         LIMIT $2`,
-      [this.row.id, BACKFILL_MAX_SYMBOLS]
+      [this.row.id, BACKFILL_MAX_SYMBOLS, `${BACKFILL_LOOKBACK_MS} milliseconds`]
     )
-    for (const r of missing) set.add(r.symbol)
+    for (const r of missing) {
+      /*
+       * 起点 = 最老那一笔缺的成交（只在**能取到的窗口**里找：`/fapi/v1/userTrades`
+       * 只给最近 7 天，取不到的起点只会每轮白占名额）。
+       */
+      jobs.set(r.symbol, {
+        symbol: r.symbol,
+        from: r.from_ts ? new Date(r.from_ts).getTime() : undefined
+      })
+    }
     if (missing.length) {
       /* 看得见才有得查：补完会再打一行「REST 补成交 N 笔」 */
       console.log(
-        `${this.tag} 发现 ${missing.length} 个币的成交明细缺失（账本里有）：${missing.map(m => m.symbol).join('、')}`
+        `${this.tag} 发现 ${missing.length} 个币的成交明细缺失（账本里有）：` +
+          missing.map(m => `${m.symbol}(${m.n} 笔)`).join('、')
       )
     }
 
     /* ② 持仓（ccxt 统一符号 → 交易所原始符号） */
     for (const p of this.lastOverview?.futures.positions ?? []) {
       const raw = this.ex?.market?.(p.symbol)?.id ?? p.symbol
-      if (raw) set.add(String(raw))
+      if (raw && !jobs.has(String(raw))) jobs.set(String(raw), {symbol: String(raw)})
     }
 
-    /* ③ 账本里最近 30 天有成交的币（名额还有剩才补） */
-    if (set.size < BACKFILL_MAX_SYMBOLS) {
+    /* ③ 账本里最近有成交的币（名额还有剩才补） */
+    if (jobs.size < BACKFILL_MAX_SYMBOLS) {
       const rows = await query<{symbol: string}>(
         `SELECT symbol
            FROM exchange_fills
@@ -966,9 +1022,11 @@ export class KeyStream {
           LIMIT $2`,
         [this.row.id, BACKFILL_MAX_SYMBOLS]
       )
-      for (const r of rows) if (r.symbol) set.add(r.symbol)
+      for (const r of rows) {
+        if (r.symbol && !jobs.has(r.symbol)) jobs.set(r.symbol, {symbol: r.symbol})
+      }
     }
-    return [...set].slice(0, BACKFILL_MAX_SYMBOLS)
+    return [...jobs.values()].slice(0, BACKFILL_MAX_SYMBOLS)
   }
 
   /** 账本里最后一笔成交的时间（往回多要 5 分钟，防边界漏单） */

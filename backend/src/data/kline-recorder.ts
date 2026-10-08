@@ -44,6 +44,7 @@ import {
   findStaleBuckets,
   lastTradedAt,
   maxOpenTimes,
+  onlyMissing,
   pendingCheckStats,
   pruneCandles,
   readRecentCandles,
@@ -148,8 +149,31 @@ const STALE_CHECK_BUCKETS = 4
  */
 const STALE_SWEEP_LIMIT = 50
 /**
- * 补高周期时往前补多少格（60 格：5m = 5 小时、1h = 2.5 天）。
- * 原来这个 60 写死在 rollup/官方覆盖两处，现在提出来当常量。
+ * 补缺口时一次最多往前补多少。
+ *
+ * ⚠️ 这里**原来是个「往前 60 格」的钳位**（`REPAIR_SPAN_BARS`），2026-10-08 拆掉：
+ *    它是个**静默的丢洞机器** —— 调用方明明知道洞在哪（`fromMs`），钳位却把起点往后推到
+ *    `now - 60 格`，于是比这更老的洞**连修都不去修**。而「老洞」天生就在几十小时前
+ *    （掉线造出来的），1m 又只有 7 天保留期 —— 拖到过期就永久丢了。
+ *    现在改成「尊重调用方给的起点」+ 这两个硬上限（发数 × 每发根数）来兜成本。
+ */
+const REPAIR_MAX_CALLS = 8
+const REPAIR_MAX_CANDLES = 1500
+/**
+ * 0 权重的 rollup 兜底能往前滚多少格（60 格：5m = 5 小时、1h = 2.5 天）。
+ *
+ * ⚠️ 这个钳位**只**管 rollup 那条兜底路，**不管**上面直连交易所那条 ——
+ *    后者必须够到洞（见 `REPAIR_MAX_CALLS`），而 rollup 必须**越窄越好**。
+ *
+ * 为什么 rollup 要窄（2026-10-08 实测，别把它调大）：
+ *    rollup 是用库里 1m **重算**出来的，而
+ *      · `ccxt` 的 OHLCV 里没有笔数/主动买量 ⇒ `seed` / `backfill` 进来的 1m
+ *        `trades` / `quote_volume` / `taker_buy_volume` 一律存 **0**；
+ *      · 1m 自己还有洞时，`sum(volume)` 会**偏小**。
+ *    实测拿 10-07 03:34 起的 1m 重算 5m，和库里现有的 5m 比：
+ *    **42,838 个桶里 16,771 个 `trades` 对不上、11,036 个 `volume` 对不上（26%）** ——
+ *    也就是说"把旧洞滚一遍"不是补数据，而是**拿偏小 26% 的量去盖掉交易所给的权威值**。
+ *    ⇒ 高周期缺了就该直连那一档（官方口径）；rollup 只在直连失败时兜一小段、或填**空的**桶。
  */
 const REPAIR_SPAN_BARS = 60
 /** 分区维护的间隔（跨天/跨月/跨年建新分区、丢过期分区；幂等，很便宜） */
@@ -276,6 +300,20 @@ interface RepairJob {
   from: number
   /** 要修的档（`1m` 或高周期） */
   intervals: Set<KlineInterval>
+  /**
+   * 是不是「修一个**已经存在但值不对**的桶」（残桶复核那条路）。
+   *
+   * ⚠️ 缺省 `false` = **只补库里没有的桶**（`onlyMissing`），因为 REST 那条路
+   *    （ccxt 的 `fetchOHLCV`）**只有 OHLCV**：`trades` / `quote_volume` 只能填 0，
+   *    而库里同一个桶可能是 `vision`（官方历史包，字段全）或 `rollup`（由 ws 的 1m 滚出，
+   *    笔数也是真的）写进去的 ⇒ **覆盖写 = 拿 0 盖掉真值**。
+   *    实测（2026-10-08）：15m 的 05:00 桶 523 行里 468 行带真实笔数，
+   *    一次覆盖写就把被碰到的那些抹成了 0。见 `db/candle-store.ts` 的 `onlyMissing`。
+   *
+   * 只有残桶裁决（`verifyPendingChecks` 报上来的那几桶）才该置 `true` —— 那种情况
+   * 覆盖正是目的（原来那根是拿没收盘的桶写进去的，值本来就是错的）。
+   */
+  overwrite: boolean
 }
 const repairQueue = new Map<string, RepairJob>()
 /** 动态订阅/退订用的请求 id（跟启动那批批量订阅的 id 分开，便于看回执） */
@@ -700,15 +738,19 @@ async function flush(): Promise<void> {
 function queueRepair(
   st: SymState,
   fromMs: number,
-  intervals: KlineInterval[] = ['1m']
+  intervals: KlineInterval[] = ['1m'],
+  /** `true` = 这一次是「修已经存在但值不对的桶」（残桶裁决），允许覆盖写；见 `RepairJob` */
+  overwrite = false
 ): boolean {
   if (Date.now() - st.repairedAt < REPAIR_COOLDOWN_MS) return false
   const cur = repairQueue.get(st.sym.symbol)
   if (!cur) {
-    repairQueue.set(st.sym.symbol, {from: fromMs, intervals: new Set(intervals)})
+    repairQueue.set(st.sym.symbol, {from: fromMs, intervals: new Set(intervals), overwrite})
   } else {
     if (fromMs < cur.from) cur.from = fromMs
     for (const it of intervals) cur.intervals.add(it)
+    /* 合并时取「或」：只要有一路要求覆盖，这一次就允许覆盖 */
+    if (overwrite) cur.overwrite = true
   }
   return true
 }
@@ -778,14 +820,14 @@ async function repairTick(): Promise<void> {
         const st = [...states.values()].find(s => s.sym.symbol === symbol)
         if (!st || !job) continue
         try {
-          await repairSymbol(st, job.from, job.intervals)
+          await repairSymbol(st, job.from, job.intervals, job.overwrite)
           stats.repairedSymbols++
           st.repairedAt = Date.now()
         } catch (e) {
           stats.lastError = (e as Error).message
           if (e instanceof RateBudgetError) {
             /* 被限流：把这个币放回队列，等一会儿再来（硬挤只会把 IP 打得更死） */
-            queueRepair(st, job.from, [...job.intervals])
+            queueRepair(st, job.from, [...job.intervals], job.overwrite)
             await sleep(20_000)
           } else {
             console.warn(`[kline] 修 ${symbol} 失败：${(e as Error).message.slice(0, 100)}`)
@@ -808,7 +850,13 @@ async function repairTick(): Promise<void> {
 async function repairSymbol(
   st: SymState,
   fromMs: number,
-  intervals: Set<KlineInterval>
+  intervals: Set<KlineInterval>,
+  /**
+   * `true` = 允许覆盖已存在的桶（残桶裁决那条路）。
+   * ⚠️ 缺省 `false` = **只补缺的**（`onlyMissing`）—— 见 `RepairJob.overwrite` 的说明：
+   *    REST 只有 OHLCV，覆盖写会把 `trades` / `quote_volume` 抹成 0。
+   */
+  overwrite = false
 ): Promise<void> {
   if (!cfg) return
   const now = Date.now()
@@ -835,52 +883,79 @@ async function repairSymbol(
    *    现在报 5m 就只打 5m（见 ②），1m 有洞才补 1m。
    */
   if (intervals.has('1m')) {
-    const bars = await paced(`补 1m ${st.sym.pair}`, 15, () =>
-      fetchCandlesRange({
-        exchangeId: cfg!.exchange,
-        symbol: st.sym.symbol,
-        timeframe: '1m',
-        from: fromMs,
-        to: now,
-        marketType: cfg!.marketType,
-        apiBase: cfg!.apiBase,
-        maxCandles: 1500
-      })
-    )
-    const rows: NewCandleRow[] = closedOnly(
-      bars.filter(b => b.timestamp >= fromMs),
-      MIN_MS,
-      now
-    )
-      .map(b => ({
-        exchange: cfg!.exchange,
-        marketType: cfg!.marketType,
-        symbol: st.sym.symbol,
-        pair: st.sym.pair,
-        interval: '1m' as KlineInterval,
-        openTime: b.timestamp,
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-        volume: b.volume,
-        quoteVolume: 0,
-        trades: 0,
-        takerBuyVolume: 0,
-        source: 'backfill'
-      }))
-    if (rows.length) {
-      stats.backfilled1m += await saveCandles(rows)
+    /*
+     * ⚠️ 起点**就是调用方给的那一刻**，中途不往后钳（见 `REPAIR_MAX_CALLS` 的说明）。
+     *    跨度超出一发能拿的量就分几发打。常态只有一发：`repairSweep` 的起点最多在 24 小时前
+     *    = 1440 根 < 1500；`npm run candles:audit --repair` 给的起点最老 7 天前
+     *    = 10080 根 = 7 发（上限 8 发）。
+     */
+    const floor = now - REPAIR_MAX_CALLS * REPAIR_MAX_CANDLES * MIN_MS
+    const from1m = Math.floor(Math.max(fromMs, floor) / MIN_MS) * MIN_MS
+    if (from1m > fromMs) {
+      console.warn(
+        `[kline] ⚠️ 补 1m 的起点被上限截断（${new Date(fromMs).toISOString()} → ` +
+          `${new Date(from1m).toISOString()}）：${st.sym.pair} —— ` +
+          `上限必须覆盖该档的整个保留期，不够就要调大 REPAIR_MAX_CALLS`
+      )
+    }
+    for (let at = from1m; at < now; ) {
+      const until = Math.min(now, at + REPAIR_MAX_CANDLES * MIN_MS)
+      const bars = await paced(`补 1m ${st.sym.pair}`, 15, () =>
+        fetchCandlesRange({
+          exchangeId: cfg!.exchange,
+          symbol: st.sym.symbol,
+          timeframe: '1m',
+          from: at,
+          to: until,
+          marketType: cfg!.marketType,
+          apiBase: cfg!.apiBase,
+          maxCandles: REPAIR_MAX_CANDLES
+        })
+      )
+      const rows: NewCandleRow[] = closedOnly(
+        bars.filter(b => b.timestamp >= at),
+        MIN_MS,
+        now
+      )
+        .map(b => ({
+          exchange: cfg!.exchange,
+          marketType: cfg!.marketType,
+          symbol: st.sym.symbol,
+          pair: st.sym.pair,
+          interval: '1m' as KlineInterval,
+          openTime: b.timestamp,
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+          volume: b.volume,
+          quoteVolume: 0,
+          trades: 0,
+          takerBuyVolume: 0,
+          source: 'backfill'
+        }))
+      const fresh = overwrite ? rows : await onlyMissing(rows, scope)
+      if (fresh.length) {
+        stats.backfilled1m += await saveCandles(fresh)
+      }
+      at = until
     }
     /*
      * 1m 补好了 ⇒ 用**纯 SQL** 把高周期那一档滚出来（0 权重）。高周期本来就由 1m 滚成，
      * 这一步等于"顺手把派生数据补齐"，不用再打交易所。
+     *
+     * ⚠️ 范围**只往前 60 格**（`REPAIR_SPAN_BARS`），别按 `from1m` 滚 ——
+     *    rollup 是有损的（`trades` 恒 0、1m 有洞时 `volume` 偏小），
+     *    铺开到几十小时就是拿偏小的量去盖掉交易所给的权威值（见常量的实测数据）。
+     *    老洞对应的高周期桶本来就该走下面 ② 直连那一档去补。
      */
     for (const it of HIGH_INTERVALS) {
       const ms = MS[it]
-      const from = Math.floor(Math.max(fromMs, now - REPAIR_SPAN_BARS * ms) / ms) * ms
+      const from = Math.floor(Math.max(from1m, now - REPAIR_SPAN_BARS * ms) / ms) * ms
       const to = Math.floor(now / ms) * ms
-      if (from < to) await rollupFrom1m(it, [st.sym.symbol], from, to, ms, scope)
+      if (from < to) {
+        await rollupFrom1m(it, [st.sym.symbol], from, to, ms, scope, !overwrite)
+      }
     }
   }
 
@@ -895,65 +970,96 @@ async function repairSymbol(
    *
    *    ⚠️ 交易所那发拿不到（超时 / 被限流）时**退回**「用 1m 重算」（纯 SQL、0 权重）——
    *       所以 rollup 那条路留着当兜底，不是主路。
+   *
+   *    ⚠️ 起点同样**不往后钳**（见 `REPAIR_MAX_CALLS`）。这是 2026-10-08 修掉的一个
+   *       「静默丢洞」：原来 `from` 被钳到 `now - 60 格`，而调用方知道的洞天生就在
+   *       几十小时前 ⇒ 钳位一推，**那个洞又被跳过了**，而且没有任何日志说它被跳过。
+   *       跨度太大就分几发打。
    */
   for (const it of HIGH_INTERVALS) {
     if (!intervals.has(it)) continue
     const ms = MS[it]
-    const from = Math.floor(Math.max(fromMs, now - REPAIR_SPAN_BARS * ms) / ms) * ms
     const to = Math.floor(now / ms) * ms
-    if (from >= to) continue
-    let ok = false
-    try {
-      /*
-       * ⚠️ 必须 `closedOnly`：交易所区间接口会把**正在走的那根**也返回，
-       *    而它 `timestamp < now` 一过滤就"合法"了 —— 于是库里多一根量只有半截的
-       *    `source='repair'`（2026-10-07 实测抓到：5 个币 × 5 档全有）。
-       */
-      const official = await paced(`补 ${it} ${st.sym.pair}`, 5, () =>
-        fetchCandlesRange({
-          exchangeId: cfg!.exchange,
-          symbol: st.sym.symbol,
-          timeframe: it,
-          from,
-          to: now,
-          marketType: cfg!.marketType,
-          apiBase: cfg!.apiBase,
-          maxCandles: Math.max(3, Math.ceil((now - from) / ms) + 2)
-        })
+    const floor = to - REPAIR_MAX_CALLS * REPAIR_MAX_CANDLES * ms
+    let at = Math.max(Math.floor(fromMs / ms) * ms, floor)
+    if (at > fromMs) {
+      console.warn(
+        `[kline] ⚠️ 补 ${it} 的起点被上限截断（${new Date(fromMs).toISOString()} → ` +
+          `${new Date(at).toISOString()}）：${st.sym.pair} —— ` +
+          `上限必须覆盖该档的整个保留期，不够就要调大 REPAIR_MAX_CALLS`
       )
-      const officialRows: NewCandleRow[] = closedOnly(
-        official.filter(c => c.timestamp >= from),
-        ms,
-        now
-      )
-        .map(c => ({
-          exchange: cfg!.exchange,
-          marketType: cfg!.marketType,
-          symbol: st.sym.symbol,
-          pair: st.sym.pair,
-          interval: it as KlineInterval,
-          openTime: c.timestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: c.volume,
-          quoteVolume: 0,
-          trades: 0,
-          takerBuyVolume: 0,
-          source: 'repair'
-        }))
-      if (officialRows.length) {
-        await saveCandles(officialRows)
-        stats.repairedHigh += officialRows.length
-        ok = true
-      }
-    } catch (e) {
-      stats.lastError = (e as Error).message
     }
-    if (!ok) {
-      /* 兜底：交易所没给（或给空了）⇒ 用库里的 1m 重算这一段（0 权重） */
-      await rollupFrom1m(it, [st.sym.symbol], from, to, ms, scope)
+    while (at < to) {
+      const until = Math.min(to, at + REPAIR_MAX_CANDLES * ms)
+      let ok = false
+      try {
+        /*
+         * ⚠️ 必须 `closedOnly`：交易所区间接口会把**正在走的那根**也返回，
+         *    而它 `timestamp < now` 一过滤就"合法"了 —— 于是库里多一根量只有半截的
+         *    `source='repair'`（2026-10-07 实测抓到：5 个币 × 5 档全有）。
+         */
+        const official = await paced(`补 ${it} ${st.sym.pair}`, 5, () =>
+          fetchCandlesRange({
+            exchangeId: cfg!.exchange,
+            symbol: st.sym.symbol,
+            timeframe: it,
+            from: at,
+            to: until,
+            marketType: cfg!.marketType,
+            apiBase: cfg!.apiBase,
+            maxCandles: Math.max(3, Math.ceil((until - at) / ms) + 2)
+          })
+        )
+        const officialRows: NewCandleRow[] = closedOnly(
+          official.filter(c => c.timestamp >= at),
+          ms,
+          now
+        )
+          .map(c => ({
+            exchange: cfg!.exchange,
+            marketType: cfg!.marketType,
+            symbol: st.sym.symbol,
+            pair: st.sym.pair,
+            interval: it as KlineInterval,
+            openTime: c.timestamp,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+            quoteVolume: 0,
+            trades: 0,
+            takerBuyVolume: 0,
+            source: 'repair'
+          }))
+        const fresh = overwrite ? officialRows : await onlyMissing(officialRows, scope)
+        if (fresh.length) {
+          await saveCandles(fresh)
+          stats.repairedHigh += fresh.length
+        }
+        /*
+         * `ok` 看的是**交易所到底给没给**（给了就说明这一发有效，不该再退回 rollup），
+         * 不是"写了几行"：补洞时 `onlyMissing` 可能把整批都滤掉（库里有更好的来源），
+         * 那时候退回 rollup 反而会**盖掉**那些更好的值。
+         */
+        if (officialRows.length) ok = true
+      } catch (e) {
+        stats.lastError = (e as Error).message
+      }
+      if (!ok) {
+        /*
+         * 兜底：交易所没给（或给空了）⇒ 用库里的 1m 重算这一段（0 权重）。
+         *
+         * ⚠️ 也只往前 60 格（`REPAIR_SPAN_BARS`）。宁可**留个可见的洞**（下一次对账还会报、
+         *    还会再试），也不要拿一段可能偏小的量去**盖掉**一条本来是对的权威值 ——
+         *    「错的」比「缺的」坏得多（缺的会被看见，错的会一直用下去）。
+         */
+        const rFrom = Math.floor(Math.max(at, now - REPAIR_SPAN_BARS * ms) / ms) * ms
+        if (rFrom < until) {
+          await rollupFrom1m(it, [st.sym.symbol], rFrom, until, ms, scope, !overwrite)
+        }
+      }
+      at = until
     }
   }
 }
@@ -974,7 +1080,7 @@ async function repairSymbol(
 const SLOW_TASK_MS_DEFAULT = 3_000
 const SLOW_TASK_MS: Record<string, number> = {
   补缺口: 120_000,
-  灌历史: 120_000
+  灌历史: 120_000,
 }
 const taskStats: Record<string, {lastMs: number; lastAt: number; runs: number; slow: number}> = {}
 
@@ -1152,7 +1258,14 @@ export async function runGapCheck(reason: string): Promise<{
       }
       const st = [...states.values()].find(v => v.sym.symbol === sv.symbol)
       if (!st) continue
-      if (out.queued < GAP_ALERT_MAX && queueRepair(st, sv.openTime, [sv.interval as KlineInterval])) {
+      /*
+       * 残桶裁决：**这一根本来就在库里、只是值不对** ⇒ 必须允许覆盖，
+       * 不能走 `onlyMissing`（那样什么都不会写）。见 `RepairJob.overwrite`。
+       */
+      if (
+        out.queued < GAP_ALERT_MAX &&
+        queueRepair(st, sv.openTime, [sv.interval as KlineInterval], true)
+      ) {
         out.queued++
       }
       else out.cooling++

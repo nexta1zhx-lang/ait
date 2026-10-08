@@ -4704,6 +4704,16 @@ async function route(
         const after = await klineRecorderStats()
         return sendJson(res, 200, {...r, gaps: after.gaps, pendingRepairs: after.pendingRepairs})
       }
+      if (run === 'audit') {
+        /*
+         * 连续性审计搬成**手动脚本**了（用户 2026-10-08：默认历史数据没问题，
+         * 有缺失时手动跑一遍就行）—— `npm run candles:audit`。
+         * 这里保留一句提示，别让人以为线上没有这个能力。
+         */
+        return sendJson(res, 200, {
+          error: '连续性审计已改成手动脚本：npm run candles:audit（-- --repair 顺手补）'
+        })
+      }
       if (run) {
         const r = await runGapCheck('manual')
         const after = await klineRecorderStats()
