@@ -338,20 +338,26 @@ export interface IncomeInput {
  *
  * 返回**新写进去几条**。
  */
+/**
+ * 一次 INSERT 多少条。
+ *
+ * ⚠️ 2026-10-08：钱账本开始**翻页**（一次可能几千条）之后就得分批了 ——
+ *    原来是一条一条 `INSERT ... RETURNING`，8000 条就是 8000 次往返，
+ *    在线上那块慢盘上要几十秒，而这段是在常驻流里跑的。
+ */
+const INCOME_BATCH = 500
+
 export async function upsertIncome(
   userId: number,
   keyId: number,
   list: IncomeInput[]
 ): Promise<number> {
   let added = 0
-  for (const r of list) {
-    const rows = await query<{id: string}>(
-      `INSERT INTO exchange_income
-         (user_id, key_id, tran_id, income_type, symbol, asset, amount, ts, trade_id, raw)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
-       ON CONFLICT (key_id, income_type, tran_id) DO NOTHING
-       RETURNING id`,
-      [
+  for (let i = 0; i < list.length; i += INCOME_BATCH) {
+    const chunk = list.slice(i, i + INCOME_BATCH)
+    const values: unknown[] = []
+    const tuples = chunk.map((r, n) => {
+      values.push(
         userId,
         keyId,
         r.tranId,
@@ -362,11 +368,35 @@ export async function upsertIncome(
         r.ts,
         r.tradeId || null,
         JSON.stringify(r.raw ?? {})
-      ]
+      )
+      const b = n * 10
+      return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, ` +
+        `$${b + 7}, $${b + 8}, $${b + 9}, $${b + 10}::jsonb)`
+    })
+    const rows = await query<{id: string}>(
+      `INSERT INTO exchange_income
+         (user_id, key_id, tran_id, income_type, symbol, asset, amount, ts, trade_id, raw)
+       VALUES ${tuples.join(', ')}
+       ON CONFLICT (key_id, income_type, tran_id) DO NOTHING
+       RETURNING id`,
+      values
     )
-    if (rows.length) added++
+    added += rows.length
   }
   return added
+}
+
+/**
+ * 这套 key 的钱账本**最新一条**的时间（毫秒）；空表返回 `null`。
+ *
+ * 用途：`reconcileIncome()` 拿它当**水位**往前回溯（替代原来"固定往前 7 天"的窗口）。
+ */
+export async function maxIncomeTs(keyId: number): Promise<number | null> {
+  const row = await queryOne<{t: Date | null}>(
+    `SELECT max(ts) AS t FROM exchange_income WHERE key_id = $1`,
+    [keyId]
+  )
+  return row?.t ? new Date(row.t).getTime() : null
 }
 
 /** 钱账本里的一行（数字都转回 number —— pg 的 NUMERIC 出来是字符串） */

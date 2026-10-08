@@ -19,6 +19,7 @@
  *   ⑤ 「这个币刚被平仓」判得对不对 + 撤残留单的去抖（平了就撤，见 `docs/EXCHANGE.md`）
  *   ⑥ 三档（normal / idle / asleep）的判据 + 换档日志里的数字（见 `tierOf` / `tierText`）
  *   ⑦ 分区命名 / 时间格边界 / 保留期解析（见 `partNameOf` / `periodStartOf` / `keepMs`）
+ *   ⑧ 币安历史窗口切分（见 `data/exchange-trade.ts` 的 `planWindows`）
  *      —— 这几个是**纯函数**，而它们的失效方式同样很隐蔽：命名约定一变，
  *      `pruneCandles` 就再也匹配不到过期子分区（表会一直涨），或者建分区时算出重叠区间
  *      （直接建不出来）。所以拿固定夹具卡住它们。
@@ -36,6 +37,11 @@ import {
   type NewCandleRow
 } from '../db/candle-store'
 import {planContractChanges, type RawContract} from '../data/market'
+import {
+  BINANCE_MAX_WINDOW_MS,
+  BINANCE_RETENTION_MS,
+  planWindows
+} from '../data/exchange-trade'
 import {
   KeyStream,
   ORPHAN_SWEEP_GAP_MS,
@@ -544,6 +550,62 @@ function checkPartitions(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ⑧ 币安历史窗口切分（`planWindows`）                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 为什么值得一条夹具：`/fapi/v1/userTrades` **单次窗口上限 7 天**
+ * （实测超了回 `{"code":-4165,"msg":"Maximum time interval is 7 days."}`），
+ * 而补成交是「从水位一直取到现在」——切窗口一旦算错（漏一段 / 重叠错 / 跨过 7 天），
+ * 表现是**线上报 -4165 而后端只在日志里嘟囔一句**，很容易几周没人发现。
+ */
+function checkWindows(): boolean {
+  let ok = true
+  const bad = (msg: string): void => {
+    console.error(`❌ 窗口夹具：${msg}`)
+    ok = false
+  }
+  const D = 86_400_000
+  const W = 7 * D
+
+  /* ① 刚好 7 天 ⇒ 一片，且左闭右开 */
+  const one = planWindows(0, W, W)
+  if (one.length !== 1) bad(`刚好 7 天应该切 1 片，实际 ${one.length}`)
+  else if (one[0].from !== 0 || one[0].to !== W) bad('那一片的区间不对')
+
+  /* ② 边界：多 1 毫秒 ⇒ 两片，且**不重叠、不留缝** */
+  const two = planWindows(0, W + 1, W)
+  if (two.length !== 2) bad(`7 天 + 1ms 应该切 2 片，实际 ${two.length}`)
+  else if (two[0].to !== two[1].from) bad('两片之间必须首尾相接（to 等于下一片的 from）')
+  else if (two[1].to !== W + 1) bad('最后一片必须收到区间终点')
+
+  /* ③ 跨 3 个月（90 天）⇒ 每片都不超过 7 天，且首尾相接 */
+  const many = planWindows(0, 90 * D, W)
+  for (const w of many) {
+    if (w.to - w.from > W) bad(`有一片跨度 ${(w.to - w.from) / D} 天 > 7 天`)
+    if (!(w.to > w.from)) bad('出现空片 / 反片')
+  }
+  for (let i = 1; i < many.length; i++) {
+    if (many[i].from !== many[i - 1].to) bad(`第 ${i} 片与前一片不相接`)
+  }
+  if (many.length !== 13) bad(`90 天按 7 天切应该是 13 片，实际 ${many.length}`)
+
+  /* ④ 空 / 反向 / 非法跨度 ⇒ 空数组（调用方据此直接跳过，别发请求） */
+  if (planWindows(100, 100, W).length) bad('from === to 应该切出空数组')
+  if (planWindows(200, 100, W).length) bad('反向区间应该切出空数组')
+  if (planWindows(0, D, 0).length) bad('跨度 0 应该切出空数组')
+  if (planWindows(NaN, D, W).length) bad('NaN 起点应该切出空数组')
+
+  /* ⑤ 保留期常量本身要自洽：地平线必须 ≥ 单窗口（否则永远切不出一片） */
+  if (!(BINANCE_RETENTION_MS >= BINANCE_MAX_WINDOW_MS)) {
+    bad('保留期（地平线）必须不小于单次窗口上限')
+  }
+
+  if (ok) console.log('✅ 窗口：币安 7 天窗口切分 夹具通过')
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -554,6 +616,7 @@ if (!checkCloseSweep()) failed = true
 if (!checkTier()) failed = true
 if (!checkTierText()) failed = true
 if (!checkPartitions()) failed = true
+if (!checkWindows()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)

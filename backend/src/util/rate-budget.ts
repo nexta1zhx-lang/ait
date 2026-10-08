@@ -30,9 +30,38 @@ function limitOf(): number {
 /** 单次最多等这么久（等不到就抛，别把 HTTP 请求挂在那儿几十秒） */
 const MAX_WAIT_MS = 5_000
 
+/**
+ * ★ 后台类最多只能吃掉窗口的这么大比例（剩下的是给前台留的**保留额度**）。
+ *
+ * 为什么要有它（2026-10-08，用户要求；线上实测抓到的）：
+ * 发布冷启动时 K 线要补 `灌历史 2100 个任务` + `525 个币的缺口`，而账户侧和它
+ * **挤同一个窗口** ⇒ 用户刚打开页面想看账户，拿到的是我们自己限流的
+ * 「取数失败：交易所请求太频繁，稍等几秒再试」。等 K 线补完会自愈，但那几分钟
+ * 恰好是用户最可能来点的时候（刚发完版本）。
+ *
+ * 现在：后台最多吃 `70%`，前台可以用满 100%。后台被这条挡住时会走**退避重试**
+ * （`paced()` 那套），所以表现是「补数慢一点」而不是「补数失败」。
+ *
+ * ⚠️ 前台不设自己的上限（它本来就该优先）；总上限仍然管着两类之和。
+ * `EXCHANGE_BG_SHARE` 可覆盖（本地调试想看效果就调小，比如 0.2）。
+ */
+function bgShare(): number {
+  const v = Number(process.env.EXCHANGE_BG_SHARE)
+  if (!Number.isFinite(v)) return 0.7
+  return Math.min(1, Math.max(0, v))
+}
+
+/**
+ * 权重类别（2026-10-08 加，见下面 `BG_SHARE`）：
+ *   · `fg`（前台）= 有人在等结果的：账户查询、下单、K 线的按需补数…
+ *   · `bg`（后台）= 没人等、纯补数：K 线底座补缺口 / 灌历史、`candles:audit --repair`…
+ */
+export type WeightClass = 'fg' | 'bg'
+
 interface Slot {
   at: number
   w: number
+  cls: WeightClass
 }
 
 let slots: Slot[] = []
@@ -61,10 +90,26 @@ function usedOf(): number {
   return sum
 }
 
+/** 窗口里**后台类**已经吃掉多少（前台那部分不算进来） */
+function bgUsedOf(): number {
+  let sum = 0
+  for (const s of slots) if (s.cls === 'bg') sum += s.w
+  return sum
+}
+
 /** 预算不够时给接口用的一句人话 */
 export class RateBudgetError extends Error {
-  constructor(public readonly weight: number, public readonly used: number) {
-    super('交易所请求太频繁（后端限流保护），稍等几秒再试')
+  constructor(
+    public readonly weight: number,
+    public readonly used: number,
+    /** 哪一类被挡的 —— 后台被**保留额度**挡住时不该吓人，见 `bgShare()` */
+    public readonly cls: WeightClass = 'fg'
+  ) {
+    super(
+      cls === 'bg'
+        ? '后台补数正在给交互请求让路（保留额度），稍后继续'
+        : '交易所请求太频繁（后端限流保护），稍等几秒再试'
+    )
     this.name = 'RateBudgetError'
   }
 }
@@ -84,14 +129,24 @@ export class RateBudgetError extends Error {
  */
 const VERBOSE = process.env.EXCHANGE_VERBOSE === '1'
 
-function tryReserve(weight: number): Promise<boolean> {
+function tryReserve(weight: number, cls: WeightClass): Promise<boolean> {
   const run = chain.then(() => {
     const now = Date.now()
     prune(now)
-    if (usedOf() + weight > limitOf()) return false
-    slots.push({at: now, w: weight})
+    const limit = limitOf()
+    /* 总护栏：两类之和不能超窗口上限 */
+    if (usedOf() + weight > limit) return false
+    /*
+     * 后台护栏：后台不能把前台那份**保留额度**也吃掉。
+     * ⚠️ 这条检查**必须还在 `chain` 里**（否则又回到 check-then-act 竞态，见文件头）。
+     */
+    if (cls === 'bg' && bgUsedOf() + weight > limit * bgShare()) return false
+    slots.push({at: now, w: weight, cls})
     if (VERBOSE) {
-      console.log(`[api] +${weight} 权重（窗口内 ${usedOf()}/${limitOf()}）`)
+      console.log(
+        `[api] +${weight} 权重（${cls}，窗口内 ${usedOf()}/${limit}` +
+          `，其中后台 ${bgUsedOf()}）`
+      )
     }
     return true
   })
@@ -110,7 +165,9 @@ function tryReserve(weight: number): Promise<boolean> {
 export async function takeWeight(
   weight: number,
   tag: string,
-  maxWaitMs = MAX_WAIT_MS
+  maxWaitMs = MAX_WAIT_MS,
+  /** 缺省 `fg`（前台）—— 没人等结果的后台补数请显式传 `'bg'`，见 `bgShare()` */
+  cls: WeightClass = 'fg'
 ): Promise<void> {
   if (!(weight > 0)) return
   if (VERBOSE) console.log(`[api] ${tag} 取权重 ${weight}`)
@@ -131,21 +188,22 @@ export async function takeWeight(
   if (cool > 0) {
     if (cool > maxWaitMs) {
       console.warn(`[budget] ${tag} ${coolingMessage()}`)
-      throw new RateBudgetError(weight, budgetState().used)
+      throw new RateBudgetError(weight, budgetState().used, cls)
     }
     await sleep(cool)
   }
   for (;;) {
-    if (await tryReserve(weight)) return
+    if (await tryReserve(weight, cls)) return
 
     prune(Date.now())
     const oldest = slots[0]
     const need = oldest ? oldest.at + WINDOW_MS - Date.now() + 20 : 100
     if (Date.now() - started + need > maxWaitMs) {
       console.warn(
-        `[budget] ${tag} 权重 ${weight} 被拒（窗口已用 ${usedOf()}/${limit}）`
+        `[budget] ${tag}（${cls}）权重 ${weight} 被拒` +
+          `（窗口已用 ${usedOf()}/${limit}，其中后台 ${bgUsedOf()}/${Math.round(limit * bgShare())}）`
       )
-      throw new RateBudgetError(weight, usedOf())
+      throw new RateBudgetError(weight, usedOf(), cls)
     }
     /* 分段睡：窗口滑动 / 有别的请求释放时能早点抢到 */
     await sleep(Math.min(need, 500))
@@ -153,8 +211,22 @@ export async function takeWeight(
 }
 
 /** 现在的预算占用（诊断 / 日志用） */
-export function budgetState(): {used: number; limit: number; windowMs: number} {
+export function budgetState(): {
+  used: number
+  limit: number
+  windowMs: number
+  /** 窗口里后台类占了多少 / 后台的上限（诊断"补数为什么慢了"一眼就够） */
+  bgUsed: number
+  bgLimit: number
+} {
   const now = Date.now()
   prune(now)
-  return {used: usedOf(), limit: limitOf(), windowMs: WINDOW_MS}
+  const limit = limitOf()
+  return {
+    used: usedOf(),
+    limit,
+    windowMs: WINDOW_MS,
+    bgUsed: bgUsedOf(),
+    bgLimit: Math.round(limit * bgShare())
+  }
 }

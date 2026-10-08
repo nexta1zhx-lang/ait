@@ -34,7 +34,14 @@ import {
   fetchExchangeOverview,
   type ExchangeOverview
 } from './data/exchange-overview'
-import {fetchIncomeHistory, incomeDedupeKey} from './data/exchange-trade'
+import {
+  BINANCE_MAX_WINDOW_MS,
+  BINANCE_RETENTION_MS,
+  INCOME_MAX_PAGES,
+  fetchIncomeHistoryAll,
+  incomeDedupeKey,
+  planWindows
+} from './data/exchange-trade'
 import {subscribeMarkPrice} from './data/kline-stream'
 import {
   publishLive,
@@ -48,6 +55,7 @@ import {
   replaceOpenOrders,
   saveSnapshot,
   upsertFill,
+  maxIncomeTs,
   upsertIncome,
   upsertOpenOrder,
   type FillInput,
@@ -161,11 +169,13 @@ const FILL_SAFETY_MS = 24 * 3600 * 1000
 /**
  * 账本（income）反查"缺哪些成交"时往前看多久。
  *
- * ⚠️ 必须对齐 `/fapi/v1/userTrades` 的**实际上限（最近 7 天）**：比它更老的缺口
- *    **取不回来**，放在候选里只会每轮白占一个名额（`BACKFILL_MAX_SYMBOLS` 只有 8 个）
- *    并把后面的币饿死。所以要补的是"能补的"，不是"全部缺的"。
+ * ⚠️ 对齐**币安的数据地平线**（3 个月），不是 7 天 —— 2026-10-08 实测确认：
+ *    7 天只是 `/fapi/v1/userTrades` 的**单次请求窗口上限**（超了回 `-4165`），
+ *    而它的**数据保留 3 个月**、还能靠 7 天切窗 + 翻页取回来（见 `backfillSymbol`）。
+ *    所以比 3 个月更老的缺口才算"取不回来"；把这些放进候选只会白占那 8 个名额
+ *    （`BACKFILL_MAX_SYMBOLS`）并把后面的币饿死。
  */
-const BACKFILL_LOOKBACK_MS = 7 * 24 * 3600 * 1000 - 3600 * 1000
+const BACKFILL_LOOKBACK_MS = BINANCE_RETENTION_MS
 /** 按某个币自己的起点回补时，再往前留一点重叠（跨时钟/边界，靠唯一键去重） */
 const FILL_OVERLAP_MS = 5 * 60 * 1000
 /** **空转档**（没持仓 + 没挂单 + 10 分钟没动静）：三条兜底按「正常档 ×2」再降一档 */
@@ -199,8 +209,15 @@ const IDLE_MS = 10 * 60 * 1000
  *    不是断流 —— 早先那版 `sleepWs()`「没人看就关掉上游 WS」已经删了（见第 18 节）。
  */
 const HIBERNATE_MS = 2 * 60 * 60 * 1000
-/** 钱账本每次回看的跨度（币安只给最近 7 天） */
-const INCOME_LOOKBACK_MS = 7 * 24 * 3600 * 1000
+/**
+ * 钱账本回补时，从**库里水位**再往前留一点重叠（去重靠 `tranId` 唯一键，重扫无害）。
+ *
+ * ⚠️ 原来这里叫 `INCOME_LOOKBACK_MS` = **固定往前 7 天**，而「币安只给 7 天」这个前提
+ *    是**错的**（2026-10-08 实测：起点分别拉 7/30/90/120 天前返回同一批 222 条）。
+ *    固定窗口的坏处很直接：停机超过 7 天，那段就**永远吃不到**（窗口滑走了）。
+ *    现在按水位回溯，越界由币安保留期（3 个月）截断。
+ */
+const INCOME_OVERLAP_MS = 5 * 60_000
 /**
  * 用户数据流多久**毫无动静**（数据帧和 ping 都没有）就当它哑了。
  * ⚠️ 必须大于币安的 ping 周期（3 分钟）；判断依据只能是 ping ——
@@ -672,6 +689,11 @@ export class KeyStream {
   private evSnap = {taken: 0, skipNoViewer: 0, skipFresh: 0, loggedAt: 0}
   /** activity 时钟有没有从库里种过一次（见 `seedActivity`） */
   private seededActivity = false
+  /**
+   * 已经就「起点早于币安保留期」告警过的币（避免每隔几轮刷一遍同样的话）。
+   * 见 `backfillSymbol` —— 超期的洞**不回补**，但要让人知道它是故意跳过的。
+   */
+  private warnedOld?: Set<string>
   /** 上一次全量采样的时间（空转时按 30 分钟拦） */
   private lastSampleAt = 0
   /** 定期对账 / 健康检查的定时器 */
@@ -902,22 +924,69 @@ export class KeyStream {
     }
   }
 
-  /** 补一个币的成交，返回新记了几笔 */
+  /**
+   * 补一个币的成交，返回新记了几笔。
+   *
+   * ⚠️⚠️ **必须按 7 天切窗**（2026-10-08 修）。币安对 `/fapi/v1/userTrades` 的
+   *     单次请求时间窗**上限就是 7 天**，实测超了直接
+   *     `{"code":-4165,"msg":"Maximum time interval is 7 days."}` ——
+   *     而原来这里是 `fetchMyTrades(unified, cursor, PAGE)`（**不带 `endTime`**），
+   *     即"窗口 = cursor 到**现在**"⇒ 只要水位超过 7 天，这一发**必然报错**，
+   *     那句 `补 X 失败（跳过它继续）` 就是它。
+   *     现在用 `planWindows()` 切成 ≤7 天的窗口逐段取（每段内部再翻页）。
+   *
+   * ⚠️ 地平线 = `BINANCE_RETENTION_MS`（3 个月）：更早的**币安没有**，直接截断、
+   *    不发明知道空手而归的请求（用户 2026-10-08：「回补不上的就不回补」）。
+   *
+   * ⚠️ 页数上限 `BACKFILL_MAX_PAGES` **按币算总量**（不是每个窗口各算）——
+   *    否则窗口一多，一发（`weight 5`）就变成几十发，把预算吃光。
+   *    吃不下的下一轮再来（水位会往前推，天然续跑）。
+   */
   private async backfillSymbol(raw: string, since: number): Promise<number> {
     const unified = this.ex?.market?.(raw)?.symbol ?? raw
-    let cursor = since
+    const now = Date.now()
+    const floor = now - BINANCE_RETENTION_MS
+    const from = Math.max(since, floor)
+    if (from > since) {
+      this.warnedOld ??= new Set<string>()
+      if (!this.warnedOld.has(raw)) {
+        this.warnedOld.add(raw)
+        console.log(
+          `${this.tag} ${raw}：要补的起点早于币安保留期（3 个月）⇒ 那一段不回补` +
+            `（${new Date(since).toISOString().slice(0, 16)} → ${new Date(from).toISOString().slice(0, 16)}）`
+        )
+      }
+    }
     let added = 0
-    for (let page = 0; page < BACKFILL_MAX_PAGES; page++) {
-      const trades = await this.ex.fetchMyTrades(unified, cursor, BACKFILL_PAGE)
-      if (!Array.isArray(trades) || !trades.length) break
-      for (const t of trades) if (await this.saveTrade(t)) added++
-      if (trades.length < BACKFILL_PAGE) break
-      const lastTs = Number(trades[trades.length - 1]?.timestamp ?? 0)
-      if (!(lastTs > cursor)) break
-      // 下一页从最后一笔之后开始（重叠的那笔靠唯一键去重）
-      cursor = lastTs + 1
+    let pages = 0
+    for (const w of planWindows(from, now, BINANCE_MAX_WINDOW_MS)) {
+      let cursor = w.from
+      let windowDone = false
+      while (!windowDone && pages < BACKFILL_MAX_PAGES) {
+        await this.chargeTradeWeight()
+        const trades = await this.ex.fetchMyTrades(unified, cursor, BACKFILL_PAGE, {
+          endTime: Math.min(w.to, now)
+        })
+        pages++
+        if (!Array.isArray(trades) || !trades.length) break
+        for (const t of trades) if (await this.saveTrade(t)) added++
+        if (trades.length < BACKFILL_PAGE) {
+          windowDone = true
+          break
+        }
+        const lastTs = Number(trades[trades.length - 1]?.timestamp ?? 0)
+        if (!(lastTs > cursor)) break
+        // 下一页从最后一笔之后开始（重叠的那笔靠唯一键去重）
+        cursor = lastTs + 1
+      }
+      if (pages >= BACKFILL_MAX_PAGES) break
     }
     return added
+  }
+
+  /** 成交明细一发（`userTrades`，权重 5）—— 走全局预算，别绕过它 */
+  private chargeTradeWeight(): Promise<void> {
+    return chargeWeight(5, 'userTrades')
   }
 
   /**
@@ -989,8 +1058,9 @@ export class KeyStream {
     )
     for (const r of missing) {
       /*
-       * 起点 = 最老那一笔缺的成交（只在**能取到的窗口**里找：`/fapi/v1/userTrades`
-       * 只给最近 7 天，取不到的起点只会每轮白占名额）。
+       * 起点 = 这个币**最老那一笔缺的成交**（按币各给各的，见上面 ⚠️）。
+       * `FILTER` 只在这个窗口内找：比币安保留期（3 个月）更早的**取不回来**，
+       * 拿它当起点只会每轮白占一个名额（`BACKFILL_MAX_SYMBOLS` 只有 8 个）。
        */
       jobs.set(r.symbol, {
         symbol: r.symbol,
@@ -2028,14 +2098,42 @@ export class KeyStream {
 
   /**
    * 拉交易所那本账（`/fapi/v1/income`）落库 —— **权威口径**，含资金费。
-   * 详见 `data/exchange-trade.ts` 的 `fetchIncomeHistory`。
+   * 详见 `data/exchange-trade.ts` 的 `fetchIncomeHistoryAll`（翻页 + 币安保留期截断）。
    */
   private async reconcileIncome(): Promise<void> {
     try {
-      const list = await fetchIncomeHistory(credsOf(this.row), {
-        startTime: Date.now() - INCOME_LOOKBACK_MS
-      })
+      const now = Date.now()
+      /*
+       * 起点 = **库里的水位**（不是"现在往前固定 N 天"）。
+       *
+       * 为什么改（2026-10-08）：原来固定往前看 `INCOME_LOOKBACK_MS`（7 天），
+       * 于是「停机超过 7 天」的那段**永远吃不到**（窗口滑走了）。而币安的数据其实留
+       * **3 个月**，且这个接口没有 7 天窗口限制 ⇒ 按水位来回溯才对。
+       * 水位缺失（新账户 / 清过库）就从**保留期**开始 —— 把能补的一次补全。
+       */
+      const last = await maxIncomeTs(this.row.id)
+      const from = last ? last - INCOME_OVERLAP_MS : now - BINANCE_RETENTION_MS
+      const {records: list, pages, clamped, hitPageCap} = await fetchIncomeHistoryAll(
+        credsOf(this.row),
+        {
+          fromMs: from,
+          toMs: now,
+          /* `income` 一发 30 权重（比一般接口贵得多）⇒ 每页都过全局预算 */
+          charge: () => chargeWeight(30, 'income')
+        }
+      )
+      if (clamped) {
+        console.log(
+          `${this.tag} 钱账本：起点早于币安保留期（3 个月）⇒ 更早的那段不回补`
+        )
+      }
+      if (hitPageCap) {
+        console.warn(
+          `${this.tag} 钱账本：翻到页数上限（${INCOME_MAX_PAGES} 页）—— 更早的可能还没吃到，下一轮继续`
+        )
+      }
       if (!list.length) return
+      if (pages > 1) console.log(`${this.tag} 钱账本翻页 ${pages} 页（共 ${list.length} 条）`)
       const added = await upsertIncome(
         this.row.user_id,
         this.row.id,

@@ -274,7 +274,8 @@ async function repairOne(
   let written = 0
   for (let calls = 0; at < to && calls < maxcalls; calls++) {
     const until = Math.min(to, at + PAGE * ms)
-    await takeWeight(weightOf(g.interval), `audit ${g.interval} ${g.symbol}`)
+    /* `'bg'`：这是批量补数，别把交互请求的保留额度吃掉 */
+    await takeWeight(weightOf(g.interval), `audit ${g.interval} ${g.symbol}`, 5_000, 'bg')
     const bars = await fetchCandlesRange({
       exchangeId: cfg.exchange,
       symbol: g.symbol,

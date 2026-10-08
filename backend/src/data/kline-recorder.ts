@@ -387,7 +387,8 @@ async function paced<T>(tag: string, weight: number, fn: () => Promise<T>): Prom
   await sleep(PACE_MS)
   for (let attempt = 0; ; attempt++) {
     try {
-      await takeWeight(weight, tag, 5_000)
+      /* `'bg'` = 后台类：会被保留额度挡住给前台让路（见 util/rate-budget 的 bgShare） */
+      await takeWeight(weight, tag, 5_000, 'bg')
       return await fn()
     } catch (e) {
       if (!(e instanceof RateBudgetError) || attempt >= 1) throw e

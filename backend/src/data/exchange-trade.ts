@@ -1014,6 +1014,58 @@ export async function listOpenOrders(
 }
 
 /* ------------------------------------------------------------------ */
+/* 币安的历史数据边界（2026-10-08 实测钉死，别再凭记忆写别的数）          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 2026-10-08 用真 key 实测（走服务器出口）：
+ *
+ *   ① `/fapi/v1/userTrades`：**单次请求的时间窗不能超过 7 天**。
+ *      实测传 20 天窗口 → `{"code":-4165,"msg":"Maximum time interval is 7 days."}`。
+ *      而**数据本身保留约 3 个月**（7 天窗口在 8 / 30 / 80 / 100 天前都正常返回，
+ *      只有 100 天前那发是空的 —— 那个账户本来就那么久没在这个币上成交）。
+ *   ② `/fapi/v1/income`：**没有 7 天这一说**。起点分别拉 7 / 30 / 90 / 120 天前，
+ *      返回的是**同一批 222 条** ⇒ 语义是「**从 startTime 起的前 `limit` 条**、升序」，
+ *      所以它可以靠**翻页**一直往前吃。
+ *
+ * ⚠️⚠️ 所以仓库里原先那句「`userTrades` / `income` 都只给最近 7 天」是**错的**：
+ *    7 天是 **userTrades 的单次请求窗口上限**，不是**数据地平线**。
+ *    把它当地平线会同时犯两个错：
+ *      ① 白白放弃 3 个月内**本来能补**的数据；
+ *      ② 一旦水位超过 7 天，`fetchMyTrades(since)`（不带 `endTime` = 窗口到"现在"）
+ *         会直接撞 `-4165` **报错**，而不是安静地少拿一点。
+ */
+
+/** 币安合约**数据地平线**：成交明细与钱账本都只保留最近 3 个月（更早的**不存在**，不回补） */
+export const BINANCE_RETENTION_MS = 90 * 24 * 3600 * 1000
+/** `/fapi/v1/userTrades` 的**单次请求窗口**上限（实测超了回 `-4165`） */
+export const BINANCE_MAX_WINDOW_MS = 7 * 24 * 3600 * 1000
+/** `/fapi/v1/income` 一次最多回多少条 */
+export const INCOME_PAGE_LIMIT = 1000
+/** 钱账本最多翻几页（8000 条；撞到就告警。`income` 一发 **30 权重**，别无限翻） */
+export const INCOME_MAX_PAGES = 8
+
+/**
+ * 把一个区间切成若干**跨度不超过 `maxSpanMs`** 的窗口（左闭右开）。纯函数，自检里直接测。
+ *
+ * 为什么需要它：`/fapi/v1/userTrades` 不接受超过 7 天的窗口（`-4165`），
+ * 所以「从水位补到现在」必须**自己切窗**，不能整个区间一发打出去。
+ */
+export function planWindows(
+  fromMs: number,
+  toMs: number,
+  maxSpanMs: number
+): {from: number; to: number}[] {
+  const out: {from: number; to: number}[] = []
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return out
+  if (!(maxSpanMs > 0) || !(toMs > fromMs)) return out
+  for (let from = fromMs; from < toMs; from += maxSpanMs) {
+    out.push({from, to: Math.min(toMs, from + maxSpanMs)})
+  }
+  return out
+}
+
+/* ------------------------------------------------------------------ */
 /* 交易所那本账（`/fapi/v1/income`，2026-10-06）                        */
 /* ------------------------------------------------------------------ */
 
@@ -1072,7 +1124,9 @@ export function incomeDedupeKey(r: {
  * ⚠️ **权重 30**（币安文档），比一般接口贵得多 ⇒ 别按分钟轮询，见
  *    `exchange-stream.ts` 的对账节奏（接上时一次 + 每小时一次）。
  * ⚠️ 不给 `incomeType` 就是**全类型**（省调用次数）。
- * ⚠️ 币安这个接口一次最多 1000 条、只能查最近 7 天（不给 startTime 时）。
+ * ⚠️ 币安这个接口一次最多 1000 条（`limit`），**没有 7 天窗口限制** ——
+ *    语义是「从 `startTime` 起的前 `limit` 条、升序」，要更早的得**翻页**
+ *    （见 `fetchIncomeHistoryAll`）。数据只保留 **3 个月**（`BINANCE_RETENTION_MS`）。
  */
 export async function fetchIncomeHistory(
   c: ExchangeCredentials,
@@ -1080,15 +1134,19 @@ export async function fetchIncomeHistory(
 ): Promise<IncomeRecord[]> {
   assertTradable(c)
   const ex = createExchange(c)
-  const call =
-    typeof ex.fapiPrivateGetIncome === 'function'
-      ? ex.fapiPrivateGetIncome
-      : null
-  if (!call) return []
+  if (typeof ex.fapiPrivateGetIncome !== 'function') return []
+  const limit = Math.min(INCOME_PAGE_LIMIT, Math.max(1, opts.limit ?? INCOME_PAGE_LIMIT))
+  return incomePage(ex, opts.startTime, limit)
+}
 
-  const limit = Math.min(1000, Math.max(1, opts.limit ?? 1000))
-  const raw: any = await call.call(ex, {
-    startTime: Math.round(opts.startTime),
+/** 一页（`incomePage` 与 `fetchIncomeHistoryAll` 共用；翻页时**不要**每页重建交易所实例） */
+async function incomePage(
+  ex: any,
+  startTime: number,
+  limit: number
+): Promise<IncomeRecord[]> {
+  const raw: any = await ex.fapiPrivateGetIncome({
+    startTime: Math.round(startTime),
     limit
   })
   const list: any[] = Array.isArray(raw) ? raw : []
@@ -1123,6 +1181,81 @@ export async function fetchIncomeHistory(
   /* 旧的排前面（写库顺序无所谓，但看着顺眼好排查） */
   out.sort((a, b) => a.ts - b.ts)
   return out
+}
+
+/**
+ * 拉**整段**钱账本：翻页把 `fromMs` 到现在之间**能取到的**全拿到。
+ *
+ * 为什么要有它（2026-10-08）：`/fapi/v1/income` 一次只给 1000 条，而它的语义是
+ * **「从 `startTime` 起的前 `limit` 条、升序」** ⇒ 只发一发的话，「7 天内超过 1000 条」
+ * 时**更早的那部分永远不会进库**（而且 §54 那条「靠 `income.trade_id` 反连接发现缺哪些成交」
+ * 的路也会跟着瞎）。实测已确认它**没有 7 天窗口限制**，所以往前吃只能靠翻页。
+ *
+ * ⚠️ 三点边界，都按币安的规矩来（用户 2026-10-08：「根据币安的历史要求来改，
+ *    回补不上的就不回补」）：
+ *   · 地平线 = `BINANCE_RETENTION_MS`（**3 个月**）—— 想更早**直接截断**，不发注定空手而归的请求
+ *     （返回值里的 `clamped=true` 让调用方知道"要过、但币安没有"）。
+ *   · 翻页游标 = 上一批**最后一条的 `ts + 1`**（升序，所以往后推就能继续吃）。
+ *   · 页数上限 `INCOME_MAX_PAGES`（一发 **30 权重**）—— 撞到上限记 `hitPageCap`，别无限翻。
+ *
+ * 幂等：`tranId` 是稳定键（`incomeDedupeKey`）+ 写库 `ON CONFLICT` ⇒ 重复翻同一段不会写重复行。
+ */
+export async function fetchIncomeHistoryAll(
+  c: ExchangeCredentials,
+  opts: {
+    fromMs: number
+    toMs?: number
+    /**
+     * 每一页发出去**之前**调一次（调用方拿它记权重 —— `income` 一发 **30 权重**，
+     * 翻页后一次回补可能是好几发，不能绕过全局预算）。
+     */
+    charge?: () => Promise<void>
+  }
+): Promise<{
+  records: IncomeRecord[]
+  pages: number
+  /** 想要的比币安保留期还早 ⇒ 被截断（那一段**不回补**） */
+  clamped: boolean
+  /** 撞到 `INCOME_MAX_PAGES`（可能还有更早的没吃进来） */
+  hitPageCap: boolean
+}> {
+  const to = Math.min(opts.toMs ?? Date.now(), Date.now())
+  const floor = Date.now() - BINANCE_RETENTION_MS
+  const from = Math.max(opts.fromMs, floor)
+  const clamped = opts.fromMs < floor
+
+  assertTradable(c)
+  const ex = createExchange(c)
+  if (typeof ex.fapiPrivateGetIncome !== 'function') {
+    return {records: [], pages: 0, clamped, hitPageCap: false}
+  }
+
+  const byKey = new Map<string, IncomeRecord>()
+  let cursor = from
+  let pages = 0
+  let hitPageCap = false
+  while (cursor < to) {
+    if (pages >= INCOME_MAX_PAGES) {
+      hitPageCap = true
+      break
+    }
+    if (opts.charge) await opts.charge()
+    const batch = await incomePage(ex, cursor, INCOME_PAGE_LIMIT)
+    pages++
+    if (!batch.length) break
+    for (const r of batch) if (r.ts <= to) byKey.set(r.tranId, r)
+    /* 不满一页 ⇒ 后面没有了 */
+    if (batch.length < INCOME_PAGE_LIMIT) break
+    const next = batch[batch.length - 1].ts + 1
+    if (!(next > cursor)) break /* 防死循环（理论上不会） */
+    cursor = next
+  }
+  return {
+    records: [...byKey.values()].sort((a, b) => a.ts - b.ts),
+    pages,
+    clamped,
+    hitPageCap
+  }
 }
 
 /* ------------------------------------------------------------------ */
