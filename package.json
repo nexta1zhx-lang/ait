@@ -60,6 +60,7 @@
     "commander": "^12.1.0",
     "dotenv": "^16.4.5",
     "echarts": "^6.1.0",
+    "fflate": "^0.8.3",
     "lightweight-charts": "^5.2.1",
     "openai": "^4.77.0",
     "pg": "^8.23.1",

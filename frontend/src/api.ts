@@ -1128,6 +1128,110 @@ export const fetchExchangeIncome = (id?: number, days = 7, limit = 200, q: Ledge
       (id ? `&id=${id}` : '')
   )
 
+export interface ExchangeAnalytics {
+  capital: {
+    orders: number
+    depositsUsdt: number
+    withdrawalsUsdt: number
+    netUsdt: number
+    depositsCny: number
+    withdrawalsCny: number
+  }
+}
+
+export interface PositionStatistics {
+  closedCount: number
+  wins: number
+  losses: number
+  breakeven: number
+  grossProfit: number
+  grossLoss: number
+  net: number
+  realized: number
+  fees: number
+  funding: number
+  longCount: number
+  shortCount: number
+  averageHoldSec: number
+  breakdown: {
+    bySymbol: {key: string; closedCount: number; wins: number; net: number}[]
+    byDirection: {key: 'long' | 'short'; closedCount: number; wins: number; net: number}[]
+    byHoldDuration: {key: 'short' | 'medium' | 'long'; closedCount: number; wins: number; net: number}[]
+    incompleteHoldCount: number
+    profitConcentration: {selectedCount: number; totalCount: number; amount: number; sharePct: number}
+    lossConcentration: {selectedCount: number; totalCount: number; amount: number; sharePct: number}
+    entryReasonAvailable: false
+  }
+  daily: {date: string; net: number; cumulative: number; count: number}[]
+}
+
+export interface C2cOrderInput {
+  orderId: string
+  side: 'Buy' | 'Sell'
+  asset: 'USDT'
+  fiat: string
+  fiatTotal: number
+  price: number
+  quantity: number
+  timestamp: string
+}
+
+export interface C2cHistoryOrder {
+  orderId: string
+  side: 'Buy' | 'Sell'
+  asset: 'USDT'
+  fiat: string
+  fiatTotal: number
+  price: number
+  quantity: number
+  timestamp: string
+}
+
+export interface C2cHistoryPage {
+  orders: C2cHistoryOrder[]
+  page: number
+  pageSize: number
+  total: number
+}
+
+export interface C2cSyncResult {
+  ok: boolean
+  from: number
+  to: number
+  pages: number
+  received: number
+  inserted: number
+  skippedDuplicates: number
+}
+
+export const fetchExchangeAnalytics = (q: LedgerQuery = {}, id?: number) =>
+  get<{
+    account: {id: number; name: string}
+    analytics: ExchangeAnalytics
+    positions: PositionStatistics
+  }>(
+    `/api/exchange/analytics?${[
+      ledgerQs(q),
+      id ? `id=${encodeURIComponent(id)}` : ''
+    ].filter(Boolean).join('&')}`
+  )
+
+export const fetchC2cOrderHistory = (id: number, page = 1, pageSize = 20) =>
+  get<C2cHistoryPage>(
+    `/api/exchange/c2c-history?id=${encodeURIComponent(id)}&page=${page}&pageSize=${pageSize}`
+  )
+
+export const importC2cOrders = (id: number, orders: C2cOrderInput[]) =>
+  post<{
+    ok: boolean
+    received: number
+    inserted: number
+    skippedDuplicates: number
+  }>('/api/exchange/c2c-import', {id, orders})
+
+export const syncC2cOrders = (id: number) =>
+  post<C2cSyncResult>('/api/exchange/c2c-sync', {id})
+
 /* ---------------- 仓位历史（「开仓 → 全平」一笔的那种） ---------------- */
 
 /** 仓位周期里的一笔成交（点开详情看的那份） */

@@ -177,7 +177,10 @@ function setAdminTab(v: AdminTab): void {
 <template>
   <PaneShell
     ref="rootRef"
-    :class="{'no-bar': pane === 'exchange'}"
+    :class="{
+      'no-bar': pane === 'exchange' || (pane === 'replay' && route.query.r === 'stats'),
+      'stats-pane': pane === 'replay' && route.query.r === 'stats'
+    }"
     :model-value="pane"
     :options="panes"
     @update:model-value="setPane"
@@ -223,5 +226,8 @@ function setAdminTab(v: AdminTab): void {
 }
 .tabpane.no-bar :deep(.tabpane-body::-webkit-scrollbar) {
   display: none;
+}
+.tabpane.stats-pane :deep(.tabpane-body) {
+  padding-bottom: calc(var(--tabbar-h, 59px) + env(safe-area-inset-bottom) + 18px);
 }
 </style>

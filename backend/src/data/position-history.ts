@@ -263,6 +263,32 @@ export interface PositionHistoryResult {
   openCount: number
   /** 账本里最早的成交时间（这个时间点之前的历史没进账本） */
   since: string | null
+  /** Range-wide statistics over all completed cycles, before the display limit is applied. */
+  summary: {
+    closedCount: number
+    wins: number
+    losses: number
+    breakeven: number
+    grossProfit: number
+    grossLoss: number
+    net: number
+    realized: number
+    fees: number
+    funding: number
+    longCount: number
+    shortCount: number
+    averageHoldSec: number
+  }
+  breakdown: {
+    bySymbol: {key: string; closedCount: number; wins: number; net: number}[]
+    byDirection: {key: 'long' | 'short'; closedCount: number; wins: number; net: number}[]
+    byHoldDuration: {key: 'short' | 'medium' | 'long'; closedCount: number; wins: number; net: number}[]
+    incompleteHoldCount: number
+    profitConcentration: {selectedCount: number; totalCount: number; amount: number; sharePct: number}
+    lossConcentration: {selectedCount: number; totalCount: number; amount: number; sharePct: number}
+    entryReasonAvailable: false
+  }
+  daily: {date: string; net: number; cumulative: number; count: number}[]
 }
 
 /**
@@ -372,25 +398,154 @@ export async function listPositionHistory(
     .sort((a, b) => String(b.openAt).localeCompare(String(a.openAt)))
   const from = Number(range.from ?? 0) || 0
   const to = Number(range.to ?? 0) || 0
-  const closed = all
-    .filter(c => c.closed)
-    .filter(c => {
-      if (!from && !to) return true
-      const at = c.closeAt ? Date.parse(c.closeAt) : NaN
-      if (!Number.isFinite(at)) return false
-      if (from && at < from) return false
-      if (to && at > to) return false
-      return true
-    })
+  const inRangeClosed = all.filter(c => {
+    if (!c.closed) return false
+    if (!from && !to) return true
+    const at = c.closeAt ? Date.parse(c.closeAt) : NaN
+    if (!Number.isFinite(at)) return false
+    if (from && at < from) return false
+    if (to && at > to) return false
+    return true
+  })
+  const summary = inRangeClosed.reduce(
+    (result, cycle) => {
+      result.closedCount++
+      result.net += cycle.net
+      result.realized += cycle.realized
+      result.fees += cycle.fee
+      result.funding += cycle.funding
+      result.holdSec += cycle.holdSec
+      if (cycle.net > 0) {
+        result.wins++
+        result.grossProfit += cycle.net
+      } else if (cycle.net < 0) {
+        result.losses++
+        result.grossLoss += Math.abs(cycle.net)
+      }
+      else result.breakeven++
+      if (cycle.side === 'long') result.longCount++
+      else result.shortCount++
+      return result
+    },
+    {
+      closedCount: 0,
+      wins: 0,
+      losses: 0,
+      breakeven: 0,
+      grossProfit: 0,
+      grossLoss: 0,
+      net: 0,
+      realized: 0,
+      fees: 0,
+      funding: 0,
+      longCount: 0,
+      shortCount: 0,
+      holdSec: 0
+    }
+  )
+  const closed = inRangeClosed
     /* 最近平的在最前（跟币安仓位历史一致） */
     .sort((a, b) => String(b.closeAt).localeCompare(String(a.closeAt)))
     .slice(0, Math.min(500, Math.max(1, Math.round(limit) || 50)))
+  summary.grossProfit = r8(summary.grossProfit)
+  summary.grossLoss = r8(summary.grossLoss)
+  summary.net = r8(summary.net)
+  const aggregate = <K extends string>(
+    cycles: PositionCycle[],
+    keyFor: (cycle: PositionCycle) => K
+  ) => {
+    const groups = new Map<K, {key: K; closedCount: number; wins: number; net: number}>()
+    for (const cycle of cycles) {
+      const key = keyFor(cycle)
+      const group = groups.get(key) ?? {key, closedCount: 0, wins: 0, net: 0}
+      group.closedCount++
+      group.net += cycle.net
+      if (cycle.net > 0) group.wins++
+      groups.set(key, group)
+    }
+    return [...groups.values()].map(group => ({...group, net: r8(group.net)}))
+  }
+  const symbolBreakdown = aggregate(inRangeClosed, cycle => cycle.symbol)
+    .sort((a, b) => b.net - a.net)
+  const directionGroups = aggregate(inRangeClosed, cycle => cycle.side)
+  const byDirection = (['long', 'short'] as const).map(key =>
+    directionGroups.find(group => group.key === key) ?? {key, closedCount: 0, wins: 0, net: 0}
+  )
+  const completeHoldCycles = inRangeClosed.filter(cycle => !cycle.partial)
+  const durationGroups = aggregate(completeHoldCycles, cycle =>
+    cycle.holdSec <= 60 * 60 ? 'short' : cycle.holdSec <= 24 * 60 * 60 ? 'medium' : 'long'
+  )
+  const byHoldDuration = (['short', 'medium', 'long'] as const).map(key =>
+    durationGroups.find(group => group.key === key) ?? {key, closedCount: 0, wins: 0, net: 0}
+  )
+  const profitSampleSize = Math.ceil(inRangeClosed.length * 0.05)
+  const topProfitCycles = [...inRangeClosed]
+    .sort((a, b) => b.net - a.net)
+    .slice(0, profitSampleSize)
+  const topProfitAmount = r8(topProfitCycles.reduce((sum, cycle) => sum + Math.max(0, cycle.net), 0))
+  const largestLosses = inRangeClosed
+    .filter(cycle => cycle.net < 0)
+    .sort((a, b) => a.net - b.net)
+    .slice(0, 5)
+  const largestLossAmount = r8(largestLosses.reduce((sum, cycle) => sum + Math.abs(cycle.net), 0))
+  const breakdown: PositionHistoryResult['breakdown'] = {
+    bySymbol: symbolBreakdown,
+    byDirection,
+    byHoldDuration,
+    incompleteHoldCount: inRangeClosed.length - completeHoldCycles.length,
+    profitConcentration: {
+      selectedCount: topProfitCycles.length,
+      totalCount: inRangeClosed.length,
+      amount: topProfitAmount,
+      sharePct: summary.grossProfit > 0 ? r8(topProfitAmount / summary.grossProfit * 100) : 0
+    },
+    lossConcentration: {
+      selectedCount: largestLosses.length,
+      totalCount: summary.losses,
+      amount: largestLossAmount,
+      sharePct: summary.grossLoss > 0 ? r8(largestLossAmount / summary.grossLoss * 100) : 0
+    },
+    entryReasonAvailable: false
+  }
+  const {
+    holdSec,
+    ...summaryFields
+  } = summary
+  const dailyMap = new Map<string, {net: number; count: number}>()
+  for (const cycle of inRangeClosed) {
+    if (!cycle.closeAt) continue
+    const date = new Date(Date.parse(cycle.closeAt) + 8 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10)
+    const day = dailyMap.get(date) ?? {net: 0, count: 0}
+    day.net += cycle.net
+    day.count++
+    dailyMap.set(date, day)
+  }
+  let cumulative = 0
+  const daily = [...dailyMap.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, value]) => {
+      cumulative += value.net
+      return {
+        date,
+        net: r8(value.net),
+        cumulative: r8(cumulative),
+        count: value.count
+      }
+    })
 
   return {
     cycles: closed,
     open: openList,
     openCount: openList.length,
-    since: fills[0]?.ts ?? null
+    since: fills[0]?.ts ?? null,
+    summary: {
+      ...summaryFields,
+      averageHoldSec: summary.closedCount ? holdSec / summary.closedCount : 0
+    },
+    breakdown,
+    daily
   }
 }
 

@@ -635,6 +635,25 @@ CREATE TABLE IF NOT EXISTS exchange_income (
 CREATE INDEX IF NOT EXISTS exchange_income_user_idx ON exchange_income (user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS exchange_income_key_idx  ON exchange_income (key_id, ts DESC);
 
+-- Binance C2C completed USDT orders imported by the user for principal-flow analysis.
+CREATE TABLE IF NOT EXISTS exchange_c2c_orders (
+  id          BIGSERIAL   PRIMARY KEY,
+  user_id     BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  key_id      BIGINT      NOT NULL REFERENCES user_exchange_keys (id) ON DELETE CASCADE,
+  order_id    TEXT        NOT NULL,
+  side        TEXT        NOT NULL CHECK (side IN ('Buy', 'Sell')),
+  asset       TEXT        NOT NULL DEFAULT 'USDT',
+  fiat        TEXT        NOT NULL,
+  fiat_total  NUMERIC(24,8) NOT NULL,
+  price       NUMERIC(24,8) NOT NULL,
+  quantity    NUMERIC(24,8) NOT NULL,
+  ts          TIMESTAMPTZ NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (key_id, order_id)
+);
+CREATE INDEX IF NOT EXISTS exchange_c2c_orders_range_idx
+  ON exchange_c2c_orders (user_id, key_id, ts DESC);
+
 -- ------------------------------------------- ccxt 的 markets 快照（公开数据）
 -- 币安 exchangeInfo 整份约 1.1MB，ccxt 每个实例都要一份、只在内存，
 -- 于是每次进程重启都得重下（本地隧道 25 秒 > ccxt 默认 10 秒超时，一超时整个实例就坏）。

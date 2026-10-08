@@ -101,6 +101,7 @@ import {
 } from './db/exchange-keys'
 import {
   EXCHANGE_CATALOG,
+  createExchange,
   humanize,
   type ExchangeCredentials
 } from './data/exchange-account'
@@ -140,6 +141,13 @@ import {
   saveSnapshot,
   type OpenOrderInput
 } from './db/exchange-store'
+import {
+  exchangeAnalytics,
+  importC2cOrders,
+  latestC2cOrderTimestamp,
+  listC2cOrderHistory,
+  type C2cOrderInput
+} from './db/exchange-analytics'
 import {
   candleRejectStats,
   candleStoreStats,
@@ -648,6 +656,137 @@ const orderRowOfInput = (o: OpenOrderInput) => ({
  */
 async function chargeExchange(weight: number, tag: string): Promise<void> {
   await takeWeight(weight, tag)
+}
+
+const C2C_SYNC_PAGE_SIZE = 100
+const C2C_SYNC_MAX_PAGES = 1000
+const C2C_SYNC_RANGE_MS = 30 * 24 * 60 * 60 * 1000
+const C2C_SYNC_INITIAL_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000
+
+interface C2cHistoryExchange {
+  request(
+    path: string,
+    api: string,
+    method: string,
+    params: Record<string, number>
+  ): Promise<unknown>
+}
+
+function mapBinanceC2cOrder(
+  value: unknown,
+  page: number,
+  index: number
+): C2cOrderInput | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`币安 C2C 第 ${page} 页第 ${index + 1} 条记录格式无效`)
+  }
+  const row = value as Record<string, unknown>
+  const orderStatus = str(row.orderStatus).toUpperCase()
+  const asset = str(row.asset).toUpperCase()
+  if (!orderStatus || !asset) {
+    throw new Error(`币安 C2C 第 ${page} 页第 ${index + 1} 条记录缺少状态或资产`)
+  }
+  if (orderStatus !== 'COMPLETED' || asset !== 'USDT') return null
+
+  const orderId = str(row.orderNumber).trim()
+  const tradeType = str(row.tradeType).toUpperCase()
+  const fiat = str(row.fiat).trim().toUpperCase()
+  const fiatTotal = num(row.totalPrice)
+  const price = num(row.unitPrice)
+  const quantity = num(row.amount)
+  const rawTimestamp = row.createTime
+  const timestampMs =
+    typeof rawTimestamp === 'number' || /^\d+$/.test(String(rawTimestamp ?? ''))
+      ? Number(rawTimestamp)
+      : Date.parse(String(rawTimestamp ?? ''))
+
+  if (
+    !orderId ||
+    orderId.length > 80 ||
+    (tradeType !== 'BUY' && tradeType !== 'SELL') ||
+    !fiat ||
+    fiat.length > 16 ||
+    fiatTotal === undefined ||
+    fiatTotal < 0 ||
+    price === undefined ||
+    price <= 0 ||
+    quantity === undefined ||
+    quantity <= 0 ||
+    !Number.isFinite(timestampMs)
+  ) {
+    throw new Error(`币安 C2C 第 ${page} 页第 ${index + 1} 条已完成订单字段无效`)
+  }
+
+  return {
+    orderId,
+    side: tradeType === 'BUY' ? 'Buy' : 'Sell',
+    asset: 'USDT',
+    fiat,
+    fiatTotal,
+    price,
+    quantity,
+    timestamp: new Date(timestampMs).toISOString()
+  }
+}
+
+async function fetchBinanceC2cOrders(
+  exchange: C2cHistoryExchange,
+  from: number,
+  to: number
+): Promise<{orders: C2cOrderInput[]; pages: number}> {
+  const orders: C2cOrderInput[] = []
+  let pages = 0
+
+  for (let rangeStart = from; rangeStart <= to;) {
+    const rangeEnd = Math.min(rangeStart + C2C_SYNC_RANGE_MS - 1, to)
+    let page = 1
+    while (true) {
+      await chargeExchange(1, 'Binance C2C 历史')
+      const response = await exchange.request(
+        'c2c/orderMatch/listUserOrderHistory',
+        'sapi',
+        'GET',
+        {
+          startTimestamp: rangeStart,
+          endTimestamp: rangeEnd,
+          page,
+          rows: C2C_SYNC_PAGE_SIZE
+        }
+      )
+      if (!response || typeof response !== 'object' || Array.isArray(response)) {
+        throw new Error('币安 C2C 历史接口返回格式无效')
+      }
+      const result = response as Record<string, unknown>
+      if (result.success === false) {
+        const message = str(result.message, '未知错误')
+        throw new Error(`币安 C2C 历史查询失败：${message}`)
+      }
+      if (!Array.isArray(result.data)) {
+        throw new Error('币安 C2C 历史接口缺少订单列表')
+      }
+
+      for (const [index, value] of result.data.entries()) {
+        const order = mapBinanceC2cOrder(value, page, index)
+        if (order) orders.push(order)
+      }
+      pages++
+
+      const total = num(result.total)
+      const hasMoreByTotal =
+        total !== undefined &&
+        total > 0 &&
+        page * C2C_SYNC_PAGE_SIZE < total
+      const hasMore = result.data.length === C2C_SYNC_PAGE_SIZE || hasMoreByTotal
+      if (!hasMore) break
+      if (pages >= C2C_SYNC_MAX_PAGES) {
+        throw new Error('本次 C2C 更新超过分页上限，请稍后重试')
+      }
+      page++
+    }
+    rangeStart = rangeEnd + 1
+  }
+
+  return {orders, pages}
 }
 
 /**
@@ -3558,6 +3697,178 @@ async function route(
       to: t && t > 0 ? Math.round(t) : null,
       types: types.length ? types : null,
       other
+    }
+  }
+
+  if (p === '/api/exchange/analytics' && method === 'GET') {
+    const requestedIdRaw = url.searchParams.get('id')
+    const requestedId = requestedIdRaw === null ? null : Number(requestedIdRaw)
+    if (requestedIdRaw !== null && (!Number.isInteger(requestedId) || Number(requestedId) <= 0)) {
+      return sendJson(res, 400, {error: '账户 ID 无效'})
+    }
+    const key = requestedId !== null
+      ? await getExchangeKey(me.id, requestedId)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    try {
+      const from = num(url.searchParams.get('from'))
+      const to = num(url.searchParams.get('to'))
+      const analytics = await exchangeAnalytics(me.id, key.id, {
+        from: from && from > 0 ? from : null,
+        to: to && to > 0 ? to : null
+      })
+      const positions = await listPositionHistory(me.id, key.id, 1, undefined, {
+        from: from && from > 0 ? from : null,
+        to: to && to > 0 ? to : null
+      })
+      return sendJson(res, 200, {
+        account: {id: key.id, name: key.name},
+        analytics,
+        positions: {...positions.summary, breakdown: positions.breakdown, daily: positions.daily}
+      })
+    } catch (e) {
+      return fail(res, 'exchange/analytics', e)
+    }
+  }
+
+  if (p === '/api/exchange/c2c-history' && method === 'GET') {
+    const id = num(url.searchParams.get('id'))
+    if (id === undefined || !Number.isInteger(id) || id <= 0) {
+      return sendJson(res, 400, {error: '账户 ID 无效'})
+    }
+    const key = await getExchangeKey(me.id, id)
+    if (!key) return sendJson(res, 404, {error: '交易所账户不存在'})
+    const page = num(url.searchParams.get('page') ?? '1')
+    const pageSize = num(url.searchParams.get('pageSize') ?? '20')
+    if (
+      page === undefined ||
+      pageSize === undefined ||
+      !Number.isInteger(page) ||
+      page < 1 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 100
+    ) {
+      return sendJson(res, 400, {error: '分页参数无效'})
+    }
+    try {
+      const history = await listC2cOrderHistory(me.id, key.id, page, pageSize)
+      return sendJson(res, 200, history)
+    } catch (e) {
+      return fail(res, 'exchange/c2c-history', e)
+    }
+  }
+
+  if (p === '/api/exchange/c2c-import' && method === 'POST') {
+    try {
+      const body = await readJsonBody(req, 4 * 1024 * 1024)
+      const keyId = num(body.id)
+      if (keyId === undefined || !Number.isSafeInteger(keyId) || keyId <= 0) {
+        return sendJson(res, 400, {error: '账户 ID 无效'})
+      }
+      const key = await getExchangeKey(me.id, keyId)
+      if (!key) return sendJson(res, 404, {error: '交易所账户不存在'})
+
+      if (!Array.isArray(body.orders) || body.orders.length > 10000) {
+        return sendJson(res, 400, {error: '订单数据无效或超过 10000 条'})
+      }
+
+      const orders: C2cOrderInput[] = []
+      for (const [index, value] of body.orders.entries()) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return sendJson(res, 400, {error: `第 ${index + 1} 笔订单格式无效`})
+        }
+        const row = value as Record<string, unknown>
+        const orderId = str(row.orderId).trim()
+        const side = row.side
+        const asset = row.asset
+        const fiat = str(row.fiat).trim().toUpperCase()
+        const fiatTotal = num(row.fiatTotal)
+        const price = num(row.price)
+        const quantity = num(row.quantity)
+        const timestamp = str(row.timestamp)
+        const time = Date.parse(timestamp)
+        if (
+          !orderId ||
+          orderId.length > 80 ||
+          (side !== 'Buy' && side !== 'Sell') ||
+          asset !== 'USDT' ||
+          !fiat ||
+          fiat.length > 16 ||
+          fiatTotal === undefined ||
+          fiatTotal < 0 ||
+          price === undefined ||
+          price <= 0 ||
+          quantity === undefined ||
+          quantity <= 0 ||
+          !Number.isFinite(time)
+        ) {
+          return sendJson(res, 400, {error: `第 ${index + 1} 笔订单字段无效`})
+        }
+        orders.push({
+          orderId,
+          side,
+          asset,
+          fiat,
+          fiatTotal,
+          price,
+          quantity,
+          timestamp: new Date(time).toISOString()
+        })
+      }
+
+      const inserted = await importC2cOrders(me.id, key.id, orders)
+      return sendJson(res, 200, {
+        ok: true,
+        received: orders.length,
+        inserted,
+        skippedDuplicates: orders.length - inserted
+      })
+    } catch (e) {
+      return fail(res, 'exchange/c2c-import', e)
+    }
+  }
+
+  if (p === '/api/exchange/c2c-sync' && method === 'POST') {
+    try {
+      const body = await readJsonBody(req)
+      const keyId = num(body.id)
+      if (keyId === undefined || !Number.isSafeInteger(keyId) || keyId <= 0) {
+        return sendJson(res, 400, {error: '账户 ID 无效'})
+      }
+      const key = await getExchangeKey(me.id, keyId)
+      if (!key) return sendJson(res, 404, {error: '交易所账户不存在'})
+      if (key.exchange.toLowerCase() !== 'binance') {
+        return sendJson(res, 400, {error: 'C2C 历史更新仅支持币安账户'})
+      }
+      if (key.sandbox) {
+        return sendJson(res, 400, {error: 'C2C 历史更新仅支持币安正式账户'})
+      }
+
+      const latestTimestamp = await latestC2cOrderTimestamp(me.id, key.id)
+      const endTimestamp = Date.now()
+      const startTimestamp =
+        latestTimestamp ?? endTimestamp - C2C_SYNC_INITIAL_LOOKBACK_MS
+      const fetched = startTimestamp <= endTimestamp
+        ? await fetchBinanceC2cOrders(
+            createExchange(exchangeCredsOf(key)),
+            startTimestamp,
+            endTimestamp
+          )
+        : {orders: [], pages: 0}
+      const inserted = await importC2cOrders(me.id, key.id, fetched.orders)
+
+      return sendJson(res, 200, {
+        ok: true,
+        from: startTimestamp,
+        to: endTimestamp,
+        pages: fetched.pages,
+        received: fetched.orders.length,
+        inserted,
+        skippedDuplicates: fetched.orders.length - inserted
+      })
+    } catch (e) {
+      return fail(res, 'exchange/c2c-sync', e, humanize)
     }
   }
 
