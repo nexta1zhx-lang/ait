@@ -125,46 +125,20 @@ c '构建并启动（首次要拉镜像 + 装依赖，几分钟）'
 #    那个 `PREBUILT=1` 就被当成**命令名**了 ⇒ `PREBUILT=1: command not found`（踩过）。
 #    而 `$SUDO env PREBUILT=1 docker …` 两种身份（root / sudo）都通，实测过。
 #
-# 先只构建、不启动：下面要停下来做分区迁移（换表那一刻不能有写入），
-# 构建放前面能让停机窗口只覆盖「迁移」，不覆盖「编译镜像」。
+# ⚠️ 2026-10-09 起这里**不再跑 candles 分区迁移/维护**。
+#    原来每次发布都跑一遍，其中那句无条件的 `ANALYZE candles` 在线上实测要 **~106 秒**
+#    （1100 万行 / 2 核机器），而幂等路径下它其实什么都没改 —— 纯粹白花，占了整趟发布近一半。
+#
+#    分区的日常维护**本来就由应用自己负责**，不依赖发布流程（见 data/kline-recorder.ts）：
+#      · 启动时 `ensureCandlePartitions()`：先建好分区再写任何一行；
+#      · 之后每小时一次，跨零点/跨月建新子分区，并顺手丢过期分区；
+#      · 保留期另有分级的 `pruneCandles()`（DROP 整片子分区）。
+#    `ensureCandlePartitions()` 对**还没分区**的库直接返回空（优雅降级成按行 DELETE 清理），
+#    所以老库不会因为少了这一步而报错。
+#
+#    ⚠️ 一次性迁移（普通表 → 分区表）仍然需要停机手工做：
+#       `npm run candles:partition -- --apply`（先停 app；见 docs/DEPLOY.md）。
 $SUDO env PREBUILT="${PREBUILT:-0}" docker compose -f docker-compose.prod.yml build app
-
-c '检查 candles 分区状态（只读）'
-# 先演练迁移脚本并解析它报告的状态。已经是分区表时，--apply 只做幂等维护，
-# 不会改名/搬表，可以让线上 app 继续写；普通表或迁移续跑仍必须先停 app。
-if ! PARTITION_STATUS=$(
-  $SUDO docker compose -f docker-compose.prod.yml run --rm --no-deps app \
-    node backend/dist/scripts/migrate-candles-partitions.js 2>&1
-); then
-  printf '%s\n' "$PARTITION_STATUS"
-  die '分区状态演练失败 —— 未停止应用，先查数据库/迁移日志'
-fi
-printf '%s\n' "$PARTITION_STATUS"
-if ! grep -q '当前状态：candles 已分区=' <<<"$PARTITION_STATUS"; then
-  die '迁移演练没有报告 candles 分区状态 —— 未停止应用，拒绝猜测'
-fi
-
-APP_STOPPED=0
-if grep -q '当前状态：candles 已分区=true' <<<"$PARTITION_STATUS"; then
-  ok 'candles 已是分区表；在线执行幂等维护，不停 app'
-else
-  c '停止 app（普通表/迁移续跑需要停写）'
-  $SUDO docker compose -f docker-compose.prod.yml stop app || true
-  APP_STOPPED=1
-fi
-
-c 'candles 分区维护/迁移'
-if ! $SUDO docker compose -f docker-compose.prod.yml run --rm --no-deps app \
-      node backend/dist/scripts/migrate-candles-partitions.js --apply; then
-  # 即便原先走在线维护，失败也可能留下未完成的分区变更；失败时停写，避免继续写入。
-  if (( APP_STOPPED == 0 )); then
-    $SUDO docker compose -f docker-compose.prod.yml stop app || true
-  fi
-  warn '分区迁移失败 —— 应用先不启，避免它对着半迁移的库写'
-  printf '      看上面输出；库里的 candles / candles_old 都还在，没丢数据\n'
-  exit 1
-fi
-ok '分区结构与数据核对通过'
 
 c '启动'
 $SUDO docker compose -f docker-compose.prod.yml up -d
