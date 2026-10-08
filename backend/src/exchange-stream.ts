@@ -867,10 +867,13 @@ export class KeyStream {
         await sleep(250)
       }
       if (added) {
-        console.log(`${this.tag} REST 补成交 ${added} 笔`)
+        console.log(`${this.tag} REST 补成交 ${added} 笔（查了 ${syms.length} 个币：${syms.join('、')}）`)
         emit(this.row.id, {type: 'backfill', added})
         /* 补回来的成交同样可能改变持仓集合（离线期间开的仓就在这里被发现） */
         this.resyncAfterFill()
+      } else {
+        /* 查了、但确实没有新成交也要留一行 —— 不然「没查」和「查了没漏」在日志里长得一样 */
+        console.log(`${this.tag} 补成交：查了 ${syms.length} 个币（${syms.join('、')}），没有遗漏`)
       }
     } catch (e) {
       console.warn(`${this.tag} 补成交失败：${(e as Error).message.slice(0, 140)}`)
@@ -898,33 +901,72 @@ export class KeyStream {
   /**
    * 要补哪些交易对（**交易所原始符号**，如 `BTCUSDT`）。
    *
-   * 两拨人**共用** `BACKFILL_MAX_SYMBOLS` 这 8 个名额，顺序是：
-   *   ① 账本里最近 30 天有成交的币，按**最后成交时间倒序**（SQL 里 `LIMIT` 就截到 8 了）；
-   *   ② 再并上当前持仓（不会新增名字，只是去重）。
+   * 三拨人**共用** `BACKFILL_MAX_SYMBOLS` 这 8 个名额，顺序就是优先级：
+   *   ① **账本（income）里有、成交明细我们没有的币** —— 见下面那段 ⚠️⚠️；
+   *   ② 当前持仓（无条件进，别被后面的挤掉）；
+   *   ③ 账本里最近 30 天有成交的币，按最后成交时间倒序。
    *
-   * ⚠️ 所以**持仓币不保证进得来**：① 先把 8 个占满时，末尾 `slice()` 会把持仓全挤掉 ——
+   * ⚠️⚠️ **① 是 2026-10-08 补的，它修的是一整类"永久丢失"**：
+   *    掉线期间在某个币上成交、事后又平掉 ⇒ 它**没有持仓**、`exchange_fills` 里也**没有它**
+   *    ⇒ 原来的两条路（③ 已知成交 + ② 持仓）都看不见它，那几笔成交明细永远补不回来。
+   *    实测踩到：掉线 3.5 小时，JUP / MET 上成交了 23 笔（income 账本正确记着），
+   *    而 `exchange_fills` 这两个币是 **0 条**；`symbolsToBackfill()` 只返回 RAYSOL /
+   *    PUMP / 1000FLOKI / 1000CHEEMS ⇒ 那 23 笔一直补不回来。
+   *    income 行带 `symbol` + `trade_id`，正好能定位"哪些币有我们没记的成交"，
+   *    而且**不用打交易所**（本地一条 SQL）。
+   *    ① 天然**轮转**：补完前 8 个币之后它们的 income 不再"比成交新"，
+   *    下一轮就轮到后面的币 —— 不需要额外的游标。
+   *
+   * ⚠️ ② 的顺序也重要：原来 ③ 先 `LIMIT 8` 占满、末尾 `slice()` 会把持仓全挤掉 ——
    *    典型是「开了仓但 30 天内没再成交过」的币。仓位周期是从 `exchange_fills` **推**出来的
    *    （见 `data/position-history.ts`），漏了它的成交就等于那一段周期画不出来。
-   *    真要放开，别只调大这个数（每一轮的成本会跟着线性涨），应该给持仓留固定名额
-   *    或者加个轮转游标。
    *
    * 一轮的代价：≤8 币 × ≤4 页 × 权重 5。
    */
   private async symbolsToBackfill(): Promise<string[]> {
-    const rows = await query<{symbol: string}>(
-      `SELECT symbol
-         FROM exchange_fills
-        WHERE key_id = $1 AND ts > now() - interval '30 days'
-        GROUP BY symbol
-        ORDER BY max(ts) DESC
+    const set = new Set<string>()
+
+    /* ① 账本里有、成交里没有的币（= 掉线期间成交、我们一条明细都没记下来的） */
+    const missing = await query<{symbol: string}>(
+      `SELECT i.symbol
+         FROM exchange_income i
+         LEFT JOIN (
+           SELECT symbol, max(ts) AS t FROM exchange_fills WHERE key_id = $1 GROUP BY symbol
+         ) f ON f.symbol = i.symbol
+        WHERE i.key_id = $1 AND i.symbol IS NOT NULL AND i.symbol <> ''
+          AND i.ts > now() - interval '30 days'
+          AND (f.t IS NULL OR i.ts > f.t)
+        GROUP BY i.symbol
+        ORDER BY max(i.ts) DESC
         LIMIT $2`,
       [this.row.id, BACKFILL_MAX_SYMBOLS]
     )
-    const set = new Set(rows.map(r => r.symbol).filter(Boolean))
-    // 持仓存的是 ccxt 统一符号（BTC/USDT:USDT）→ 换成交易所原始符号
+    for (const r of missing) set.add(r.symbol)
+    if (missing.length) {
+      /* 看得见才有得查：补完会再打一行「REST 补成交 N 笔」 */
+      console.log(
+        `${this.tag} 发现 ${missing.length} 个币的成交明细缺失（账本里有）：${missing.map(m => m.symbol).join('、')}`
+      )
+    }
+
+    /* ② 持仓（ccxt 统一符号 → 交易所原始符号） */
     for (const p of this.lastOverview?.futures.positions ?? []) {
       const raw = this.ex?.market?.(p.symbol)?.id ?? p.symbol
       if (raw) set.add(String(raw))
+    }
+
+    /* ③ 账本里最近 30 天有成交的币（名额还有剩才补） */
+    if (set.size < BACKFILL_MAX_SYMBOLS) {
+      const rows = await query<{symbol: string}>(
+        `SELECT symbol
+           FROM exchange_fills
+          WHERE key_id = $1 AND ts > now() - interval '30 days'
+          GROUP BY symbol
+          ORDER BY max(ts) DESC
+          LIMIT $2`,
+        [this.row.id, BACKFILL_MAX_SYMBOLS]
+      )
+      for (const r of rows) if (r.symbol) set.add(r.symbol)
     }
     return [...set].slice(0, BACKFILL_MAX_SYMBOLS)
   }

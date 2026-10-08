@@ -4147,3 +4147,55 @@ candles_1h  (按月)   candles_4h / candles_1d (按年)
 3. **别在定时任务里做全市场扫描**：要扫就记账 + 只扫"刚动过的"，或者手动触发。
 4. `candles` 的**索引建在父表**上（子分区自动继承）；**分区表上不能设 `reloptions`**
    （PG 16 报错），reloptions 逐片子分区设（`ensureCandlePartitions` 里做）。
+
+## 54. 「掉线期间成交、事后平掉」的币，成交明细永远补不回来（2026-10-08 实测抓到）
+
+**怎么发现的**：用户让我把本地整套流程跑一遍看恢复情况。本地服务停了 3.5 小时，重启后：
+K 线追平了、income 账本 +23 条（资金费/已实现盈亏）、余额快照也补了 ——
+但 `exchange_fills`（成交明细）**一条没动**。
+
+**根因**：`symbolsToBackfill()` 只从两个来源推「该查哪些币」：
+
+```
+① exchange_fills 里最近 30 天有成交的币（按最后成交时间倒序，LIMIT 8）
+② 当前持仓的币
+```
+
+而这次成交发生在 **JUP / MET / PROM / RESOLV** 上，事后**平掉了**（无持仓），
+`exchange_fills` 里又**一条都没有**（就是漏掉的那批）⇒ **两个来源都看不见它们**，
+于是永远不去查，那 15 笔明细就永久丢了（盈亏/仓位周期都从 `exchange_fills` 推，跟着一起错）。
+
+⚠️ 注意这是个**鸡生蛋**结构：候选集来自"我们已经知道的成交"，而缺的恰恰是"我们还不知道的成交"。
+只要「成交 → 平仓 → 进程重启」这个顺序出现，就会静默丢数据 —— 而**这正是掉线/重启的典型形态**。
+
+**修法**：加第三个来源，且**优先级最高**（`exchange-stream.ts` 的 `symbolsToBackfill()`）：
+
+```sql
+-- 账本（income）里出现过的币、且它的账目比我们记的成交还新 ⇒ 有我们没记下来的成交
+SELECT i.symbol FROM exchange_income i
+  LEFT JOIN (SELECT symbol, max(ts) AS t FROM exchange_fills WHERE key_id=$1 GROUP BY symbol) f
+    ON f.symbol = i.symbol
+ WHERE i.key_id = $1 AND i.symbol <> '' AND i.ts > now() - interval '30 days'
+   AND (f.t IS NULL OR i.ts > f.t)
+ GROUP BY i.symbol ORDER BY max(i.ts) DESC LIMIT $2
+```
+
+为什么 income 是可靠的锚：它**按时间拉**（`incomeType` 全量、不需要币），
+所以掉线期间的钱账本一定是对的 —— 拿对的去点出错的，正好。
+
+* 顺序也改了：**① 缺失发现 → ② 持仓（无条件进）→ ③ 已知成交**。
+  原来的顺序会把持仓币挤掉（`LIMIT 8` 先占满 + 末尾 `slice()`），
+  而「开了仓但 30 天没再成交」的币同样会让仓位周期画不出来。
+* ① 天然**轮转**：补完前 8 个币后它们不再"账目比成交新"，下一轮自动轮到后面的币。
+* 顺手加了一行**可见性日志**：`发现 N 个币的成交明细缺失（账本里有）：…` 和
+  `补成交：查了 N 个币（…），没有遗漏` —— 原来「没查」与「查了没漏」在日志里长得一样，
+  这次就是靠这个才一眼看出问题。
+
+**实测修复效果**（本地，掉线 3.5 小时）：
+
+```
+[T+24s] [exch:9] 发现 4 个币的成交明细缺失（账本里有）：RESOLVUSDT、PROMUSDT、METUSDT、JUPUSDT
+[T+33s] [exch:9] REST 补成交 15 笔（查了 8 个币：RESOLV…、PROM…、MET…、JUP…、RAYSOL…、PUMP…）
+```
+
+`exchange_fills` 里 key 9 的成交 **24 → 39 笔**，四个币的最新成交（02:55）与 income 账本对齐。

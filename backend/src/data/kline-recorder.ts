@@ -880,8 +880,18 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
  * + `EXPLAIN` + 临时探针）才定位到「巡检一轮 4 分 40 秒」。
  * 现在每个维护任务自己报耗时，超阈值就打日志 —— 慢会自己冒出来，不用再问人。
  */
-/** 超过这个耗时就算「慢」，打一条告警（3 秒：这台机器上正常任务都是几十毫秒级） */
-const SLOW_TASK_MS = 3_000
+/**
+ * 超过多久算「慢」并告警。默认 3 秒 —— 这台机器上纯 DB 的维护任务都是几十毫秒级。
+ *
+ * ⚠️ **要走交易所 REST 的任务不能套这个数**：`补缺口` 一轮要按限速打十几发请求
+ *    （本地走隧道时实测 57–63 秒，这是**正常工作量**不是故障）。这类任务单独放宽，
+ *    否则积压期间每一拍都告警，把真正该看的日志淹掉。
+ */
+const SLOW_TASK_MS_DEFAULT = 3_000
+const SLOW_TASK_MS: Record<string, number> = {
+  补缺口: 120_000,
+  灌历史: 120_000
+}
 const taskStats: Record<string, {lastMs: number; lastAt: number; runs: number; slow: number}> = {}
 
 /** 包一个维护任务，记耗时；慢过阈值告警一次（每次跑都告警，便于 f 日志里搜） */
@@ -895,11 +905,12 @@ async function timed<T>(name: string, fn: () => Promise<T>): Promise<T> {
     s.lastMs = ms
     s.lastAt = Date.now()
     s.runs++
-    if (ms >= SLOW_TASK_MS) {
+    const limit = SLOW_TASK_MS[name] ?? SLOW_TASK_MS_DEFAULT
+    if (ms >= limit) {
       s.slow++
       console.warn(
         `[kline] ⚠️ 维护任务慢：${name} 用了 ${(ms / 1000).toFixed(1)} 秒` +
-          `（阈值 ${SLOW_TASK_MS / 1000} 秒，第 ${s.slow} 次）`
+          `（阈值 ${limit / 1000} 秒，第 ${s.slow} 次）`
       )
     }
   }
