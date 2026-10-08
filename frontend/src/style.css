@@ -1931,6 +1931,38 @@ button.danger {
   overflow-x: hidden;
 }
 
+/* ==================== 行情面板：暖灰底 + 暖橙主色（2026-10-08） ==================== */
+/*
+ * 背景是用户在 7 个候选里挑的「**⑦ 暖灰底**」：**抬一档灰、不加任何光**。
+ *
+ * ⚠️ 中途给过两轮别的方案，都**被否了**，别再往这儿加特效：
+ *    · 弧形地平线光（暖橙光带 / 冷蓝版 / 顶部日出）—— 用户：「不要那个半圈那个东西」；
+ *    · 波形动态（单线横流 / 三条波带 / 底部声波条 / 同心涟漪 / 行进亮段 / 呼吸光）
+ *      —— 用户：「算了不要了，改为 7 方案」。
+ *    ⇒ 这里**只有纯色**：没有渐变、没有动画、没有遮罩。
+ *
+ * 主色从低饱和暖沙 `#d3b583` 提亮成暖橙 `#ffb347`（只在这一格）：排序箭头、
+ * 置顶星、置顶行的币名、选中行底色都跟着它走（它们取的本来就是 `--blue*` / `--accent*`）。
+ *
+ * ⚠️ **范围只到行情这一格**（`.mkt-panel` 在合约页和开单分析页各挂一次，两处一起生效）。
+ *    整站其它地方仍是 :root 的暖沙主色。
+ *    要全站推：把下面这几行搬到 `:root`。但 ⚠️ **K 线的蜡烛色是写死的**
+ *    （`KlineChart.vue` / `MiniKline.vue` + 成交量柱的 `rgba()`），动涨跌色时必须连它们一起改。
+ * ⚠️ `--blue` / `--blue-soft` 这两个历史别名**要显式再写一遍**：`--blue: var(--accent)`
+ *    是在 `:root` 上声明的，别指望它在这里跟着新 `--accent` 变（写出来最稳，也少一层推理）。
+ */
+.mkt-panel {
+  --panel: #0d0c0b;
+  --panel-2: #16130f;
+  --border: #242019;
+  --accent: #ffb347;
+  --accent-soft: color-mix(in srgb, #ffb347 13%, transparent);
+  --accent-line: color-mix(in srgb, #ffb347 42%, transparent);
+  --accent-ink: #231603;
+  --blue: #ffb347;
+  --blue-soft: color-mix(in srgb, #ffb347 13%, transparent);
+}
+
 /*
  * 面板撑满左栏：标题 / 榜单 / 计数固定，**只有列表滚**
  * （跟「历史分析」那个面板一套做法）。
@@ -2301,6 +2333,36 @@ button.danger {
 .mkt-table .chg.down {
   background: color-mix(in srgb, var(--bad) 95%, #000);
   color: #fff;
+}
+
+/*
+ * ⑭ 2026-10-08：用户从候选里挑了「⑦ 暖灰底」那一版，数据样式跟着收干净 ——
+ *    **方块去掉，只留彩色数字**（＋箭头，见 `MarketPanel` 的 `arrowOf`）。
+ *
+ * ⚠️ 尺寸 / 居中 / 字重**一个都没动**（还是钉死的 72×28 + 居中 + `--fw-mid`）：
+ *    只换填充 ⇒ 列宽、行高、小数点对齐全部原样，不会因为「去个背景」顺带把行压扁。
+ * ⚠️ 这是这一格第 14 次改（①~⑬ 的完整历史在上面 `.chg` 与 `.chg.up` 两段里）。
+ *    **要回退**：删掉下面这几条即可，实心白字那两档（82% / 95%）原样还在。
+ * ⚠️ 现在的对比度（在行情面板那块暖灰底 `#0d0c0b` 上实测）：
+ *    `--ok` #5eba89 ≈ **7.7:1**、`--bad` #e35561 ≈ **5.2:1** —— 都比 AA(4.5) 高，
+ *    所以「彩色数字」这一档不像实心块那样需要靠压深填充来救白字。
+ */
+.mkt-table .chg.up,
+.mkt-table .chg.down {
+  background: none;
+}
+.mkt-table .chg.up {
+  color: var(--ok);
+}
+.mkt-table .chg.down {
+  color: var(--bad);
+}
+/* 方向箭头：小一号、跟着数字同色，只做「扫一眼」的冗余提示 */
+.mkt-table .chg .ar {
+  margin-right: 3px;
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0.85;
 }
 
 /*
@@ -6690,6 +6752,15 @@ button.badge:disabled {
     border-left: 0;
     border-right: 0;
     border-radius: 0;
+    /*
+     * ★ 2026-10-08：手机这一档必须**显式给回底色** —— 上面 `.split .panel`
+     *   （同一条 media 里）把面板设成了 `background: transparent`（行情列表通栏、
+     *   露页面底色是那时的做法）。不补这一行的话，整块「⑦ 暖灰底」在手机上**完全看不到**
+     *   （宽屏走 `.panel { background: var(--panel) }`，所以只有手机漏）。
+     * ⚠️ 特指度 `.split.m-market .mkt-panel`（0,3,0）压得过 `.split .panel`（0,2,0），
+     *    不依赖先后顺序。
+     */
+    background: var(--panel);
   }
   .split.m-market .mkt-panel > h2,
   .split.m-market .mkt-bar {

@@ -693,6 +693,17 @@ function pctText(v: number | null): string {
 
 const toneOf = (v: number | null): string =>
   v === null ? 'dim' : v >= 0 ? 'up' : 'down'
+
+/**
+ * 涨跌方向箭头（`▲` / `▼`）。
+ *
+ * ★ 2026-10-08 加：涨跌幅从「实心色块 + 白字」改成**彩色数字**之后（见 style.css
+ *   的 `.chg` ⑭），方向只靠红绿区分，色弱 / 强光下就没那么一眼了；
+ *   补一个箭头做**冗余提示**，扫一列时方向和大小一起进眼睛。
+ * ⚠️ 拿不到数（`—`）时**不画箭头** —— 否则会有个孤零零的方向标在说一件不存在的事。
+ */
+const arrowOf = (v: number | null): string =>
+  v === null || !Number.isFinite(v) ? '' : v >= 0 ? '▲' : '▼'
 </script>
 
 <template>
@@ -939,6 +950,7 @@ const toneOf = (v: number | null): string =>
                   换基准那一下走 `chgOf(r)`（基准以来的涨跌幅），否则就是交易所的 24h。
                 -->
                 <span class="chg" :class="toneOf(chgOf(r))">
+                  <span v-if="arrowOf(chgOf(r))" class="ar">{{ arrowOf(chgOf(r)) }}</span>
                   {{ pctText(chgOf(r)) }}
                 </span>
               </td>
