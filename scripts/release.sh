@@ -11,13 +11,14 @@
 #   bash scripts/release.sh              # 打包 + 上传 + 部署（会问一句确认）
 #   bash scripts/release.sh -y           # 不问，直接发
 #   bash scripts/release.sh --dry-run    # 只打包 + 打印命令，不碰服务器
-#   bash scripts/release.sh --no-check   # 跳过「未提交改动」与 tsc 类型检查
+#   bash scripts/release.sh --no-check   # 跳过「未提交改动」检查（tsc 由预构建那步保证）
 #
 # 服务器端那个脚本是 scripts/deploy.sh（加 swap / 装 Docker / 起容器 / 自检）；
 # 这个脚本只管「把本机代码安全地送过去并让它跑起来」。
 #
 # 可覆盖的环境变量（一般不用动）：
 #   HOST / SSH_USER / KEY / APP_DIR / DOMAIN
+#   POLL_TIMEOUT —— 服务器上构建+起容器的等待上限（秒，默认 1800）；超时不杀进程，只如实报「可能还在跑」
 
 set -euo pipefail
 
@@ -31,6 +32,8 @@ SSH_USER="${SSH_USER:-ubuntu}"
 KEY="${KEY:-$HOME/.ssh/LightsailDefaultKey-ap-northeast-1.pem}"
 APP_DIR="${APP_DIR:-/opt/crypto-advisor}"
 DOMAIN="${DOMAIN:-bitcoooin.cn}"
+# 服务器上「构建镜像 + 起容器 + 自检」的等待上限（秒）。超了只报「可能还在跑」，不杀它。
+POLL_TIMEOUT="${POLL_TIMEOUT:-1800}"
 LOCAL_TAR="${LOCAL_TAR:-/tmp/ca.tgz}"
 REMOTE_TAR="${REMOTE_TAR:-/tmp/ca.tgz}"
 # 需要单独补传的 APK 先落在服务器的这个暂存目录（见「4b. APK 按需上传」）
@@ -52,10 +55,50 @@ for arg in "$@"; do
   esac
 done
 
-c()    { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+# ---------------------------------------------------------------- 计时
+# 每两个 `c '标题'` 之间自动记一段耗时，收尾打一张「各阶段耗时」小表 ——
+# 哪一步慢一眼就能看出来，不用再去问人（2026-10-08 用户要求）。
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time() * 1000))'
+  else
+    echo $(( $(date +%s) * 1000 ))
+  fi
+}
+# 毫秒 → 「12.3 秒」
+secs() { printf '%d.%d 秒' $(( $1 / 1000 )) $(( ($1 % 1000) / 100 )); }
+
+TOTAL_T0="$(now_ms)"
+STAGE_T0="$TOTAL_T0"
+STAGE_NAME='前置检查'
+STAGE_TIMES=()
+
+# 打印阶段标题，同时把**上一段**的耗时收进表里
+c() {
+  local now
+  now="$(now_ms)"
+  STAGE_TIMES+=("${STAGE_NAME}|$(( now - STAGE_T0 ))")
+  STAGE_T0="$now"
+  STAGE_NAME="$*"
+  printf '\n\033[1;36m==> %s\033[0m\n' "$*"
+}
+
+# 收尾：把最后一段也记上再打表。成功和失败都打 —— 失败时更需要知道卡在哪一步。
+finish() {
+  local now total entry
+  now="$(now_ms)"
+  STAGE_TIMES+=("${STAGE_NAME}|$(( now - STAGE_T0 ))")
+  total=$(( now - TOTAL_T0 ))
+  printf '\n\033[1;36m==> 各阶段耗时\033[0m\n'
+  for entry in "${STAGE_TIMES[@]}"; do
+    printf '    %s —— %s\n' "${entry%|*}" "$(secs "${entry##*|}")"
+  done
+  printf '    %s —— %s\n' '合计' "$(secs "$total")"
+}
+
 ok()   { printf '    \033[1;32m✓\033[0m %s\n' "$*"; }
 warn() { printf '    \033[1;33m!\033[0m %s\n' "$*"; }
-die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; finish; exit 1; }
 md5of() { if command -v md5 >/dev/null 2>&1; then md5 -q "$1"; else md5sum "$1" | cut -d' ' -f1; fi; }
 
 # ---------------------------------------------------------------- 0. 本机前置检查
@@ -73,10 +116,6 @@ if (( CHECK )); then
     die '工作区有未提交的改动 —— 先「git commit」再发布（要强行跳过就加 --no-check）'
   fi
   ok "代码已保存：$(git log -1 --format='%h %s')"
-
-  c '类型检查（tsc --noEmit）'
-  npm run --silent typecheck
-  ok '通过'
 fi
 
 # ---------------------------------------------------------------- 0b. 本机预构建
@@ -85,7 +124,13 @@ fi
 # （777 个模块）= **111 秒**，占整趟发布 5 分钟里的 1/3 还多 —— 哪怕只改了一个 .vue。
 # 本机（M 系 Mac）跑同一份脚本只要几秒，产物是纯 JS/CSS/HTML，跟平台无关。
 # 容器侧靠 `Dockerfile` 的 `PREBUILT` 开关跳过编译（见 docker-compose.prod.yml）。
-c '本机预构建（backend/dist + frontend/dist 随包发过去）'
+#
+# 2026-10-08：**顺手去掉一次白跑的 tsc**。原来这步前面还有一步 `tsc --noEmit` 类型检查，
+#   可 `npm run build:all` 里的 `tsc` 就是同一条命令再来一遍（只是这次带 emit）。
+#   本机实测两次各 ~2 秒 —— 省得不多，但同一件检查没必要做两遍。
+#   （别把它和「服务器上 tsc ≈31 秒」混了：那是没开 PREBUILT 时在 2 核 Lightsail 上的数字。）
+#   类型检查的保证不变：`tsc` 报错这一步就 die，一个字节都发不出去。
+c '本机预构建 + 类型检查（tsc + vite build，产物随包发过去）'
 rm -rf backend/dist frontend/dist
 npm run --silent build:all
 [[ -f backend/dist/server.js ]] || die '预构建失败：没有 backend/dist/server.js'
@@ -138,6 +183,7 @@ if (( DRY_RUN )); then
     "$SSH_USER" "$HOST" "$APP_DIR"
   printf '    （APK 不在主包里，只把服务器上没有的那些单独 scp 到 %s）\n' "$REMOTE_APK_DIR"
   printf '    curl https://%s/api/health\n' "$DOMAIN"
+  finish
   exit 0
 fi
 
@@ -207,9 +253,11 @@ fi
 # ---------------------------------------------------------------- 5. 远端：检查 → 清旧 → 解包 → 核对 → 部署
 c '远端执行（清旧 → 解包 → 核对 → scripts/deploy.sh）'
 ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" \
-  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR' '1'" <<'REMOTE'
+  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR' '1' '$POLL_TIMEOUT'" <<'REMOTE'
 set -euo pipefail
 APP_DIR="$1"; TAR="$2"; WANT_TS="$3"; WANT_DEPLOY="$4"; APK_STAGE="$5"
+# 第 7 个参数：等部署结束的上限（秒）—— 超时只报「可能还在跑」，不杀进程
+POLL_TIMEOUT="${7:-1800}"
 # 第 6 个参数：PREBUILT —— 包里有本机构建好的 backend/dist / frontend/dist，
 # 让 compose 把 build-arg 传进 Dockerfile 跳过服务器上的编译（见上面「本机预构建」）。
 PREBUILT="${6:-0}"
@@ -307,8 +355,10 @@ DEPLOY_LOG=/tmp/ca-deploy.log
 rm -f "$DEPLOY_LOG"
 setsid bash -c "sudo env PREBUILT=$PREBUILT bash scripts/deploy.sh > $DEPLOY_LOG 2>&1; echo DEPLOY_EXIT=\$? >> $DEPLOY_LOG" </dev/null >/dev/null 2>&1 &
 seen=0
+waited=0
 while true; do
   sleep 5
+  waited=$((waited + 5))
   if [[ -s "$DEPLOY_LOG" ]]; then
     total=$(wc -l < "$DEPLOY_LOG")
     if (( total > seen )); then
@@ -319,12 +369,26 @@ while true; do
     if [[ -n "$exit_line" ]]; then
       [[ "$exit_line" == 0 ]] || {
         echo "✗ scripts/deploy.sh 失败（exit $exit_line）—— 上面是服务器上的完整输出" >&2
+        echo "  完整日志还在服务器上：$DEPLOY_LOG" >&2
         exit 1
       }
       break
     fi
   fi
+  # 卡住别无限等：到点如实报「可能还在跑」，但**不杀它** ——
+  # 杀在构建/起容器中间只会留下半拉状态，比多等一会儿难收拾。
+  if (( waited >= POLL_TIMEOUT )); then
+    echo "✗ 等了 $((POLL_TIMEOUT / 60)) 分钟还没等到 DEPLOY_EXIT —— 服务器上的部署**可能还在跑**（没有杀它）" >&2
+    echo "  接着看：ssh 上去 tail -f $DEPLOY_LOG" >&2
+    echo "  确认它跑完（或日志里出现错误）之后，再按需要重发" >&2
+    exit 1
+  fi
 done
+
+# 传上去的 12MB 包留在服务器 /tmp 没意义 ⇒ 部署完就删。
+# （/tmp/ca-deploy.log 留着：上面那些失败提示都指着它，事后排查要看。）
+rm -f "$TAR"
+echo "==> 已清掉服务器上的包：$TAR"
 
 # Caddyfile 是 bind mount 的**单个文件**：内容变了 compose 看不出来，`up -d` 不会重建容器，
 # 而 Caddy 只在启动时读一次配置 —— 不重建的话改了等于没改。
@@ -361,13 +425,18 @@ if [[ -s /tmp/ca-health.remote.json ]]; then
   head -c 300 /tmp/ca-health.remote.json; echo
   if grep -q '"ok":true' /tmp/ca-health.remote.json; then
     ok "线上正常：https://$DOMAIN"
+    finish
     exit 0
   fi
   warn 'health 返回了，但 ok 不是 true（看上面远端输出里的数据库提示）'
+  finish
   exit 1
 fi
 warn "https://$DOMAIN/api/health 试了 $ATTEMPTS 次都没通："
 printf '      curl -s https://%s/api/health\n' "$DOMAIN"
-printf '      看日志：ssh -i %s %s@%s "cd %s && sudo docker compose -f docker-compose.prod.yml logs --tail=80 app"\n' \
+printf '      部署日志：ssh -i %s %s@%s "tail -60 /tmp/ca-deploy.log"\n' \
+  "$KEY" "$SSH_USER" "$HOST"
+printf '      应用日志：ssh -i %s %s@%s "cd %s && sudo docker compose -f docker-compose.prod.yml logs --tail=80 app"\n' \
   "$KEY" "$SSH_USER" "$HOST" "$APP_DIR"
+finish
 exit 1
