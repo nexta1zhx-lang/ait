@@ -40,15 +40,18 @@ import {
   HIGH_INTERVALS,
   bucketCoverage,
   candleRejectStats,
+  ensureCandlePartitions,
   findStaleBuckets,
   lastTradedAt,
   maxOpenTimes,
+  pendingCheckStats,
   pruneCandles,
   readRecentCandles,
   rollupFrom1m,
   saveCandles,
   saveKlineRecon,
   sumClosed1m,
+  verifyPendingChecks,
   type HighInterval,
   type KlineInterval,
   type KlineReconRow,
@@ -136,6 +139,16 @@ const GAP_WINDOW_BARS = 120
 const GAP_FLUSH_GRACE_MS = 30_000
 /** 库内自洽看最近几个桶（4h 看 4 个就是 16 小时，够覆盖"重启前后写坏的那一个"） */
 const STALE_CHECK_BUCKETS = 4
+/**
+ * 每轮**只复核**多少个账目（`kline_pending_check`）。
+ *
+ * 账上常态只有「刚 seed / 刚补过数据」的那些桶，所以这个上限几乎用不到；
+ * 真赶上大批量补数据（比如重启后 525 个币一起修）时，它保证单轮 IO 有上界 —— 一个桶
+ * 最贵也就 1440 行（1d），50 个 ≈ 7 万行，比原来那轮的 370 万行小两个数量级。
+ */
+const STALE_SWEEP_LIMIT = 50
+/** 分区维护的间隔（跨天/跨月/跨年建新分区、丢过期分区；幂等，很便宜） */
+const PARTITION_TICK_MS = 60 * 60_000
 /**
  * 「静默」判定：上游超过这么久没推某个币，就当它停牌/下架（或我们那条流死了）。
  * 1m 流在交易的币上每秒都有帧，所以 15 分钟已经很宽松。
@@ -861,6 +874,37 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
   }
 }
 
+/* ---------------- 维护任务计时（P4，2026-10-08） ----------------
+ *
+ * 为什么要有：2026-10-08 那次「服务器为什么慢」，只能 ssh 进去手工量（`pg_stat_activity`
+ * + `EXPLAIN` + 临时探针）才定位到「巡检一轮 4 分 40 秒」。
+ * 现在每个维护任务自己报耗时，超阈值就打日志 —— 慢会自己冒出来，不用再问人。
+ */
+/** 超过这个耗时就算「慢」，打一条告警（3 秒：这台机器上正常任务都是几十毫秒级） */
+const SLOW_TASK_MS = 3_000
+const taskStats: Record<string, {lastMs: number; lastAt: number; runs: number; slow: number}> = {}
+
+/** 包一个维护任务，记耗时；慢过阈值告警一次（每次跑都告警，便于 f 日志里搜） */
+async function timed<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const t0 = Date.now()
+  try {
+    return await fn()
+  } finally {
+    const ms = Date.now() - t0
+    const s = (taskStats[name] ??= {lastMs: 0, lastAt: 0, runs: 0, slow: 0})
+    s.lastMs = ms
+    s.lastAt = Date.now()
+    s.runs++
+    if (ms >= SLOW_TASK_MS) {
+      s.slow++
+      console.warn(
+        `[kline] ⚠️ 维护任务慢：${name} 用了 ${(ms / 1000).toFixed(1)} 秒` +
+          `（阈值 ${SLOW_TASK_MS / 1000} 秒，第 ${s.slow} 次）`
+      )
+    }
+  }
+}
+
 /* ---------------- 三档校验 ----------------
  *
  *  ① 实时（写入前）  `sanitizeRows` 在 `db/candle-store.ts` 的 `saveCandles` 里 —— 四条入库路
@@ -876,7 +920,10 @@ const gapStats = {
   lastQueued: 0,
   lastCooling: 0,
   lastStale: 0,
-  lastSilent: 0
+  lastSilent: 0,
+  /** 这一轮取出来复核的账目数 / 还判不了的 */
+  lastChecked: 0,
+  lastStaleWaiting: 0
 }
 let gapChecking = false
 
@@ -895,14 +942,36 @@ export async function runGapCheck(reason: string): Promise<{
   queued: number
   cooling: number
   stale: number
+  /** 账上「1m 还没补齐」、这一轮判不了的桶（留着下轮复核） */
+  staleWaiting: number
+  /** 账目超期销账的条数（1m 已过保留期，永远判不了了） */
+  staleExpired: number
   /** 上游好久没推帧的币（停牌/下架，或者我们那条流静默死了 —— 已顺手重订一次） */
   silent: number
 }> {
   if (gapChecking || stopped || !cfg) {
-    return {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0, silent: 0}
+    return {
+      scanned: 0,
+      found: 0,
+      queued: 0,
+      cooling: 0,
+      stale: 0,
+      staleWaiting: 0,
+      staleExpired: 0,
+      silent: 0
+    }
   }
   gapChecking = true
-  const out = {scanned: 0, found: 0, queued: 0, cooling: 0, stale: 0, silent: 0}
+  const out = {
+    scanned: 0,
+    found: 0,
+    queued: 0,
+    cooling: 0,
+    stale: 0,
+    staleWaiting: 0,
+    staleExpired: 0,
+    silent: 0
+  }
   try {
     const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
     const now = Date.now()
@@ -959,34 +1028,34 @@ export async function runGapCheck(reason: string): Promise<{
       }
     }
     /*
-     * ② 库内自洽：高周期桶的值对不对（残桶在①里看不出来：它在那儿、根数也对，就是值不对）。
-     *   把 1m 缺根的那些桶排除掉了 —— 那是①的活，不能记到高周期行的账上。
+     * ② 库内自洽：只复核**账上**那些「我们自己写下去、且写的时候桶还没收盘」的高周期桶。
+     *
+     * 2026-10-08 改的（见 docs/EXCHANGE.md 第 53 节）：
+     *   原来是「4 桶 × 5 档 × 全部币」的定时全市场扫描 —— 每轮 ≈ 370 万行 1m 读取、
+     *   实测 **4 分 40 秒**（1d 一档就 3 分 33 秒），而 `gapChecking` 守卫会让上一轮没完就跳过
+     *   下一轮 ⇒ 实际是**背靠背连续跑**，磁盘被占 60–99%（`wa=48%`、loadavg 冲到 11）——
+     *   这才是「服务器慢」和发布期间超时的真身。而那段最贵的 4h/1d 从没揪出过任何坏桶。
+     *   现在：只核对账上「桶已收盘」的那些，一个桶一次定向探测（≤1440 行）。
+     *   全量扫描保留成**手动**入口（`?run=full`），供上线时把历史遗留理一遍。
      */
+    const sweep = await verifyPendingChecks(STALE_SWEEP_LIMIT)
+    out.stale = sweep.stale.length
+    out.staleWaiting = sweep.waiting
+    out.staleExpired = sweep.expired
     const staleByInterval: Record<string, number> = {}
     const staleSamples: string[] = []
-    for (const it of HIGH_INTERVALS) {
-      const ms = MS[it]
-      const stale = await findStaleBuckets(
-        it,
-        now - STALE_CHECK_BUCKETS * ms,
-        scope,
-        symbols.map(v => v.symbol)
-      )
-      if (!stale.length) continue
-      out.stale += stale.length
-      staleByInterval[it] = stale.length
-      for (const sv of stale) {
-        if (staleSamples.length < 5) {
-          staleSamples.push(
-            `${sv.symbol}/${it} @${new Date(sv.openTime).toISOString()} ` +
-              `库里 close=${sv.ours.close} 而 1m 重算=${sv.from1m.close}`
-          )
-        }
-        const st = [...states.values()].find(v => v.sym.symbol === sv.symbol)
-        if (!st) continue
-        if (out.queued < GAP_ALERT_MAX && queueRepair(st, sv.openTime)) out.queued++
-        else out.cooling++
+    for (const sv of sweep.stale) {
+      staleByInterval[sv.interval] = (staleByInterval[sv.interval] ?? 0) + 1
+      if (staleSamples.length < 5) {
+        staleSamples.push(
+          `${sv.symbol}/${sv.interval} @${new Date(sv.openTime).toISOString()} ` +
+            `库里 close=${sv.ours.close} 而 1m 重算=${sv.from1m.close}（记账来源 ${sv.why}）`
+        )
       }
+      const st = [...states.values()].find(v => v.sym.symbol === sv.symbol)
+      if (!st) continue
+      if (out.queued < GAP_ALERT_MAX && queueRepair(st, sv.openTime)) out.queued++
+      else out.cooling++
     }
     gapStats.lastAt = now
     gapStats.lastFound = out.found
@@ -995,6 +1064,14 @@ export async function runGapCheck(reason: string): Promise<{
     gapStats.lastCooling = out.cooling
     gapStats.lastStale = out.stale
     gapStats.lastSilent = out.silent
+    gapStats.lastStaleWaiting = out.staleWaiting
+    gapStats.lastChecked = sweep.due
+    /* 账上超期（1m 都没了、判不了）要看得见：说明有桶一直没能复核 */
+    if (out.staleExpired) {
+      console.warn(
+        `[kline] 复核账目超期销账 ${out.staleExpired} 条（记账超过 7 天仍判不了 —— 1m 已过保留期）`
+      )
+    }
     if (out.found) {
       const detail = Object.entries(byInterval)
         .map(([k, v]) => `${k} ${v}`)
@@ -1029,6 +1106,50 @@ export async function runGapCheck(reason: string): Promise<{
     gapChecking = false
   }
   return out
+}
+
+/**
+ * **手动**的全量残桶体检（`GET /api/kline/gaps?run=full`）。
+ *
+ * 就是 2026-10-08 之前那个定时任务（4 桶 × 5 档 × 全部币的全市场扫描），
+ * 现在只在这个入口跑：**上线时把历史遗留的残桶理一遍**，之后定时路径只走记账复核
+ * （见 `verifyPendingChecks` 与 docs/EXCHANGE.md 第 53 节）。
+ *
+ * ⚠️ 它很贵：实测一轮 4 分 40 秒（1d 一档 3 分 33 秒），会把磁盘占满 —— 别没事就点它。
+ */
+export async function runFullStaleSweep(reason = '手动'): Promise<{
+  stale: number
+  queued: number
+  samples: string[]
+}> {
+  if (!cfg) return {stale: 0, queued: 0, samples: []}
+  const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
+  const now = Date.now()
+  const samples: string[] = []
+  let stale = 0
+  let queued = 0
+  for (const it of HIGH_INTERVALS) {
+    const ms = MS[it]
+    const found = await timed(`全量残桶体检 ${it}`, () =>
+      findStaleBuckets(it, now - STALE_CHECK_BUCKETS * ms, scope, symbols.map(v => v.symbol))
+    )
+    stale += found.length
+    for (const sv of found) {
+      if (samples.length < 5) {
+        samples.push(
+          `${sv.symbol}/${it} @${new Date(sv.openTime).toISOString()} ` +
+            `库里 close=${sv.ours.close} 而 1m 重算=${sv.from1m.close}`
+        )
+      }
+      const st = [...states.values()].find(v => v.sym.symbol === sv.symbol)
+      if (st && queueRepair(st, sv.openTime)) queued++
+    }
+  }
+  console.log(
+    `[kline] 全量残桶体检（${reason}）：发现 ${stale} 个对不上的高周期桶，排进修复队列 ${queued} 个` +
+      (samples.length ? ` —— 例：${samples.join('；')}` : '')
+  )
+  return {stale, queued, samples}
 }
 
 const reconStats = {
@@ -1553,8 +1674,17 @@ async function seedHistory(): Promise<void> {
 
 async function prune(): Promise<void> {
   try {
-    const n = await pruneCandles()
-    if (n) console.log(`[kline] 分级清理：删掉 ${n} 行（1m/5m >7天、15m >30天、1h >400天）`)
+    const r = await pruneCandles()
+    if (r.partitions.length) {
+      /* 分区路径：丢掉整片子分区（秒级、零死行）—— 这才是保留期的常态 */
+      console.log(
+        `[kline] 分级清理：丢掉 ${r.partitions.length} 片子分区（≈${r.rows} 行）：` +
+          `${r.partitions.join('、')}`
+      )
+    } else if (r.rows) {
+      /* 老库（未迁移）路径：按 scope + 档位分批删 */
+      console.log(`[kline] 分级清理：删掉 ${r.rows} 行（1m/5m >7天、15m >30天、1h >400天）`)
+    }
   } catch (e) {
     console.warn(`[kline] 清理失败：${(e as Error).message.slice(0, 120)}`)
   }
@@ -1578,6 +1708,11 @@ export function startKlineRecorder(): void {
 async function boot(): Promise<void> {
   const c = loadConfig()
   cfg = {exchange: c.exchange, marketType: c.marketType, apiBase: c.apiBase}
+  /*
+   * 分区先就位再写任何一行：跨天/跨月的那一刻如果没建好，晚到的帧会落进 DEFAULT 兜底分区
+   * （不丢，但要多一次搬迁）。幂等、几十毫秒。
+   */
+  await timed('分区维护', () => ensureCandlePartitions())
   symbols = await listPerpetualSymbols({exchangeId: cfg.exchange, apiBase: cfg.apiBase})
   const max = Number(process.env.KLINE_RECORDER_MAX || 0)
   if (Number.isFinite(max) && max > 0) symbols = symbols.slice(0, max)
@@ -1613,13 +1748,17 @@ async function boot(): Promise<void> {
   }
   console.log(`[kline] 底座启动：${symbols.length} 个合约，1 条上游连接（只订 1m）`)
   await open()
-  timers.push(setInterval(() => void flush(), FLUSH_MS))
+  timers.push(setInterval(() => void timed('落库', flush), FLUSH_MS))
   timers.push(setInterval(logStats, STATS_MS))
-  timers.push(setInterval(() => void prune(), PRUNE_EVERY_MS))
+  timers.push(setInterval(() => void timed('分级清理', prune), PRUNE_EVERY_MS))
   timers.push(setInterval(checkWatchdog, WATCHDOG_MS))
-  timers.push(setInterval(() => void repairTick(), REPAIR_TICK_MS))
+  timers.push(setInterval(() => void timed('补缺口', repairTick), REPAIR_TICK_MS))
   /* 第 2 档：存在性检查（0 权重）。第一次等一个周期，别跟启动那轮 seed/repair 抢 */
-  timers.push(setInterval(() => void runGapCheck('定时'), GAP_CHECK_MS))
+  timers.push(setInterval(() => void timed('缺口巡检', () => runGapCheck('定时')), GAP_CHECK_MS))
+  /* 分区维护：跨零点/跨月/跨年时建新的时间子分区（幂等，几毫秒），顺手丢过期分区 */
+  timers.push(
+    setInterval(() => void timed('分区维护', ensureCandlePartitions), PARTITION_TICK_MS)
+  )
   /* 第 3 档：抽样对账。启动 15 分钟后第一轮（那之后 seed 基本灌完，比出来才有意义） */
   if ((process.env.KLINE_RECON ?? '').toLowerCase() !== 'off') {
     timers.push(
@@ -1696,10 +1835,22 @@ export interface KlineRecorderStats {
   recon: typeof reconStats
   /** 合约发现（生命周期）：最近一次的结果 + 累计增删 */
   discovery: typeof discoveryStats & {subscribed: number; lifecycle: number}
+  /**
+   * 每个维护任务的耗时（`lastMs` / 跑过几次 / 慢过几次）。
+   *
+   * 2026-10-08 加的：那天「服务器为什么慢」只能靠 ssh 进去手工量（`pg_stat_activity`
+   * + `EXPLAIN` + 我的探针），最后才发现是巡检一轮 4 分 40 秒在占磁盘。
+   * 有了这张表，慢会自己出现在接口和日志里 —— 不用再问人。
+   */
+  tasks: Record<string, {lastMs: number; lastAt: number; runs: number; slow: number}>
+  /** 待复核的高周期桶（`kline_pending_check`）：账目数与最老那条多久了 */
+  pendingCheck: {rows: number; oldestSecAgo: number}
   lastError: string
 }
 
-export function klineRecorderStats(): KlineRecorderStats {
+export async function klineRecorderStats(): Promise<KlineRecorderStats> {
+  /* 账目数读库：小表（常态几十行），但要防它拖慢这个诊断接口 */
+  const pending = await pendingCheckStats().catch(() => ({rows: -1, oldestMs: null}))
   return {
     enabled: started && !stopped,
     connected: sock?.readyState === 1,
@@ -1724,6 +1875,11 @@ export function klineRecorderStats(): KlineRecorderStats {
     gaps: {...gapStats},
     recon: {...reconStats},
     discovery: {...discoveryStats, subscribed: symbols.length, lifecycle: lifecycle.size},
+    tasks: Object.fromEntries(Object.entries(taskStats).map(([k, v]) => [k, {...v}])),
+    pendingCheck: {
+      rows: pending.rows,
+      oldestSecAgo: pending.oldestMs ? Math.round((Date.now() - pending.oldestMs) / 1000) : -1
+    },
     lastError: stats.lastError
   }
 }

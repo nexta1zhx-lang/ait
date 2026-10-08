@@ -93,7 +93,21 @@ const UPSERT = `ON CONFLICT (exchange, market_type, symbol, interval, open_time)
                 trades           = EXCLUDED.trades,
                 taker_buy_volume = EXCLUDED.taker_buy_volume,
                 source           = EXCLUDED.source,
-                updated_at       = now()`
+                updated_at       = now()
+  -- ⚠️ 值全一样就别写（2026-10-08）：不生成新版本 ⇒ 没有死行、不动索引。
+  --    回补 / 对账 / 重算会把同一批桶反复写很多遍而且是同一个值，这正是死行与
+  --    autovacuum 负载的主要来源（实测死行几小时就攒到 60 万、触发全表 3.4GB 的扫描）。
+  --    source 也参与比较：同一份 OHLCV 由不同来源写进来时要留下来源变化。
+  --    （open 故意不在 SET 里 —— 见 sanitizeRows：同一根的开价以第一次写入为准。）
+  WHERE candles.pair             IS DISTINCT FROM EXCLUDED.pair
+     OR candles.high             IS DISTINCT FROM EXCLUDED.high
+     OR candles.low              IS DISTINCT FROM EXCLUDED.low
+     OR candles.close            IS DISTINCT FROM EXCLUDED.close
+     OR candles.volume           IS DISTINCT FROM EXCLUDED.volume
+     OR candles.quote_volume     IS DISTINCT FROM EXCLUDED.quote_volume
+     OR candles.trades           IS DISTINCT FROM EXCLUDED.trades
+     OR candles.taker_buy_volume IS DISTINCT FROM EXCLUDED.taker_buy_volume
+     OR candles.source           IS DISTINCT FROM EXCLUDED.source`
 
 function rowParams(r: NewCandleRow): unknown[] {
   return [
@@ -222,7 +236,15 @@ function describeRejects(): string {
     .join('、')
 }
 
-/** 批量 UPSERT，返回真正写进去的行数（被同桶覆盖也算） */
+/**
+ * 批量 UPSERT，返回**实际变更**的行数。
+ *
+ * ⚠️ 2026-10-08 起 `DO UPDATE` 带 `WHERE … IS DISTINCT FROM`：**值一模一样就不写**
+ *    （不生成新版本 ⇒ 不产生死行、不动索引）。原来是无条件覆盖，而回补 / 对账 / 重算
+ *    会把同一批桶反复写很多遍（同一个值），那正是死行与 vacuum 负载的主要来源。
+ *    `rowCount` 因此从「提交的行数」变成「真正变化的行数」，所以返回值和日志口径都叫
+ *    「实际变更」——别把它当成"写了多少行"。
+ */
 export async function saveCandles(rows: NewCandleRow[]): Promise<number> {
   if (!rows.length) return 0
   const clean = sanitizeRows(rows)
@@ -232,6 +254,8 @@ export async function saveCandles(rows: NewCandleRow[]): Promise<number> {
     )
   }
   if (!clean.length) return 0
+  /* 记账：这一批里有没有「写下去的时候桶还没收盘」的高周期行（见 recordPendingChecks） */
+  await recordPartials(clean)
   let written = 0
   for (let i = 0; i < clean.length; i += BATCH_ROWS) {
     const chunk = clean.slice(i, i + BATCH_ROWS)
@@ -243,10 +267,51 @@ export async function saveCandles(rows: NewCandleRow[]): Promise<number> {
                $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12},
                $${base + 13}::int, $${base + 14}, $${base + 15})`
     })
-    await query(`INSERT INTO candles (${COLS}) VALUES ${tuples.join(',')} ${UPSERT}`, values)
-    written += chunk.length
+    const res = await getPool().query(`INSERT INTO candles (${COLS}) VALUES ${tuples.join(',')} ${UPSERT}`, values)
+    written += res.rowCount ?? 0
   }
   return written
+}
+
+/**
+ * 把这一批里「高周期 + 写的时候桶还没收盘」的行记进复核账（`kline_pending_check`）。
+ *
+ * 为什么放在这里：四条入库路（实时流 / rollup / 补缺口 / 灌历史）最后都过 `saveCandles`
+ * ⇒ 一处判定、四处生效（与 `sanitizeRows` 同一个思路），不会漏。
+ *
+ * ⚠️ `source !== 'seed'` 却写了未收盘的桶 = **违反设计**（`rollup` 的累加器有 `partial`
+ *    自保、`rollupFrom1m` 的区间按桶对齐、REST 覆盖走 `closedOnly`），所以这里直接告警 ——
+ *    等于一条断言，将来谁改坏了当场就知道，而不是等几周后靠巡检发现。
+ */
+async function recordPartials(rows: NewCandleRow[]): Promise<void> {
+  const now = Date.now()
+  const partial = rows.filter(
+    r => r.interval !== '1m' && r.openTime + (MS[r.interval] ?? 0) > now
+  )
+  if (!partial.length) return
+  const unexpected = partial.filter(r => r.source !== 'seed')
+  if (unexpected.length) {
+    const one = unexpected[0]
+    console.warn(
+      `[kline] ⚠️ 写了未收盘的高周期桶（按设计不该发生，已记账等收盘复核）：` +
+        `${unexpected.length} 行，例 ${one.interval} ${one.pair} ` +
+        `@${new Date(one.openTime).toISOString()}（source=${one.source}）`
+    )
+  }
+  try {
+    await recordPendingChecks(
+      partial.map(r => ({
+        interval: r.interval,
+        symbol: r.symbol,
+        openTime: r.openTime,
+        scope: {exchange: r.exchange, marketType: r.marketType},
+        why: r.source
+      }))
+    )
+  } catch (e) {
+    /* 记账失败不能连累落库：下轮还会再写，这一桶大不了少复核一次 */
+    console.warn(`[kline] 复核记账失败：${(e as Error).message.slice(0, 120)}`)
+  }
 }
 
 /**
@@ -609,6 +674,27 @@ export async function rollupFrom1m(
      ${UPSERT}`,
     [interval, bucketMs, symbols, fromMs, toMs, scope.exchange, scope.marketType]
   )
+  /*
+   * ⚠️ 这条 INSERT 绕过了 `saveCandles` ⇒ 记账钩子要单独补一次（否则它写出的残桶没人复核）。
+   *    正常调用方（`repairSymbol`）的 `from`/`to` 都按桶对齐、且 `to` = 当前桶起点，
+   *    所以这里几乎不会触发；一旦触发就说明有人传了非对齐区间 ⇒ 记账 + 告警。
+   */
+  const lastBucket = Math.floor((toMs - 1) / bucketMs) * bucketMs
+  if (lastBucket + bucketMs > Date.now()) {
+    console.warn(
+      `[kline] ⚠️ rollupFrom1m 写到了未收盘的桶（${interval} @${new Date(lastBucket).toISOString()}）——` +
+        `按构造不该发生，已记账等收盘复核`
+    )
+    await recordPendingChecks(
+      symbols.map(symbol => ({
+        interval: interval as KlineInterval,
+        symbol,
+        openTime: lastBucket,
+        scope,
+        why: 'rollup'
+      }))
+    ).catch(() => undefined)
+  }
   return res.rowCount ?? 0
 }
 
@@ -619,33 +705,49 @@ const KEEP: [KlineInterval, string][] = [
   ['15m', '30 days'],
   ['1h', '400 days']
 ]
+/** 一次 DELETE 最多删多少行（老库路径：避免长事务 + 一次性写放大） */
+const PRUNE_BATCH = 20_000
+
+export interface PruneResult {
+  /** 删掉/丢掉的**行数**（分区路径是估计值，来自 `reltuples`） */
+  rows: number
+  /** 丢掉的子分区名（分区路径才有） */
+  partitions: string[]
+}
 
 /**
- * 分级清理。返回删掉的行数。
+ * 分级清理。返回删掉的行数（分区路径还会返回丢掉的子分区名）。
  *
  * 为什么这么分：1m/5m 只在「最近的图」上有用；15m 要能画 30 天；1h 要能画一年；
  * 4h/1d 一辈子最值钱（一年才 19 万行）。
  *
- * ⚠️ 必须**按 scope 拆开、一档一条 DELETE**。原来那条
- *    `(interval = '1m' AND open_time < …) OR …` 四条分支都缺索引前缀
- *    （`candles` 的索引全部以 `exchange, market_type` 打头）⇒
- *    每次清理都顺序扫 3.8GB，连 autovacuum 一起把磁盘占死（2026-10-07 线上实测）。
- *    拆开后每条都是「前 3 列等值 + `open_time` 范围」⇒ 走 `candles_ivl_time_idx` 的范围扫。
+ * 两条路：
+ *  · **分区表（2026-10-08 起，线上常态）**：直接 `DROP` 过期的时间子分区 ——
+ *    秒级、零死行、不触发 autovacuum 扫全表。这是这套分区最主要的目的。
+ *  · **老库（还没迁移）**：按 scope + 档位分批删。⚠️ 必须**按 scope 拆开、一档一条 DELETE**：
+ *    原来那条 `(interval='1m' AND open_time < …) OR …` 四条分支都缺索引前缀 ⇒ 顺序扫 3.8GB。
  */
-export async function pruneCandles(): Promise<number> {
-  let n = 0
+export async function pruneCandles(): Promise<PruneResult> {
+  if (await isCandlesPartitioned()) return pruneByPartition()
+  let rows = 0
   for (const s of await knownCandleScopes()) {
     for (const [interval, keep] of KEEP) {
-      const res = await getPool().query(
-        `DELETE FROM candles
-          WHERE exchange = $1 AND market_type = $2 AND interval = $3
-            AND open_time < now() - $4::interval`,
-        [s.exchange, s.marketType, interval, keep]
-      )
-      n += res.rowCount ?? 0
+      for (;;) {
+        const res = await getPool().query(
+          `DELETE FROM candles WHERE ctid IN (
+             SELECT ctid FROM candles
+              WHERE exchange = $1 AND market_type = $2 AND interval = $3
+                AND open_time < now() - $4::interval
+              LIMIT $5)`,
+          [s.exchange, s.marketType, interval, keep, PRUNE_BATCH]
+        )
+        const n = res.rowCount ?? 0
+        rows += n
+        if (n < PRUNE_BATCH) break
+      }
     }
   }
-  return n
+  return {rows, partitions: []}
 }
 
 /** 1d 收盘序列（**新的在前**）—— 给「N 天涨幅」算基点用 */
@@ -688,7 +790,423 @@ export interface CandleStoreStats {
 }
 
 /** 库里所有档（1m 在最前，其余按 `HIGH_INTERVALS`） */
-const ALL_INTERVALS: KlineInterval[] = ['1m', ...HIGH_INTERVALS]
+export const ALL_INTERVALS: KlineInterval[] = ['1m', ...HIGH_INTERVALS]
+
+/* ---------------- 分区：粒度 / 保留期 / 建与删（2026-10-08） ----------------
+ *
+ * `candles` 是从 2026-10-08 起**两级分区**的：`LIST (interval)` → `RANGE (open_time)`
+ * （见 `schema.ts` 的 `candles` 段）。这一节是它的运行时助手：
+ *   · `ensureCandlePartitions()` —— 建时间子分区（启动 / 每天 / 迁移时）
+ *   · `pruneCandles()` —— 保留期改成 **DROP 整片子分区**（下面的 `pruneByPartition`）
+ *
+ * 为什么值得动结构（2026-10-08 实测，见 docs/EXCHANGE.md 第 53 节）：
+ *   · 查询只碰自己那一档 ⇒ 索引从「1100 万行的 876MB」变成每档几十万行的小索引，
+ *     缓存命中率上去（这台机器 `shared_buffers` 384MB + OS 1.4GB，而数据 5.6GB）；
+ *   · 保留期不再是一天 90 万行 DELETE（三份索引写放大 + 死行 + autovacuum 扫全表 3.4GB），
+ *     而是 `DROP TABLE` 一片 —— 秒级、零死行。
+ */
+export type PartGranularity = 'day' | 'month' | 'year'
+
+/** 每档的时间子分区粒度（粒度比保留期粗时，最老那一片会多留一格） */
+export const PART_GRANULARITY: Record<KlineInterval, PartGranularity> = {
+  '1m': 'day',
+  '5m': 'day',
+  '15m': 'day',
+  '1h': 'month',
+  '4h': 'year',
+  '1d': 'year'
+}
+
+/** 分级保留期（null = 永久）。⚠️ 与 docs/EXCHANGE.md 的保留表同一个口径 */
+export const KLINE_RETENTION: Record<KlineInterval, string | null> = {
+  '1m': '7 days',
+  '5m': '7 days',
+  '15m': '30 days',
+  '1h': '400 days',
+  '4h': null,
+  '1d': null
+}
+
+/** 永久保留的档：建子分区时往回铺多久（灌历史最多两年多） */
+const FOREVER_LOOKBACK_MS = 3 * 365 * 24 * 3600 * 1000
+
+/** 把 `'7 days'` 这种写法换算成毫秒（本地小工具，只认 `N day(s)`） */
+export function keepMs(keep: string): number {
+  const m = /^(\d+)\s*days?$/.exec(keep)
+  if (!m) throw new Error(`保留期写法不认识：${keep}`)
+  return Number(m[1]) * DAY_MS
+}
+
+/** 该时刻所在时间格的起点（UTC：天/月/年） */
+export function periodStartOf(ms: number, g: PartGranularity): number {
+  const d = new Date(ms)
+  if (g === 'day') return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+  if (g === 'month') return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)
+  return Date.UTC(d.getUTCFullYear(), 0, 1)
+}
+
+/** 该时间格的**下一个**起点（= 本格终点，左闭右开） */
+export function periodEndOf(startMs: number, g: PartGranularity): number {
+  const d = new Date(startMs)
+  if (g === 'day') return startMs + DAY_MS
+  if (g === 'month') return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)
+  return Date.UTC(d.getUTCFullYear() + 1, 0, 1)
+}
+
+/** 子分区命名：`candles_1m_20261008`（时间格起点）。`pruneCandles` 按这个名字反解 */
+export function partNameOf(interval: KlineInterval, startMs: number): string {
+  const d = new Date(startMs)
+  const ymd = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`
+  return `candles_${interval}_${ymd}`
+}
+
+/** 反解名字；不是时间子分区（DEFAULT、子父表、别的表）就返回 null */
+export function parsePartName(name: string): {interval: KlineInterval; startMs: number} | null {
+  const m = /^candles_(1m|5m|15m|1h|4h|1d)_(\d{4})(\d{2})(\d{2})$/.exec(name)
+  if (!m) return null
+  return {
+    interval: m[1] as KlineInterval,
+    startMs: Date.UTC(Number(m[2]), Number(m[3]) - 1, Number(m[4]))
+  }
+}
+
+/** `candles` 是不是已经分区了（迁移前的老库是普通表 ⇒ 建/删分区都要退化成老办法） */
+export async function isCandlesPartitioned(): Promise<boolean> {
+  const row = await queryOne<{relkind: string}>(
+    `SELECT relkind FROM pg_class WHERE relname = 'candles' AND relnamespace = current_schema()::regnamespace`
+  )
+  return row?.relkind === 'p'
+}
+
+/**
+ * 建时间子分区，覆盖**保留期整段 + 下一格**（启动、每天、迁移时都调）。
+ *
+ * 幂等：已存在的直接跳过（一次查名字集合，不是几十次往返）。返回新建的名字。
+ *
+ * ⚠️ 每个档都有 DEFAULT 兜底分区（`schema.ts` 建的），插入永远不会因为缺分区失败；
+ *    建新格时**先**把 DEFAULT 里落在这一格的行搬出来，再建分区（否则会撞约束），建完搬回去。
+ * ⚠️ 分区表上父表的 `reloptions` 不继承给子分区 ⇒ 这里逐片设激进的 autovacuum。
+ *
+ * @param opts.fromMs 从这一刻起铺（默认按保留期铺；`coverExisting` 时按各档实际最早一行铺）
+ * @param opts.coverExisting 迁移/历史灌数据用：按**库里已有的最早一行**铺，别漏掉老数据
+ */
+export async function ensureCandlePartitions(
+  opts: {fromMs?: number; coverExisting?: boolean} = {}
+): Promise<string[]> {
+  if (!(await isCandlesPartitioned())) return []
+  const rows = await query<{relname: string}>(
+    `SELECT relname FROM pg_class
+      WHERE relnamespace = current_schema()::regnamespace AND relname LIKE 'candles\\_%'`
+  )
+  const existing = new Set(rows.map(r => r.relname))
+  const mins = opts.coverExisting && opts.fromMs === undefined ? await minOpenTimeByInterval() : null
+  const now = Date.now()
+  const created: string[] = []
+  for (const it of ALL_INTERVALS) {
+    const g = PART_GRANULARITY[it]
+    const keep = KLINE_RETENTION[it]
+    const floor = now - (keep ? keepMs(keep) : FOREVER_LOOKBACK_MS)
+    const since = Math.min(opts.fromMs ?? mins?.get(it) ?? floor, floor)
+    const stop = periodEndOf(periodStartOf(now, g), g)
+    for (let start = periodStartOf(since, g); start < stop; start = periodEndOf(start, g)) {
+      const name = partNameOf(it, start)
+      if (existing.has(name)) continue
+      const end = periodEndOf(start, g)
+      const def = `candles_${it}_def`
+      /* ① DEFAULT 里落在这一格的行先拿出来（新分区建好再放回去） */
+      const moved = await query<Record<string, unknown>>(
+        `DELETE FROM ${def} WHERE open_time >= $1 AND open_time < $2 RETURNING *`,
+        [new Date(start), new Date(end)]
+      )
+      /* ② 建分区：父表上的三个索引会自动带过来 */
+      await query(
+        `CREATE TABLE IF NOT EXISTS ${name} PARTITION OF candles_${it}
+           FOR VALUES FROM ('${new Date(start).toISOString()}') TO ('${new Date(end).toISOString()}')`
+      )
+      if (moved.length) {
+        await query(
+          `INSERT INTO ${name} SELECT * FROM jsonb_populate_recordset(null::candles, $1::jsonb)`,
+          [JSON.stringify(moved)]
+        )
+      }
+      /* ③ 子分区自己的 reloptions（父表的不继承） */
+      await query(
+        `ALTER TABLE ${name} SET (autovacuum_vacuum_scale_factor = 0.05,
+                                  autovacuum_analyze_scale_factor = 0.02)`
+      )
+      existing.add(name)
+      created.push(name)
+    }
+  }
+  return created
+}
+
+/** 各档**库里最早那一行**的时刻（迁移时按它铺子分区，别漏掉老数据） */
+async function minOpenTimeByInterval(): Promise<Map<KlineInterval, number>> {
+  const out = new Map<KlineInterval, number>()
+  for (const s of await knownCandleScopes()) {
+    const rows = await query<{interval: string; a: Date | null}>(
+      `SELECT interval, min(open_time) AS a FROM candles
+        WHERE exchange = $1 AND market_type = $2 GROUP BY interval`,
+      [s.exchange, s.marketType]
+    )
+    for (const r of rows) {
+      if (!r.a) continue
+      const ms = new Date(r.a).getTime()
+      const key = r.interval as KlineInterval
+      const prev = out.get(key)
+      if (prev === undefined || ms < prev) out.set(key, ms)
+    }
+  }
+  return out
+}
+
+/**
+ * 过期子分区直接 `DROP`（保留期的实现）。
+ *
+ * 粒度比保留期粗时最老那片会多留一格（1d 按年切 ⇒ 永久档没有过期一说；1h 按月切
+ * ⇒ 400 天实际留 13 个月）。这是可以接受的：相比「每天 90 万行 DELETE」，
+ * 这点多留的行便宜得多 —— 而且它换来的是零死行、零 autovacuum 全表扫。
+ */
+async function pruneByPartition(): Promise<PruneResult> {
+  const rows = await query<{relname: string; est: string}>(
+    `SELECT relname, greatest(reltuples, 0)::bigint::text AS est
+       FROM pg_class
+      WHERE relnamespace = current_schema()::regnamespace AND relname ~ '^candles_(1m|5m|15m|1h|4h|1d)_[0-9]{8}$'`
+  )
+  const now = Date.now()
+  let n = 0
+  const dropped: string[] = []
+  for (const r of rows) {
+    const p = parsePartName(r.relname)
+    if (!p) continue
+    const keep = KLINE_RETENTION[p.interval]
+    if (!keep) continue
+    if (periodEndOf(p.startMs, PART_GRANULARITY[p.interval]) > now - keepMs(keep)) continue
+    await query(`DROP TABLE IF EXISTS ${r.relname}`)
+    n += Number(r.est)
+    dropped.push(r.relname)
+  }
+  return {rows: n, partitions: dropped}
+}
+
+/* ---------------- 待复核的高周期桶：记账 + 复核（2026-10-08） ----------------
+ *
+ * 「库内自洽」原来自定时全市场扫描（每轮 4 桶 × 5 档 × 全部币 ≈ 370 万行 1m 读取、
+ * 实测 4 分 40 秒，而其中 4h/1d 那 97% 从没揪出过坏桶 ⇒ 磁盘被占 60–99%）。
+ * 现在只复核**我们自己写下去、且写的时候桶还没收盘**的那些桶：
+ *   · 历史数据不会自己变坏（用户 2026-10-08 确认的口径）；
+ *   · 掉线 / 网络抖动的后果只会落在「刚补进来的那段」上；
+ *   · 真正会写坏桶的动作只有三处（seed / rollup / repair 的 REST 覆盖），
+ *     而它们全部经 `saveCandles` 一处 ⇒ 在那一处判定并记账，就**不会漏**。
+ */
+
+/** 一条待复核的账目 */
+export interface PendingCheck {
+  interval: KlineInterval
+  symbol: string
+  openTime: number
+  scope: {exchange: string; marketType: string}
+  /** 写入来源（`seed` / `rollup` / `backfill` / `repair`），排查用 */
+  why: string
+}
+
+/**
+ * 记账：把「写下去的时候桶还没收盘」的高周期桶记进 `kline_pending_check`。
+ *
+ * 由 `saveCandles` 调（一处判定、四条写入路全覆盖）。同一批里重复的桶会去重，
+ * 已记过的靠 `ON CONFLICT DO NOTHING` 幂等。
+ */
+export async function recordPendingChecks(rows: PendingCheck[]): Promise<number> {
+  const uniq = new Map<string, PendingCheck>()
+  for (const r of rows) {
+    uniq.set(
+      `${r.scope.exchange}|${r.scope.marketType}|${r.symbol}|${r.interval}|${r.openTime}`,
+      r
+    )
+  }
+  const list = [...uniq.values()]
+  if (!list.length) return 0
+  const values: unknown[] = []
+  const tuples = list.map((r, n) => {
+    const b = n * 6
+    values.push(r.scope.exchange, r.scope.marketType, r.symbol, r.interval, new Date(r.openTime), r.why)
+    return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}::timestamptz, $${b + 6})`
+  })
+  await query(
+    `INSERT INTO kline_pending_check (exchange, market_type, symbol, interval, open_time, why)
+     VALUES ${tuples.join(',')} ON CONFLICT DO NOTHING`,
+    values
+  )
+  return list.length
+}
+
+/** 复核出来的坏桶（交 `repairSymbol` 用交易所口径盖回去） */
+export interface StaleBucketVerdict {
+  symbol: string
+  interval: string
+  openTime: number
+  why: string
+  ours: {close: number; volume: number}
+  from1m: {close: number; volume: number}
+}
+
+export interface PendingSweep {
+  /** 这一轮取出来复核的账目数 */
+  due: number
+  /** 一致 ⇒ 销账 */
+  ok: number
+  /** 不一致 ⇒ 交修复，**留着账**继续盯 */
+  stale: StaleBucketVerdict[]
+  /** 1m 还没补齐（还在补数据）⇒ 留着下轮 */
+  waiting: number
+  /** 超过保留期仍无法判定 ⇒ 销账 + 告警（1m 都不在了，没法判） */
+  expired: number
+}
+
+/**
+ * 复核：只核对账上「桶已收盘」的那些，每个桶一次定向探测（≤1440 行）。
+ *
+ * 判据与原来那条全表扫描**逐字一致**（免得改出语义差）：
+ *   该桶 1m 一根不缺（`n = 桶长` 且最后一根正好落在桶末）的前提下，
+ *   `高周期行.close ≠ 1m 最后一根 close` 或 `volume 求和不符` ⇒ 残桶/陈旧值。
+ */
+export async function verifyPendingChecks(limit = 50): Promise<PendingSweep> {
+  const out: PendingSweep = {due: 0, ok: 0, stale: [], waiting: 0, expired: 0}
+  const due = await query<{
+    exchange: string
+    market_type: string
+    symbol: string
+    interval: string
+    open_time: Date
+    mins: number
+    tries: number
+    why: string
+    h_close: number | null
+    h_volume: number | null
+    m_n: string
+    m_v: number | null
+    m_c: number | null
+    m_t: Date | null
+  }>(
+    `WITH grid(ivl, mins) AS (
+       VALUES ('1m', 1), ('5m', 5), ('15m', 15), ('1h', 60), ('4h', 240), ('1d', 1440)
+     ), due AS (
+       SELECT p.*, g.mins
+         FROM kline_pending_check p
+         JOIN grid g ON g.ivl = p.interval
+        WHERE p.open_time + (g.mins * interval '1 minute') <= now()   -- 桶已收盘才判
+        ORDER BY p.written_at
+        LIMIT $1
+     )
+     SELECT d.exchange, d.market_type, d.symbol, d.interval, d.open_time, d.mins, d.tries,
+            d.why, h.close AS h_close, h.volume AS h_volume,
+            m.n AS m_n, m.v AS m_v, m.c AS m_c, m.t AS m_t
+       FROM due d
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS n, sum(volume) AS v,
+                (array_agg(close ORDER BY open_time DESC))[1] AS c, max(open_time) AS t
+           FROM candles
+          WHERE exchange = d.exchange AND market_type = d.market_type
+            AND interval = '1m' AND symbol = d.symbol
+            AND open_time >= d.open_time
+            AND open_time < d.open_time + (d.mins * interval '1 minute')
+       ) m ON true
+       LEFT JOIN candles h
+         ON h.exchange = d.exchange AND h.market_type = d.market_type
+        AND h.symbol = d.symbol AND h.interval = d.interval AND h.open_time = d.open_time`,
+    [Math.max(1, limit)]
+  )
+  out.due = due.length
+  const done: [string, string, string, string, Date][] = []
+  const wait: [string, string, string, string, Date][] = []
+  for (const r of due) {
+    const key: [string, string, string, string, Date] = [
+      r.exchange,
+      r.market_type,
+      r.symbol,
+      r.interval,
+      new Date(r.open_time)
+    ]
+    /* 高周期那一行没了（被清掉/换过档）：没什么可核对的 */
+    if (r.h_close === null || r.h_volume === null) {
+      done.push(key)
+      out.ok++
+      continue
+    }
+    const bucketEnd = new Date(r.open_time).getTime() + r.mins * 60_000
+    const lastExpected = bucketEnd - 60_000
+    const complete = Number(r.m_n) === r.mins && r.m_t !== null && new Date(r.m_t).getTime() === lastExpected
+    if (!complete) {
+      /* 1m 还没补齐：现在判就是把自己缺的数据算成这行的错，留着下轮 */
+      wait.push(key)
+      out.waiting++
+      continue
+    }
+    const mClose = Number(r.m_c)
+    const mVolume = Number(r.m_v)
+    const closeOff = r.h_close !== mClose
+    const volOff = Math.abs(r.h_volume - mVolume) > Math.max(1e-9, Math.abs(mVolume) * 1e-9)
+    if (closeOff || volOff) {
+      out.stale.push({
+        symbol: r.symbol,
+        interval: r.interval,
+        openTime: new Date(r.open_time).getTime(),
+        why: r.why,
+        ours: {close: r.h_close, volume: r.h_volume},
+        from1m: {close: mClose, volume: mVolume}
+      })
+      wait.push(key) // 留着账：等修复完再复核一次
+    } else {
+      done.push(key)
+      out.ok++
+    }
+  }
+  const where = `WHERE (exchange, market_type, symbol, interval, open_time) IN (${inTuples(done, 5)})`
+  if (done.length) await query(`DELETE FROM kline_pending_check ${where}`, flatIn(done))
+  if (wait.length) {
+    await query(
+      `UPDATE kline_pending_check SET tries = tries + 1, checked_at = now()
+        WHERE (exchange, market_type, symbol, interval, open_time) IN (${inTuples(wait, 5)})`,
+      flatIn(wait)
+    )
+  }
+  /* 超过保留期仍判不了的（1m 早被清了）⇒ 销账 + 告警一次，别让它永远挂在账上 */
+  const stale = await query<{n: string}>(
+    `WITH gone AS (
+       DELETE FROM kline_pending_check
+        WHERE written_at < now() - interval '7 days'
+        RETURNING 1
+     ) SELECT count(*)::text AS n FROM gone`
+  )
+  out.expired = Number(stale[0]?.n ?? 0)
+  return out
+}
+
+/** IN 列表的占位符（每行 n 个） */
+function inTuples(keys: [string, string, string, string, Date][], n: number): string {
+  return keys
+    .map((_, i) => {
+      const b = i * n
+      return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}::timestamptz)`
+    })
+    .join(',')
+}
+
+function flatIn(keys: [string, string, string, string, Date][]): unknown[] {
+  return keys.flatMap(k => [...k])
+}
+
+/** 账上有多少条、最老那条多久了（`/api/kline/recorder` 看它） */
+export async function pendingCheckStats(): Promise<{rows: number; oldestMs: number | null}> {
+  const row = await queryOne<{n: string; oldest: Date | null}>(
+    `SELECT count(*)::text AS n, min(written_at) AS oldest FROM kline_pending_check`
+  )
+  return {
+    rows: Number(row?.n ?? 0),
+    oldestMs: row?.oldest ? new Date(row.oldest).getTime() : null
+  }
+}
 
 /**
  * 诊断用：库里有多少行、多大、每档覆盖到哪儿。
@@ -702,9 +1220,13 @@ const ALL_INTERVALS: KlineInterval[] = ['1m', ...HIGH_INTERVALS]
 export async function candleStoreStats(
   opts: {exact?: boolean} = {}
 ): Promise<CandleStoreStats> {
+  /*
+   * ⚠️ 分区表的父表自身 size = 0 ⇒ 必须把**叶子**加起来（`pg_partition_tree` 对普通表
+   *    也能用，返回它自己一行 isleaf=true，所以两种形态同一条 SQL 都成立）。
+   */
   const size = await queryOne<{s: string | null}>(
-    `SELECT pg_total_relation_size($1)::text AS s`,
-    ['candles']
+    `SELECT coalesce(sum(pg_total_relation_size(relid)), 0)::text AS s
+       FROM pg_partition_tree('candles') WHERE isleaf`
   )
   const byInterval: CandleStoreStats['byInterval'] = {}
   for (const it of ALL_INTERVALS) byInterval[it] = {rows: null, from: null, to: null}

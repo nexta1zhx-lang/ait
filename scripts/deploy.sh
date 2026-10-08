@@ -124,7 +124,27 @@ c '构建并启动（首次要拉镜像 + 装依赖，几分钟）'
 #    bash 是在展开**之前**认「赋值」的，`$SUDO` 一旦展开成空串，
 #    那个 `PREBUILT=1` 就被当成**命令名**了 ⇒ `PREBUILT=1: command not found`（踩过）。
 #    而 `$SUDO env PREBUILT=1 docker …` 两种身份（root / sudo）都通，实测过。
-$SUDO env PREBUILT="${PREBUILT:-0}" docker compose -f docker-compose.prod.yml up -d --build
+#
+# 先只构建、不启动：下面要停下来做分区迁移（换表那一刻不能有写入），
+# 构建放前面能让停机窗口只覆盖「迁移」，不覆盖「编译镜像」。
+$SUDO env PREBUILT="${PREBUILT:-0}" docker compose -f docker-compose.prod.yml build app
+
+c 'candles 分区迁移（幂等；换表要在应用停止时做）'
+# 为什么要停机：迁移会把 candles 改名成 candles_old、再建同名的分区表 ——
+# 换表那一刻如果还有写入，那些行会写进旧表然后被丢掉。
+# 脚本本身幂等：已经迁移过就只补时间子分区（几十毫秒），所以每次发布都跑它没成本。
+# 详见 docs/EXCHANGE.md 第 53 节。
+$SUDO docker compose -f docker-compose.prod.yml stop app || true
+if ! $SUDO docker compose -f docker-compose.prod.yml run --rm --no-deps app \
+      node backend/dist/scripts/migrate-candles-partitions.js --apply; then
+  warn '分区迁移失败 —— 应用先不启，避免它对着半迁移的库写'
+  printf '      看上面输出；库里的 candles / candles_old 都还在，没丢数据\n'
+  exit 1
+fi
+ok '分区结构与数据核对通过'
+
+c '启动'
+$SUDO docker compose -f docker-compose.prod.yml up -d
 
 echo
 $SUDO docker compose -f docker-compose.prod.yml ps

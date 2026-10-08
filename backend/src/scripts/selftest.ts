@@ -18,8 +18,23 @@
  *   ④ `planContractChanges` 该加的加、该摘的摘（新币 / 下架 / 待上线）
  *   ⑤ 「这个币刚被平仓」判得对不对 + 撤残留单的去抖（平了就撤，见 `docs/EXCHANGE.md`）
  *   ⑥ 三档（normal / idle / asleep）的判据 + 换档日志里的数字（见 `tierOf` / `tierText`）
+ *   ⑦ 分区命名 / 时间格边界 / 保留期解析（见 `partNameOf` / `periodStartOf` / `keepMs`）
+ *      —— 这几个是**纯函数**，而它们的失效方式同样很隐蔽：命名约定一变，
+ *      `pruneCandles` 就再也匹配不到过期子分区（表会一直涨），或者建分区时算出重叠区间
+ *      （直接建不出来）。所以拿固定夹具卡住它们。
  */
-import {sanitizeRows, type NewCandleRow} from '../db/candle-store'
+import {
+  ALL_INTERVALS,
+  KLINE_RETENTION,
+  PART_GRANULARITY,
+  keepMs,
+  parsePartName,
+  partNameOf,
+  periodEndOf,
+  periodStartOf,
+  sanitizeRows,
+  type NewCandleRow
+} from '../db/candle-store'
 import {planContractChanges, type RawContract} from '../data/market'
 import {
   KeyStream,
@@ -448,6 +463,87 @@ function checkCloseSweep(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ⑦ 分区命名 / 边界 / 保留期                                            */
+/* ------------------------------------------------------------------ */
+
+/** UTC 毫秒的简写（夹具里写清楚比 `Date.UTC(...)` 好读） */
+function ms(iso: string): number {
+  return Date.parse(iso)
+}
+
+function checkPartitions(): boolean {
+  let ok = true
+  const bad = (msg: string): void => {
+    console.error(`❌ 分区夹具：${msg}`)
+    ok = false
+  }
+
+  /* 时间格边界：天/月/年，含月末与跨年 */
+  const cases: [string, 'day' | 'month' | 'year', string, string][] = [
+    ['2026-10-08T13:45:00Z', 'day', '2026-10-08T00:00:00Z', '2026-10-09T00:00:00Z'],
+    ['2026-10-31T23:59:59Z', 'day', '2026-10-31T00:00:00Z', '2026-11-01T00:00:00Z'],
+    ['2026-10-08T13:45:00Z', 'month', '2026-10-01T00:00:00Z', '2026-11-01T00:00:00Z'],
+    ['2026-12-31T23:59:59Z', 'month', '2026-12-01T00:00:00Z', '2027-01-01T00:00:00Z'],
+    ['2026-12-31T23:59:59Z', 'year', '2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z'],
+    /* 闰年 2 月：按天切不能算成 28 号就完事 */
+    ['2028-02-29T05:00:00Z', 'day', '2028-02-29T00:00:00Z', '2028-03-01T00:00:00Z']
+  ]
+  for (const [at, g, wantStart, wantEnd] of cases) {
+    const start = periodStartOf(ms(at), g)
+    const end = periodEndOf(start, g)
+    if (start !== ms(wantStart)) bad(`${at} 按 ${g} 切的起点应为 ${wantStart}，得到 ${new Date(start).toISOString()}`)
+    if (end !== ms(wantEnd)) bad(`${at} 按 ${g} 切的终点应为 ${wantEnd}，得到 ${new Date(end).toISOString()}`)
+  }
+
+  /* 命名 ↔ 反解：往返必须一致，且别把 DEFAULT / 子父表认成时间子分区 */
+  for (const it of ALL_INTERVALS) {
+    const start = Date.UTC(2026, 9, 8)
+    const name = partNameOf(it, start)
+    const back = parsePartName(name)
+    if (!back || back.interval !== it || back.startMs !== start) {
+      bad(`「${it}」命名往返不一致：${name} → ${JSON.stringify(back)}`)
+    }
+  }
+  for (const notAPart of ['candles_1m_def', 'candles_1m', 'candles', 'candles_1m_2026100', 'other_1m_20261008']) {
+    if (parsePartName(notAPart) !== null) bad(`「${notAPart}」不该被认成时间子分区`)
+  }
+
+  /* 保留期写法 */
+  if (keepMs('7 days') !== 7 * 86_400_000) bad("keepMs('7 days') 不对")
+  if (keepMs('400 days') !== 400 * 86_400_000) bad("keepMs('400 days') 不对")
+  for (const s of ['7d', '一周', '']) {
+    let threw = false
+    try {
+      keepMs(s)
+    } catch {
+      threw = true
+    }
+    if (!threw) bad(`keepMs('${s}') 该报错（写法不认识），却算出了值`)
+  }
+
+  /* 每档都得有粒度和保留期声明 —— 少一个，那一档就永远不会被清理/建分区 */
+  for (const it of ALL_INTERVALS) {
+    if (!PART_GRANULARITY[it]) bad(`「${it}」没有声明分区粒度`)
+    if (!(it in KLINE_RETENTION)) bad(`「${it}」没有声明保留期`)
+  }
+  /* 永久保留的档不该被判成过期 ⇒ 保留期必须是 null */
+  for (const it of ['4h', '1d'] as const) {
+    if (KLINE_RETENTION[it] !== null) bad(`「${it}」是永久保留档，保留期应为 null`)
+  }
+
+  /* 保留期必须**至少**覆盖读路径要用的窗口（粗档 1h 要能画一年 = 400 天） */
+  const keepDays = (it: keyof typeof KLINE_RETENTION): number | null => {
+    const k = KLINE_RETENTION[it]
+    return k === null ? null : keepMs(k) / 86_400_000
+  }
+  if (keepDays('1m') !== 7) bad('1m 保留期应为 7 天（读路径 baseProbe 按 6 天挑 1m）')
+  if ((keepDays('1h') ?? 0) < 400) bad('1h 保留期要 ≥400 天（K 线要能画一年）')
+
+  if (ok) console.log('✅ 分区：命名往返 / 时间格边界 / 保留期解析 夹具通过')
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -457,6 +553,7 @@ if (!checkDiff()) failed = true
 if (!checkCloseSweep()) failed = true
 if (!checkTier()) failed = true
 if (!checkTierText()) failed = true
+if (!checkPartitions()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)

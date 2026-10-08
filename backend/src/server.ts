@@ -204,6 +204,7 @@ import {
 import {
   discoverContracts,
   klineRecorderStats,
+  runFullStaleSweep,
   runGapCheck,
   runKlineRecon,
   startKlineRecorder,
@@ -4597,7 +4598,7 @@ async function route(
      * （`memory/db/rest/live`）—— 常态应该是 `db` 涨、`rest` 几乎不动。
      */
     try {
-      const st = klineRecorderStats()
+      const st = await klineRecorderStats()
       if (url.searchParams.get('db')) {
         /*
          * `?db=1` 走**估计值**（`pg_class.reltuples`）+ 每档索引端点探测；不再是全表 `count(*)`
@@ -4633,7 +4634,7 @@ async function route(
       }
       const limit = Number(url.searchParams.get('limit') ?? 20)
       return sendJson(res, 200, {
-        recon: klineRecorderStats().recon,
+        recon: (await klineRecorderStats()).recon,
         rejects: candleRejectStats(),
         recent: await recentKlineRecon(Number.isFinite(limit) ? limit : 20)
       })
@@ -4656,12 +4657,12 @@ async function route(
         const r = await discoverContracts('manual')
         return sendJson(res, 200, {
           ...r,
-          discovery: klineRecorderStats().discovery,
+          discovery: (await klineRecorderStats()).discovery,
           table: await symbolTableStats()
         })
       }
       const out: Record<string, unknown> = {
-        discovery: klineRecorderStats().discovery,
+        discovery: (await klineRecorderStats()).discovery,
         table: await symbolTableStats()
       }
       if (url.searchParams.get('list')) {
@@ -4691,10 +4692,22 @@ async function route(
      * 为什么要有手动入口：定时那轮 5 分钟一次，发布后想当场确认"洞补上没有"不该干等。
      */
     try {
-      const before = klineRecorderStats()
-      if (url.searchParams.get('run')) {
+      const before = await klineRecorderStats()
+      const run = url.searchParams.get('run')
+      if (run === 'full') {
+        /*
+         * `?run=full`：**手动**的全量残桶体检 —— 4 桶 × 5 档 × 全部币，实测一轮 4 分 40 秒。
+         * 定时路径不再跑它（改成记账复核，见 candle-store 的 verifyPendingChecks）；
+         * 这个入口是给**上线时把历史遗留理一遍**用的。
+         */
+        const r = await runFullStaleSweep('manual-full')
+        const after = await klineRecorderStats()
+        return sendJson(res, 200, {...r, gaps: after.gaps, pendingRepairs: after.pendingRepairs})
+      }
+      if (run) {
         const r = await runGapCheck('manual')
-        return sendJson(res, 200, {...r, pendingRepairs: klineRecorderStats().pendingRepairs})
+        const after = await klineRecorderStats()
+        return sendJson(res, 200, {...r, pendingRepairs: after.pendingRepairs})
       }
       return sendJson(res, 200, {gaps: before.gaps, pendingRepairs: before.pendingRepairs})
     } catch (e) {

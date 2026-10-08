@@ -22,6 +22,72 @@
  * 提示词**全部存数据库**：`rules/` 目录、代码里的内置角色都已去掉。
  * 每次分析读「启用的文档」拼成 system prompt，并按 hash 存进 rules_versions。
  */
+
+/**
+ * `candles` 的列定义 —— ⚠️ **只写这一份**：父表（`SCHEMA_SQL`）与分区迁移脚本
+ * （`scripts/migrate-candles-partitions.ts`）都从这里取，别各写一份（写岔了就是列不一致）。
+ */
+export const CANDLES_COLUMNS = `
+  exchange         TEXT             NOT NULL,
+  market_type      TEXT             NOT NULL DEFAULT 'swap',
+  symbol           TEXT             NOT NULL,   -- ccxt 统一符号（BTC/USDT:USDT）
+  pair             TEXT             NOT NULL,   -- 币安交易对（BTCUSDT），上游流名用它
+  interval         TEXT             NOT NULL,
+  open_time        TIMESTAMPTZ      NOT NULL,
+  open             DOUBLE PRECISION NOT NULL,
+  high             DOUBLE PRECISION NOT NULL,
+  low              DOUBLE PRECISION NOT NULL,
+  close            DOUBLE PRECISION NOT NULL,
+  volume           DOUBLE PRECISION NOT NULL DEFAULT 0,  -- 基础币成交量
+  quote_volume     DOUBLE PRECISION NOT NULL DEFAULT 0,  -- 计价币成交额
+  trades           INTEGER          NOT NULL DEFAULT 0,
+  taker_buy_volume DOUBLE PRECISION NOT NULL DEFAULT 0,
+  -- ws（实时流）/ rollup（由 1m 滚出）/ backfill（补缺口）/ seed（首灌历史）
+  source           TEXT             NOT NULL DEFAULT 'ws',
+  updated_at       TIMESTAMPTZ      NOT NULL DEFAULT now(),
+  PRIMARY KEY (exchange, market_type, symbol, interval, open_time)
+`
+
+/**
+ * `candles` 的两个非主键索引。⚠️ 建在**父表**上 ⇒ 每片子分区自动有同名索引，
+ * `ensureCandlePartitions()` 之后新建的子分区也会自动带。
+ *
+ * 想走索引的查询**必须**带上 `exchange` + `market_type`（两列都在索引最前）——
+ * 只给 `interval`（连 `interval + symbol` 也一样）会用不上任何索引 ⇒ 顺序扫整表。
+ * 2026-10-07 就是这么炸的（详见 `docs/EXCHANGE.md` 第 52 节）。
+ * 迁移脚本 `scripts/migrate-candles-partitions.ts` 也用这一份，别各写一遍。
+ */
+export const CANDLES_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS candles_ivl_symbol_time_idx
+  ON candles (exchange, market_type, interval, symbol, open_time);
+CREATE INDEX IF NOT EXISTS candles_ivl_time_idx
+  ON candles (exchange, market_type, interval, open_time);`
+
+/**
+ * `candles` 的**静态**分区骨架：每档一个 LIST 子分区 + 一个 DEFAULT 兜底分区。
+ * 时间子分区是滚动的，由 `ensureCandlePartitions()` 建。
+ *
+ * ⚠️ 必须判 `relkind = 'p'`：老库（未分区）上直接 `PARTITION OF` 会报
+ *    「candles is not partitioned」，而 `SCHEMA_SQL` 每次启动都跑 —— 迁移前不能炸。
+ */
+export const CANDLES_PARTITION_SKELETON_SQL = `
+DO $$
+DECLARE ivl TEXT;
+BEGIN
+  IF (SELECT relkind FROM pg_class WHERE relname = 'candles' AND relnamespace = current_schema()::regnamespace) = 'p' THEN
+    FOREACH ivl IN ARRAY ARRAY['1m','5m','15m','1h','4h','1d'] LOOP
+      EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS %I PARTITION OF candles FOR VALUES IN (%L) PARTITION BY RANGE (open_time)',
+        'candles_' || ivl, ivl
+      );
+      EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS %I PARTITION OF %I DEFAULT',
+        'candles_' || ivl || '_def', 'candles_' || ivl
+      );
+    END LOOP;
+  END IF;
+END $$;`
+
 export const SCHEMA_SQL = `
 -- ---------------------------------------------------------------- 用户
 -- 用户名 + 密码（scrypt）。密码不存明文。
@@ -588,33 +654,36 @@ CREATE TABLE IF NOT EXISTS ccxt_markets (
 --
 -- 保留策略**按周期分级**（见 db/candle-store.ts 的 pruneCandles）：
 --   1m 7 天 / 5m 7 天 / 15m 30 天 / 1h 400 天 / 4h 永久 / 1d 永久。
---   为什么不按天分区：分区没法只丢「1m 那部分」（同一格里混着所有周期），
---   而分级保留才是这里真正需要的（1h 要能画一年）。
-CREATE TABLE IF NOT EXISTS candles (
-  exchange         TEXT             NOT NULL,
-  market_type      TEXT             NOT NULL DEFAULT 'swap',
-  symbol           TEXT             NOT NULL,   -- ccxt 统一符号（BTC/USDT:USDT）
-  pair             TEXT             NOT NULL,   -- 币安交易对（BTCUSDT），上游流名用它
-  interval         TEXT             NOT NULL,
-  open_time        TIMESTAMPTZ      NOT NULL,
-  open             DOUBLE PRECISION NOT NULL,
-  high             DOUBLE PRECISION NOT NULL,
-  low              DOUBLE PRECISION NOT NULL,
-  close            DOUBLE PRECISION NOT NULL,
-  volume           DOUBLE PRECISION NOT NULL DEFAULT 0,  -- 基础币成交量
-  quote_volume     DOUBLE PRECISION NOT NULL DEFAULT 0,  -- 计价币成交额
-  trades           INTEGER          NOT NULL DEFAULT 0,
-  taker_buy_volume DOUBLE PRECISION NOT NULL DEFAULT 0,
-  -- ws（实时流）/ rollup（由 1m 滚出）/ backfill（补缺口）/ seed（首灌历史）
-  source           TEXT             NOT NULL DEFAULT 'ws',
-  updated_at       TIMESTAMPTZ      NOT NULL DEFAULT now(),
-  PRIMARY KEY (exchange, market_type, symbol, interval, open_time)
-);
--- 每天要删掉约 90 万行（1m 那部分滚出 7 天）⇒ 让 autovacuum 勤快点，别等表涨到阈值
-ALTER TABLE candles SET (
-  autovacuum_vacuum_scale_factor = 0.05,
-  autovacuum_analyze_scale_factor = 0.02
-);
+--   2026-10-08 改成分区实现：先按 interval 分（LIST），再按 open_time 分（RANGE，
+--   1m/5m/15m 按天、1h 按月、4h/1d 按年）⇒ 分级保留与「只扫自己那档」同时满足。
+--   （原来的顾虑是「同一个时间格里混着所有周期，没法只丢 1m 那部分」——
+--     两级分区正好解决：先按周期切开，再在周期内部按时间切。）
+CREATE TABLE IF NOT EXISTS candles (${CANDLES_COLUMNS}
+) PARTITION BY LIST (interval);
+-- ⚠️ 这里用 PARTITION BY LIST (interval)，子分区再按 open_time 分 —— 见
+-- ensureCandlePartitions()（schema.ts 底下）与 docs/EXCHANGE.md 第 53 节。理由：
+--   · 所有查询都带 interval（也只有带它才走得了索引）⇒ 每档一个分区，查询只碰自己那档，
+--     索引从「1100 万行的 876MB」变成「1d 档 34 万行的几 MB」，缓存命中率大幅上升；
+--     （2026-10-08 实测：一个 1d 查询要 3 分 33 秒，就是被跨全表的随机读拖的。）
+--   · 保留期变成 DROP PARTITION ⇒ 原来每天 90 万行的 DELETE（+ 三份索引写放大 + 死行
+--     + autovacuum 扫全表 3.4GB）全部归零。
+-- 老库（未分区）由 scripts/migrate-candles-partitions.ts 一次性搬过来；
+-- CREATE TABLE IF NOT EXISTS 对老库是空操作，所以这段对两边都安全。
+-- ⚠️ 子分区不是自动出现的：必须调 ensureCandlePartitions()（启动时/每天），否则插入会报
+--    "no partition of relation found for row"（每个档都有一个 DEFAULT 分区兜底，见那儿）。
+-- 每天要删掉约 90 万行（1m 那部分滚出 7 天）⇒ 让 autovacuum 勤快点，别等表涨到阈值。
+-- ⚠️ **分区表上不能设 reloptions**（PG 16 直接报 "cannot specify storage parameters for a
+--    partitioned table"）⇒ 必须判 relkind：普通表（迁移前）在这儿设，分区表由
+--    ensureCandlePartitions() **逐个子分区**设（父表的设置也不会继承给子分区）。
+DO $$
+BEGIN
+  IF (SELECT relkind FROM pg_class WHERE relname = 'candles' AND relnamespace = current_schema()::regnamespace) = 'r' THEN
+    ALTER TABLE candles SET (
+      autovacuum_vacuum_scale_factor = 0.05,
+      autovacuum_analyze_scale_factor = 0.02
+    );
+  END IF;
+END $$;
 -- ⚠️ 这两个索引**都以 exchange, market_type 打头** ⇒ 想走索引的查询**必须**带上这两列
 -- （底座自己的 scope 就是 cfg.exchange / cfg.marketType）。只给 interval（甚至
 -- interval + symbol）是**一个索引都用不上**的 —— PG 16 没有 index skip scan，只能顺序扫整表。
@@ -628,10 +697,47 @@ ALTER TABLE candles SET (
 --   · 走 candles_ivl_time_idx：带 scope 但**不带** symbol 的（pruneCandles / bucketCoverage …）
 -- ⇒ **新增或修改 candles 的查询时，先看谓词里有没有那两列。**
 -- 索引名带 ivl 前缀，别改 —— MIGRATE_SQL 里按同名建。
-CREATE INDEX IF NOT EXISTS candles_ivl_symbol_time_idx
-  ON candles (exchange, market_type, interval, symbol, open_time);
-CREATE INDEX IF NOT EXISTS candles_ivl_time_idx
-  ON candles (exchange, market_type, interval, open_time);
+${CANDLES_INDEX_SQL}
+-- 分区表上这两条建在**父表**上 ⇒ 每片子分区自动有同名索引，之后 ensureCandlePartitions()
+-- 新建的子分区也会自动带（PG 建 PARTITION OF 时会照父表索引建）。
+
+-- ──────────────────────────────── candles 的分区骨架（2026-10-08）
+-- 静态部分放在这儿：每档一个 LIST 子分区 + 一个 DEFAULT 兜底分区。
+-- ⚠️ 时间子分区（candles_1m_20261008 这种）是**滚动**的，由 ensureCandlePartitions() 建
+--    （启动 / 每天 / 迁移时按需）；DEFAULT 兜底保证「忘了建」也不会插入失败
+--    —— 落在 DEFAULT 里的行会在下次建该时间格时被搬进正规子分区。
+-- ⚠️ 必须包 DO 且判 relkind = 'p'：老库（未分区）上直接 PARTITION OF 会报
+--    「candles is not partitioned」，而 SCHEMA_SQL 每次启动都跑 —— 迁移前不能炸。
+${CANDLES_PARTITION_SKELETON_SQL}
+
+-- ──────────────────────────────── 待复核的高周期桶（2026-10-08）
+-- 「库内自洽」原来是**定时全市场扫描**：每轮 4 桶 × 5 档 × 全部币 ≈ 370 万行 1m 读取，
+-- 而 sum(volume) / array_agg(close…) 要的两列不在任何索引里 ⇒ 每个 1m 行都要回堆取一页。
+-- 2026-10-08 实测单轮 **4 分 40 秒**（1d 一档就 3 分 33 秒），而那段最贵的 4h/1d 从没揪出过
+-- 任何一个坏桶 —— 磁盘被它占住 60–99%，这就是「服务器慢」的真身（见 docs/EXCHANGE.md 第 53 节）。
+--
+-- 现在改成**记账 + 复核**：只有「我们自己写下去、且写的时候桶还没收盘」的高周期桶才可能坏
+-- （历史数据不会自己变坏；掉线/抖动的后果都落在"最近补进来的那段"上），
+-- 把那些记在这里，等它的 1m 补齐、桶也收盘之后，**只核对这一桶**（≤1440 行，毫秒级）。
+-- 写入者只有三处，全部经 saveCandles 一处判定（见 recordPartialBuckets）：
+--   · seed（启动灌历史，官方部分快照 —— 预期会写未收盘的桶）
+--   · rollup（按构造不该写未收盘的桶 ⇒ 写了就**立即告警**，等于一条断言）
+--   · repair 的 REST 覆盖（权威值，不记账）
+CREATE TABLE IF NOT EXISTS kline_pending_check (
+  exchange    TEXT        NOT NULL,
+  market_type TEXT        NOT NULL,
+  symbol      TEXT        NOT NULL,
+  interval    TEXT        NOT NULL,
+  open_time   TIMESTAMPTZ NOT NULL,             -- 桶起点
+  why         TEXT        NOT NULL,             -- 写入来源（seed / rollup / …），排查用
+  tries       INTEGER     NOT NULL DEFAULT 0,   -- 复核了几次还没法判定（1m 还没补齐）
+  written_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  checked_at  TIMESTAMPTZ,
+  PRIMARY KEY (exchange, market_type, symbol, interval, open_time)
+);
+-- 复核顺序：最老的先来；「桶已收盘」的判定在 SQL 里按 interval 算桶长
+CREATE INDEX IF NOT EXISTS kline_pending_check_written_idx
+  ON kline_pending_check (written_at);
 
 -- ──────────────────────────────── K 线对账（2026-10-07，抽样那一路）
 -- 每天抽几个币、每档取最近 N 根，跟交易所 REST 的官方 K 线逐字段比 OHLCV。
