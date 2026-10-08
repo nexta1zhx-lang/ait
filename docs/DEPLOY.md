@@ -298,6 +298,38 @@ bash scripts/release.sh            # 会问一句确认；加 -y 不问，加 --
 
 ⚠️ 万一包里的产物有问题，最直接的兜底：`sudo PREBUILT=0 bash scripts/deploy.sh`。
 
+### 为什么部署在**服务器上自己跑**、输出落文件（别让构建流经 ssh）
+
+2026-10-08 连续两次发布都栽在同一处：
+
+```
+failed to solve: frontend grpc server closed unexpectedly
+# 同一时刻 dockerd 里还有：
+session healthcheck failed fatally: Unavailable: connection error:
+  desc = "transport: Error while dialing: only one connection allowed"
+copy stream failed: reading from a closed fifo
+```
+
+`docker build` 的进度是 **BuildKit 前端容器的 gRPC 流**，而这条流的**客户端就是发起 build 的那条连接**。
+原来 `release.sh` 把这步放在 `ssh … bash -s` 的远程脚本里实时回传 ⇒ 本机这一侧只要**停读一下**
+（长构建里很常见：输出被缓冲、终端被切走、网络抖一下），客户端就掉线，
+dockerd 先刷「会话健康检查失败（only one connection allowed）」，紧接着**把前端会话判死** ✗
+—— 整次发布白跑，而且**服务器上什么都没动**（容器还是旧的，站点还活着）。
+
+所以现在：远程脚本里用 `setsid` 把 `deploy.sh` detach 出来，**输出重定向到服务器上的
+`/tmp/ca-deploy.log`**，本机只 `tail` 那个文件 ⇒ 本机断了也不影响构建（构建不挂在 ssh 会话上），
+重连上去接着看就行。
+
+⚠️ 另外：**别在旧 app 还在跑的时候发布**。旧版本每 60 秒那条 `maxOpenTimes` 全表扫会把盘占满
+（`vmstat wa=94%`），构建会被饿到十几分钟都跑不完。发布前先
+`sudo docker compose -f docker-compose.prod.yml stop app`，
+顺手把孤儿查询取消掉（客户端已死、PG 还在跑的那种）：
+
+```sql
+SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+ WHERE datname='crypto_advisor' AND state='active' AND backend_type='client backend';
+```
+
 先分清哪一类改动：
 
 - **要重新 build 镜像的**（走上面这套）：后端 / 前端源码、`Dockerfile`、

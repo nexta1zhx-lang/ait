@@ -288,7 +288,43 @@ fi
 echo "==> 跑 scripts/deploy.sh（构建镜像 + 起容器 + 自检）
     （PREBUILT=$PREBUILT：包里已带本机构建好的产物，服务器跳过 tsc + vite）"
 cd "$APP_DIR"
-sudo PREBUILT="$PREBUILT" bash scripts/deploy.sh
+# 上一次 ssh 断了、但部署还在服务器上跑 ⇒ 再发一次会两个构建同时抢盘
+if pgrep -f "bash scripts/deploy.sh" >/dev/null 2>&1; then
+  echo "✗ 服务器上已经有一个 scripts/deploy.sh 在跑（上次的 ssh 断了？）—— 等它跑完再发" >&2
+  echo "  看进度：ssh 上去 tail -f /tmp/ca-deploy.log" >&2
+  exit 1
+fi
+# ⚠️ **必须让服务器自己跑、输出落服务器上的文件，本机只轮询那个文件**（2026-10-08 两次踩到）。
+#    `docker build` 的进度是 BuildKit **前端容器的 gRPC 流**，而客户端就是「发起 build 的那条连接」。
+#    让它经 ssh 实时回传到本机，本机这侧一旦停读/抖动（长构建很容易），
+#    dockerd 里就会先刷
+#      healthcheck failed fatally: ... only one connection allowed
+#    紧接着
+#      frontend grpc server closed unexpectedly
+#    （还伴随 copy stream failed: reading from a closed fifo）⇒ 整次发布白跑。
+#    落文件之后客户端只是 `tail`，断了也不影响构建：构建是 setsid 出来的，不挂在 ssh 会话上。
+DEPLOY_LOG=/tmp/ca-deploy.log
+rm -f "$DEPLOY_LOG"
+setsid bash -c "sudo env PREBUILT=$PREBUILT bash scripts/deploy.sh > $DEPLOY_LOG 2>&1; echo DEPLOY_EXIT=\$? >> $DEPLOY_LOG" </dev/null >/dev/null 2>&1 &
+seen=0
+while true; do
+  sleep 5
+  if [[ -s "$DEPLOY_LOG" ]]; then
+    total=$(wc -l < "$DEPLOY_LOG")
+    if (( total > seen )); then
+      tail -n +$((seen + 1)) "$DEPLOY_LOG" | sed 's/^/    /'
+      seen=$total
+    fi
+    exit_line=$(sed -n 's/^DEPLOY_EXIT=//p' "$DEPLOY_LOG")
+    if [[ -n "$exit_line" ]]; then
+      [[ "$exit_line" == 0 ]] || {
+        echo "✗ scripts/deploy.sh 失败（exit $exit_line）—— 上面是服务器上的完整输出" >&2
+        exit 1
+      }
+      break
+    fi
+  fi
+done
 
 # Caddyfile 是 bind mount 的**单个文件**：内容变了 compose 看不出来，`up -d` 不会重建容器，
 # 而 Caddy 只在启动时读一次配置 —— 不重建的话改了等于没改。
