@@ -672,11 +672,9 @@ function queueRepair(st: SymState, fromMs: number): boolean {
 async function repairSweep(reason: string): Promise<void> {
   if (repairing || stopped || !cfg) return
   repairing = true
+  const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
   try {
-    const stored = await maxOpenTimes(
-      '1m',
-      symbols.map(s => s.symbol)
-    )
+    const stored = await maxOpenTimes('1m', symbols.map(s => s.symbol), scope)
     const now = Date.now()
     let queued = 0
     for (const st of states.values()) {
@@ -817,7 +815,7 @@ async function repairSymbol(st: SymState, fromMs: number): Promise<void> {
     const ms = MS[it]
     const from = Math.floor(Math.max(fromMs, now - 60 * ms) / ms) * ms
     const to = Math.floor(now / ms) * ms
-    if (from < to) await rollupFrom1m(it, [st.sym.symbol], from, to, ms)
+    if (from < to) await rollupFrom1m(it, [st.sym.symbol], from, to, ms, scope)
 
     /*
      * ③ 同段再问一次交易所（1~2 根的量，很便宜）。
@@ -1415,10 +1413,8 @@ export function subscribedSymbolCount(): number {
 async function seedHistory1m(): Promise<void> {
   if (!cfg || (process.env.KLINE_SEED_1M ?? '').toLowerCase() !== 'on') return
   const now = Date.now()
-  const have = await maxOpenTimes(
-    '1m',
-    symbols.map(s => s.symbol)
-  )
+  const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
+  const have = await maxOpenTimes('1m', symbols.map(s => s.symbol), scope)
   const jobs = symbols.filter(s => {
     const last = have.get(s.symbol)
     return !last || now - last > 60 * MIN_MS
@@ -1477,15 +1473,10 @@ async function seedHistory1m(): Promise<void> {
 async function seedHistory(): Promise<void> {
   if (!cfg || (process.env.KLINE_SEED ?? '').toLowerCase() === 'off') return
   const now = Date.now()
+  const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
   const have = new Map<HighInterval, Map<string, number>>()
   for (const it of HIGH_INTERVALS) {
-    have.set(
-      it,
-      await maxOpenTimes(
-        it,
-        symbols.map(s => s.symbol)
-      )
-    )
+    have.set(it, await maxOpenTimes(it, symbols.map(s => s.symbol), scope))
   }
   const jobs: {sym: PerpSymbol; it: HighInterval; tries: number}[] = []
   for (const s of symbols) {

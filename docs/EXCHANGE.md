@@ -2151,6 +2151,11 @@ const isProfit = (px >= d.entry) === long      // ← 跟**开仓价**比
    修法：**先挂一个吞掉的 `error` 处理器，再 `close()`**（见 `cleanup()`，注释里写明了原因）。
    ⚠️ 同一类坑还有 `onMessage` 的 `void … .catch()`（未处理的 Promise 拒绝 = 事件静默消失）——
    凡是**异步抛出**的都要显式接住，`try/catch` 只覆盖同步那一段。
+12. **`candles` 的查询不带 `exchange` / `market_type` = 整表扫**（2026-10-08：线上全站 502 3 分 27 秒）。
+   三个索引全以这两列打头，PG 16 又没有 index skip scan ⇒ 只给 `interval`（连 `interval + symbol`
+   也一样）就走 `Parallel Seq Scan`。数据量小时完全看不出来，涨到千万行才露头：
+   `maxOpenTimes` 单次 **410 秒**，而它开机跑 5 次 + `repairSweep` 每 60 秒一次 ⇒
+   磁盘 `wa=94%`、K 线写入被堵、app 3.5 分钟才 `listen()`。带 scope + 逐币索引探测后同规模 **33 ms**。详见 §52。
 
 ### 点位的时间戳：写侧留真实时刻，读侧才「聚集」
 
@@ -3970,3 +3975,71 @@ App 的「我的 → 个人信息 → 账户信息 → App 信息」那张体检
 （结果按分钟对齐的 `since` 缓存 5 分钟 —— 挪排序 / 切币 / 多开标签页都不会再查库。
 界面那一路用一份隔离的假后端在浏览器里验过：切 `UTC+8` 会带 `?since=` 重拉、
 列头变「今日涨跌」、`baseClose` 为 null 的那行显示「—」、✕ 能回到 24h。）
+
+## 52. 发布之后全站 502 三分钟：K 线那 5.5GB 全表扫（2026-10-08 事故）
+
+**症状**：发布重建 `ca-app` 之后，容器在跑、日志看着「启动正常」、`docker ps` 却一直是 `unhealthy`，
+外部访问**全是 502**（Caddy 日志 `dial tcp 172.18.0.4:8787: connect: connection refused`）。
+但**从容器里** `fetch http://127.0.0.1:8787/api/health` 是 **200 / 8ms** —— 应用本身没坏，坏的是「它还没开始听」。
+
+**时间线**（服务器上取证，全部是 `docker inspect` / `docker logs -t` 的原始时间）：
+
+| 时刻（UTC） | 事件 |
+|---|---|
+| 23:53:07 | 新容器 create |
+| 23:53:36 | 容器 start（node 起来，`RestartCount=0`：中途没崩） |
+| 23:54:01 → 23:56:22 | Caddy **13 次 `connection refused`**（≈ 全站 502） |
+| 23:57:01 | **应用第一行日志** —— 之前 **3 分 25 秒**一句都没有 |
+| 23:57:03 | `✅ 开单分析 Web 界面已启动`（`listen()` 此刻才发生） |
+
+**根因**（三条证据链：`EXPLAIN` + `pg_stat_activity` + `vmstat`）：
+
+1. `candles` 涨到 **11,055,577 行 / 5.5GB**（本地那份 10,556,168 行 / 3.8GB，同量级）。
+2. `maxOpenTimes()` 的谓词只有 `interval + symbol`，**没有 `exchange` / `market_type`**；
+   而三个索引**全部以这两列打头**（PG 16 没有 index skip scan）⇒
+   现在：`Parallel Seq Scan on candles (cost=500904)`；带 scope 后：
+   `Index Only Scan using candles_ivl_symbol_time_idx (cost=2100)`。
+3. 这条查询**开机跑 5 次**（`seedHistory` 五档各一次）+ `repairSweep` **每 60 秒一次**。
+   单次实测 **410.5 秒**（`state=active · wait_event=IO/DataFileRead`，3 个并行 worker）⇒
+   `vmstat wa=94%`、PSI `io some avg10=92%`、`loadavg 4~6.8`（2 核）、`swpd 110MB`；
+   连 `psql` 跑一句 catalog 查询都要几分钟，`INSERT INTO candles` 卡在 `IPC/BufferIO`
+   ⇒ **K 线实时写入被堵**。这正是 `schema.ts` 里 2026-10-07 记的那句「底座写不进去」——
+   当时只加了索引，**没发现那几条查询根本没带 scope，索引压根没被用上**。
+
+**为什么不怪「本地预构建 / BuildKit」（当时的两条怀疑）**：
+
+* 镜像里 `grep -c` 能查到崩溃修复那行 ⇒ 代码是新的那份；
+* 从容器内 `fetch /api/health` 是 200，healthcheck 后来也回到 `healthy`；
+* 慢的是**初始化前段**（第一行日志之前），而 `EXPLAIN` 在任何一台同样数据的机器上都是 Seq Scan。
+  BuildKit 那次失败是另一码事（SSH 流断 ⇒ 前端会话死），与本事故无关。
+
+**修法**（改根因，不是绕）：
+
+| 位置 | 改动 |
+|---|---|
+| `candle-store.ts` `maxOpenTimes` | 加 `scope` 参数，并改成**每币一次索引探测**（`unnest` + `LEFT JOIN LATERAL … ORDER BY open_time DESC LIMIT 1`）。带 scope 的 `GROUP BY` 仍要把这些币在该档的**全部**索引项读一遍（1m × 525 币 × 7 天 ≈ 530 万条），逐币探测只读 **1 条** |
+| `lastOpenTime` / `candleCount` | 补 scope（也缺，只是当前没人调用 —— 留着就是下一颗雷） |
+| `rollupFrom1m` | 补 scope（原来 `interval='1m' AND symbol=ANY(…) AND open_time…` 也是全表扫） |
+| `pruneCandles` | 原来一条 `(interval='1m' AND open_time<…) OR …`，四条分支都缺前缀 ⇒ 全表扫。改成**按 scope + 档位逐条 DELETE**（前 3 列等值 + `open_time` 范围 ⇒ 走 `candles_ivl_time_idx`） |
+| `candleStoreStats` | 诊断接口不再跑全表 `count(*)`：行数取 `pg_class.reltuples`（**估计值**），覆盖区间用每档索引端点探测；要精确值用 `?db=exact` |
+| `server.ts` `main()` | **`listen()` 提到所有重活之前** —— 端口 2 秒就服务，重活再慢只是接口慢，不会再出现「Caddy 全程 refused」 |
+
+**实测**（本地 10.5M 行 / 3.8GB，与线上同量级）：
+
+| 写法 | 耗时 |
+|---|---|
+| 旧（缺 scope，1 个币） | **1691 ms**（线上 525 个币：**410 秒**） |
+| 新（525 个真实币） | **33 ms**（线上在磁盘仍被旧代码占满时 9.7 秒 ⇒ 不被占后回到几十毫秒） |
+
+* `pruneCandles` / `rollupFrom1m` 的 `EXPLAIN`：`Index Scan using candles_ivl_time_idx` /
+  `candles_ivl_symbol_time_idx`（改前是 `Seq Scan`）；
+* 本地重启（带时间戳）：**T+2s 端口已可服务**，T+3s 才轮到 markets / 底座 / 清理 / 灌历史；
+* 崩溃修复那份 `dist` 也在线上镜像里（`grep -c` = 1）。
+
+**以后怎么防**（已写进 `schema.ts` 的 `candles` 段注释）：
+
+* `candles` 的索引都以 `exchange, market_type` 打头 ⇒ **新增/修改查询时先看谓词里有没有这两列**，
+  没有就是整表扫，数据量小的时候完全看不出来；
+* `EXPLAIN` 里出现 `Seq Scan on candles` 就是红灯，正常应当是
+  `Index Scan / Index Only Scan using candles_ivl_*`；
+* 现成入口：`GET /api/kline/recorder?db=1`（估计值 + 每档覆盖区间）、`?db=exact`（精确值，慎用）。

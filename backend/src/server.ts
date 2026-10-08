@@ -4599,7 +4599,17 @@ async function route(
     try {
       const st = klineRecorderStats()
       if (url.searchParams.get('db')) {
-        return sendJson(res, 200, {...st, store: klineStoreStats(), db: await candleStoreStats()})
+        /*
+         * `?db=1` 走**估计值**（`pg_class.reltuples`）+ 每档索引端点探测；不再是全表 `count(*)`
+         * —— 11M 行 / 5.5GB 时那条要几十秒，还把磁盘占住（与 2026-10-07 线上事故同类）。
+         * 真要精确值就用 `?db=exact`。
+         */
+        const exact = url.searchParams.get('db') === 'exact'
+        return sendJson(res, 200, {
+          ...st,
+          store: klineStoreStats(),
+          db: await candleStoreStats({exact})
+        })
       }
       return sendJson(res, 200, {...st, store: klineStoreStats()})
     } catch (e) {
@@ -4863,7 +4873,35 @@ async function resolveFrontend(): Promise<'vite' | 'dist'> {
 }
 
 async function main(): Promise<void> {
-  /** 管理员账号的情况（下面 listen 日志里要提示） */
+  /*
+   * ★ 先占端口，再干重活（2026-10-07 线上事故）。
+   *
+   * 原来顺序是「DB schema → markets → 资产流 → 归档 → 管理员 → 币种表 → K 线底座 → `listen()`」，
+   * 中间**任何一步慢**都等于「Caddy 拿不到上游 ⇒ **全站 502**」：那天 K 线表涨到 10.45M 行 /
+   * 3.8GB 之后退化成的全表扫，让容器起来到 listen 用了 **3 分 27 秒** ⇒ 502 也持续 3 分 27 秒。
+   * 端口先占上：静态页、健康检查立刻可用，重活再慢也只影响真正用它们的接口。
+   */
+  const rules = await loadRules()
+  const frontend = await resolveFrontend()
+  server.listen(PORT, () => {
+    console.log('')
+    console.log('  ✅ 开单分析 Web 界面已启动')
+    console.log(`     http://localhost:${PORT}`)
+    console.log('')
+    if (frontend === 'vite') {
+      console.log('  前端    Vite 开发模式 —— 改前端代码立刻生效，不需要 build')
+    } else if (hasBuiltFrontend()) {
+      console.log('  前端    frontend/dist（要改前端就重新 ui:build）')
+    } else {
+      console.log('  前端    ⚠️  还没构建：npm run ui:build')
+    }
+    console.log(
+      `  提示词  ${rules.sources.join('、') || '（数据库里没有启用的文档）'}`
+    )
+    for (const w of rules.warnings) console.log(`  ⚠️  ${w}`)
+  })
+
+  /** 管理员账号的情况（要等下面的 DB 初始化才知道，所以 banner 之后再补一行） */
   let adminNote = ''
   try {
     await ensureSchema()
@@ -4935,8 +4973,10 @@ async function main(): Promise<void> {
     console.error('')
   }
 
-  const rules = await loadRules()
-  const frontend = await resolveFrontend()
+  /* 端口在 `main()` 开头就占了（见那儿的说明）⇒ banner 剩下的两行补在这里 */
+  if (adminNote) console.log(`  账号    ${adminNote}`)
+  console.log('')
+  console.log('  按 Ctrl+C 停止。')
 
   // 币种表：启动时过旧就后台刷一次（新上币自动出现），之后每 24 小时一次。
   // 不 await —— 联网慢不应该拖住启动；失败了也只告警，继续用旧清单。
@@ -5068,28 +5108,6 @@ async function main(): Promise<void> {
     .catch(() => {
       /* 内部已经吞过异常了，这里只是兜底 */
     })
-
-  server.listen(PORT, () => {
-    console.log('')
-    console.log('  ✅ 开单分析 Web 界面已启动')
-    console.log(`     http://localhost:${PORT}`)
-    console.log('')
-    if (frontend === 'vite') {
-      console.log('  前端    Vite 开发模式 —— 改前端代码立刻生效，不需要 build')
-    } else if (hasBuiltFrontend()) {
-      console.log('  前端    frontend/dist（要改前端就重新 ui:build）')
-    } else {
-      console.log('  前端    ⚠️  还没构建：npm run ui:build')
-    }
-    console.log(
-      `  提示词  ${rules.sources.join('、') || '（数据库里没有启用的文档）'}`
-    )
-    if (adminNote) console.log(`  账号    ${adminNote}`)
-    for (const w of rules.warnings) console.log(`  ⚠️  ${w}`)
-    console.log('')
-    console.log('  按 Ctrl+C 停止。')
-    console.log('')
-  })
 }
 
 /** 退出时把 Vite 与数据库连接池关干净，别留孤儿进程 */

@@ -13,6 +13,7 @@
  *    别直接拿库里的最后一根当"正在走的那根"。
  */
 import {getPool, query, queryOne} from './client'
+import {loadMarketsStore} from './ccxt-markets'
 import type {Candle, Timeframe} from '../types'
 
 /** 底座记 1m，高周期由它滚出来 */
@@ -32,6 +33,27 @@ const MS: Record<KlineInterval, number> = {
   '1h': 60 * 60_000,
   '4h': 240 * 60_000,
   '1d': 1440 * 60_000
+}
+
+/**
+ * 库里可能存在的 (exchange, market_type) 组合。
+ *
+ * ⚠️ 从 `ccxt_markets`（就几行）读，**别**写 `SELECT DISTINCT exchange, market_type FROM candles` ——
+ * 那要扫 1000 万条索引项，又变成一次全表级开销（2026-10-07 线上就是被这类扫描拖死的）。
+ * `pruneCandles` 与 `candleStoreStats` 都靠它拿 scope（`candles` 的索引全以这两列打头）。
+ */
+export async function knownCandleScopes(): Promise<
+  {exchange: string; marketType: string}[]
+> {
+  const out: {exchange: string; marketType: string}[] = []
+  for (const r of await loadMarketsStore()) {
+    const [exchange, marketType] = r.key.split('|')
+    if (!exchange || !marketType) continue
+    if (!out.some(s => s.exchange === exchange && s.marketType === marketType)) {
+      out.push({exchange, marketType})
+    }
+  }
+  return out
 }
 
 export interface NewCandleRow {
@@ -227,19 +249,38 @@ export async function saveCandles(rows: NewCandleRow[]): Promise<number> {
   return written
 }
 
-/** 这些币在某个周期上各自最后一个点（毫秒）；没记录过的币不出现在结果里 */
+/**
+ * 这些币在某个周期上各自最后一个点（毫秒）；没记录过的币不出现在结果里。
+ *
+ * ⚠️ **必须带 scope**（`exchange` + `market_type`）：`candles` 的三个索引都以这两列打头，
+ *    只给 `interval + symbol` 的话**一个索引都用不上** ⇒ 顺序扫整张表。
+ *    2026-10-07 线上实测：表涨到 10.45M 行 / 3.8GB 之后，这一条要跑 **6.8 分钟**
+ *    （并行 worker 把 2 核机器的磁盘读到 94% io-wait），而它**开机跑 5 次、之后每 60 秒一次**
+ *    （`repairSweep`）⇒ 磁盘永远占着、K 线实时写入被堵、app 容器要 3.5 分钟才 `listen()`
+ *    （Caddy 全程 502）。见 docs/EXCHANGE.md §52。
+ *
+ * 为什么用「每币一次索引探测」而不是 `GROUP BY symbol`：带上 scope 之后 `GROUP BY` 仍要把
+ * 这些币在该档的**全部**索引项读一遍（1m × 525 币 × 7 天 ≈ 530 万条）；
+ * `ORDER BY open_time DESC LIMIT 1` 每个币只读**1 条**（向后索引扫，取到就停）。
+ */
 export async function maxOpenTimes(
   interval: KlineInterval,
-  symbols: string[]
+  symbols: string[],
+  scope: {exchange: string; marketType: string}
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>()
   if (!symbols.length) return out
   const rows = await query<{symbol: string; t: Date | null}>(
-    `SELECT symbol, max(open_time) AS t
-       FROM candles
-      WHERE interval = $1 AND symbol = ANY($2::text[])
-      GROUP BY symbol`,
-    [interval, symbols]
+    `SELECT s.sym AS symbol, m.t
+       FROM unnest($3::text[]) AS s(sym)
+       LEFT JOIN LATERAL (
+         SELECT open_time AS t
+           FROM candles
+          WHERE exchange = $1 AND market_type = $2 AND interval = $4 AND symbol = s.sym
+          ORDER BY open_time DESC
+          LIMIT 1
+       ) m ON true`,
+    [scope.exchange, scope.marketType, symbols, interval]
   )
   for (const r of rows) {
     if (r.t) out.set(r.symbol, new Date(r.t).getTime())
@@ -249,11 +290,16 @@ export async function maxOpenTimes(
 
 export async function lastOpenTime(
   interval: KlineInterval,
-  symbol: string
+  symbol: string,
+  scope: {exchange: string; marketType: string}
 ): Promise<number | null> {
   const row = await queryOne<{t: Date | null}>(
-    `SELECT max(open_time) AS t FROM candles WHERE interval = $1 AND symbol = $2`,
-    [interval, symbol]
+    `SELECT open_time AS t
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND interval = $3 AND symbol = $4
+      ORDER BY open_time DESC
+      LIMIT 1`,
+    [scope.exchange, scope.marketType, interval, symbol]
   )
   return row?.t ? new Date(row.t).getTime() : null
 }
@@ -335,14 +381,17 @@ export async function closesAtOrBefore(
   return out
 }
 
-/** 某个周期上已经记了多少个点（在哪个区间） */
+/** 某个周期上已经记了多少个点（在哪个区间）。⚠️ 同 `maxOpenTimes`：必须带 scope，否则全表扫 */
 export async function candleCount(
   interval: KlineInterval,
-  symbol: string
+  symbol: string,
+  scope: {exchange: string; marketType: string}
 ): Promise<number> {
   const row = await queryOne<{n: string}>(
-    `SELECT count(*)::text AS n FROM candles WHERE interval = $1 AND symbol = $2`,
-    [interval, symbol]
+    `SELECT count(*)::text AS n
+       FROM candles
+      WHERE exchange = $1 AND market_type = $2 AND interval = $3 AND symbol = $4`,
+    [scope.exchange, scope.marketType, interval, symbol]
   )
   return Number(row?.n ?? 0)
 }
@@ -537,7 +586,8 @@ export async function rollupFrom1m(
   symbols: string[],
   fromMs: number,
   toMs: number,
-  bucketMs: number
+  bucketMs: number,
+  scope: {exchange: string; marketType: string}
 ): Promise<number> {
   if (!symbols.length || fromMs >= toMs) return 0
   const res = await getPool().query(
@@ -551,32 +601,51 @@ export async function rollupFrom1m(
             sum(volume), sum(quote_volume), sum(trades), sum(taker_buy_volume),
             'rollup'
        FROM candles
-      WHERE interval = '1m' AND symbol = ANY($3::text[])
+      WHERE exchange = $6 AND market_type = $7 AND interval = '1m' AND symbol = ANY($3::text[])
         AND open_time >= to_timestamp($4 / 1000.0)
         AND open_time <  to_timestamp($5 / 1000.0)
       GROUP BY exchange, market_type, symbol, pair,
                floor(extract(epoch FROM open_time) * 1000 / $2)
      ${UPSERT}`,
-    [interval, bucketMs, symbols, fromMs, toMs]
+    [interval, bucketMs, symbols, fromMs, toMs, scope.exchange, scope.marketType]
   )
   return res.rowCount ?? 0
 }
+
+/** 分级保留：超期就删（周期 → 保留多久） */
+const KEEP: [KlineInterval, string][] = [
+  ['1m', '7 days'],
+  ['5m', '7 days'],
+  ['15m', '30 days'],
+  ['1h', '400 days']
+]
 
 /**
  * 分级清理。返回删掉的行数。
  *
  * 为什么这么分：1m/5m 只在「最近的图」上有用；15m 要能画 30 天；1h 要能画一年；
  * 4h/1d 一辈子最值钱（一年才 19 万行）。
+ *
+ * ⚠️ 必须**按 scope 拆开、一档一条 DELETE**。原来那条
+ *    `(interval = '1m' AND open_time < …) OR …` 四条分支都缺索引前缀
+ *    （`candles` 的索引全部以 `exchange, market_type` 打头）⇒
+ *    每次清理都顺序扫 3.8GB，连 autovacuum 一起把磁盘占死（2026-10-07 线上实测）。
+ *    拆开后每条都是「前 3 列等值 + `open_time` 范围」⇒ 走 `candles_ivl_time_idx` 的范围扫。
  */
 export async function pruneCandles(): Promise<number> {
-  const res = await getPool().query(
-    `DELETE FROM candles
-      WHERE (interval = '1m'  AND open_time < now() - interval '7 days')
-         OR (interval = '5m'  AND open_time < now() - interval '7 days')
-         OR (interval = '15m' AND open_time < now() - interval '30 days')
-         OR (interval = '1h'  AND open_time < now() - interval '400 days')`
-  )
-  return res.rowCount ?? 0
+  let n = 0
+  for (const s of await knownCandleScopes()) {
+    for (const [interval, keep] of KEEP) {
+      const res = await getPool().query(
+        `DELETE FROM candles
+          WHERE exchange = $1 AND market_type = $2 AND interval = $3
+            AND open_time < now() - $4::interval`,
+        [s.exchange, s.marketType, interval, keep]
+      )
+      n += res.rowCount ?? 0
+    }
+  }
+  return n
 }
 
 /** 1d 收盘序列（**新的在前**）—— 给「N 天涨幅」算基点用 */
@@ -610,31 +679,80 @@ export async function dailyCloses(
 }
 
 export interface CandleStoreStats {
+  /** 行数：默认是**估计值**（`pg_class.reltuples`），`exact` 时才是精确值 */
   rows: number
+  /** 上面那个 `rows` 是不是精确值 */
+  exact: boolean
   sizeBytes: number
-  byInterval: Record<string, {rows: number; from: string | null; to: string | null}>
+  byInterval: Record<string, {rows: number | null; from: string | null; to: string | null}>
 }
 
-/** 诊断用：库里有多少行、多大、每档覆盖到哪儿 */
-export async function candleStoreStats(): Promise<CandleStoreStats> {
-  const rows = await query<{interval: string; n: string; a: Date | null; b: Date | null}>(
-    `SELECT interval, count(*)::text AS n, min(open_time) AS a, max(open_time) AS b
-       FROM candles GROUP BY interval ORDER BY interval`
-  )
+/** 库里所有档（1m 在最前，其余按 `HIGH_INTERVALS`） */
+const ALL_INTERVALS: KlineInterval[] = ['1m', ...HIGH_INTERVALS]
+
+/**
+ * 诊断用：库里有多少行、多大、每档覆盖到哪儿。
+ *
+ * ⚠️ 默认**不精确数行**：`count(*)` 要扫全表，10.45M 行 / 3.8GB 时一次几秒到几十秒，
+ *    还把磁盘占住（2026-10-07 线上就是被这类扫描拖死的）。默认走
+ *    `pg_class.reltuples`（autovacuum 维护的估计值，这表开了激进的 autovacuum ⇒ 够准）
+ *    + 每档两个**索引端点探测**（`from` / `to`，与表大小无关）。
+ *    真要精确值就传 `exact: true`（会跑那条全表 count，慎用）。
+ */
+export async function candleStoreStats(
+  opts: {exact?: boolean} = {}
+): Promise<CandleStoreStats> {
   const size = await queryOne<{s: string | null}>(
-    `SELECT pg_total_relation_size('candles')::text AS s`
+    `SELECT pg_total_relation_size($1)::text AS s`,
+    ['candles']
   )
   const byInterval: CandleStoreStats['byInterval'] = {}
-  let total = 0
-  for (const r of rows) {
-    total += Number(r.n)
-    byInterval[r.interval] = {
-      rows: Number(r.n),
-      from: r.a ? new Date(r.a).toISOString() : null,
-      to: r.b ? new Date(r.b).toISOString() : null
+  for (const it of ALL_INTERVALS) byInterval[it] = {rows: null, from: null, to: null}
+
+  let rows = 0
+  if (opts.exact) {
+    const exact = await query<{interval: string; n: string; a: Date | null; b: Date | null}>(
+      `SELECT interval, count(*)::text AS n, min(open_time) AS a, max(open_time) AS b
+         FROM candles GROUP BY interval ORDER BY interval`
+    )
+    for (const r of exact) {
+      rows += Number(r.n)
+      byInterval[r.interval] = {
+        rows: Number(r.n),
+        from: r.a ? new Date(r.a).toISOString() : null,
+        to: r.b ? new Date(r.b).toISOString() : null
+      }
+    }
+  } else {
+    const est = await queryOne<{n: string}>(
+      `SELECT greatest(reltuples, 0)::bigint::text AS n FROM pg_class WHERE relname = $1`,
+      ['candles']
+    )
+    rows = Number(est?.n ?? 0)
+    /* 每档的覆盖区间：带 scope 的索引端点探测 ⇒ 每条只读 1 个索引项 */
+    for (const s of await knownCandleScopes()) {
+      for (const it of ALL_INTERVALS) {
+        const r = await queryOne<{a: Date | null; b: Date | null}>(
+          `SELECT (SELECT open_time FROM candles
+                    WHERE exchange = $1 AND market_type = $2 AND interval = $3
+                    ORDER BY open_time ASC LIMIT 1) AS a,
+                  (SELECT open_time FROM candles
+                    WHERE exchange = $1 AND market_type = $2 AND interval = $3
+                    ORDER BY open_time DESC LIMIT 1) AS b`,
+          [s.exchange, s.marketType, it]
+        )
+        const cur = byInterval[it] ?? {rows: null, from: null, to: null}
+        const from = r?.a ? new Date(r.a).toISOString() : null
+        const to = r?.b ? new Date(r.b).toISOString() : null
+        byInterval[it] = {
+          rows: null,
+          from: !from ? cur.from : !cur.from || from < cur.from ? from : cur.from,
+          to: !to ? cur.to : !cur.to || to > cur.to ? to : cur.to
+        }
+      }
     }
   }
-  return {rows: total, sizeBytes: Number(size?.s ?? 0), byInterval}
+  return {rows, exact: !!opts.exact, sizeBytes: Number(size?.s ?? 0), byInterval}
 }
 
 /* ---------------- 缺口巡检（第 2 档：定时，0 权重） ----------------

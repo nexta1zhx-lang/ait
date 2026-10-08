@@ -615,12 +615,19 @@ ALTER TABLE candles SET (
   autovacuum_vacuum_scale_factor = 0.05,
   autovacuum_analyze_scale_factor = 0.02
 );
--- 主键是 (exchange, market_type, symbol, interval, open_time) ⇒ 前缀是 symbol，
--- 而底座的两条日常 SQL **不带 symbol**：
---   · 修复扫描 maxOpenTimes / lastOpenTime / candleCount：按 (interval, symbol=ANY(…))
---   · 分级清理 pruneCandles：按 (interval, open_time < …)
--- 少了下面这两个索引就是**全表扫**（2026-10-07 灌完 1100 万行当场暴露：库 CPU 300%、
--- 连接超时、底座写不进去）。索引名带 ivl 前缀，别改 —— MIGRATE_SQL 里按同名建。
+-- ⚠️ 这两个索引**都以 exchange, market_type 打头** ⇒ 想走索引的查询**必须**带上这两列
+-- （底座自己的 scope 就是 cfg.exchange / cfg.marketType）。只给 interval（甚至
+-- interval + symbol）是**一个索引都用不上**的 —— PG 16 没有 index skip scan，只能顺序扫整表。
+-- 2026-10-07 就是这么炸的（当时只加了索引，没发现那几条查询没带 scope，索引压根没被用上）：
+-- 表到 1100 万行 / 5.5GB 时，maxOpenTimes 那条只给 interval + symbol 的查询**单次 410 秒**
+-- （3 个并行 worker 读满磁盘），而它**开机跑 5 次、之后每 60 秒一次** ⇒
+-- vmstat wa=94%、K 线实时写入卡在 IPC/BufferIO、app 容器 **3.5 分钟才 listen()**
+-- （Caddy 全程 connection refused ⇒ 全站 502）。详见 docs/EXCHANGE.md 第 52 节。
+--   · 走 candles_ivl_symbol_time_idx：带 scope **且**带 symbol 的
+--     （maxOpenTimes / lastOpenTime / lastTradedAt / candleCount / rollupFrom1m / 读最近 N 根 …）
+--   · 走 candles_ivl_time_idx：带 scope 但**不带** symbol 的（pruneCandles / bucketCoverage …）
+-- ⇒ **新增或修改 candles 的查询时，先看谓词里有没有那两列。**
+-- 索引名带 ivl 前缀，别改 —— MIGRATE_SQL 里按同名建。
 CREATE INDEX IF NOT EXISTS candles_ivl_symbol_time_idx
   ON candles (exchange, market_type, interval, symbol, open_time);
 CREATE INDEX IF NOT EXISTS candles_ivl_time_idx
