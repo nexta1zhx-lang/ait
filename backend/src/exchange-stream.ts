@@ -1530,13 +1530,27 @@ export class KeyStream {
     if (this.seededActivity) return
     this.seededActivity = true
     try {
-      const row = await queryOne<{t: string | null}>(
-        `SELECT max(ts) AS t FROM exchange_fills WHERE key_id = $1`,
+      /*
+       * ⚠️ 「上次动静」必须**连账本（income）一起看**（2026-10-08 补）。
+       *
+       * 只认 `exchange_fills` 的话有个死结：掉线期间成交、事后平掉的那个币
+       * **在成交明细里一条都没有**（就是漏掉的那批）⇒ 账户被判定成"很久没动"⇒
+       * 直接落进 `asleep` ⇒ `reconcileTick` 那句 `return` 会把**成交回补整条停掉** ⇒
+       * 连"发现缺哪几个币"的机会都没有 ⇒ 永远补不回来（实测踩到：掉线 3.5 小时，
+       * JUP / MET / PROM / RESOLV 上的 15 笔就是这样丢的，而 income 账本是对的）。
+       *
+       * income 是**按时间全量拉**的（`incomeType` 不需要币），所以掉线期间它一定完整
+       * —— 拿它当活跃信号，正好补上"成交明细缺失"这类看不见的动静。
+       */
+      const rows = await queryOne<{f: string | null; i: string | null}>(
+        `SELECT (SELECT max(ts) FROM exchange_fills  WHERE key_id = $1) AS f,
+                (SELECT max(ts) FROM exchange_income WHERE key_id = $1) AS i`,
         [this.row.id]
       )
-      const lastFill = row?.t ? new Date(row.t).getTime() : 0
+      const lastFill = rows?.f ? new Date(rows.f).getTime() : 0
+      const lastIncome = rows?.i ? new Date(rows.i).getTime() : 0
       const created = this.row.created_at.getTime()
-      const t = Math.max(lastFill, created)
+      const t = Math.max(lastFill, lastIncome, created)
       if (t > 0 && t < this.lastActivityAt) this.lastActivityAt = t
     } catch {
       /* 读不到就当「刚有动静」，不影响正确性 */
