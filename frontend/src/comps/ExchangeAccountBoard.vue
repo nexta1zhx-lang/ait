@@ -114,11 +114,6 @@ const props = defineProps<{
   lastPrice?: Record<string, number>
   /** `incomeTotals`（后端按交易所口径算好的那几项合计）—— 资金动向顶部那一行 */
   incomeTotals?: ExchangeIncomeTotals
-  /**
-   * 这一本钱账本涵盖几天（后端 `?days=`）—— 资金动向右上角写「近 N 天」，
-   * 免得人以为这就是账户的**全部**历史。
-   */
-  incomeDays?: number
   /** 正在提交「平仓 / 全平」（按钮转圈 + 禁点） */
   busy?: boolean
   /**
@@ -2158,7 +2153,7 @@ const RANGES = [
             <span class="spacer" />
             <span
               class="dim tiny"
-              title="按上面的周期范围筛；账本只有币安给的那段成交（约 7 天），更早的里面没有"
+              title="按上面的周期范围筛；账本里最早的只有币安还留着的那 3 个月（成交 / 已实现盈亏 / 手续费都是），更早的交易所自己也没有了"
             >
               {{ shownFlow.length }} 笔
             </span>

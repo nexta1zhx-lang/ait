@@ -36,7 +36,7 @@ import {showToast} from '../toast'
 import {isForeground} from '../live'
 import {bjTime} from '../format'
 import LedgerRangeSheet from './LedgerRangeSheet.vue'
-import {bjDayStart, TYPE_NAME, type RangeKey} from '../ledger'
+import {bjDayStart, rangeToInterval, TYPE_NAME, type RangeKey} from '../ledger'
 import {
   cancelTradeOrder,
   cancelTradeOrders,
@@ -87,13 +87,6 @@ const REFRESH_AFTER_SEC = 15
  *      所以放大上限只是「允许往下滚更多」，不是一上来就渲染五百行。
  */
 const LEDGER_MAX = 500
-/**
- * 只用来写那句提示「账本只有币安给的那段成交（约 7 天）」。
- *
- * ⚠️ **别拿它去请求**：范围现在由各格的周期范围（`from`/`to`）决定，
- *    两个条件是与关系，传 `days=7` 会把「近 30 天」卡成 7 天（见 `loadIncome` 那段）。
- */
-const INCOME_DAYS = 7
 
 /* ---------------- 账本三格的筛选（周期范围 + 币种 + 资金类型） ---------------- */
 
@@ -111,7 +104,13 @@ interface LedgerFilter {
   types: string[] | null
 }
 
-/** 默认：近 7 天 + 全部币种 + 全部类型（用户 2026-10-07：「默认显示 7 天的数据」） */
+/**
+ * 默认：近 7 天 + 全部币种 + 全部类型（用户 2026-10-07：「默认显示 7 天的数据」）。
+ *
+ * ⚠️ 这里的 `from`/`to` 只是**弹层回显用的快照**，**别拿去请求**
+ *    （相对范围每次请求现算，见 `rangeOf`；否则 `to` 一旦冻住，
+ *    页面打开之后的新数据就永远读不出来了）。
+ */
 function defaultFilter(): LedgerFilter {
   const to = Date.now()
   return {range: '7d', from: bjDayStart(to, 6), to, symbol: '', types: null}
@@ -127,12 +126,21 @@ const filters = reactive<Record<LedgerTab, LedgerFilter>>({
   flow: defaultFilter()
 })
 
-/** 交给 api 的范围参数（币种不传 —— 本地筛） */
+/**
+ * 交给 api 的范围参数（币种不传 —— 本地筛）。
+ *
+ * ⚠️ **相对范围（今天 / 近 N 天）必须每次现算，不能直接用 `f.filters[].from/to`。**
+ *    那两个字段是「组件挂载那一刻」或「弹层里点完成那一刻」的快照，`to` **冻在过去**。
+ *    拿它去请求的后果是：**页面打开之后**发生的成交 / 平仓 / 手续费全落在窗口外，
+ *    重读多少次都读不回来 —— 用户 2026-10-08 报的「仓位历史 / 成交 / 资金动向
+ *    根本不实时」就是这么来的（当时兜底定时器每 20 秒确实都在读库，读的却是一个
+ *    过期的 `to`，所以「查了但永远是旧数据」）。
+ *    只有**自定义**范围才该用用户选死的 from/to（那是他要的固定区间）。
+ */
 function rangeOf(tab: LedgerTab): {from: number | null; to: number | null; types?: string[] | null} {
   const f = filters[tab]
-  return tab === 'flow'
-    ? {from: f.from, to: f.to, types: f.types}
-    : {from: f.from, to: f.to}
+  const win = f.range === 'custom' ? {from: f.from, to: f.to} : rangeToInterval(f.range)
+  return tab === 'flow' ? {...win, types: f.types} : win
 }
 
 /** 按钮上那行字 */
@@ -1561,11 +1569,17 @@ function startStreams(): void {
            */
           if (t.id && fills.value.some(f => f.id === t.id)) return
           /*
-           * ⚠️ 只有「范围还没关到过去」时才插进列表 —— 用户把成交历史筛成
+           * ⚠️ 只有「范围被**用户手动关到过去**」时才丢这笔 —— 他把成交历史筛成
            *    「8 月 1 号 → 8 月 10 号」的时候，刚成交的这笔不该冒在最上面。
+           *
+           * ⚠️ 判据必须是 `range === 'custom'`，**不能只看 `rf.to`**：`rf.to` 在
+           *    「今天 / 近 N 天」这些相对范围下也是个**过期快照**（挂载那一刻的 now），
+           *    于是 `rf.to < Date.now() - 1000` 从页面活过 1 秒之后**恒为真** ——
+           *    所有实时成交都被这一行静默丢掉，而那正是用户报的
+           *    「成交记录根本就没有实时变」（2026-10-08）。
            */
           const rf = filters.trades
-          if (rf.to && rf.to < Date.now() - 1000) return
+          if (rf.range === 'custom' && rf.to && rf.to < Date.now() - 1000) return
           const tagged = keys.value.length > 1 ? {...t, keyName: k.name} : t
           fills.value = [tagged, ...fills.value].slice(0, LEDGER_MAX)
           /* 仓位历史是从成交推出来的 —— 新成交可能刚开一段、也可能刚平掉一段 */
@@ -1809,6 +1823,26 @@ function startWork(): void {
   startSnapTimer()
   startLastPrices()
   if (!data.value && !reason.value) void loadSnapshots()
+  /*
+   * ★ **进来就把三本台账读一遍**（2026-10-08 加）。
+   *
+   * 为什么：这三格原来只靠 SSE 事件触发重读。可是**下单往往不在这一页**
+   *   （K 线页底部那个下单模块，那会儿这条账户流压根没有订阅者 ——
+   *   线上日志实测过：用户 12:34 下单时那几行统计都是 `观察者 0`），
+   *   于是"事件"这条路必然收不到 ⇒ 打开这一页看到的还是上次那份旧数据
+   *   （快照那份被缓存挡住不重读，见下面那句的注释）。
+   *   用户报的「仓位历史/成交/资金动向不实时」有一半就是这个场景。
+   *
+   * ⚠️ 敢在这儿读四份的理由：**全是读我们自己的库**（成交/仓位历史/钱账本/挂单），
+   *    毫秒级、零交易所权重。所以"进页面必读"是划算的，也**不违反**当初
+   *    「进页面别去打交易所」那条（那条说的是 `loadSnapshots()` 那个 25 权重的快照）。
+   * ⚠️ 挂单走 `silent`，别让"正在查询挂单…"闪一下。
+   * ⚠️ 快照**仍然**按缓存策略（`data.value` 有了就不重读）—— 它是打交易所的那一发。
+   */
+  void loadFills()
+  void loadCycles()
+  void loadIncome()
+  void loadOrders({silent: true})
 }
 
 /** 停掉：两条 SSE + 三个定时器（没人看的时候一条请求都不发） */
@@ -1937,7 +1971,6 @@ onUnmounted(stopWork)
       :trades="fills"
       :income="income"
       :income-totals="incomeTotals"
-      :income-days="INCOME_DAYS"
       :cycles="cycles"
       :open-cycles="openCycles"
       :cycles-since="cyclesSince"

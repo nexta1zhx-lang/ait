@@ -262,7 +262,7 @@ function liveSse(
   events: string[],
   onEvent: (name: string, data: unknown) => void,
   opts: {idleMs?: number; onReconnect?: () => void; onAlive?: () => void} = {}
-): () => void {
+): {stop: () => void; addEvents: (names: string[]) => void} {
   const idleMs = opts.idleMs ?? 75_000
   /** 断开超过这么久才值得重拉底稿（快抖就交给下一批推送） */
   const RESYNC_GAP_MS = 10_000
@@ -303,16 +303,39 @@ function liveSse(
       opts.onAlive?.()
     })
 
-    for (const name of events) {
-      cur.addEventListener(name, e => {
-        lastAt = Date.now()
-        opts.onAlive?.()
-        try {
-          onEvent(name, JSON.parse((e as MessageEvent).data))
-        } catch {
-          /* 一条坏消息不影响后面的 */
-        }
-      })
+    for (const name of events) attach(cur, name)
+  }
+
+  /**
+   * 给**这条（当前）连接**挂一个具名事件的监听。
+   *
+   * ⚠️ 抽成函数是因为要支持"**就地加事件**"：同一条 path 被多个组件共用，
+   *    而它们要的事件名单不一样（见 `sharedSse`）。原来那种情况会**拆掉连接重建**
+   *    —— 重建间隙里的事件就丢了，而 SSE 恰恰是"错过就不再来"的东西。
+   */
+  const attach = (holder: EventSource, name: string): void => {
+    holder.addEventListener(name, e => {
+      lastAt = Date.now()
+      opts.onAlive?.()
+      try {
+        onEvent(name, JSON.parse((e as MessageEvent).data))
+      } catch {
+        /* 一条坏消息不影响后面的 */
+      }
+    })
+  }
+
+  /**
+   * 就地补监听（当前连接 + 后续重连都生效）。
+   *
+   * `events` 是**调用方传进来的那个数组**（`sharedSse` 里就是 `e.events`），
+   * 所以往里 push 之后，`connect()` 下次重连时也会自动带上 —— 不用改两处。
+   */
+  const addEvents = (names: string[]): void => {
+    for (const name of names) {
+      if (events.includes(name)) continue
+      events.push(name)
+      if (es) attach(es, name)
     }
   }
 
@@ -334,12 +357,15 @@ function liveSse(
     else closeSocket()
   })
 
-  return () => {
-    stopped = true
-    if (watchdog) clearInterval(watchdog)
-    watchdog = null
-    closeSocket()
-    offForeground()
+  return {
+    stop: () => {
+      stopped = true
+      if (watchdog) clearInterval(watchdog)
+      watchdog = null
+      closeSocket()
+      offForeground()
+    },
+    addEvents
   }
 }
 
@@ -432,7 +458,7 @@ function spawnStream(path: string, events: string[], idleMs: number): SharedStre
     timer: null,
     seq: ++streamSeq
   }
-  e.stop = liveSse(
+  const conn = liveSse(
     path,
     e.events,
     (name, data) => {
@@ -460,6 +486,8 @@ function spawnStream(path: string, events: string[], idleMs: number): SharedStre
       idleMs
     }
   )
+  e.stop = conn.stop
+  e.addEvents = conn.addEvents
   return e
 }
 
@@ -485,13 +513,38 @@ function sharedSse(
    * 不满足就带着老订阅者一起重建 —— 一条消息都别丢。
    * （现有调用方每条 path 的事件名单都是固定的，重建这条路基本走不到，留着防以后。）
    */
-  if (live && merged.length === live.events.length && idleMs >= live.idleMs) {
+  /*
+   * ★ 复用优先，缺事件就**就地补**（2026-10-08 改）。
+   *
+   * 原来这里只在「新名单是老名单的**子集**」时才复用，否则 `dropStream(live)` **拆掉重建**。
+   * 现在：名单不够就地 `addEvents`（给当前连接加监听，重连后也自动带上），
+   * **连接一条都不拆**。只有 `idleMs` 更宽（看门狗口径不一致）时才重建 —— 那种情况
+   * 现有调用方走不到（每条 path 的 idleMs 是固定的）。
+   *
+   * ⚠️ **别把这一条当成「三格不实时」的原因**（我一开始就是这么误判的，后来对着代码和
+   *    线上日志推翻了）：`/api/exchange/stream` 的三个订阅者
+   *    （`positions.ts` / `trade-overlay.ts` / 交易所账户那一格）传的**是同一个常量
+   *    `EXCHANGE_EVENTS`**（`exchangeStream()` 里写死的那一份），三条路的事件名单**完全相同**
+   *    ⇒ 上面那个条件恒成立 ⇒ **这条 path 本来就不会重建**。
+   *    线上那句 `[exchange/stream] 连接只活了 2xxx ms 就被收尾` 也不是它 ——
+   *    那是我自己刷页面时"最后一个订阅者走了、`STREAM_GRACE_MS` 到了"的正常收尾
+   *    （我另挂一条探针实测过：0s open、20s / 40s 心跳，一直稳）。
+   *    真正的成因见 `docs/EXCHANGE.md` §57.2：周期范围的 `to` 冻在挂载那一刻
+   *    （`ExchangeAccountLivePanel.rangeOf`）+ 下单时页面上没有订阅者（`观察者 0`）。
+   *
+   * 那为什么还改：这是个**真存在的坑**，只是现在没人踩 —— 以后任何一条 path 若出现
+   *   「小名单先订、大名单后订」，就会拆连接，而**重建的间隙里事件全丢**
+   *   （SSE 是"错过就不再来"的）。就地补监听把这条路彻底堵死，成本是零。
+   */
+  if (live && idleMs >= live.idleMs) {
     e = live
     /* 还在宽限里 ⇒ 撤销关闭，这条连接就活了 */
     if (e.timer) {
       clearTimeout(e.timer)
       e.timer = null
     }
+    const missing = merged.filter(n => !e.events.includes(n))
+    if (missing.length) e.addEvents(missing)
   } else {
     const old = live ? {subs: [...live.subs], idleMs: live.idleMs} : null
     if (live) dropStream(live)
