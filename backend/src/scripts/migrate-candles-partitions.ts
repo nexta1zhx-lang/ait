@@ -31,7 +31,11 @@ import {
   SCHEMA_SQL
 } from '../db/schema'
 import {closePool, getPool, query, queryOne} from '../db/client'
-import {ensureCandlePartitions, isCandlesPartitioned} from '../db/candle-store'
+import {
+  ensureCandlePartitions,
+  isCandlesPartitioned,
+  minOpenTimeByInterval
+} from '../db/candle-store'
 
 const APPLY = process.argv.includes('--apply')
 const DROP_OLD = process.argv.includes('--drop-old')
@@ -138,7 +142,23 @@ async function main(): Promise<void> {
 
   /* ③ 按各档实际最早一行铺子分区（老数据不能漏） */
   log('③ 铺时间子分区（按各档最早一行）')
-  const created = await ensureCandlePartitions({coverExisting: true})
+  /*
+   * ⚠️⚠️ `fromMs` 必须从**数据所在的那张表**读，不能靠 `coverExisting`。
+   *
+   * `coverExisting` 走的是 `minOpenTimeByInterval()`，默认读 `candles` —— 可走到这一步时
+   * 老表在步骤 ① 已经改名成 `candles_old`，`candles` 是**刚建好的空父表** ⇒ 读回来是空的
+   * ⇒ 下界退化成「现在 − 该档保留期」⇒ **比保留期更老的行全掉进 DEFAULT**。
+   * 而 DEFAULT 里的行**永远不会被清理**（`pruneByPartition` 只 DROP 具名子分区）——
+   * 2026-10-08 线上实测踩到：1m 的 09-18 ~ 09-19 共 **118,000 行**卡在 `candles_1m_def` 里。
+   */
+  const source = hasOld ? 'candles_old' : 'candles'
+  const mins = await minOpenTimeByInterval(source)
+  const fromMs = mins.size ? Math.min(...mins.values()) : undefined
+  log(
+    `  最早一行：${fromMs ? new Date(fromMs).toISOString() : '（空表）'}` +
+      `（读自 ${source}）`
+  )
+  const created = await ensureCandlePartitions({fromMs})
   log(`  建了 ${created.length} 个子分区`)
 
   /* ④ 分批搬运：粗档按 30 天、细档按 1 天，一批一个事务。

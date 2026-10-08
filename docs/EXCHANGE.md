@@ -4522,3 +4522,83 @@ WS 实时帧进来；帧一丢就得等下一轮对账。
   其中**资金费率 / 持仓量库里根本没有**（K 线底座只存 OHLCV）⇒ 没法像 K 线那样改成读库，
   只能靠预热让第一发命中缓存。
 
+---
+
+## 58. 分区迁移的一个真 bug：比保留期更老的行会掉进 DEFAULT，而且**永远清不掉**（2026-10-08 线上实测）
+
+### 58.1 怎么发现的
+
+P3 分区迁移在线上跑完、六档行数与 `Σclose` 逐位一致（⑤ 核对全过），
+但顺手看一眼兜底切片就露馅了：
+
+```
+candles_1m_def  = 118000 行   2026-09-18 08:00 → 2026-09-19 17:19
+其余 5 档 _def  = 0 行
+```
+
+那 118k 行是 **1m、比 7 天保留期更老**的数据。
+
+### 58.2 根因：迁移算「下界」时读错了表
+
+`migrate-candles-partitions.ts` 步骤 ③ 调的是：
+
+```ts
+ensureCandlePartitions({coverExisting: true})
+```
+
+而 `coverExisting` 走 `minOpenTimeByInterval()`，它查的是 **`candles`** ——
+**可走到这一步时，老表在步骤 ① 已经改名成 `candles_old` 了**，
+`candles` 是**刚建好的空分区父表** ⇒ `mins` 读回来是空的
+⇒ 下界退化成 `floor = now - 该档保留期` ⇒ **比保留期更老的行没有对应子分区，全掉进 DEFAULT**。
+
+而 DEFAULT 是**只进不出**的：`pruneByPartition` 只 DROP **具名**子分区
+（它按 `relname ~ '^candles_(1m|…)_[0-9]{8}$'` 找片子），**DEFAULT 永远不会被清理** ⇒ 泄漏。
+
+⚠️ 注意 ⑤ 的核对**发现不了它** —— 核对是按 `candles` 整表数的，DEFAULT 也是 `candles` 的一部分，
+所以「行数 + Σclose 全对」和「有 118k 行卡在 DEFAULT」可以同时成立。
+
+### 58.3 修法（两处，都在 main）
+
+**① 迁移：下界必须从「数据所在的那张表」读。**
+`minOpenTimeByInterval()` 加了个 `table` 参数（默认 `'candles'`），迁移显式传
+`hasOld ? 'candles_old' : 'candles'`，并把日志打出来（`最早一行：…（读自 candles_old）`）。
+
+**② 维护：下界还要够到 DEFAULT 里最早那一行 —— 这样它是自愈的。**
+`ensureCandlePartitions` 新增 `defaultPartitionMin()`（6 次 `min(open_time)`，
+走继承来的主键索引，向后索引扫取到就停），下界取
+`min(fromMs, 覆盖表的最小值, DEFAULT 的最小值, floor)`。
+
+于是**不用人工介入**：DEFAULT 里一旦有行比具名分区更早，下一轮小时级维护就会
+建出对应子分区、把行搬进去，随后「分级清理」按保留期把它们 DROP 掉。
+收敛性：搬完 DEFAULT 就空了 ⇒ 下一轮不再往前够，不会反复建了又删。
+
+实测（本地，故意往 `candles_1m_def` 塞一行 09-18）：
+
+```
+塞完之后 candles_1m_def 有 1 行（期望 1）
+ensureCandlePartitions 建了 13 片：candles_1m_20260918 … 20260930
+跑完之后 DEFAULT 有 0 行（期望 0）
+那行到 candles_1m_20260918 了吗：1 行（期望 1）
+```
+
+### 58.4 ★ 顺带一条给运维的：建分区与 DEFAULT 的**顺序不能反**
+
+线上清理那 118k 行时第一版 SQL 先 `CREATE TABLE … PARTITION OF` 再搬，直接被 PG 拒了：
+
+```
+ERROR: updated partition constraint for default partition "candles_1m_def"
+       would be violated by some row
+```
+
+**建分区的瞬间，DEFAULT 里不能有落在这个区间里的行**。所以顺序必须是
+`DELETE FROM <def> … RETURNING` → `CREATE … PARTITION OF` → `INSERT` 回新片。
+`ensureCandlePartitions` 本来就是这个顺序（见它循环里的 ①②③），**别改成先建后搬**。
+
+线上最终用「staging 临时表 → 删 DEFAULT → 建两片 → 回填」跑完：
+
+```
+待搬 = 118000 → 09-18 片 = 56640 / 09-19 片 = 61360 / DEFAULT = 0
+```
+
+🔥 这两片都早过 1m 的 7 天保留期 ⇒ **下一轮「分级清理」会 DROP 掉它们**（`periodEndOf(09-18)` = 09-19 ≤ now − 7d）。
+

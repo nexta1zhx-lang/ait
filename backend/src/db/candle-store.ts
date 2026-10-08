@@ -968,13 +968,30 @@ export async function ensureCandlePartitions(
   )
   const existing = new Set(rows.map(r => r.relname))
   const mins = opts.coverExisting && opts.fromMs === undefined ? await minOpenTimeByInterval() : null
+  /*
+   * ⚠️⚠️ 下界还要算上**每个 `*_def`（DEFAULT 兜底）里的最早一行**（2026-10-08 加）。
+   *
+   * 为什么必须有这一条：`pruneByPartition` 只 DROP **具名**子分区 —— **DEFAULT 里的行
+   * 永远不会过期、永远清不掉**，那是条只增不减的泄漏。而迁移时若下界算窄了
+   * （历史上正好踩过一次，见 `minOpenTimeByInterval` 的 ⚠️），超期的行就会堆在 DEFAULT 里。
+   * 把下界一直往前够到 DEFAULT 里最早那一行，这些行就会被搬进具名子分区、随后被正常 DROP 掉。
+   *
+   * 收敛性：搬完 DEFAULT 就空了 ⇒ 下一轮不再往前够，不会反复建了又删。
+   * 代价：6 次 `min(open_time)` —— 走继承来的主键索引，向后索引扫取到就停。
+   */
+  const defMin = await defaultPartitionMin()
   const now = Date.now()
   const created: string[] = []
   for (const it of ALL_INTERVALS) {
     const g = PART_GRANULARITY[it]
     const keep = KLINE_RETENTION[it]
     const floor = now - (keep ? keepMs(keep) : FOREVER_LOOKBACK_MS)
-    const since = Math.min(opts.fromMs ?? mins?.get(it) ?? floor, floor)
+    const since = Math.min(
+      opts.fromMs ?? Infinity,
+      mins?.get(it) ?? Infinity,
+      defMin.get(it) ?? Infinity,
+      floor
+    )
     const stop = periodEndOf(periodStartOf(now, g), g)
     for (let start = periodStartOf(since, g); start < stop; start = periodEndOf(start, g)) {
       const name = partNameOf(it, start)
@@ -1010,11 +1027,44 @@ export async function ensureCandlePartitions(
 }
 
 /** 各档**库里最早那一行**的时刻（迁移时按它铺子分区，别漏掉老数据） */
-async function minOpenTimeByInterval(): Promise<Map<KlineInterval, number>> {
+/**
+ * 每个 `candles_<档>_def`（DEFAULT 兜底）里**最早那一行**（毫秒）；空的档不出现。
+ *
+ * 用途见 `ensureCandlePartitions` 里那段 ⚠️⚠️：DEFAULT 里的行永远不被清理，
+ * 所以建分区时下界必须一直够到它们最早那一行，好把它们搬进可 DROP 的具名子分区。
+ *
+ * 表可能还不存在（第一次迁移的半路上）⇒ 查不到就跳过，别让维护任务报错。
+ */
+async function defaultPartitionMin(): Promise<Map<KlineInterval, number>> {
+  const out = new Map<KlineInterval, number>()
+  for (const it of ALL_INTERVALS) {
+    try {
+      const row = await queryOne<{t: Date | null}>(
+        `SELECT min(open_time) AS t FROM candles_${it}_def`
+      )
+      if (row?.t) out.set(it, new Date(row.t).getTime())
+    } catch {
+      /* 那片子分区还没建（或已被 DROP）—— 没有 DEFAULT 行要照顾 */
+    }
+  }
+  return out
+}
+
+/**
+ * 每档的**最早一行**（毫秒）。
+ *
+ * ⚠️ 默认看 `candles`，但**迁移脚本必须传 `'candles_old'`** —— 见下面 `ensureCandlePartitions`
+ *    里那段 ⚠️⚠️（2026-10-08 线上就是在这里踩的：步骤 ① 已经把老表改名成 `candles_old`，
+ *    再去读 `candles` 读到的是**刚建好的空父表** ⇒ 下界退化成「现在 − 保留期」⇒
+ *    比保留期更老的行全掉进 DEFAULT，而且永远清不掉）。
+ */
+export async function minOpenTimeByInterval(
+  table: 'candles' | 'candles_old' = 'candles'
+): Promise<Map<KlineInterval, number>> {
   const out = new Map<KlineInterval, number>()
   for (const s of await knownCandleScopes()) {
     const rows = await query<{interval: string; a: Date | null}>(
-      `SELECT interval, min(open_time) AS a FROM candles
+      `SELECT interval, min(open_time) AS a FROM ${table}
         WHERE exchange = $1 AND market_type = $2 GROUP BY interval`,
       [s.exchange, s.marketType]
     )
