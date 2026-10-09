@@ -182,6 +182,15 @@ function buzz(pattern: number | number[] = 12): void {
 /** 请求序号：换币之后兜回来的旧结果直接作废 */
 let seq = 0
 
+/** 正在飞的那一发（`币种@KeyId`）和它的请求代次 —— 只有代次没被顶掉才去重复用 */
+let pendingKey = ''
+let pendingSeq = 0
+/** 上一次**成功**读回来的是哪一发、什么时候 */
+let loadedKey = ''
+let loadedAt = 0
+/** 同一份下单信息这么久内不重读（来回切 tab 时别每秒都去问余额） */
+const INFO_FRESH_MS = 30_000
+
 const ready = computed(() => info.value?.ready === true)
 const base = computed(() => info.value?.base || props.symbol)
 const available = computed(() => Number(info.value?.balance?.available ?? 0))
@@ -389,12 +398,29 @@ function useLast(): void {
 async function load(): Promise<void> {
   const sym = exSymbol.value
   if (!sym) return
+  /*
+   * 切页回来（`watch(props.active)`）本来就要重读一次余额；但用户主场景是
+   * **两个 tab 来回切**，几秒内切 4 轮就会白打 4 发交易所。所以同一份数据
+   * 在这个窗口内不重读 —— `info` 还在（内容没被作废）且币种 / Key 都没变才跳。
+   * 换币、换账户都会先把 `info` 清成 `null`，走不到这里。
+   *
+   * 「正在飞」那一发只在**代次没被顶掉**时才算数：换币 / 换账户会 `seq++`，
+   * 旧代次的结果本来就要丢（A→B→A 快速来回时不能被旧的那发挡住，否则面板会空着）。
+   */
+  const k = `${sym}@${keyId.value ?? ''}`
+  if (info.value == null && k === pendingKey && pendingSeq === seq) return
+  if (info.value && k === loadedKey && Date.now() - loadedAt < INFO_FRESH_MS)
+    return
   const my = ++seq
+  pendingKey = k
+  pendingSeq = my
   loading.value = true
   try {
     const r = await fetchTradeInfo(sym, keyId.value)
     if (my !== seq) return
     info.value = r
+    loadedKey = k
+    loadedAt = Date.now()
     /*
      * 杠杆：**默认 10 倍**（用户 2026-10-05 定了两次）。
      *
@@ -416,6 +442,7 @@ async function load(): Promise<void> {
     info.value = null
     say((e as Error).message)
   } finally {
+    if (pendingSeq === my) pendingKey = ''
     if (my === seq) loading.value = false
   }
 }

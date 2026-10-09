@@ -222,13 +222,30 @@ const historyOffset = computed(
 
 /** 已经拉过哪一页（`币种@偏移@条数`），避免回页面时重复请求 */
 let historyKey = ''
+/** 上一次拉**成功**的时刻（配合下面的软刷新窗口） */
+let historyFetchedAt = 0
 
-export async function loadHistory(sym: string, force = false): Promise<void> {
+/**
+ * 同一页在这么久内**不再重拉**。
+ *
+ * 回页面（`onActivated`）和左栏高度微调（`setHistoryPageSize`）都会来一发「刷新」，
+ * 它们传的是**软** `force`：数据刚拿过，再打一次后端纯属白费 —— 两个 tab 来回切时
+ * 这一列会被反复重拉。真要立刻看到新数据的地方（跑完分析回第一页）传 `'hard'`。
+ */
+const HISTORY_FRESH_MS = 60_000
+
+export async function loadHistory(
+  sym: string,
+  force: boolean | 'hard' = false
+): Promise<void> {
   const s = sym.trim().toUpperCase()
   if (!s) return
   const offset = historyOffset.value
   const key = `${s}@${offset}@${historyPageSize.value}`
-  if (!force && historyKey === key) return
+  if (historyKey === key) {
+    if (!force) return
+    if (force !== 'hard' && Date.now() - historyFetchedAt < HISTORY_FRESH_MS) return
+  }
   historyError.value = ''
   try {
     const page = await fetchAnalyses({
@@ -244,6 +261,7 @@ export async function loadHistory(sym: string, force = false): Promise<void> {
     history.value = page.rows
     historyTotal.value = page.total
     historyKey = key
+    historyFetchedAt = Date.now()
   } catch (e) {
     historyError.value = (e as Error).message
     history.value = []
@@ -286,7 +304,8 @@ export async function historyGo(delta: number): Promise<void> {
 /** 回到第 1 页（跑完一次新分析后，新记录在最前面） */
 export async function historyFirstPage(sym: string): Promise<void> {
   historyPage.value = 1
-  await loadHistory(sym, true)
+  // 刚跑完的分析要**马上**出现在第一页上，所以是硬刷新，绕开新鲜度窗口
+  await loadHistory(sym, 'hard')
 }
 
 /* ---------------- 跑一次分析 ---------------- */
