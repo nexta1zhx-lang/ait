@@ -18,6 +18,12 @@ import {query, queryOne} from './client'
 /** 自动建出来的那套叫什么 */
 export const DEFAULT_EXCHANGE_KEY_NAME = '默认'
 
+/**
+ * 一个用户最多能绑几套（用户 2026-10-10：「最多支持上传 4 个账户」）。
+ * 前后端共用这个数：前端拿列表接口回的 `max` 去禁用「新增」按钮。
+ */
+export const MAX_EXCHANGE_KEYS = 4
+
 /** 名字 / 密钥的长度上限（太长的会挤爆列表） */
 const MAX_NAME = 20
 const MAX_CRED = 200
@@ -120,7 +126,12 @@ function cleanCred(v: unknown): string {
 /* ------------------------------------------------------------------ */
 
 /**
- * 这个用户的所有交易所 Key（默认那套排最前面）。
+ * 这个用户的所有交易所 Key，**按用户自己拖出来的顺序**排（用户 2026-10-10：
+ * 「后续其他页面的 tab 渲染都按此顺序排列」）。
+ *
+ * ⚠️ 这里**不能再按 `is_default` 排**：默认那套只是「下单 / 账户页默认用哪套」，
+ *    跟显示顺序是两件事，混在一起会让用户拖完顺序、一刷新又跳回去。
+ *    `getDefaultExchangeKey` 那边照样按 `is_default` 找。
  * **一套都没有就自动建一套「默认」** —— 前端永远有东西可编辑。
  */
 export async function listExchangeKeys(
@@ -129,7 +140,7 @@ export async function listExchangeKeys(
   let rows = await query<Raw>(
     `SELECT ${COLS} FROM user_exchange_keys
       WHERE user_id = $1
-      ORDER BY is_default DESC, id`,
+      ORDER BY sort, id`,
     [userId]
   )
   if (!rows.length) {
@@ -139,11 +150,46 @@ export async function listExchangeKeys(
       [userId, DEFAULT_EXCHANGE_KEY_NAME]
     )
     rows = await query<Raw>(
-      `SELECT ${COLS} FROM user_exchange_keys WHERE user_id = $1 ORDER BY id`,
+      `SELECT ${COLS} FROM user_exchange_keys WHERE user_id = $1 ORDER BY sort, id`,
       [userId]
     )
   }
   return rows.map(map)
+}
+
+/**
+ * 重新排一遍（拖拽落点之后调）。
+ *
+ * `ids` = 拖完之后的**完整**顺序。只认这个用户自己的 id（有别人的 id 直接报错，
+ * 别静默忽略 —— 那样用户会以为拖成功了）。
+ */
+export async function reorderExchangeKeys(
+  userId: number,
+  ids: number[]
+): Promise<void> {
+  const clean = [
+    ...new Set(ids.map(v => Number(v)).filter(n => Number.isFinite(n) && n > 0))
+  ]
+  if (!clean.length) throw new Error('没有要排序的账户')
+  const mine = await query<{id: string}>(
+    'SELECT id FROM user_exchange_keys WHERE user_id = $1',
+    [userId]
+  )
+  const allowed = new Set(mine.map(r => Number(r.id)))
+  if (clean.some(id => !allowed.has(id))) throw new Error('有不属于你的账户')
+  /*
+   * 一条 UPDATE 搞定（按数组下标当新的 sort）：单语句天然原子，
+   * 不用开事务、也不会出现「改了一半」的中间态。
+   */
+  await query(
+    `UPDATE user_exchange_keys AS k
+        SET sort = v.ord, updated_at = now()
+       FROM (
+         SELECT id, ord FROM unnest($1::bigint[]) WITH ORDINALITY AS t(id, ord)
+       ) AS v
+      WHERE k.id = v.id AND k.user_id = $2`,
+    [clean, userId]
+  )
 }
 
 export async function getExchangeKey(
@@ -198,7 +244,16 @@ export async function createExchangeKey(
     'SELECT count(*)::text AS n FROM user_exchange_keys WHERE user_id = $1',
     [userId]
   )
-  const isFirst = Number(existing[0]?.n ?? 0) === 0
+  const count = Number(existing[0]?.n ?? 0)
+  /*
+   * 上限 4 套（用户 2026-10-10：「最多支持上传 4 个账户」）。
+   * ⚠️ 报错要说人话：直接说「最多 4 套，先删一套」比回一句 400 有用。
+   */
+  if (count >= MAX_EXCHANGE_KEYS)
+    throw new Error(
+      `最多只能绑 ${MAX_EXCHANGE_KEYS} 套账户 —— 先删掉一套再加`
+    )
+  const isFirst = count === 0
   const apiKey =
     typeof input.apiKey === 'string' && !isMask(input.apiKey)
       ? cleanCred(input.apiKey)
@@ -215,8 +270,10 @@ export async function createExchangeKey(
   const row = await queryOne<Raw>(
     `INSERT INTO user_exchange_keys
        (user_id, exchange, name, api_key, secret, password, market_type,
-        sandbox, is_default)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        sandbox, is_default, sort)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+             -- 排在最后：老行 sort 可能全是 0，取 max + 1 就一定在后面
+             (SELECT COALESCE(max(sort), -1) + 1 FROM user_exchange_keys WHERE user_id = $1))
      RETURNING ${COLS}`,
     [
       userId,

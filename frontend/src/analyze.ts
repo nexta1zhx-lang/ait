@@ -1,7 +1,7 @@
 /**
  * 开单分析的全局状态。
  *
- * 放模块作用域，不放组件的 `ref` —— 切到「历史 / 知识库 / 用量」再回来时
+ * 放模块作用域，不放组件的 `ref` —— 切到「预测历史 / 知识库 / 用量」再回来时
  * 组件会重新挂载，局部 ref 就没了，结论会被「刷新掉」。
  * 这里保证：
  *   · 结论、分析过程、报错都留着
@@ -14,8 +14,6 @@
 import {computed, ref, watch} from 'vue'
 import {
   analyzeStream,
-  fetchAnalyses,
-  type AnalysisRow,
   type AnalyzeResult,
   type AnalyzeStep
 } from './api'
@@ -158,7 +156,8 @@ export const LEFT_TABS = [
   {value: 'market' as const, label: '合约行情'},
   {value: 'live' as const, label: '实时分析'},
   {value: 'test' as const, label: '测试'},
-  {value: 'history' as const, label: '历史分析'},
+  {value: 'records' as const, label: '预测历史'},
+  {value: 'kb' as const, label: '知识库'},
   {value: 'add' as const, label: '添加案例'}
 ]
 export type LeftTab = (typeof LEFT_TABS)[number]['value'] | 'chart'
@@ -194,119 +193,6 @@ export const CHART_TAB = {value: 'chart' as const, label: 'K 线'}
 
 /** 分析过程：跑的时候展开，出结论后收成一行，点一下还能展开 */
 export const showSteps = ref(true)
-
-/* ---------------- 该币种的历史分析 ---------------- */
-
-/** 每页条数的兜底值 —— 真实的条数按左栏高度自适应，见 setHistoryPageSize */
-export const HISTORY_LIMIT = 12
-/** 一页最少 / 最多几条，兜住极端窗口高度 */
-export const HISTORY_MIN = 4
-export const HISTORY_MAX = 60
-
-export const history = ref<AnalysisRow[]>([])
-export const historyTotal = ref(0)
-export const historyError = ref('')
-/** 当前第几页（从 1 开始） */
-export const historyPage = ref(1)
-/** 当前每页几条 —— 由左栏能放下几行算出来 */
-export const historyPageSize = ref(HISTORY_LIMIT)
-
-/** 一共几页 */
-export const historyPages = computed(() =>
-  Math.max(1, Math.ceil(historyTotal.value / historyPageSize.value))
-)
-/** 当前页从第几条开始 */
-const historyOffset = computed(
-  () => (historyPage.value - 1) * historyPageSize.value
-)
-
-/** 已经拉过哪一页（`币种@偏移@条数`），避免回页面时重复请求 */
-let historyKey = ''
-/** 上一次拉**成功**的时刻（配合下面的软刷新窗口） */
-let historyFetchedAt = 0
-
-/**
- * 同一页在这么久内**不再重拉**。
- *
- * 回页面（`onActivated`）和左栏高度微调（`setHistoryPageSize`）都会来一发「刷新」，
- * 它们传的是**软** `force`：数据刚拿过，再打一次后端纯属白费 —— 两个 tab 来回切时
- * 这一列会被反复重拉。真要立刻看到新数据的地方（跑完分析回第一页）传 `'hard'`。
- */
-const HISTORY_FRESH_MS = 60_000
-
-export async function loadHistory(
-  sym: string,
-  force: boolean | 'hard' = false
-): Promise<void> {
-  const s = sym.trim().toUpperCase()
-  if (!s) return
-  const offset = historyOffset.value
-  const key = `${s}@${offset}@${historyPageSize.value}`
-  if (historyKey === key) {
-    if (!force) return
-    if (force !== 'hard' && Date.now() - historyFetchedAt < HISTORY_FRESH_MS) return
-  }
-  historyError.value = ''
-  try {
-    const page = await fetchAnalyses({
-      symbol: s,
-      grade: '',
-      verdict: '',
-      tag: '',
-      actionable: false,
-      days: 3650,
-      limit: historyPageSize.value,
-      offset
-    })
-    history.value = page.rows
-    historyTotal.value = page.total
-    historyKey = key
-    historyFetchedAt = Date.now()
-  } catch (e) {
-    historyError.value = (e as Error).message
-    history.value = []
-    historyTotal.value = 0
-  }
-}
-
-/** 换币种 → 回到第 1 页（否则会停在上一只币翻到的页码上） */
-export function resetHistoryPaging(): void {
-  historyPage.value = 1
-  historyKey = ''
-}
-
-/**
- * 左栏高度变了（窗口缩放 / 换 tab）→ 重新算一页该放几条。
- * 目标是刚好装满可视区，列表自己不出现滚动条。
- */
-export function setHistoryPageSize(n: number): void {
-  const size = Math.max(
-    HISTORY_MIN,
-    Math.min(HISTORY_MAX, Math.floor(n) || HISTORY_MIN)
-  )
-  if (size === historyPageSize.value) return
-  // 尽量停在原来那条记录上，而不是粗暴地跳回第 1 页
-  const firstRow = (historyPage.value - 1) * historyPageSize.value
-  historyPageSize.value = size
-  historyPage.value = Math.floor(firstRow / size) + 1
-  historyKey = ''
-  if (symbol.value.trim()) void loadHistory(symbol.value, true)
-}
-
-/** 翻页：delta = -1 上一页 / +1 下一页 */
-export async function historyGo(delta: number): Promise<void> {
-  const next = historyPage.value + delta
-  if (next < 1 || next > historyPages.value) return
-  historyPage.value = next
-  await loadHistory(symbol.value, true)
-}
-
-/** 回到第 1 页（跑完一次新分析后，新记录在最前面） */
-export async function historyFirstPage(sym: string): Promise<void> {
-  historyPage.value = 1
-  // 刚跑完的分析要**马上**出现在第一页上，所以是硬刷新，绕开新鲜度窗口
-  await loadHistory(sym, 'hard')
-}
 
 /* ---------------- 跑一次分析 ---------------- */
 
@@ -376,14 +262,12 @@ watch(leftTab, (v, prev) => {
   if (v !== 'add') rangeDrawing.value = false
 })
 
-/** 换币种：清掉上一只币的结论，历史由 loader 重拉（并回到第 1 页） */
+/** 换币种：清掉上一只币的结论 */
 export function pickSymbol(v: string): void {
   symbol.value = v
   result.value = null
   steps.value = []
   error.value = ''
-  resetHistoryPaging()
-  void loadHistory(v)
 }
 
 export function run(): void {
@@ -425,9 +309,6 @@ export function run(): void {
         showSteps.value = false
         stopRun()
         void refreshConfig()
-        // 新记录排在最前面 —— 顺手回到第 1 页，否则停在旧页看不到它。
-        // 测试跑不存档，也就没有新记录可看
-        if (!at) void historyFirstPage(s)
       },
       onError(msg) {
         error.value = msg

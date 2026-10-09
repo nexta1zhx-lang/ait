@@ -164,7 +164,7 @@ defineExpose({load, loadTags})
           moveType === 'all' && !activeTag && !keyword.trim() && !symbolQ.trim()
         "
       >
-        去「历史知识库」收录一条试试 —— 在 K 线上画一段就行。
+        去「知识库」收录一条试试 —— 在 K 线上画一段就行。
       </template>
     </div>
 

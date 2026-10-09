@@ -739,7 +739,12 @@ a {
   gap: 10px;
 }
 
-input:not([type='checkbox']),
+/*
+ * `[type='radio']` 也必须排除：单选圆点套上 `width: 100%` + padding 会被拉成
+ * 90 多像素宽，在 flex 行里把 label 文字挤成一列竖排（用户 2026-10-11 报的
+ * 「金额显示单位」就是这条引起的）。checkbox 本来就排除着，radio 是漏了。
+ */
+input:not([type='checkbox'], [type='radio']),
 select,
 textarea {
   background: var(--panel-2);
@@ -3541,25 +3546,76 @@ body.fixed-viewport .split {
 }
 
 /*
- * 换币 / 换周期时的淡入淡出。
+ * 换币 / 换周期时的提示。
  *
- * 整段重画是「一套数据换另一套」（价格轴精度、可见区间、蜡烛全变），
- * 硬切会闪一下；这里让旧画面淡下去、新画面淡上来就顺了。
- * ⚠️ 时长要跟组件里的 `FADE_MIN_MS`（140ms）对得上。
+ * 原来是整块 `opacity: .3` 淡一下，用户 2026-10-10：「切换 k 线的时候不要加整个
+ * 区域的类似白色的渐变」「有层遮罩的感觉」⇒ **不再动整块的透明度**，
+ * 改成图中间那一条三颗灯的灯带（`.kl-dots`）：旧图保持原样，直到新图画上去。
+ * ⚠️ 灯带的最短显示时长在组件里，见 `FADE_MIN_MS`（140ms）。
  */
 .chart-wrap {
   position: relative;
   height: 56vh;
   min-height: 320px;
   display: flex;
-  transition: opacity 0.16s ease;
 }
 
 .chart-wrap.fading {
-  /* 淡到 0.3：旧币的蜡烛已经看不清了（不会误读成新币），但又不是「黑一下」 */
-  opacity: 0.3;
-  /* 淡出中别让它还能拖 / 画范围（那是上一个币的图） */
+  /* 旧图还在，但别让它还能拖 / 画范围（那是上一个币的图） */
   pointer-events: none;
+}
+
+/*
+ * 灯带：三颗灯一颗一颗亮过去，摆在图的**顶部居中**。
+ * 用户 2026-10-10：「不要暗色的背景」「快放在顶部」⇒ 没有底衬药丸、没有边框，
+ * 就三颗灯自己亮着（颜色用主色 `--blue`，压在蜡烛上也看得清）。
+ */
+.kl-dots {
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  z-index: 25;
+  display: flex;
+  gap: 6px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.kl-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--blue);
+  opacity: 0.25;
+  animation: kl-dot 0.9s ease-in-out infinite;
+}
+
+.kl-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.kl-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes kl-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+/* 不爱动效的就三颗常亮的灯（跟 RecIcon / MarginRateBadge 一个处理） */
+@media (prefers-reduced-motion: reduce) {
+  .kl-dots i {
+    animation: none;
+    opacity: 0.75;
+  }
 }
 
 /* 等着我拖一段时的提示（按钮在左边面板） */
@@ -4169,6 +4225,35 @@ body.fixed-viewport .split {
 
 .tk-head .tk-left .combo {
   width: 190px;
+}
+
+.tk-head .tk-fav {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.tk-head .tk-fav svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tk-head .tk-fav.on {
+  color: var(--accent, #d3b583);
+}
+
+.tk-head .tk-fav.on svg {
+  fill: currentColor;
 }
 
 /*

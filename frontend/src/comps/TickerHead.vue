@@ -4,8 +4,7 @@
  *
  *   左 = 币种（下拉，外层用 #symbol 插进来）
  *   中 = 现价（大字）+ 24h 涨跌额 / 涨跌幅 + 24h 位置条
- *   右 = 两行：① 多周期涨幅（1天…1年，原来在图**底部**那行，用户 2026-10-05 挪上来）
- *              ② 成交额 / 资金费率（原来一共 8 项，用户 2026-10-05 砍到只剩这 2 项）
+ *   右 = 成交额 / 资金费率
  *
  * 数据来自「../ticker」（15 秒刷一次），拿不到就显示「—」，不挡页面。
  */
@@ -13,7 +12,6 @@ import {computed, onBeforeUnmount, ref, watch} from 'vue'
 import {fixed, fmt, price} from '../format'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
 import {priceDigitsOf} from '../store'
-import TickerChanges from './TickerChanges.vue'
 
 const props = defineProps<{symbol: string}>()
 
@@ -216,15 +214,8 @@ const rows = computed(() => {
       </div>
     </div>
 
-    <!--
-      右边这一块 = 两行（用户 2026-10-05）：
-        ① 多周期涨幅（从图的底部挪上来，见 `TickerChanges`）
-        ② 成交额 / 资金费率 —— 原来是 8 项，砍到只剩这 2 项
-      ⚠️ `.tk-stats` 原来的 `margin-left: auto` 挪到 `.tk-right` 上了
-         （右对齐现在由整块负责，不然两行各飘各的）。
-    -->
+    <!-- `.tk-right` 把两项统计作为一个整体右对齐。 -->
     <div class="tk-right">
-      <TickerChanges />
       <div class="tk-stats">
         <div v-for="r in rows" :key="r.k" class="tk-item">
           <span class="k">{{ r.k }}</span>

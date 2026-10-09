@@ -24,15 +24,20 @@ import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
   fetchMarketBase,
   fetchMarkets,
-  fetchPins,
   iconUrl,
   tickerStream,
-  togglePin,
   type MarketRow,
   type TickerPatch
 } from '../api'
 import {bjTime, decimalsFor, fmt} from '../format'
 import {isForeground, onForegroundChange} from '../live'
+import {
+  ensurePins,
+  isPinnedBase,
+  maxPinnedBases as pinMax,
+  pinnedBases as pins,
+  toggleFavorite
+} from '../pins'
 import {marketMinVolUsd, rankBase, rankSinceMs} from '../settings'
 import {contracts} from '../store'
 
@@ -185,13 +190,6 @@ const loadingBase = ref(false)
 let lastSnapshotAt = 0
 const SNAPSHOT_FRESH_MS = 20_000
 
-/**
- * 上一次置顶拉成功的时刻 + 新鲜度窗口（2026-10-09，跟上面同一个道理）。
- * 置顶只有用户自己点星才变 —— 那时走 `onTogglePin` 的响应更新，不经过这里。
- */
-let lastPinsAt = 0
-const PINS_FRESH_MS = 20_000
-
 /** 拉一次全表（初载 / 兜底 / 重同步都用它） */
 async function loadSnapshot(): Promise<void> {  if (loading.value) return
   loading.value = true
@@ -342,7 +340,9 @@ function sync(): void {
    *   一直在 patch（见 `applyBatch`），置顶只有用户自己点星时才变（那时
    *   `onTogglePin` 直接拿响应更新，不走这里）。所以 20 秒内的那份足够新。
    */
-  if (Date.now() - lastPinsAt > PINS_FRESH_MS) void loadPins()
+  void ensurePins().catch(e =>
+    console.warn(`[行情] 读取收藏失败：${(e as Error).message}`)
+  )
   if (shouldRun()) {
     // 回来先补一次全表：中间漏掉的增量不追了，直接拿最新的
     if (Date.now() - lastSnapshotAt > SNAPSHOT_FRESH_MS) void loadSnapshot()
@@ -415,25 +415,11 @@ function letterColor(base: string): string {
  * · 置顶的币**不受「行情过滤」影响** —— 那是手选的，成交额再小也给显示
  *   （搜索还是会过它，搜索是「我要找这个」，不该被置顶挡住）
  */
-const pins = ref<string[]>([])
-const pinMax = ref(5)
 /** 星号操作的提示（超上限 / 失败） */
 const pinTip = ref('')
 const pinBusy = ref('')
 
-const pinSet = computed(() => new Set(pins.value))
-const isPinned = (base: string): boolean => pinSet.value.has(base)
-
-async function loadPins(): Promise<void> {
-  try {
-    const r = await fetchPins()
-    lastPinsAt = Date.now()
-    pins.value = r.pins
-    pinMax.value = r.max
-  } catch {
-    /* 未登录 / 网络问题：当没有置顶，不影响看行情 */
-  }
-}
+const isPinned = isPinnedBase
 
 function flashPinTip(text: string, ms = 3200): void {
   pinTip.value = text
@@ -446,9 +432,7 @@ async function onTogglePin(base: string): Promise<void> {
   if (pinBusy.value) return
   pinBusy.value = base
   try {
-    const r = await togglePin(base)
-    pins.value = r.pins
-    pinMax.value = r.max
+    await toggleFavorite(base)
     pinTip.value = ''
   } catch (e) {
     flashPinTip((e as Error).message)

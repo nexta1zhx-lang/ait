@@ -34,6 +34,7 @@ import {testOrder} from '../settings'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
 import {isForeground} from '../live'
+import {setAvailableBalance} from '../positions'
 import {bjTime} from '../format'
 import LedgerRangeSheet from './LedgerRangeSheet.vue'
 import {bjDayStart, rangeToInterval, TYPE_NAME, type RangeKey} from '../ledger'
@@ -1139,6 +1140,7 @@ async function loadSnapshots(): Promise<void> {
       if (!(next[id] && dbAt <= knownAt)) {
         next[id] = r.overview
         snapAt = {...snapAt, [id]: dbAt}
+        setAvailableBalance(id, r.overview.futures?.available, dbAt)
       }
       delete nextReason[id]
     }
@@ -1223,6 +1225,7 @@ async function doRefresh(auto = false): Promise<void> {
       if (r.overview) {
         /* 用户手动刷新拿到的新数据 ⇒ 合约那块也是刚问过的（同上） */
         next[k.id] = {...r.overview, liveAt: new Date().toISOString()}
+        setAvailableBalance(k.id, r.overview.futures?.available)
         delete nextReason[k.id]
         snapAt = {...snapAt, [k.id]: Date.now()}
       } else if (r.reason) {
@@ -1502,7 +1505,8 @@ function startStreams(): void {
              * （`takenAt` 用它自己的采集时间，`liveAt` 记我们收到的时间）。
              */
             next[k.id] = {...r.overview, liveAt: new Date().toISOString()}
-            delete nextReason[k.id]
+             setAvailableBalance(k.id, r.overview.futures?.available)
+             delete nextReason[k.id]
             snapAt = {...snapAt, [k.id]: Date.now()}
           }
           parts.value = next
@@ -1516,10 +1520,11 @@ function startStreams(): void {
          *
          * ⚠️ 只往**已有快照**上盖（没有底稿就先不管：`snapshot` 事件马上就到，
          *    凭空造一份缺 wallet/assets/c2c 的快照反而会让净资产算错）。
-         * ⚠️ **不动 `snapAt`**：这份补丁里只有持仓，钱包 / C2C / 现货还是上一份快照的，
+         * ⚠️ **不动 `snapAt`**：这份补丁更新持仓 / 钱包 / 可用余额，C2C / 现货还是上一份快照的，
          *    所以那条「太久没整份快照就刷一次」的兜底定时器不该被它喂饱。
          */
         positions: p => {
+          setAvailableBalance(k.id, p.available)
           const cur = parts.value[k.id]
           if (!cur) return
           parts.value = {
@@ -1531,16 +1536,18 @@ function startStreams(): void {
                *
                * ⚠️ 原来写的是 `takenAt: p.at`，于是那颗「几分钟前」的标签在**有持仓**
                *    的账户上永远显示「刚刚更新」—— 因为持仓/浮盈每秒都在推。
-               *    可它旁边那几项（C2C / 现货 / 可用余额）其实还是上一份快照的，
+               *    可它旁边那几项（C2C / 现货）其实还是上一份快照的，
                *    最长可能一小时前 —— 标签在**替它们报喜**。
                *    现在拆成两个时间：`liveAt` = 合约那块（WS，秒级），
-               *    `takenAt` = 整份快照（现货 / C2C / 可用余额）。
+               *    `takenAt` = 整份快照（现货 / C2C / 资产明细）。
                */
               liveAt: p.at,
               futures: {
                 ...cur.futures,
                 positions: p.positions,
                 wallet: p.wallet,
+                available: p.available,
+                used: Math.max(p.margin - p.available, 0),
                 unrealized: p.unrealized,
                 margin: p.margin
               },

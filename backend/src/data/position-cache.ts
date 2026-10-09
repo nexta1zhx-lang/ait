@@ -55,6 +55,8 @@ export interface LiveState {
   live: boolean
   /** 合约钱包余额（不含浮盈）—— 算保证金余额要用 */
   wallet: number
+  /** 可用余额（fapi account balance） */
+  available: number
   positions: LivePosition[]
   /** Σ 未实现盈亏 */
   unrealized: number
@@ -66,13 +68,14 @@ export interface LiveState {
 /**
  * 推给前端的**增量**（SSE 事件 `positions`）。
  *
- * 只带会随行情变的那几项：`wallet` / `assets` / `c2c` / `spot` 这些
- * 跟标记价无关的字段**不动**，前端拿着这份往已有快照上盖就行。
+ * 只带实时层字段：持仓、钱包、可用余额、浮盈和保证金；`assets` / `c2c` / `spot`
+ * 仍由完整快照更新，前端拿着这份往已有快照上盖就行。
  */
 export interface PositionsPatch {
   at: string
   live: boolean
   wallet: number
+  available: number
   unrealized: number
   margin: number
   stats: Stats
@@ -226,6 +229,7 @@ export function publishLive(
   keyId: number,
   input: {
     wallet: number
+    available: number
     positions: LivePosition[]
     live: boolean
     at?: number
@@ -236,6 +240,7 @@ export function publishLive(
     at: input.at ?? Date.now(),
     live: input.live,
     wallet: r8(input.wallet),
+    available: r8(input.available),
     positions: input.positions,
     unrealized: stats.unrealized,
     /* 保证金余额 = 钱包 + 浮盈（跟 REST 的 totalMarginBalance 同一个算法） */
@@ -249,6 +254,7 @@ export function publishLive(
     at: new Date(state.at).toISOString(),
     live: state.live,
     wallet: state.wallet,
+    available: state.available,
     unrealized: state.unrealized,
     margin: state.margin,
     stats: state.stats,

@@ -507,6 +507,10 @@ CREATE INDEX IF NOT EXISTS user_exchange_keys_user_idx
 -- 一个用户最多只能有一套默认
 CREATE UNIQUE INDEX IF NOT EXISTS user_exchange_keys_default_idx
   ON user_exchange_keys (user_id) WHERE is_default;
+-- 显示顺序（用户 2026-10-10：「个人信息里的交易所支持拖拽调整顺序，后续其他页面的 tab
+-- 渲染都按此顺序排列」）。各页的账户 tab 一律按 sort, id 排。
+-- ⚠️ 老数据全是 0 ⇒ 自然退回「按 id」那套老顺序，不用回填。
+ALTER TABLE user_exchange_keys ADD COLUMN IF NOT EXISTS sort INTEGER NOT NULL DEFAULT 0;
 
 -- ──────────────────────────────── 交易所资产（2026-10-05）
 -- 只统计「USDT 合约 + C2C」两个钱包（现货不参与），方案见 docs/EXCHANGE.md。

@@ -90,12 +90,14 @@ import {MAX_PINS, listPins, togglePin} from './db/pins'
 import {getStatsSettings, saveStatsSettings} from './db/stats-settings'
 import {
   MARKET_TYPES,
+  MAX_EXCHANGE_KEYS,
   createExchangeKey,
   deleteExchangeKey,
   getDefaultExchangeKey,
   getExchangeKey,
   listExchangeKeys,
   maskCred,
+  reorderExchangeKeys,
   setDefaultExchangeKey,
   updateExchangeKey,
   type ExchangeKey
@@ -1984,6 +1986,7 @@ async function handleExchangeStream(
       at: new Date(liveNow.at).toISOString(),
       live: liveNow.live,
       wallet: liveNow.wallet,
+      available: liveNow.available,
       unrealized: liveNow.unrealized,
       margin: liveNow.margin,
       stats: liveNow.stats,
@@ -3485,8 +3488,26 @@ async function route(
       return sendJson(res, 200, {
         keys: keys.map(publicExchangeKey),
         exchanges: EXCHANGE_CATALOG,
-        marketTypes: [...MARKET_TYPES]
+        marketTypes: [...MARKET_TYPES],
+        /** 最多能绑几套（前端拿它禁用「新增」按钮，别自己写死一个数） */
+        max: MAX_EXCHANGE_KEYS
       })
+    }
+
+    /*
+     * 拖拽排序（用户 2026-10-10）：传**拖完之后的完整顺序**。
+     * ⚠️ 必须放在下面那条 `/api/exchange-keys/(\d+)` 正则**前面**：
+     *    正则只认数字，`order` 本来不会撞，但先匹配更保险、也更好读。
+     */
+    if (p === '/api/exchange-keys/order' && method === 'POST') {
+      try {
+        const body = await bodyOf()
+        const ids = Array.isArray(body.ids) ? (body.ids as unknown[]) : []
+        await reorderExchangeKeys(me.id, ids.map(v => Number(v)))
+        return sendJson(res, 200, {ok: true})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
     }
 
     // 新增
@@ -4210,6 +4231,7 @@ async function route(
         ok: true,
         positions,
         wallet: live?.wallet ?? null,
+        available: live?.available ?? null,
         unrealized: live?.unrealized ?? null,
         margin: live?.margin ?? null,
         maintMargin: live?.stats.maintMargin ?? null,

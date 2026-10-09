@@ -1,44 +1,54 @@
 <script setup lang="ts">
 /**
  * 「我的」页：页内分四段
- * （**交易所账户 / 复盘 / 个人信息 / 管理**）。
+ * （**交易所账户 / 账户统计 / 个人信息 / 管理**）。
  *
- * 沿革（用户 2026-10-06 本轮改版，以最后一条为准）：
- *   · 「交易所账户移动到我的」→ 从「开单分析」的一级 tab 搬进来，排在**第一个**；
- *   · 「预测历史和知识库合放二级，一级叫做复盘」+「复盘不放在底下，
- *     放在交易所账户后面一个 tab」→ 紧跟交易所账户的第二格
- *     （`ReplayPane`，里面再分预测历史 / 知识库）；
- *   · 「模型配置移动到个人信息」→ 并进「个人信息」（`ProfileView` 的一段 tab），
- *     不再单独占一格。
- * 旧版那五段（预测历史 / 知识库 / 模型配置 / 个人信息 / 管理）见 git 历史。
+ * 沿革（以最后一条为准）：
+ *   · 用户 2026-10-06：「交易所账户移动到我的」→ 从「开单分析」的一级 tab 搬进来，
+ *     排在**第一个**；「模型配置移动到个人信息」→ 并进「个人信息」，不再单独占一格；
+ *   · ★ 用户 2026-10-10：「去掉 1 级菜单里的复盘」+「把预测历史和知识库挪到开单分析里，
+ *     原有的历史分析去掉」+「账户统计不是放在底下的，是在『我的』里面，
+ *     交易所账户后面」——
+ *     原来那格「复盘」取消：预测历史 / 知识库 → 开单分析（`/analyze?t=records|kb`），
+ *     **账户统计搬进来当第二格**（紧跟交易所账户，底栏不加格）。
+ * 旧版那几段（预测历史 / 知识库 / 模型配置）见 git 历史。
  *
- * ⚠️ 子页用 **`?p=`** 记。老链接（`?p=records|kb|history`）由 `router.ts` 换成
- *    `?p=replay&r=…`；`?p=llm|usage` 在这里映射成「个人信息」（模型配置已经进去了）。
- *    复盘的二级 tab 用 **`?r=`** 记（`ReplayPane` 自己管）。
+ * ⚠️ 子页用 **`?p=`** 记；`?p=llm|usage` 在这里映射成「个人信息」（模型配置已经进去了），
+ *    老链接（`?p=replay…`、`?records|kb|history`）在 `router.ts` 里就分流好了。
  *    「管理」里的二级 tab 用 `?t=` 记，`/me?p=admin&t=server` 分享出去能直接落在服务器那半。
  */
-import {computed, onActivated, onDeactivated, ref, watch} from 'vue'
+import {computed, defineAsyncComponent, onActivated, onDeactivated, ref, watch} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import {useScrollMemory} from '../scroll'
 import PaneShell from '../comps/PaneShell.vue'
 import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
-import ReplayPane from './ReplayPane.vue'
 import ProfileView from './ProfileView.vue'
 import AdminView from './AdminView.vue'
 import {user} from '../session'
 
-type Pane = 'exchange' | 'replay' | 'profile' | 'admin'
+/*
+ * 账户统计（带着 echarts，~580KB）**异步加载**：它是这一页里的第二格，
+ * 但没点进去之前不该为它买单（以前它是独立路由的懒加载，搬进来后继续保持）。
+ */
+const AccountStatsView = defineAsyncComponent(
+  () => import('./AccountStatsView.vue')
+)
+
+type Pane = 'exchange' | 'stats' | 'profile' | 'admin'
 
 /** 「管理」里那两半 */
 export type AdminTab = 'users' | 'server'
 
 /**
- * 一级 tab。用户 2026-10-06：「将交易所账户放到第一个」「复盘…放在交易所账户后面」。
- * 顺序：交易所账户 / 复盘 / 个人信息 / 管理（管理只有管理员看得到）。
+ * 一级 tab。用户 2026-10-06：「将交易所账户放到第一个」。
+ * 顺序：交易所账户 / 账户统计 / 个人信息 / 管理（管理只有管理员看得到）。
+ *
+ * ★ 2026-10-10：用户「账户统计不是放在底下的，是在『我的』里面，交易所账户后面」
+ * —— 所以它是紧跟交易所账户的第二格（原来这位置是「复盘」，那格取消了）。
  */
 const PANES: {value: Pane; label: string}[] = [
   {value: 'exchange', label: '交易所账户'},
-  {value: 'replay', label: '复盘'},
+  {value: 'stats', label: '账户统计'},
   {value: 'profile', label: '个人信息'},
   // 只有管理员看得到。里面还有二级 tab：用户管理 / 服务器
   {value: 'admin', label: '管理'}
@@ -55,12 +65,12 @@ const router = useRouter()
 /** 解析 `?p=`；不认识的都落到「交易所账户」 */
 function readPane(v: unknown): Pane {
   // ⚠️ 老链接兼容：模型配置 / 用量都并进了「个人信息」；
-  //    预测历史 / 知识库由 `router.ts` 换成 `?p=replay&r=…`（这里再兜一层，别渲染出空白）。
+  //    「复盘」那半（`?p=replay&r=…`）已经拆走（预测历史 / 知识库 去开单分析，
+  //    账户统计留在这一页），`router.ts` 会把它们转成新写法 —— 这里再兜一层，
+  //    别渲染出空白。
   if (v === 'llm' || v === 'usage') return 'profile'
-  if (v === 'records' || v === 'kb' || v === 'history') return 'replay'
-  if (v === 'status') return 'admin'
-  if (v === 'exchange' || v === 'replay' || v === 'profile' || v === 'admin')
-    return v
+  if (v === 'replay') return 'stats'
+  if (v === 'stats' || v === 'profile' || v === 'admin') return v
   return 'exchange'
 }
 
@@ -115,12 +125,26 @@ onActivated(() => {
 })
 onDeactivated(() => {
   pageAlive.value = false
+  // 统计那格跟着「这一页」一起收掉（见 `statsMounted` 的说明）
+  statsMounted.value = false
 })
 
 const exchangeMounted = ref(pane.value === 'exchange')
 watch(pane, p => {
   if (p === 'exchange') exchangeMounted.value = true
 })
+
+/**
+ * 账户统计那格：**第一次点进去才挂载**，之后留着（切别的格只是藏起来，不卸载）——
+ * 跟交易所账户同一个道理：这一页里来回切不该把它的筛选 / 滚动位置弄丢。
+ *
+ * ⚠️ 离开「我的」这一页时把标记清掉（`onDeactivated`）：下一次进来按需重新挂，
+ *    免得它替一次没人看的访问去打统计接口。
+ */
+const statsMounted = ref(false)
+watch(pane, p => {
+  if (p === 'stats') statsMounted.value = true
+}, {immediate: true})
 
 function applyRoute(): void {
   const raw = route.query.p
@@ -157,8 +181,6 @@ function writeQuery(p: Pane, t: AdminTab): void {
   // ⚠️ 二级 tab 只在「管理 → 服务器」时才写进地址栏，`?t=users` 是多余的
   if (p === 'admin' && t === 'server') q.t = 'server'
   else delete q.t
-  // 复盘的二级 tab（`?r=`）只有停在这一格时才有意义，切走就顺手清掉
-  if (p !== 'replay') delete q.r
   void router.replace({query: q})
 }
 
@@ -178,8 +200,9 @@ function setAdminTab(v: AdminTab): void {
   <PaneShell
     ref="rootRef"
     :class="{
-      'no-bar': pane === 'exchange' || (pane === 'replay' && route.query.r === 'stats'),
-      'stats-pane': pane === 'replay' && route.query.r === 'stats'
+      'no-bar': pane === 'exchange' || pane === 'stats',
+      // 统计那格底部要留出底栏的高度（它自己滚到最后一段，别被底栏压住）
+      'stats-pane': pane === 'stats'
     }"
     :model-value="pane"
     :options="panes"
@@ -200,8 +223,22 @@ function setAdminTab(v: AdminTab): void {
       它们没有交易所那套「留着别重拉」的诉求（列表类，重挂一次很便宜），
       但各自的订阅 / 轮询必须停（`ServerStatusView` 就在轮询）。
     -->
-    <ReplayPane v-if="pageAlive && pane === 'replay'" />
-    <ProfileView v-else-if="pageAlive && pane === 'profile'" />
+    <!--
+      账户统计：跟交易所账户一样**第一次点进去才挂载、之后留着**（见 `statsMounted`），
+      所以用 `v-show` 藏而不是卸载 —— 来回切不丢筛选和滚动位置。
+
+      ⚠️⚠️ 下面 `ProfileView` 必须是**新的 `v-if`**，不能是 `v-else-if`：
+         这一格的 `v-if` 一旦为真（进过一次账户统计后就恒为真），
+         `v-else-if` 那两支就再也不会渲染 —— 表现是拖/切到「个人信息 / 管理」**一片空白**
+         （2026-10-10 用户实测报的，别改回去）。
+    -->
+    <AccountStatsView v-if="pageAlive && statsMounted" v-show="pane === 'stats'" />
+    <!--
+      其余两格：**切走这一格就卸载**，另外**离开这一页（`pageAlive=false`）也卸载** ——
+      它们没有交易所那套「留着别重拉」的诉求（列表类，重挂一次很便宜），
+      但各自的订阅 / 轮询必须停（`ServerStatusView` 就在轮询）。
+    -->
+    <ProfileView v-if="pageAlive && pane === 'profile'" />
     <!-- 「管理」里再分两个 tab：用户管理 / 服务器；ServerStatusView 是 v-if 里挂的，
          切到用户管理那半就卸载 → 它自己的轮询和图表会一起停掉 -->
     <AdminView
@@ -219,7 +256,7 @@ function setAdminTab(v: AdminTab): void {
  *
  * ⚠️ 滚动容器是 `PaneShell` 的 `.tabpane-body`（子组件里的元素），
  *    所以要用 `:deep()`；类名挂在 `PaneShell` 根上（`no-bar`）。
- * ⚠️ 只在这一格关掉 —— 其它几格（复盘 / 个人信息 / 管理）的滚动条不动。
+ * ⚠️ 只在这两格关掉（交易所账户 / 账户统计）—— 其它几格（个人信息 / 管理）的滚动条不动。
  */
 .tabpane.no-bar :deep(.tabpane-body) {
   scrollbar-width: none;
@@ -227,6 +264,9 @@ function setAdminTab(v: AdminTab): void {
 .tabpane.no-bar :deep(.tabpane-body::-webkit-scrollbar) {
   display: none;
 }
+/*
+ * 账户统计那格：内容很长，滚到底时给底栏留点空（窄屏底栏是 `position: fixed`）。
+ */
 .tabpane.stats-pane :deep(.tabpane-body) {
   padding-bottom: calc(var(--tabbar-h, 59px) + env(safe-area-inset-bottom) + 18px);
 }

@@ -50,11 +50,13 @@ import {
   type TradePositionRow
 } from '../api'
 import {
+  availableBalanceOf,
   bindPositions,
   positionsAt,
   positionsErr,
   positionsRows,
-  refreshPositions
+  refreshPositions,
+  setAvailableBalance
 } from '../positions'
 import {pickSymbol, prefetchSymbol} from '../analyze'
 import {fmt, price, usd} from '../format'
@@ -193,7 +195,11 @@ const INFO_FRESH_MS = 30_000
 
 const ready = computed(() => info.value?.ready === true)
 const base = computed(() => info.value?.base || props.symbol)
-const available = computed(() => Number(info.value?.balance?.available ?? 0))
+const available = computed(
+  () =>
+    availableBalanceOf(keyId.value) ??
+    Number(info.value?.balance?.available ?? 0)
+)
 const availableText = computed(() =>
   // 余额那一项没读到时显示「—」：显示 0 会让人以为账户真的没钱（原因走 toast）
   info.value?.balance && !info.value.balanceError
@@ -419,6 +425,7 @@ async function load(): Promise<void> {
     const r = await fetchTradeInfo(sym, keyId.value)
     if (my !== seq) return
     info.value = r
+    if (!r.balanceError) setAvailableBalance(keyId.value, r.balance?.available)
     loadedKey = k
     loadedAt = Date.now()
     /*
@@ -775,12 +782,12 @@ async function loadPositions(): Promise<void> {
  * 持仓来源的**绑定**（订阅常驻流的 SSE）。
  *
  * 什么时候绑：
- *   · 在「仓位」那一格（开单页不看持仓，没必要订）
- *   · 这一页是当前页 / App 在前台（`isForeground()`）—— 省流量，也免得在后台被限频
+ *   · 这一页是当前页 / App 在前台（`isForeground()`）—— 可用余额和持仓都由这条
+ *     SSE 实时同步，离开页面或切后台时解绑。
  * 什么时候解：上面任一条不满足就解绑，一个请求都不发。
  */
 function posPollWanted(): boolean {
-  return tab.value === 'position' && props.active && isForeground()
+  return props.active && isForeground()
 }
 
 let unbindPos: (() => void) | null = null

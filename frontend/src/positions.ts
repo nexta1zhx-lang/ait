@@ -34,6 +34,28 @@ const FALLBACK_MS = 60_000
  * 万一连 SSE 都断着，就跟着这里一起补一次，不至于一直冻着。
  */
 export const positionsFallbackAt = ref(0)
+const availableBalances = ref<Record<number, {value: number; at: number}>>({})
+
+export function setAvailableBalance(
+  keyId: number | undefined,
+  value: number | null | undefined,
+  at = Date.now()
+): void {
+  if (typeof keyId !== 'number' || keyId <= 0) return
+  if (value === null || value === undefined || !Number.isFinite(Number(value)))
+    return
+  if ((availableBalances.value[keyId]?.at ?? 0) > at) return
+  availableBalances.value = {
+    ...availableBalances.value,
+    [keyId]: {value: Number(value), at}
+  }
+}
+
+export function availableBalanceOf(keyId: number | undefined): number | null {
+  if (typeof keyId !== 'number' || keyId <= 0) return null
+  return availableBalances.value[keyId]?.value ?? null
+}
+
 /** SSE 数据比这个新就认为「推送还活着」，兜底轮询跳过 */
 const FRESH_MS = 30_000
 
@@ -180,6 +202,7 @@ async function load(keyId: number, fresh = false): Promise<void> {
       return
     }
     positionsErr.value = ''
+    setAvailableBalance(keyId, r.available)
     const rows = (r.positions ?? []).map(p => ({
       ...p,
       symbol: String(p.symbol ?? '').toUpperCase()
@@ -209,6 +232,7 @@ function start(keyId: number): void {
     exchangeStream(keyId, {
       positions: (p: PositionsPatch) => {
         positionsErr.value = ''
+        setAvailableBalance(keyId, p.available)
         apply(keyId, {
           /* 账户级那几个数（算保证金率要用）—— 每次持仓推送都会带上 */
           wallet: Number(p.wallet ?? 0),

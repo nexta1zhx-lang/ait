@@ -245,7 +245,7 @@ async function remove() {
               </button>
             </div>
             <p v-else class="cm-hint">
-              还没有标签模板 —— 去「历史知识库」页顶部的「标签模板」加几个，
+              还没有标签模板 —— 去「知识库」页顶部的「标签模板」加几个，
               加完这里就能点了。
             </p>
             <p v-if="hint" class="cm-hint">{{ hint }}</p>

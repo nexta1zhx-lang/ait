@@ -852,6 +852,8 @@ export interface ExchangeKeysResult {
   /** 下拉里能选的交易所（ccxt id + 中文名） */
   exchanges: ExchangeCatalogEntry[]
   marketTypes: string[]
+  /** 最多能绑几套（后端说了算，别在前端写死） */
+  max?: number
 }
 
 export interface ExchangeKeyInput {
@@ -933,6 +935,13 @@ export const deleteExchangeKey = (id: number) =>
 
 export const setDefaultExchangeKey = (id: number) =>
   post<{ok: boolean}>(`/api/exchange-keys/${id}/default`, {})
+
+/**
+ * 拖拽排序：传**拖完之后的完整顺序**（用户 2026-10-10）。
+ * 落库之后，各页的账户 tab（交易所账户 / 账户统计 / 配置里选下单账户）都按它排。
+ */
+export const reorderExchangeKeys = (ids: number[]) =>
+  post<{ok: boolean}>('/api/exchange-keys/order', {ids})
 
 /* ---------------- 交易所资产（新版：只算 USDT 合约 + C2C，2026-10-05） ---------------- */
 
@@ -1369,8 +1378,8 @@ export const fetchExchangeOverview = (id?: number) =>
 /**
  * 持仓**增量**（SSE 事件 `positions`，2026-10-06 改造 P1/P4）。
  *
- * 只带会随行情变的那几项 —— `wallet` / `assets` / `c2c` / `spot` 那些跟标记价
- * 无关的字段不在这里，前端拿着往**已有快照**上盖就行。
+ * 带实时持仓、钱包和可用余额；`assets` / `c2c` / `spot` 等完整账户字段仍由快照更新。
+ * 前端拿着这份往**已有快照**上盖就行。
  * 有了它，交易所界面 / K 线叠加 / 下单页看的是**同一份**持仓，同屏不会再出现两个数。
  */
 export interface PositionsPatch {
@@ -1379,6 +1388,7 @@ export interface PositionsPatch {
   /** 这一份有没有叠过「标记价本地重算」（false = 纯 REST 快照口径） */
   live: boolean
   wallet: number
+  available: number
   unrealized: number
   /** 保证金余额 = 钱包 + 浮盈 */
   margin: number
@@ -1766,6 +1776,7 @@ export const fetchTradePositions = (id?: number, fresh = false) =>
     positions?: TradePositionRow[]
     /** 账户级那几个数（算「MM 保证金率」要用）；没有常驻流时是 null */
     wallet?: number | null
+    available?: number | null
     unrealized?: number | null
     margin?: number | null
     maintMargin?: number | null

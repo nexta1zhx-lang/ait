@@ -10,7 +10,8 @@
  * 分工（**WS 负责实时，REST 只管保底**）：
  *   · 实时：上面那些事件 + 每秒标记价重算（浮盈 / 强平价 / 保证金率都跟着行情动）；
  *   · 曲线：每 5 分钟用内存那份算一个点（`source='live'`，**0 权重**，见 `writeLivePoint`）；
- *   · 校准：REST `overview` 1 小时一轮 —— c2c / 现货 / 可用余额 / 资产明细**只有 REST 有**；
+ *   · 校准：REST `overview` 1 小时一轮更新 c2c / 现货 / 资产明细；
+ *     可用余额在 ACCOUNT_UPDATE 后用轻量 balance REST 接口及时补齐；
  *   · 兜底：成交 4h / 挂单 6h / income 8h（`TIER_GAPS`），另有四个确定的补账入口：
  *     重连后、写操作后（强制对平）、页面打开（数据旧了）、用户手动刷新。
  *
@@ -38,6 +39,7 @@ import {
   BINANCE_MAX_WINDOW_MS,
   BINANCE_RETENTION_MS,
   INCOME_MAX_PAGES,
+  fetchFuturesBalance,
   fetchIncomeHistoryAll,
   incomeDedupeKey,
   planWindows
@@ -112,6 +114,9 @@ const KEEPALIVE_MS = 25 * 60 * 1000
  *    不该变成 5 发 REST。
  */
 const WS_SNAPSHOT_GAP_SEC = 180
+/** 账户变化后用轻量 balance 接口补可用余额，合并短时间内的多条 ACCOUNT_UPDATE */
+const LIVE_BALANCE_REFRESH_GAP_MS = 1_000
+const LIVE_BALANCE_REFRESH_DEBOUNCE_MS = 250
 /**
  * 仓位刚平掉之后，撤它残留平仓单的**去抖间隔**（同一个币这么久内只扫一次）。
  *
@@ -183,8 +188,8 @@ const FILL_RECONCILE_MS_IDLE = 8 * 60 * 60 * 1000
 const ORDERS_RECONCILE_MS_IDLE = 12 * 60 * 60 * 1000
 const INCOME_RECONCILE_MS_IDLE = 16 * 60 * 60 * 1000
 /**
- * REST **校准**的间隔（三档共用）。只刷「只有 REST 有」的那几项
- * （c2c / 现货 / 可用余额 / 资产明细）并用交易所口径覆盖内存那份防漂移。
+ * REST **完整快照校准**的间隔（三档共用）。只刷「只有完整快照有」的那几项
+ * （c2c / 现货 / 资产明细）并用交易所口径覆盖内存那份防漂移。
  * ⚠️ **曲线的密度不靠它**（那是 0 权重的 `writeLivePoint`）。
  */
 const SAMPLE_CALIBRATE_MS = 60 * 60 * 1000
@@ -526,7 +531,7 @@ const TIER_GAPS: Record<
      * **活跃档的采样也从「5 分钟一发」改成 1 小时**。
      *   原来那发 25 权重买的是「曲线的点」，而曲线的点现在由
      *   **0 权重的 `writeLivePoint`** 提供 ⇒ REST 只需要当**校准**
-     *   （c2c / 现货 / 可用余额 / 资产明细 + 防漂移），1 小时足够。
+     *   （c2c / 现货 / 资产明细 + 防漂移），1 小时足够。
      *   实测：每套账户从 ≈6.8 权重/分钟 降到 ≈0.8。
      */
     sample: SAMPLE_CALIBRATE_MS
@@ -615,6 +620,10 @@ export class KeyStream {
   private everConnected = false
   /** 最近一次取到的完整快照（补成交时靠它的持仓推交易对） */
   private lastOverview: ExchangeOverview | null = null
+  private liveBalanceTimer: NodeJS.Timeout | null = null
+  private liveBalanceBusy = false
+  private liveBalancePending = false
+  private lastLiveBalanceAt = 0
   /** 持仓币的标记价（币安原始符号 → 价）—— 改造 P4 逐笔重算未实现盈亏用 */
   private marks = new Map<string, number>()
   /** 已订的标记价流（币安原始符号 → 退订函数） */
@@ -1226,6 +1235,7 @@ export class KeyStream {
           /* 持仓集合可能变了（新开 / 平掉）→ 标记价订阅跟着调，然后立刻推给前端 */
           this.syncMarks()
           this.pushLive(false)
+          this.scheduleLiveBalanceRefresh()
         }
         /*
          * ★ 仓位**刚平掉** ⇒ 当场撤掉它残留的止盈止损单（用户 2026-10-07：
@@ -1238,12 +1248,13 @@ export class KeyStream {
          */
         if (closedSymbols.length) this.sweepOrphans(closedSymbols)
         /*
-         * 事件里**没有**的是汇总口径：可用余额 / 保证金余额 / 资产明细 / C2C / 现货。
-         * 那些仍然要靠 REST，但**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
+         * 事件里**没有**的是可用余额 / 资产明细 / C2C / 现货。
+         * 可用余额由上面的轻量 balance 请求补齐；其余字段仍靠完整 REST 快照，
+         * 且**真的要节流**（见 `WS_SNAPSHOT_GAP_SEC` 的注释）；
          * 例外：出现了**没见过的**仓位 ⇒ 立刻要一次，否则那一行会缺杠杆/强平价。
          *
          * 「没必要每次都请求采集吧」）：**没人看就不打**。
-         *   那一发 25 权重纯粹是为了**给人看**的展示字段（可用余额 / 资产明细 / C2C / 现货）；
+         *   那一发 25 权重纯粹是为了**给人看**的展示字段（资产明细 / C2C / 现货）；
          *   钱包余额、持仓、浮盈这几项上面已经**就地从事件里改对了**，一秒都不差。
          *   没人看的时候不补展示字段，DB 曲线由 1 小时采样负责；
          *   人一打开页面，`wake()` 会因为「数据旧了（> 60 秒）」当场补一份。
@@ -1309,7 +1320,7 @@ export class KeyStream {
    * ⚠️ 两个坑：
    *   ① `P` 里**只有「这次变了」的仓位**，不是全量 ⇒ 必须**合并**，不能整份替换；
    *   ② 它**没有**杠杆 / 强平价 / 可用余额 / 资产明细 / C2C / 现货 ⇒
-   *      那些还是得靠 REST 快照（分档 5/30/60 分钟那条路），这里只把
+   *      可用余额走轻量 REST 补齐，其余靠完整 REST 快照（分档 5/30/60 分钟那条路），这里只把
    *      「余额 + 持仓量 / 开仓价 / 未实现」这几项**立刻改对**。
    *
    * 返回 `applied` = 本地改到了没有；`newSymbols` = 出现的新交易对（那行缺杠杆 / 强平价，
@@ -2442,9 +2453,63 @@ export class KeyStream {
     })
     publishLive(this.row.id, {
       wallet: liveOv.futures.wallet,
+      available: liveOv.futures.available,
       positions,
       live: live && this.marks.size > 0
     })
+  }
+
+  private scheduleLiveBalanceRefresh(): void {
+    if (this.stopped || !this.ex || !this.lastOverview) return
+    if (listenerCount(this.row.id) === 0) return
+    if (this.liveBalanceBusy) {
+      this.liveBalancePending = true
+      return
+    }
+    if (this.liveBalanceTimer) return
+    const wait = Math.max(
+      LIVE_BALANCE_REFRESH_DEBOUNCE_MS,
+      LIVE_BALANCE_REFRESH_GAP_MS - (Date.now() - this.lastLiveBalanceAt)
+    )
+    this.liveBalanceTimer = setTimeout(() => {
+      this.liveBalanceTimer = null
+      void this.refreshLiveBalance()
+    }, wait)
+  }
+
+  private async refreshLiveBalance(): Promise<void> {
+    if (this.stopped || !this.ex || !this.lastOverview) return
+    if (this.liveBalanceBusy) {
+      this.liveBalancePending = true
+      return
+    }
+    this.liveBalanceBusy = true
+    this.lastLiveBalanceAt = Date.now()
+    try {
+      await chargeWeight(5, 'futuresBalance')
+      const balance = await fetchFuturesBalance(this.ex)
+      if (this.stopped || !this.lastOverview) return
+      const current = this.lastOverview
+      this.lastOverview = {
+        ...current,
+        futures: {
+          ...current.futures,
+          available: r8(balance.available),
+          used: r8(Math.max(current.futures.margin - balance.available, 0))
+        }
+      }
+      this.pushLive(this.marks.size > 0)
+    } catch (e) {
+      console.warn(
+        `${this.tag} ACCOUNT_UPDATE 后可用余额刷新失败：${(e as Error).message.slice(0, 140)}`
+      )
+    } finally {
+      this.liveBalanceBusy = false
+      if (this.liveBalancePending) {
+        this.liveBalancePending = false
+        this.scheduleLiveBalanceRefresh()
+      }
+    }
   }
 
   /** 把订出去的标记价流全退掉 */
@@ -2546,10 +2611,13 @@ export class KeyStream {
     if (this.retryTimer) clearTimeout(this.retryTimer)
     if (this.reconTimer) clearInterval(this.reconTimer)
     if (this.healthTimer) clearInterval(this.healthTimer)
+    if (this.liveBalanceTimer) clearTimeout(this.liveBalanceTimer)
     this.keepTimer = null
     this.retryTimer = null
     this.reconTimer = null
     this.healthTimer = null
+    this.liveBalanceTimer = null
+    this.liveBalancePending = false
     try {
       const ws = this.ws
       if (ws) {

@@ -16,7 +16,7 @@ import {
   ref,
   watch
 } from 'vue'
-import {RouterLink} from 'vue-router'
+import {RouterLink, useRoute, useRouter} from 'vue-router'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import MarketPanel from '../comps/MarketPanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
@@ -28,6 +28,13 @@ import StepsPanel from '../comps/StepsPanel.vue'
 import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
+import HistoryView from './HistoryView.vue'
+import {
+  ensurePins,
+  isPinnedBase,
+  maxPinnedBases,
+  toggleFavorite
+} from '../pins'
 import {showToast} from '../toast'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
@@ -43,15 +50,7 @@ import {
   clearChartRange,
   clearTestPoint,
   error,
-  history,
-  historyError,
-  historyGo,
-  historyPage,
-  historyPageSize,
-  historyPages,
-  historyTotal,
   leftTab,
-  loadHistory,
   loading,
   pickSymbol,
   pointPicking,
@@ -59,7 +58,6 @@ import {
   rangeDrawing,
   result,
   run,
-  setHistoryPageSize,
   setPointPicking,
   showSteps,
   steps,
@@ -91,8 +89,12 @@ import {
 } from '../format'
 
 // 结论、分析过程、报错都在 ../analyze 的模块作用域里，
-// 切到别的页面再回来不会丢；这里只负责首次进页面把历史拉一次。
-onMounted(() => void loadHistory(symbol.value))
+// 切到别的页面再回来不会丢。
+onMounted(() =>
+  void ensurePins().catch(e =>
+    showToast(`读取收藏失败：${(e as Error).message}`, 'bad')
+  )
+)
 
 /*
  * 顶部行情条 / 底部涨幅：跟着币种走，进来就拉、换币立刻重拉。
@@ -177,6 +179,48 @@ const tabs = computed(() => {
   return [CHART_TAB, ...rest]
 })
 
+/* ---------------- 左栏 tab 记进地址栏（`?t=`） ---------------- */
+
+/*
+ * 为什么要有它：2026-10-10 把「预测历史 / 知识库」从「我的 → 复盘」挪进这一页，
+ * 那两边原本都是靠 URL 定位的（`/history`、`/knowledge`、`/me?p=replay&r=kb`），
+ * 老书签 / 老链接由 `router.ts` 转成 `/analyze?t=…` —— 这里负责认这个 `t`。
+ * 反过来用户换 tab 时写回地址栏，刷新 / 分享 / 返回键都能落回同一格。
+ */
+const route = useRoute()
+const router = useRouter()
+
+/** `?t=` 的取值：`chart` 是窄屏专属那格，其余在 `LEFT_TABS` 里 */
+function readTab(v: unknown): LeftTab | null {
+  if (v === 'chart') return 'chart'
+  return LEFT_TABS.some(t => t.value === v) ? (v as LeftTab) : null
+}
+
+/** 只写 `?t=`，其余 query（`?id=` 抽屉、`?symbol=` 筛选）原样留着 */
+function writeTab(v: LeftTab): void {
+  if (route.query.t === v) return
+  const q: Record<string, string> = {}
+  for (const [k, val] of Object.entries(route.query)) {
+    if (typeof val === 'string') q[k] = val
+  }
+  q.t = v
+  void router.replace({query: q})
+}
+
+// 挂在 `watch` 上而不是只读一次：这一页是**缓存的**（`KeepAlive`），
+// 老链接进来时组件早就挂着了 —— 只读一次的话 query 变了 tab 不动。
+watch(
+  () => route.query.t,
+  v => {
+    const t = readTab(v)
+    if (t && t !== leftTab.value) leftTab.value = t
+  },
+  {immediate: true}
+)
+
+// 用户自己换 tab（点 tab 行 / 窄屏左右滑）→ 写回地址栏
+watch(leftTab, v => writeTab(v))
+
 /* ---------------- 窄屏：左右滑动切换一级 tab ---------------- */
 
 /**
@@ -250,49 +294,7 @@ const marketCount = ref(0)
  * （见上面 `useSwipeTabs` 那段）。
  */
 
-/* ---------- 历史列表：能放几行就放几行，列表自己不出滚动条 ---------- */
-const histBox = ref<HTMLElement | null>(null)
-let histRO: ResizeObserver | null = null
-
-/** 左边栏可视高度 ÷ 单行高度（含行距）= 这一页该放几条 */
-function measureHistoryRows(): void {
-  const box = histBox.value
-  if (!box) return
-  const h = box.clientHeight
-  if (h <= 0) return
-  const lis = box.querySelectorAll('li')
-  /*
-   * ⚠️ 拿第 1、2 行的 `offsetTop` 差当「一步」，而不是只量单行高度：
-   * 行之间现在有 `margin-top`（用户：「行加间距」），只按行高算会多摆一行、
-   * 最后那行被 `overflow: hidden` 切掉。
-   * 首行没有上边距，所以「一步」= 行高 + 行距 ✓
-   */
-  const step =
-    lis.length > 1
-      ? lis[1].offsetTop - lis[0].offsetTop
-      : lis[0]?.getBoundingClientRect().height || 28
-  if (step <= 0) return
-  setHistoryPageSize(Math.max(1, Math.floor(h / step)))
-}
-
-// tab 切过来时 ul 才存在，ref 一挂上就量；窗口缩放由 ResizeObserver 接着管
-watch(histBox, el => {
-  histRO?.disconnect()
-  histRO = null
-  if (!el) return
-  histRO = new ResizeObserver(() => measureHistoryRows())
-  histRO.observe(el)
-  void nextTick(measureHistoryRows)
-})
-
-// 第一页拉回来的行渲染完了，才量得到真实行高
-watch(
-  () => history.value.length,
-  () => void nextTick(measureHistoryRows)
-)
-
 onBeforeUnmount(() => {
-  histRO?.disconnect()
   collectClose?.()
 })
 
@@ -342,6 +344,24 @@ function onRun(): void {
   run()
 }
 
+const currentSymbolPinned = computed(() =>
+  isPinnedBase(symbol.value.trim().toUpperCase())
+)
+const pinBusy = ref(false)
+
+async function toggleCurrentFavorite(): Promise<void> {
+  const base = symbol.value.trim().toUpperCase()
+  if (!base || pinBusy.value) return
+  pinBusy.value = true
+  try {
+    await toggleFavorite(base)
+  } catch (e) {
+    showToast((e as Error).message, 'bad')
+  } finally {
+    pinBusy.value = false
+  }
+}
+
 /* ---------------- 手机端「＋ 添加案例」---------------- */
 /*
  * 窄屏不再有「添加案例」那一格（那套表单要在图上看过程、还要填备注，手机上来不及）：
@@ -385,13 +405,13 @@ useScrollMemory(() => rootRef.value)
 let firstActivate = true
 onActivated(() => {
   pageAlive.value = true
+  void ensurePins().catch(e =>
+    showToast(`读取收藏失败：${(e as Error).message}`, 'bad')
+  )
   if (firstActivate) {
     firstActivate = false
     return
   }
-  // 缓存了页面 = 不再重新挂载，回来时顺手把「历史分析」那一列刷一下
-  // （翻页 / 币种 / 滚动位置都留着，只换数据）
-  void loadHistory(symbol.value, true)
 })
 onDeactivated(() => {
   pageAlive.value = false
@@ -900,91 +920,12 @@ const heatRows = computed(() => {
           </div>
         </template>
 
-        <!-- ② 历史分析：只在切到这个 tab 时显示 -->
-        <div v-else-if="leftTab === 'history'" class="scroll-body">
-          <section class="panel hist-panel">
-            <h2>
-              {{ symbol }} 的历史分析
-              <span class="tag">共 {{ historyTotal }} 条</span>
-            </h2>
-            <div v-if="historyError" class="dim">
-              （读取失败：{{ historyError }}）
-            </div>
-            <ul v-else ref="histBox" class="hist">
-              <li v-for="h in history" :key="h.id">
-                <!--
-                  色调类（go/wait/no）挂在行上：左边那条色条、结论文字的颜色都靠它
-                  （以前只挂在结论文字上，那文字又没配色，整行看上去是灰的）。
-                -->
-                <RouterLink
-                  :to="`/me?p=replay&id=${h.id}`"
-                  :class="
-                    h.verdict ? (VERDICT_TEXT[h.verdict]?.[1] ?? '') : 'dim'
-                  "
-                >
-                  <span class="t">{{ bjShort(h.createdAt) }}</span>
-                  <!-- 跟「预测历史」同一套标签体系，这里左右只摆得下两个 -->
-                  <span class="tags">
-                    <span
-                      v-for="t in (h.tags ?? []).slice(0, 2)"
-                      :key="t.name"
-                      class="tag"
-                    >
-                      {{ t.name }}
-                      <i v-if="t.probability">{{ t.probability }}%</i>
-                    </span>
-                    <span v-if="!(h.tags ?? []).length" class="dim">—</span>
-                  </span>
-                  <span
-                    class="v"
-                    :class="
-                      h.verdict ? (VERDICT_TEXT[h.verdict]?.[1] ?? '') : 'dim'
-                    "
-                  >
-                    {{
-                      h.verdict
-                        ? (VERDICT_TEXT[h.verdict]?.[0] ?? h.verdict)
-                        : '—'
-                    }}
-                  </span>
-                </RouterLink>
-              </li>
-            </ul>
-            <p v-if="!historyError && !history.length" class="hint">
-              {{ symbol }} 还没有分析记录。
-              <template v-if="historyPages > 1">
-                （第 {{ historyPage }} 页是空的，翻回第 1 页看看）
-              </template>
-            </p>
-
-            <!-- 分页：一页放不下就翻 -->
-            <div v-if="historyPages > 1" class="pager">
-              <button
-                class="ghost tiny"
-                :disabled="historyPage <= 1"
-                @click="historyGo(-1)"
-              >
-                上一页
-              </button>
-              <span class="dim">
-                第 {{ historyPage }} / {{ historyPages }} 页 · 每页
-                {{ historyPageSize }}
-              </span>
-              <button
-                class="ghost tiny"
-                :disabled="historyPage >= historyPages"
-                @click="historyGo(1)"
-              >
-                下一页
-              </button>
-            </div>
-
-            <div v-if="historyTotal > history.length" class="hist-more">
-              <RouterLink :to="`/me?p=replay&symbol=${symbol}`">
-                去「复盘」页看全部 {{ historyTotal }} 条 →
-              </RouterLink>
-            </div>
-          </section>
+        <!-- ② 预测历史 / 知识库：2026-10-10 从「我的 → 复盘」挪进来，替掉原来的「历史分析」 -->
+        <div
+          v-else-if="leftTab === 'records' || leftTab === 'kb'"
+          class="scroll-body"
+        >
+          <HistoryView :pane="leftTab === 'kb' ? 'kb' : 'records'" />
         </div>
 
         <!-- ③ 添加案例：币种/周期跟右侧，时间段只认「图上拖的那一段」
@@ -1041,6 +982,29 @@ const heatRows = computed(() => {
                   @pick="pickSymbol"
                   @submit="onRun"
                 />
+                <button
+                  type="button"
+                  class="ghost tiny tk-fav"
+                  :class="{on: currentSymbolPinned}"
+                  :disabled="pinBusy || !symbol.trim()"
+                  :aria-label="
+                    currentSymbolPinned
+                      ? `取消收藏 ${symbol.toUpperCase()}`
+                      : `收藏 ${symbol.toUpperCase()}`
+                  "
+                  :title="
+                    currentSymbolPinned
+                      ? '取消收藏'
+                      : `收藏（最多 ${maxPinnedBases} 个）`
+                  "
+                  @click="toggleCurrentFavorite"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M12 2.6l2.9 5.9 6.5.95-4.7 4.6 1.1 6.45L12 17.45 6.2 20.5l1.1-6.45-4.7-4.6 6.5-.95z"
+                    />
+                  </svg>
+                </button>
               </template>
               <!--
                 大字价格那一行的最右端（用户 2026-10-07：「mm放在 下面最右侧和价格那一排」）——
@@ -1127,12 +1091,7 @@ const heatRows = computed(() => {
               </svg>
             </button>
           </template>
-          <!--
-            底部：**合约下单模块**（2026-10-05）。
-            ⚠️ 原来这儿是「1天 / 3天 / 7天 / 1个月 / 3个月 / 1年 涨幅」，用户要求
-            挪到顶部行情条右侧那块指标的上方（见 `TickerHead` → `TickerChanges`），
-            腾出来的位置给下单用。
-          -->
+          <!-- 底部：合约下单模块。 -->
           <template #bottom>
             <OrderPanel
               :symbol="symbol"

@@ -15,20 +15,24 @@
  * 得再勾上**合约交易**权限（模块本身走的是币安的测试接口，不会真成交），
  * 并且要在「API 限制 IP」里放行服务器出口 IP —— 不然会一直报 `-2015`。
  */
-import {onMounted, ref} from 'vue'
+import {onBeforeUnmount, onMounted, ref} from 'vue'
 import {
   createExchangeKey,
   deleteExchangeKey,
   fetchExchangeKeys,
+  reorderExchangeKeys,
   setDefaultExchangeKey,
   updateExchangeKey,
   type ExchangeCatalogEntry,
   type ExchangeKey
 } from '../api'
 import {askConfirm} from '../confirm'
+import {loadTradeKeys} from '../trade-account'
 
 const keys = ref<ExchangeKey[]>([])
 const catalog = ref<ExchangeCatalogEntry[]>([])
+/** 最多能绑几套（后端回的；拿不到就按 4 兜底） */
+const max = ref(4)
 const loading = ref(false)
 const error = ref('')
 const msg = ref('')
@@ -65,6 +69,7 @@ async function load(): Promise<void> {
     const r = await fetchExchangeKeys()
     keys.value = r.keys
     catalog.value = r.exchanges
+    if (r.max) max.value = r.max
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -72,7 +77,91 @@ async function load(): Promise<void> {
   }
 }
 
+/* ---------------- 拖拽排序（用户 2026-10-10） ---------------- */
+
+/*
+ * 为什么用 Pointer Events 而不是 HTML5 拖放：这套界面主要跑在 Android WebView（APK）里，
+ * HTML5 的 drag & drop 在触摸上收不到事件。Pointer Events 一套代码鼠标 / 触摸都能用，
+ * 而且拖动时列表能实时跟着换位（看得见落点）。
+ */
+/** 列表容器（算落点用） */
+const listEl = ref<HTMLElement | null>(null)
+/** 正在拖第几行（-1 = 没在拖） */
+const dragFrom = ref(-1)
+/** 这一轮拖拽有没有真的换过位置（没换就别白打一次接口） */
+let dragChanged = false
+
+/** 光标压到哪一行就换到那里 */
+function moveTo(clientY: number): void {
+  const el = listEl.value
+  if (!el || dragFrom.value < 0) return
+  const rows = [...el.querySelectorAll<HTMLElement>('li')]
+  if (rows.length < 2) return
+  // 落在最后一行下面 → 排到最后
+  let to = rows.findIndex(r => clientY < r.getBoundingClientRect().bottom)
+  if (to < 0) to = rows.length - 1
+  if (to === dragFrom.value) return
+  const arr = [...keys.value]
+  const moved = arr.splice(dragFrom.value, 1)[0]
+  if (!moved) return
+  arr.splice(to, 0, moved)
+  keys.value = arr
+  dragFrom.value = to
+  dragChanged = true
+}
+
+function onPointerMove(e: PointerEvent): void {
+  e.preventDefault()
+  moveTo(e.clientY)
+}
+
+function endDrag(): void {
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('pointerup', endDrag)
+  window.removeEventListener('pointercancel', endDrag)
+  const from = dragFrom.value
+  const changed = dragChanged
+  dragFrom.value = -1
+  dragChanged = false
+  if (from < 0 || !changed) return
+  void saveOrder()
+}
+
+function startDrag(e: PointerEvent, i: number): void {
+  // 鼠标只认左键
+  if (e.pointerType === 'mouse' && e.button !== 0) return
+  // 挡掉长按选中 / 原生图片拖拽（不然手指一拖会变成选文字）
+  e.preventDefault()
+  dragFrom.value = i
+  dragChanged = false
+  window.addEventListener('pointermove', onPointerMove, {passive: false})
+  window.addEventListener('pointerup', endDrag)
+  window.addEventListener('pointercancel', endDrag)
+}
+
+onBeforeUnmount(endDrag)
+
+/** 把拖完的顺序落库；失败就把列表还原成服务端那份（别留一个假顺序） */
+async function saveOrder(): Promise<void> {
+  const ids = keys.value.map(k => k.id)
+  error.value = ''
+  try {
+    await reorderExchangeKeys(ids)
+    flash('顺序已保存')
+    // 别的页面（交易所账户 / 账户统计 / 配置里选下单账户）读的是同一份缓存，顺手刷新
+    void loadTradeKeys(true)
+  } catch (e) {
+    error.value = (e as Error).message
+    await load()
+  }
+}
+
 function openAdd(): void {
+  // 满了就别开表单了（按钮那边也会禁用，这里是第二道）
+  if (keys.value.length >= max.value) {
+    flash(`最多 ${max.value} 套 —— 先删掉一套再加`)
+    return
+  }
   editingId.value = null
   fExchange.value = catalog.value[0]?.id ?? 'binance'
   fName.value = ''
@@ -173,18 +262,24 @@ onMounted(load)
   <section class="panel exch">
     <h2>
       交易所
-      <small v-if="keys.length">共 {{ keys.length }} 套</small>
+      <small v-if="keys.length">共 {{ keys.length }} / {{ max }} 套</small>
     </h2>
     <p class="note">
       绑定交易所 API Key 后，「我的 → 交易所账户」那格就能看余额和订单历史。
       只看着数用<b>只读权限</b>就够；要在 K 线页底部<b>下单</b>（测试单，不会真成交），
       得再勾上<b>合约交易</b>权限、并把服务器出口 IP 加进「API 限制 IP」。
+      <br />
+      最多绑 {{ max }} 套；<b>按住右边的 ⠿ 拖动</b>可以调顺序，各页的账户 tab 都按这个顺序排。
     </p>
 
     <p v-if="loading" class="dim">载入中…</p>
 
-    <ul v-else class="rows">
-      <li v-for="k in keys" :key="k.id" :class="{on: k.isDefault}">
+    <ul v-else ref="listEl" class="rows">
+      <li
+        v-for="(k, i) in keys"
+        :key="k.id"
+        :class="{on: k.isDefault, dragging: dragFrom === i}"
+      >
         <div class="r-main">
           <b>{{ k.name || '（未命名）' }}</b>
           <span class="badge">{{ labelOf(k.exchange) }}</span>
@@ -213,6 +308,24 @@ onMounted(load)
             删除
           </button>
         </div>
+        <!--
+          拖动把手（用户 2026-10-10：「支持拖拽调整顺序」）。
+          ⚠️ 绝对定位在卡片**右侧**（见 CSS 里 `.rows li > .drag`）——
+            原来放左边当网格的一列，把内容推到 130px 开外，用户当场报「左边空距太大」。
+          ⚠️ 只有这一条把手能起拖：整行都能拖的话，「编辑 / 删除」上滑一下就变成拖拽；
+            而且把手以外的区域必须保留原生滚动（手机上要能滑页面）。
+        -->
+        <button
+          class="drag"
+          type="button"
+          :aria-label="`拖动调整「${k.name || labelOf(k.exchange)}」的顺序`"
+          title="按住拖动，调整显示顺序"
+          @pointerdown="startDrag($event, i)"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01" />
+          </svg>
+        </button>
       </li>
     </ul>
 
@@ -294,9 +407,20 @@ onMounted(load)
       </div>
     </template>
     <div v-else class="row">
-      <button class="btn primary" type="button" @click="openAdd">
+      <button
+        class="btn primary"
+        type="button"
+        :disabled="keys.length >= max"
+        :title="
+          keys.length >= max ? `最多只能绑 ${max} 套，先删掉一套再加` : '新增一套交易所 Key'
+        "
+        @click="openAdd"
+      >
         新增交易所
       </button>
+      <span v-if="keys.length >= max" class="dim" style="font-size: 12px">
+        已到上限（{{ max }} 套），要加新的先删一套。
+      </span>
     </div>
   </section>
 </template>
@@ -336,9 +460,68 @@ h2 small {
   border: 1px solid var(--line, rgba(128, 128, 128, 0.25));
   border-radius: 8px;
   padding: 9px 11px;
+  /*
+   * ⚠️ 这里**不能**用「grid 两列 = 把手 + 内容」那套（2026-10-10 试过）：
+   *    内容会被推到卡片左边 130px 开外，用户当场就报「左边空距太大」。
+   *    把手改成**绝对定位在右侧**（iOS 列表的排序把手也是右边），
+   *    左侧padding 一个字都不用动 ⇒ 卡片跟加把手之前一模一样。
+   */
+  position: relative;
+  padding-right: 32px;
 }
 .rows li.on {
   border-color: var(--blue);
+}
+/* 正在拖的那一行：给个明显的落点反馈 */
+.rows li.dragging {
+  border-color: var(--accent, #d3b583);
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.rows li > .drag {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.drag {
+  width: 24px;
+  height: 44px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  cursor: grab;
+  /*
+   * ⚠️ 这两条是拖拽能不能用的关键：
+   *   `touch-action: none` —— 不加的话手指一竖划被当成页面滚动，拖不动；
+   *   `user-select: none` —— 否则长按会先选中文字（手机上看着像卡住）。
+   * 只有这一条 24px 宽的把手挡滚动：卡片主体照旧能上下滑页面。
+   */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.drag:active {
+  cursor: grabbing;
+  color: var(--accent, #d3b583);
+}
+@media (hover: hover) {
+  .drag:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+.drag svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
 }
 .r-main {
   display: flex;
@@ -462,7 +645,12 @@ select {
 }
 .badge.me {
   color: var(--blue);
-  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+  /*
+   * ⚠️ 这里原来写的是 `color-mix(in srgb, var(--blue) 45%, transparent)` ——
+   *    那台华为 Android 12 的 WebView **算不出 color-mix**，边框会退成 currentColor
+   *    （亮灰），看着像多了一道白边。手算成静态 rgba 就稳了（`--accent` = #d3b583）。
+   */
+  border-color: rgba(211, 181, 131, 0.45);
 }
 .badge.soft {
   color: var(--muted);

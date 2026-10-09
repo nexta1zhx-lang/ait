@@ -392,9 +392,9 @@ let hovering = false
 let reloading = false
 /** 每次整段重画的序号：半路又切一次时，旧的那次结果直接作废 */
 let loadSeq = 0
-/** 换币 / 换周期时图上淡一下（硬切会「闪」） */
+/** 换币 / 换周期时的加载态：图上亮三颗灯（不再整块变淡，见 style.css 的 `.chart-wrap`） */
 const fading = ref(false)
-/** 淡出至少留这么久，免得请求太快时看着像原地一颠 */
+/** 灯带至少亮这么久，免得请求太快时看着像原地一颠 */
 const FADE_MIN_MS = 140
 /**
  * 图上此刻的可见区间。往前补历史时要把视图钉在原位，用它。
@@ -2843,9 +2843,9 @@ async function load() {
   if (!symbol) return
   const seq = ++loadSeq
   /*
-   * 换币 / 换周期 / 换时间都要整段重画，这里做一次「淡出 → 换数据 → 淡入」。
-   * 不淡的话，旧币还是一整套价格区间，新数据一上来（价格轴精度、可见区间、
-   * 蜡烛全变）就是硬闪一下 —— 用户说的「切换币种 k 线会有闪动」。
+   * 换币 / 换周期 / 换时间都要整段重画，这中间在图中间亮一条三颗灯的灯带。
+   * 以前是整块 `opacity: .3` 淡下去 —— 用户 2026-10-10 说那像「蒙了一层遮罩」，
+   * 改成只给指示灯：旧图保持原样，直到新数据画上去。
    */
   const startedAt = performance.now()
   let cached = false
@@ -2878,9 +2878,9 @@ async function load() {
         : (d.candles ?? [])
     draw(bars)
     /*
-     * 数据本来就在手上 → 立刻亮回来，连那 140ms 的淡入都不等。
-     * 「点币种 → 跳过去 K 线已经画好了」靠的就是这一句：淡出和画图之间
-     * 没有任何等待，浏览器通常一帧都没来得及把暗着的那一版画出来。
+     * 数据本来就在手上 → 立刻收掉灯带，连那 140ms 都不等。
+     * 「点币种 → 跳过去 K 线已经画好了」靠的就是这一句：亮灯和画图之间
+     * 没有任何等待，浏览器通常一帧都没来得及把灯带画出来。
      */
     if (cached) fading.value = false
   } catch (e) {
@@ -2888,7 +2888,7 @@ async function load() {
   } finally {
     if (seq === loadSeq) {
       reloading = false
-      // 先把新数据画进 canvas，再等淡出够时长（太快的请求也能看出「换过了」）
+      // 先把新数据画进 canvas，再等灯带够时长（太快的请求也能看出「换过了」）
       const wait = cached
         ? 0
         : Math.max(0, FADE_MIN_MS - (performance.now() - startedAt))
@@ -3643,6 +3643,13 @@ onBeforeUnmount(() => {
     -->
     <div ref="wrapEl" class="chart-wrap" data-no-swipe :class="{fading}">
       <div ref="chartEl" class="chart"></div>
+      <!--
+        换币 / 换周期的指示灯：三颗灯一颗一颗亮过去（`style.css` 的 `.kl-dots`）。
+        以前是整块变淡，用户觉得像蒙了层遮罩 —— 现在只加这一条灯带。
+      -->
+      <div v-if="fading" class="kl-dots" aria-hidden="true">
+        <i></i><i></i><i></i>
+      </div>
       <div ref="levelHost" class="level-labels"></div>
       <!-- 右轴上的「现价」标签：库那枚关掉了（改不了底色 / 边框），自己画一个 -->
       <span ref="curEl" class="cur-label off"></span>

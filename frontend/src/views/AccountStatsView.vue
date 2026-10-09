@@ -898,10 +898,10 @@ onBeforeUnmount(() => {
     <p v-if="rateError && currency === 'cny'" class="error">人民币汇率读取失败：{{ rateError }}</p>
     <section v-if="analytics" class="capital-carousel">
       <div class="capital-carousel-head">
-        <span>资金概览</span>
+        <strong class="sec-title">资金概览</strong>
         <div class="capital-carousel-controls stats-segments">
           <button type="button" aria-label="显示资金净额" :class="{active: capitalSlide === 0}" @click="showCapitalSlide(0)">资金净额</button>
-          <button type="button" aria-label="显示法币交易资金流" :class="{active: capitalSlide === 1}" @click="showCapitalSlide(1)">法币交易资金流</button>
+          <button type="button" aria-label="显示交易资金流" :class="{active: capitalSlide === 1}" @click="showCapitalSlide(1)">交易资金流</button>
         </div>
       </div>
       <div ref="capitalTrackEl" class="capital-track" @scroll.passive="syncCapitalSlide">
@@ -922,7 +922,7 @@ onBeforeUnmount(() => {
         <article class="c2c-panel capital-slide">
           <header class="section-heading">
             <div>
-              <strong>法币交易资金流</strong>
+              <strong>交易资金流</strong>
               <span>{{ selectedKey?.name }} · 当前日期范围</span>
             </div>
             <span class="c2c-order-count">{{ money(analytics.capital.orders, 0) }} 笔订单</span>
@@ -944,11 +944,15 @@ onBeforeUnmount(() => {
       </div>
       <div class="capital-dots" aria-label="切换资金概览">
         <button type="button" aria-label="资金净额" :class="{active: capitalSlide === 0}" @click="showCapitalSlide(0)"></button>
-        <button type="button" aria-label="法币交易资金流" :class="{active: capitalSlide === 1}" @click="showCapitalSlide(1)"></button>
+        <button type="button" aria-label="交易资金流" :class="{active: capitalSlide === 1}" @click="showCapitalSlide(1)"></button>
       </div>
     </section>
     <section v-if="cards.length" class="performance-section">
       <header class="performance-heading">
+        <div class="sec-head-text">
+          <strong class="sec-title">交易分析</strong>
+          <p>按品种、方向、持仓时长与盈亏集中度拆解</p>
+        </div>
         <nav class="performance-switcher stats-segments" aria-label="统计视图切换" role="tablist">
           <button
             type="button"
@@ -974,10 +978,6 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div v-else-if="positions?.breakdown" class="breakdown-content" role="tabpanel" aria-label="盈亏结构拆解">
-        <header class="breakdown-intro">
-          <strong>交易分析</strong>
-          <span>按品种、方向、持仓时长与盈亏集中度拆解</span>
-        </header>
         <section class="breakdown-group symbol-breakdown">
           <header><strong>品种贡献</strong><span>净盈亏</span></header>
           <div class="symbol-columns">
@@ -1058,28 +1058,29 @@ onBeforeUnmount(() => {
     </div>
 
     <section class="charts-section">
+        <!-- 段头跟上面两段统一：标题 + 说明在左，切换按钮在右（用户 2026-10-10） -->
         <header class="charts-heading">
-          <div>
-            <h2>收益分析</h2>
+          <div class="sec-head-text">
+            <h2 class="sec-title">收益分析</h2>
+            <p>按平仓日汇总 · 基准 {{ money(Number(benchmark) || 0) }} USDT</p>
           </div>
-          <p>按平仓日汇总 · 基准 {{ money(Number(benchmark) || 0) }} USDT</p>
+          <nav class="chart-switcher stats-segments" aria-label="图表切换" role="tablist">
+            <button
+              v-for="(label, index) in chartLabels"
+              :key="label"
+              type="button"
+              role="tab"
+              :aria-selected="chartSlide === index"
+              :class="{active: chartSlide === index}"
+              @click="showChartSlide(index)"
+            >{{ label }}</button>
+          </nav>
         </header>
-        <nav class="chart-switcher stats-segments" aria-label="图表切换" role="tablist">
-          <button
-            v-for="(label, index) in chartLabels"
-            :key="label"
-            type="button"
-            role="tab"
-            :aria-selected="chartSlide === index"
-            :class="{active: chartSlide === index}"
-            @click="showChartSlide(index)"
-          >{{ label }}</button>
-        </nav>
         <div ref="chartTrackEl" class="chart-track" @scroll.passive="syncChartSlide">
           <article class="chart-panel main-chart chart-slide">
             <div class="chart-heading">
               <div>
-                <strong>累计收益率</strong>
+                <strong>Cumulative ROI</strong>
                 <span>净盈亏 ÷ 基准本金</span>
               </div>
               <span v-if="positions">{{ positions.closedCount }} 笔平仓</span>
@@ -1088,21 +1089,21 @@ onBeforeUnmount(() => {
             <p v-if="positions && !dailyRows.length" class="chart-empty">当前账户和周期内暂无已平仓位</p>
           </article>
           <article class="chart-panel chart-slide">
-            <div class="chart-heading"><div><strong>每日净盈亏</strong><span>{{ currencyLabel }} · 按平仓日</span></div></div>
+            <div class="chart-heading"><div><strong>Daily PnL</strong><span>{{ currencyLabel }} · 按平仓日</span></div></div>
             <div ref="dailyChartEl" class="small-chart"></div>
             <p v-if="positions && !dailyRows.length" class="chart-empty">暂无数据</p>
           </article>
           <article class="chart-panel chart-slide">
-            <div class="chart-heading"><div><strong>收益回撤</strong><span>峰值至谷值的跌幅</span></div></div>
+            <div class="chart-heading"><div><strong>Max Drawdown</strong><span>峰值至谷值的跌幅</span></div></div>
             <div ref="drawdownChartEl" class="small-chart"></div>
             <p v-if="positions && !dailyRows.length" class="chart-empty">暂无数据</p>
           </article>
           <article class="chart-panel chart-slide">
-            <div class="chart-heading"><div><strong>仓位结果分布</strong><span>按净盈亏分类</span></div></div>
+            <div class="chart-heading"><div><strong>Outcome Mix</strong><span>按净盈亏分类</span></div></div>
             <div ref="outcomesChartEl" class="small-chart"></div>
           </article>
           <article class="chart-panel chart-slide">
-            <div class="chart-heading"><div><strong>交易方向分布</strong><span>已平仓位构成</span></div></div>
+            <div class="chart-heading"><div><strong>Direction Mix</strong><span>已平仓位构成</span></div></div>
             <div ref="directionChartEl" class="small-chart"></div>
           </article>
         </div>
@@ -1329,7 +1330,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
   min-height: 0;
   min-width: 0;
   overflow-y: auto;
@@ -1874,16 +1875,39 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
+}
+
+/*
+ * 三段段头统一（用户 2026-10-10：「样式要统一」+「右边 type 的格式靠右」）——
+ * 都以「资金概览」那一行为准：左边标题（+ 可选说明），右边切换按钮、**靠右**。
+ */
+.sec-head-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 段标题：三段共用这一个字号 / 字重（原来资金概览是 10px、另两段是 h2 12px，不一致） */
+.sec-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
 .performance-switcher {
   display: flex;
-  width: 100%;
 }
 
 .performance-switcher,
 .chart-switcher {
+  /* 按内容宽、靠右站（原来是 width:100% 铺满一整行） */
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
   border-color: rgb(77, 61, 40);
   background:
     radial-gradient(ellipse at 20% 0%, rgba(177, 137, 107, 0.1), transparent 55%),
@@ -1909,8 +1933,7 @@ onBeforeUnmount(() => {
 }
 
 .chart-switcher {
-  width: 100%;
-  min-height: 38px;
+  min-height: 34px;
   border-radius: 999px;
 }
 
@@ -1920,21 +1943,6 @@ onBeforeUnmount(() => {
   border-radius: 999px;
 }
 
-.breakdown-intro {
-  display: flex;
-  grid-column: 1 / -1;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 1px 2px 2px;
-}
-
-.breakdown-intro strong {
-  color: var(--text);
-  font-size: 11px;
-}
-
-.breakdown-intro span,
 .breakdown-unavailable {
   color: var(--muted);
   font-size: 10px;
@@ -1957,10 +1965,11 @@ onBeforeUnmount(() => {
 
 .performance-heading p,
 .charts-heading p {
-  margin: 0 0 2px;
+  margin: 0;
   color: var(--muted);
-  font-size: 12px;
-  text-align: right;
+  font-size: 11px;
+  /* 说明跟在标题下面（原来靠右、跟标题分居两头） */
+  text-align: left;
 }
 
 .metric-grid {
@@ -2106,7 +2115,7 @@ onBeforeUnmount(() => {
 
 .chart-slide.chart-panel {
   min-width: 0;
-  padding: 12px 14px;
+  padding: 10px 12px;
 }
 
 .chart-slide .chart-heading > div {
@@ -2729,6 +2738,7 @@ onBeforeUnmount(() => {
   background: linear-gradient(135deg, rgb(39, 39, 40), rgb(39, 30, 21));
   color: var(--muted);
   font-size: 10px;
+  white-space: nowrap;
 }
 
 .currency-setting label.selected {
@@ -2737,6 +2747,10 @@ onBeforeUnmount(() => {
 }
 
 .currency-setting input {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  padding: 0;
   accent-color: var(--accent);
 }
 
@@ -2882,12 +2896,22 @@ onBeforeUnmount(() => {
     margin-bottom: 9px;
   }
 
+  /*
+   * 2026-10-10 用户：「这个页面的高度多了一点」——
+   * 手机上把三处收一收（图表高度、概览卡、底部留白），一屏能少滚一截。
+   */
   .small-chart {
-    height: 185px;
+    height: 168px;
   }
 
   .pnl-chart {
-    height: 215px;
+    height: 190px;
+  }
+
+  .capital-hero {
+    min-height: 132px;
+    padding: 18px 20px;
+    gap: 14px;
   }
 
   .history-modal {
