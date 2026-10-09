@@ -179,7 +179,7 @@ LOCAL_MD5_DEPLOY="$(md5of scripts/deploy.sh)"
 if (( DRY_RUN )); then
   c 'DRY RUN —— 不连服务器。真要执行的是：'
   printf '    scp %s %s@%s:%s\n' "$LOCAL_TAR" "$SSH_USER" "$HOST" "$REMOTE_TAR"
-  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env / downloads）→ 解包 → md5 核对 → sudo PREBUILT=1 bash scripts/deploy.sh\n' \
+  printf '    ssh %s@%s  → 校验包 → 清空 %s（保留 .env / downloads / Caddyfile）→ 解包 → md5 核对 → sudo PREBUILT=1 bash scripts/deploy.sh\n' \
     "$SSH_USER" "$HOST" "$APP_DIR"
   printf '    （APK 不在主包里，只把服务器上没有的那些单独 scp 到 %s）\n' "$REMOTE_APK_DIR"
   printf '    curl https://%s/api/health\n' "$DOMAIN"
@@ -286,24 +286,46 @@ if grep -qxF './.env' <<<"$listing"; then
   echo "✗ 包里含 .env，拒绝解包" >&2; exit 1
 fi
 
-echo "==> 清掉旧文件（保留 .env / downloads）"
+echo "==> 清掉旧文件（保留 .env / downloads / Caddyfile）"
 before=$(find "$APP_DIR" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')
 # 清之前先记下 Caddyfile 的指纹：它没变就不必重建 caddy 容器（见文件末尾）。
 # 读不到（首次部署 / 权限）就当「变了」—— 重建是安全的那一边。
 old_caddy=$(md5sum "$APP_DIR/Caddyfile" 2>/dev/null | cut -d' ' -f1 || true)
 # tar 只覆盖、不删除：不清的话，本机删掉的 .ts 会残留并被 tsc 编进镜像
-# ⚠️ 但这两项必须留着：
+# ⚠️ 但这三项必须留着：
 #   · .env      服务器上管的密钥，本机那份会盖掉
 #   · downloads 它 bind mount 进了 caddy（./downloads:/srv/dl）。
 #     把目录整个删了再建 = **目录 inode 换了**，容器里那个挂载还指着被删的旧 inode，
 #     于是 /srv/dl 变成空目录 —— 线上 APK 直接 404（实测踩过）。
 #     留着目录、让 tar 往里覆盖文件，挂载才不断。
-find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env ! -name downloads -exec rm -rf {} +
-echo "    清掉 $before 项（保留 .env / downloads）"
+#   · Caddyfile 2026-10-10 起**只保留、不覆盖**（下面「解包」那步也不写它）：
+#     这台机器上还跑着别的服务（RustDesk / OpenList / 订阅…），它们的站点块是
+#     **手工加在这个文件里**的。以前每次发布都用仓库版本盖掉它，2026-10-10 就这么
+#     把别人的站点全弄没了（caddy 被重建后只剩 bitcoooin.cn，服务直接访问不了）。
+#     ⇒ 现在**服务器上这份才是准的**；想让仓库版的改动生效，得自己合并（见 docs/DEPLOY.md）。
+find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env ! -name downloads ! -name Caddyfile -exec rm -rf {} +
+echo "    清掉 $before 项（保留 .env / downloads / Caddyfile）"
 
 echo "==> 解包"
 # 不加 sudo：文件要归 ubuntu（root 所有会让下次更新解压失败）
-tar xzf "$TAR" -C "$APP_DIR" --warning=no-unknown-keyword
+# ⚠️ 服务器上已经有 Caddyfile 就**别解它**（理由见上面那段）：排除掉再解包，
+#    免得 tar 覆盖掉手工加的那些站点块。
+if [[ -n "$old_caddy" ]]; then
+  # ⚠️ 两个写法都写上：tar 里存的是 `./Caddyfile`，但不同版本的匹配口径不一样
+  #    （锚定 / 去前缀），少写一个就可能漏排、把手工加的站点覆盖掉。
+  tar xzf "$TAR" -C "$APP_DIR" --warning=no-unknown-keyword \
+    --exclude='./Caddyfile' --exclude='Caddyfile'
+  tar -xzOf "$TAR" --warning=no-unknown-keyword ./Caddyfile > /tmp/ca-Caddyfile.pkg 2>/dev/null || true
+  if ! cmp -s /tmp/ca-Caddyfile.pkg "$APP_DIR/Caddyfile"; then
+    echo "    ! Caddyfile 保留了服务器上的版本（仓库里的那份**没有**生效）"
+    echo "      · 服务器上那份里可能有你自己加的站点，仓库这份只认 bitcoooin.cn"
+    echo "      · 想把仓库版的改动并进来：diff /tmp/ca-Caddyfile.pkg $APP_DIR/Caddyfile"
+    echo "        改完 restart caddy：sudo docker compose -f docker-compose.prod.yml restart caddy"
+  fi
+  rm -f /tmp/ca-Caddyfile.pkg
+else
+  tar xzf "$TAR" -C "$APP_DIR" --warning=no-unknown-keyword
+fi
 
 echo "==> 核对内容与本机一致"
 got_ts=$(md5sum "$APP_DIR/backend/src/server.ts" | cut -d' ' -f1)
@@ -395,6 +417,9 @@ echo "==> 已清掉服务器上的包：$TAR"
 # 证书在命名卷 ca-caddy-data 里，重建不会重新申请。
 # 2026-10-07：改成**只在真的变了时**才重建 —— 每次无脑 `--force-recreate caddy`
 # 要多花十几秒（容器重起 + 等它监听 443），而绝大多数发布根本没碰 Caddyfile。
+# ⚠️ 2026-10-10 起发布**不再改**这个文件（上面「解包」那步把它排除了），所以这里
+#    99% 的情况都是「没变，跳过」。真要重建，是**人手工改过服务器上的 Caddyfile**
+#    —— 那种情况下 Caddy 也不会自己重载，得自己 restart 一次 caddy。
 new_caddy=$(md5sum "$APP_DIR/Caddyfile" | cut -d' ' -f1)
 if [[ -n "$old_caddy" && "$old_caddy" == "$new_caddy" ]]; then
   echo "==> Caddyfile 没变，跳过重建 caddy"

@@ -427,12 +427,24 @@ SELECT pg_cancel_backend(pid) FROM pg_stat_activity
 - **`downloads` 目录必须留着**：它 bind mount 进了 caddy（`./downloads:/srv/dl`）。
   把目录整个删了再建，**目录 inode 就换了**，容器里那个挂载还指着被删的旧 inode ——
   `/srv/dl` 变成空目录，线上 APK 直接 404（实测踩过）。留着目录、让 tar 往里覆盖文件即可。
-- **`Caddyfile` 改了要重建 caddy 容器**：它是 bind mount 的**单个文件**，内容变了
-  compose 看不出来，`up -d` 不会重建，而 Caddy 只在启动时读一次配置 —— 不重建等于没改。
-  （证书在命名卷 `ca-caddy-data` 里，重建不会重新申请。）
-  ⚠️ 2026-10-07 起这一步**只在 Caddyfile 的 md5 真的变了**时才做（release.sh 比对了
-  解包前后的指纹）—— 每次无脑 `--force-recreate caddy` 要多花十几秒，而绝大多数发布
-  根本没碰它。**在服务器上手工编辑 Caddyfile 之后，记得自己 recreate 一次**。
+- **`Caddyfile` 现在归服务器管**（2026-10-10 改）：它 bind mount 成 caddy 的**单个文件**，
+  内容变了 compose 看不出来，`up -d` 不会重建，而 Caddy 只在启动时读一次配置 ——
+  **不重建等于没改**（证书在命名卷 `ca-caddy-data` 里，重建不会重新申请）。
+  ⚠️ 2026-10-07 起 release.sh 只在 md5 真的变了时才 `--force-recreate caddy`
+  （无脑重建要多花十几秒，而绝大多数发布没碰它）。
+  ⚠️⚠️ **2026-10-10 起发布不再覆盖它**（2026-10-10 就是这么出的事故：这台机器上还跑着
+  RustDesk / OpenList / 订阅等别的服务，它们的站点块是手工加在 `Caddyfile` 里的；当时
+  release.sh 清空 `APP_DIR` 再解包，仓库版把这个文件盖掉，接着重建 caddy ⇒ 只剩
+  `bitcoooin.cn`，那些服务全部访问不了）。
+  现在的规则：
+  - release.sh 清目录时**保留**它，解包时用 `--exclude='./Caddyfile'` 排掉它 ⇒
+    **服务器上这份才是准的**，自己加的站点放里面就行；
+  - 仓库里那份只在**全新部署**时铺上去；日常发布只会打一行提示，告诉你两边不一致
+    （想抄仓库的改动：`diff` 一下手工合并）；
+  - 手工改完**一定要自己 restart 一次**才生效：
+    `sudo docker compose -f docker-compose.prod.yml restart caddy`
+    （⚠️ 是 `restart`，别为了这个跑 `release.sh` —— 发布不是重载 caddy 的开关。）
+  - 别指望「发布顺带把 Caddyfile 同步过去」：发布只发这个仓库的代码/镜像。
 
 > 💡 为什么要「先清一遍旧文件」：`tar xzf` 只覆盖同名文件、**不会删除**本机已经删掉的
 > 文件；残留的旧 `.ts` 会被 `tsc` 一起编进镜像（还 import 已删模块的话直接构建失败）。
