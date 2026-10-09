@@ -1865,6 +1865,26 @@ export const cleanupOrphanOrders = (symbol?: string, id?: number) =>
 /** 美元 → 人民币汇率（「交易所账户」USDT / CNY 切换用，跟用量页同一个源） */
 export const fetchRate = () => get<{usdCny: number}>('/api/rate')
 
+/* ---------------- 账户统计配置（每用户，2026-10-09） ---------------- */
+
+/**
+ * 账户统计的配置：收益率基准 + 金额显示单位。
+ *
+ * 用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」——
+ * 以前只写 localStorage，换设备就丢。现在存服务端，账户统计页和
+ * 「个人信息 → 账户信息」读写的是同一份。
+ */
+export interface StatsSettings {
+  benchmark: number
+  currency: 'usd' | 'cny'
+}
+
+export const fetchStatsSettings = () =>
+  get<{settings: StatsSettings; error: string | null}>('/api/stats-settings')
+
+export const saveStatsSettings = (input: StatsSettings) =>
+  put<{settings: StatsSettings; error: string | null}>('/api/stats-settings', input)
+
 /* ---------------- 万能划转（2026-10-05） ---------------- */
 
 /**

@@ -87,6 +87,7 @@ import {
   verifyTotp
 } from './util/totp'
 import {MAX_PINS, listPins, togglePin} from './db/pins'
+import {getStatsSettings, saveStatsSettings} from './db/stats-settings'
 import {
   MARKET_TYPES,
   createExchangeKey,
@@ -3243,6 +3244,31 @@ async function route(
     } catch (e) {
       return sendJson(res, 400, {error: (e as Error).message})
     }
+  }
+
+  /* ---- 账户统计配置（每用户，2026-10-09）---- */
+  /*
+   * 用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」。
+   * 之前只有浏览器 localStorage，换设备就丢；现在按用户存库，
+   * 账户统计页和「个人信息 → 账户信息」两处读写的都是这一份。
+   */
+  if (p === '/api/stats-settings') {
+    if (method === 'GET') {
+      const settings = await getStatsSettings(me.id)
+      return sendJson(res, 200, {settings, error: null})
+    }
+    if (method === 'PUT' || method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      try {
+        const settings = await saveStatsSettings(me.id, body)
+        // 配置直接改变收益率口径 ⇒ 前端拿到后要重算，这里不回统计值，由前端自己再拉
+        return sendJson(res, 200, {settings, error: null})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
 
   /* ---- 用量统计 ---- */

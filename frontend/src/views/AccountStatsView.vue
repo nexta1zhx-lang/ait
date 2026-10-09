@@ -5,7 +5,9 @@ import {
   fetchExchangeAnalytics,
   fetchExchangeKeys,
   fetchRate,
+  fetchStatsSettings,
   importC2cOrders,
+  saveStatsSettings as saveStatsSettingsApi,
   syncC2cOrders,
   type C2cHistoryOrder,
   type ExchangeKey,
@@ -345,7 +347,7 @@ function openConfig(): void {
   showConfig.value = true
 }
 
-function saveConfig(): void {
+async function saveConfig(): Promise<void> {
   const base = Number(draftBenchmark.value)
   if (!Number.isFinite(base) || base <= 0) {
     error.value = '收益率基准必须大于 0'
@@ -353,18 +355,32 @@ function saveConfig(): void {
   }
   benchmark.value = String(base)
   currency.value = draftCurrency.value
+  /*
+   * 存**服务端**（按用户）—— 用户 2026-10-09：「要保存到个人的后端和个人信息中」。
+   * localStorage 继续写，但它只是**首屏兜底**（打开页面时先用上次那份，
+   * 网络回来再被服务端那份覆盖），不再是唯一存储。
+   * ⚠️ 服务端失败**不当成保存失败**：本地已经生效了，只是没同步上去 ——
+   *    报一句让用户知道，别把弹窗卡住。
+   */
   try {
-    localStorage.setItem('ait-account-stats-settings', JSON.stringify({
+    localStorage.setItem(STATS_SETTINGS_KEY, JSON.stringify({
       benchmark: benchmark.value,
       currency: currency.value
     }))
-  } catch (e) {
-    error.value = `保存配置失败：${(e as Error).message}`
-    return
+  } catch {
+    /* 隐私模式 / WebView 不让写，忽略 */
   }
-  error.value = ''
   showConfig.value = false
   void nextTick(renderCharts)
+  try {
+    initing = true
+    await saveStatsSettingsApi({benchmark: base, currency: currency.value})
+    error.value = ''
+  } catch (e) {
+    error.value = `配置已在本机生效，但没能同步到服务器：${(e as Error).message}`
+  } finally {
+    initing = false
+  }
 }
 
 function dateEnd(value: string): number | null {
@@ -510,7 +526,7 @@ function formatOrderTime(value: string): string {
   const time = new Date(value)
   return Number.isNaN(time.getTime())
     ? '—'
-    : time.toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false})
+    : time.toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hourCycle: 'h23'})
 }
 
 const cards = computed(() => {
@@ -739,23 +755,55 @@ function renderPerformanceCharts(
   }, true)
 }
 
-onMounted(() => {
+/* ---------------- 配置：服务端为准，localStorage 只做首屏兜底 ---------------- */
+
+/** localStorage 的 key（老版本就在用，保持不变以便平滑迁移） */
+const STATS_SETTINGS_KEY = 'ait-account-stats-settings'
+
+/** 正在读 / 写服务端配置 —— 这段时间别让「保存中」被误判成用户操作 */
+let initing = false
+
+/** 把一份配置套到页面上（服务端和本地兜底共用同一条路，口径不会分叉） */
+function applySettings(raw: {benchmark?: unknown; currency?: unknown}): void {
+  const base = Number(raw.benchmark)
+  if (Number.isFinite(base) && base > 0) benchmark.value = String(base)
+  currency.value = raw.currency === 'cny' ? 'cny' : 'usd'
+}
+
+/**
+ * 读配置：**先用本地那份立刻上屏**（避免闪一下默认值），再去服务端拿权威值。
+ *
+ * ⚠️ 顺序是有意的：服务端那次**必须后到**，否则网络慢的时候会被本地旧值盖回去。
+ */
+async function loadSettings(): Promise<void> {
   try {
-    const saved = localStorage.getItem('ait-account-stats-settings')
-    if (saved) {
-      const parsed = JSON.parse(saved) as {benchmark?: unknown; currency?: unknown}
-      const base = Number(parsed.benchmark)
-      if (Number.isFinite(base) && base > 0) benchmark.value = String(base)
-      currency.value = parsed.currency === 'cny' ? 'cny' : 'usd'
-    }
-  } catch (e) {
-    error.value = `读取配置失败：${(e as Error).message}`
+    const saved = localStorage.getItem(STATS_SETTINGS_KEY)
+    if (saved) applySettings(JSON.parse(saved) as Record<string, unknown>)
+  } catch {
+    /* 本地那份坏了不影响；下面服务端会给权威值 */
   }
+  try {
+    const {settings} = await fetchStatsSettings()
+    applySettings(settings)
+    try {
+      localStorage.setItem(STATS_SETTINGS_KEY, JSON.stringify(settings))
+    } catch {
+      /* 不让写就算了 */
+    }
+    void nextTick(renderCharts)
+  } catch (e) {
+    // 服务端读不到时**不要**清掉本地那份：离线/异常时它仍是最好的近似
+    console.warn('[account-stats] 读取服务端配置失败：', (e as Error).message)
+  }
+}
+
+onMounted(() => {
   const end = beijingToday()
   const start = new Date(end)
   start.setUTCDate(start.getUTCDate() - 29)
   from.value = dateKey(start)
   to.value = dateKey(end)
+  void loadSettings()
   void Promise.all([loadKeys(), loadRate()])
   chartObserver = new ResizeObserver(() => renderCharts())
   for (const el of [roiChartEl.value, dailyChartEl.value, drawdownChartEl.value, outcomesChartEl.value, directionChartEl.value]) {
@@ -1244,6 +1292,22 @@ onBeforeUnmount(() => {
 /*
  * 本页使用局部暖灰基底与低对比度的冷暖渐变，状态色只用于金额正负。
  * 弹窗 Teleport 到 body 后不会继承 `.account-stats` 变量，因此需在遮罩上重复定义。
+ *
+ * ⚠️⚠️ **本页一律不写 `color-mix()`**（2026-10-09 全部改成了预先算好的 `rgb()` / `rgba()`）。
+ *
+ * 起因：用户 2026-10-09 报「账户统计在 App 里背景色不对、有边框，浏览器上正常」。
+ * 实测（同一条 CSS、同一台机器，仅引擎不同）确认是 `color-mix()` 在这台机器的
+ * Android System WebView（UA 里 `Chrome/114`）上**算不出颜色**：
+ *   · `border: 1px solid color-mix(...)` 里的颜色求不出来 ⇒ 退成 initial 的
+ *     `currentColor` ⇒ 边框变成**亮灰白色**（实测 ≈ rgb(221,225,227)，
+ *     浏览器里同一处是深棕 rgb(43,36,30)）—— 这就是用户看到的「有边框」；
+ *   · 于是这一页的边框/底色整体偏离设计稿。
+ *
+ * 修法：把每一处 `color-mix()` 按它当时的变量值**手算成静态颜色**。本页调色板是
+ * 常量（见下），所以这些值本来就是确定的 —— 换算后视觉等价，但任何引擎都能算对。
+ * 括号里的注释是换算前的原式，方便以后对账/改色。
+ *
+ * 本页加新样式时**请照做**：要半透明就直接写 `rgba()`，别再引入 `color-mix()`。
  */
 .account-stats,
 .date-modal-mask {
@@ -1251,11 +1315,11 @@ onBeforeUnmount(() => {
   --panel-2: #19150f;
   --border: #30271d;
   --accent: #ffc16b;
-  --accent-soft: color-mix(in srgb, #ffc16b 13%, transparent);
-  --accent-line: color-mix(in srgb, #ffc16b 52%, transparent);
+  --accent-soft: rgba(255, 193, 107, 0.13);
+  --accent-line: rgba(255, 193, 107, 0.52);
   --accent-ink: #231603;
   --blue: #ffc16b;
-  --blue-soft: color-mix(in srgb, #ffc16b 13%, transparent);
+  --blue-soft: rgba(255, 193, 107, 0.13);
   --ok: #72d6a0;
   --bad: #ff7480;
   --muted: #aaa398;
@@ -1315,7 +1379,7 @@ onBeforeUnmount(() => {
   padding: 7px;
   border: 1px solid var(--border);
   border-radius: 9px;
-  background: linear-gradient(145deg, color-mix(in srgb, var(--panel) 76%, #54402f), var(--panel) 55%, color-mix(in srgb, var(--panel) 78%, #242d36));
+  background: linear-gradient(145deg, rgb(30, 24, 20), var(--panel) 55%, rgb(18, 19, 20));
   color: var(--text);
   cursor: pointer;
 }
@@ -1358,21 +1422,21 @@ onBeforeUnmount(() => {
   padding: 5px 13px;
   border: 1px solid var(--border);
   border-radius: 9px;
-  background: linear-gradient(145deg, color-mix(in srgb, #344153 30%, var(--panel)), color-mix(in srgb, #35404a 20%, var(--panel)) 55%, var(--panel));
+  background: linear-gradient(145deg, rgb(25, 28, 33), rgb(21, 22, 24) 55%, var(--panel));
   color: var(--text);
   text-align: left;
 }
 
 .account-tabs button.active {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-color: rgb(127, 98, 59);
   background: linear-gradient(
     112deg,
-    color-mix(in srgb, #ffd99e 15%, transparent) 0%,
-    color-mix(in srgb, #ffc16b 9%, transparent) 52%,
-    color-mix(in srgb, #f39a3f 4%, transparent) 100%
+    rgba(255, 217, 158, 0.15) 0%,
+    rgba(255, 193, 107, 0.09) 52%,
+    rgba(243, 154, 63, 0.04) 100%
   );
   color: #ffd291;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent);
+  box-shadow: inset 0 0 0 1px rgba(255, 193, 107, 0.05);
 }
 
 .account-tabs button span {
@@ -1401,7 +1465,7 @@ onBeforeUnmount(() => {
   padding: 7px;
   border: 1px solid var(--border);
   border-radius: 9px;
-  background: linear-gradient(145deg, color-mix(in srgb, #344153 24%, var(--panel)), color-mix(in srgb, #35404a 18%, var(--panel)));
+  background: linear-gradient(145deg, rgb(22, 25, 28), rgb(20, 21, 22));
   color: var(--text);
 }
 
@@ -1425,7 +1489,7 @@ onBeforeUnmount(() => {
   padding: 7px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
-  background: linear-gradient(150deg, color-mix(in srgb, #6e5238 10%, var(--panel)), color-mix(in srgb, #25313a 14%, var(--panel)) 52%, var(--panel));
+  background: linear-gradient(150deg, rgb(23, 19, 16), rgb(16, 17, 18) 52%, var(--panel));
   color: var(--text);
   cursor: pointer;
 }
@@ -1441,10 +1505,10 @@ onBeforeUnmount(() => {
 }
 
 .date-trigger.active {
-  border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+  border-color: rgb(156, 119, 70);
   background:
-    linear-gradient(115deg, color-mix(in srgb, #ffe0ad 9%, transparent), transparent 54%),
-    linear-gradient(145deg, color-mix(in srgb, #6e5238 15%, var(--panel)), color-mix(in srgb, #25313a 17%, var(--panel)));
+    linear-gradient(115deg, rgba(255, 224, 173, 0.09), transparent 54%),
+    linear-gradient(145deg, rgb(28, 22, 18), rgb(17, 18, 19));
   color: #ffd291;
 }
 
@@ -1470,11 +1534,11 @@ onBeforeUnmount(() => {
   gap: 20px;
   overflow: hidden;
   padding: 22px 24px;
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border: 1px solid rgb(98, 76, 48);
   border-radius: 18px;
   background:
-    radial-gradient(ellipse at 85% 12%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 37%),
-    linear-gradient(115deg, var(--panel), color-mix(in srgb, var(--accent) 3%, var(--panel)));
+    radial-gradient(ellipse at 85% 12%, rgba(255, 193, 107, 0.09), transparent 37%),
+    linear-gradient(115deg, var(--panel), rgb(20, 17, 14));
 }
 
 .capital-carousel {
@@ -1499,7 +1563,7 @@ onBeforeUnmount(() => {
   padding: 3px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: linear-gradient(120deg, color-mix(in srgb, #29313d 20%, var(--panel)), color-mix(in srgb, #2c211b 15%, var(--panel)));
+  background: linear-gradient(120deg, rgb(19, 19, 21), rgb(18, 15, 13));
 }
 
 .stats-segments button {
@@ -1517,12 +1581,12 @@ onBeforeUnmount(() => {
 .stats-segments button.active {
   background: linear-gradient(
     112deg,
-    color-mix(in srgb, #ffd99e 25%, transparent) 0%,
-    color-mix(in srgb, #ffc16b 15%, transparent) 52%,
-    color-mix(in srgb, #f39a3f 9%, transparent) 100%
+    rgba(255, 217, 158, 0.25) 0%,
+    rgba(255, 193, 107, 0.15) 52%,
+    rgba(243, 154, 63, 0.09) 100%
   );
   color: #ffd291;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px rgba(255, 193, 107, 0.12);
 }
 
 .capital-track {
@@ -1555,7 +1619,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   padding: 0;
   border-radius: 999px;
-  background: linear-gradient(110deg, color-mix(in srgb, #8390a1 48%, var(--border)), var(--border));
+  background: linear-gradient(110deg, rgb(88, 89, 92), var(--border));
   transition: width 160ms ease, background 160ms ease;
 }
 
@@ -1565,17 +1629,17 @@ onBeforeUnmount(() => {
 }
 
 .capital-hero.waiting {
-  border-color: color-mix(in srgb, var(--bad) 45%, var(--border));
+  border-color: rgb(141, 74, 74);
   background:
-    radial-gradient(ellipse at 85% 12%, color-mix(in srgb, var(--bad) 8%, transparent), transparent 38%),
-    linear-gradient(115deg, color-mix(in srgb, #392c39 18%, var(--panel)), color-mix(in srgb, var(--bad) 4%, var(--panel)));
+    radial-gradient(ellipse at 85% 12%, rgba(255, 116, 128, 0.08), transparent 38%),
+    linear-gradient(115deg, rgb(21, 18, 19), rgb(23, 16, 16));
 }
 
 .capital-hero.recovered {
-  border-color: color-mix(in srgb, var(--ok) 36%, var(--border));
+  border-color: rgb(72, 102, 76);
   background:
-    radial-gradient(ellipse at 85% 12%, color-mix(in srgb, var(--ok) 8%, transparent), transparent 38%),
-    linear-gradient(115deg, color-mix(in srgb, #263a38 19%, var(--panel)), color-mix(in srgb, var(--ok) 4%, var(--panel)));
+    radial-gradient(ellipse at 85% 12%, rgba(114, 214, 160, 0.08), transparent 38%),
+    linear-gradient(115deg, rgb(18, 21, 20), rgb(17, 20, 17));
 }
 
 .capital-copy {
@@ -1620,23 +1684,23 @@ onBeforeUnmount(() => {
   gap: 6px;
   margin-top: 8px;
   padding: 4px 8px;
-  border: 1px solid color-mix(in srgb, var(--bad) 38%, transparent);
+  border: 1px solid rgba(255, 116, 128, 0.38);
   border-radius: 999px;
-  background: linear-gradient(110deg, color-mix(in srgb, var(--bad) 9%, transparent), color-mix(in srgb, #826077 5%, transparent));
+  background: linear-gradient(110deg, rgba(255, 116, 128, 0.09), rgba(130, 96, 119, 0.05));
   color: var(--bad);
   font-size: 10px;
   font-weight: 650;
 }
 
 .capital-hero.recovered .capital-status {
-  border-color: color-mix(in srgb, var(--ok) 27%, transparent);
-  background: linear-gradient(110deg, color-mix(in srgb, var(--ok) 8%, transparent), color-mix(in srgb, #5c87a0 6%, transparent));
+  border-color: rgba(114, 214, 160, 0.27);
+  background: linear-gradient(110deg, rgba(114, 214, 160, 0.08), rgba(92, 135, 160, 0.06));
   color: var(--ok);
 }
 
 .capital-hero.balanced .capital-status {
   border-color: var(--border);
-  background: linear-gradient(135deg, color-mix(in srgb, #29313d 20%, var(--panel)), var(--panel));
+  background: linear-gradient(135deg, rgb(19, 19, 21), var(--panel));
   color: var(--muted);
 }
 
@@ -1654,12 +1718,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border: 1px solid rgb(114, 88, 54);
   border-radius: 50%;
   background:
-    radial-gradient(circle at 32% 25%, color-mix(in srgb, #ffe0ad 6%, transparent), transparent 50%),
-    linear-gradient(145deg, color-mix(in srgb, #29313d 35%, var(--panel)), color-mix(in srgb, #2c211b 25%, var(--panel)));
-  box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 5%, transparent), 0 0 24px color-mix(in srgb, var(--accent) 9%, transparent);
+    radial-gradient(circle at 32% 25%, rgba(255, 224, 173, 0.06), transparent 50%),
+    linear-gradient(145deg, rgb(23, 25, 28), rgb(21, 17, 15));
+  box-shadow: 0 0 0 7px rgba(255, 193, 107, 0.05), 0 0 24px rgba(255, 193, 107, 0.09);
 }
 
 .capital-orbit span,
@@ -1698,8 +1762,8 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: 15px;
   background:
-    radial-gradient(ellipse at 90% 10%, color-mix(in srgb, var(--blue) 9%, transparent), transparent 42%),
-    linear-gradient(145deg, var(--panel), color-mix(in srgb, var(--blue) 3%, var(--panel)));
+    radial-gradient(ellipse at 90% 10%, rgba(255, 193, 107, 0.09), transparent 42%),
+    linear-gradient(145deg, var(--panel), rgb(20, 17, 14));
 }
 
 .section-heading,
@@ -1820,10 +1884,10 @@ onBeforeUnmount(() => {
 
 .performance-switcher,
 .chart-switcher {
-  border-color: color-mix(in srgb, var(--accent) 14%, var(--border));
+  border-color: rgb(77, 61, 40);
   background:
-    radial-gradient(ellipse at 20% 0%, color-mix(in srgb, #b1896b 10%, transparent), transparent 55%),
-    linear-gradient(110deg, color-mix(in srgb, #29313d 32%, var(--panel)), color-mix(in srgb, #39291f 26%, var(--panel)));
+    radial-gradient(ellipse at 20% 0%, rgba(177, 137, 107, 0.1), transparent 55%),
+    linear-gradient(110deg, rgb(22, 24, 27), rgb(24, 20, 16));
 }
 
 .performance-switcher button,
@@ -1836,12 +1900,12 @@ onBeforeUnmount(() => {
 .chart-switcher button.active {
   background: linear-gradient(
     112deg,
-    color-mix(in srgb, #ffd99e 25%, transparent) 0%,
-    color-mix(in srgb, #ffc16b 15%, transparent) 52%,
-    color-mix(in srgb, #f39a3f 9%, transparent) 100%
+    rgba(255, 217, 158, 0.25) 0%,
+    rgba(255, 193, 107, 0.15) 52%,
+    rgba(243, 154, 63, 0.09) 100%
   );
   color: #ffd291;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px rgba(255, 193, 107, 0.12);
 }
 
 .chart-switcher {
@@ -1912,11 +1976,11 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-height: 62px;
   padding: 8px 9px;
-  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border: 1px solid rgba(48, 39, 29, 0.72);
   border-radius: 11px;
   background:
-    radial-gradient(ellipse at 12% 0%, color-mix(in srgb, #7888a3 9%, transparent), transparent 62%),
-    linear-gradient(145deg, color-mix(in srgb, #29313d 27%, var(--panel)), color-mix(in srgb, #39291f 24%, var(--panel)));
+    radial-gradient(ellipse at 12% 0%, rgba(120, 136, 163, 0.09), transparent 62%),
+    linear-gradient(145deg, rgb(21, 22, 24), rgb(24, 19, 16));
 }
 
 .metric-card .k {
@@ -1968,11 +2032,11 @@ onBeforeUnmount(() => {
 .chart-panel {
   position: relative;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border: 1px solid rgba(48, 39, 29, 0.8);
   border-radius: 15px;
   background:
-    radial-gradient(ellipse at 90% 0%, color-mix(in srgb, #8295ae 9%, transparent), transparent 45%),
-    linear-gradient(145deg, color-mix(in srgb, #29313d 27%, var(--panel)), color-mix(in srgb, #39291f 22%, var(--panel)));
+    radial-gradient(ellipse at 90% 0%, rgba(130, 149, 174, 0.09), transparent 45%),
+    linear-gradient(145deg, rgb(21, 22, 24), rgb(23, 18, 15));
   padding: 12px 12px 9px;
 }
 
@@ -2031,7 +2095,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   padding: 0;
   border-radius: 99px;
-  background: linear-gradient(110deg, color-mix(in srgb, #8390a1 48%, var(--border)), var(--border));
+  background: linear-gradient(110deg, rgb(88, 89, 92), var(--border));
   transition: width 160ms ease, background 160ms ease;
 }
 
@@ -2058,9 +2122,9 @@ onBeforeUnmount(() => {
 .breakdown-group {
   min-width: 0;
   padding: 9px 10px;
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border: 1px solid rgba(48, 39, 29, 0.78);
   border-radius: 10px;
-  background: linear-gradient(145deg, color-mix(in srgb, #29313d 18%, var(--panel)), color-mix(in srgb, #39291f 16%, var(--panel)));
+  background: linear-gradient(145deg, rgb(18, 19, 20), rgb(20, 17, 14));
 }
 
 .breakdown-group > header {
@@ -2228,7 +2292,7 @@ onBeforeUnmount(() => {
 
 .quick-ranges button.active {
   border-color: var(--accent-line);
-  background: linear-gradient(112deg, color-mix(in srgb, #ffd99e 19%, transparent), color-mix(in srgb, #f39a3f 8%, transparent));
+  background: linear-gradient(112deg, rgba(255, 217, 158, 0.19), rgba(243, 154, 63, 0.08));
   color: #ffd291;
 }
 
@@ -2256,8 +2320,8 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border);
   border-radius: 16px;
   background:
-    radial-gradient(ellipse at 90% 0%, color-mix(in srgb, #8295ae 11%, transparent), transparent 46%),
-    linear-gradient(145deg, color-mix(in srgb, #29313d 43%, var(--panel)), color-mix(in srgb, #39291f 31%, var(--panel)) 58%, color-mix(in srgb, #253541 29%, var(--panel)));
+    radial-gradient(ellipse at 90% 0%, rgba(130, 149, 174, 0.11), transparent 46%),
+    linear-gradient(145deg, rgb(25, 28, 32), rgb(27, 21, 17) 58%, rgb(20, 24, 27));
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48);
 }
 
@@ -2273,8 +2337,8 @@ onBeforeUnmount(() => {
   gap: 14px;
   padding: 20px;
   background:
-    radial-gradient(ellipse at 90% 0%, color-mix(in srgb, #8295ae 9%, transparent), transparent 44%),
-    linear-gradient(145deg, color-mix(in srgb, #29313d 27%, var(--panel)), color-mix(in srgb, #39291f 21%, var(--panel)) 58%, color-mix(in srgb, #253541 20%, var(--panel)));
+    radial-gradient(ellipse at 90% 0%, rgba(130, 149, 174, 0.09), transparent 44%),
+    linear-gradient(145deg, rgb(21, 22, 24), rgb(22, 18, 15) 58%, rgb(18, 20, 22));
 }
 
 .history-head {
@@ -2295,12 +2359,12 @@ onBeforeUnmount(() => {
 .history-action-button {
   min-height: 34px;
   padding: 0 14px;
-  border: 1px solid color-mix(in srgb, #8295ae 42%, var(--border));
+  border: 1px solid rgb(82, 85, 90);
   border-radius: 9px;
   background: linear-gradient(
     120deg,
-    color-mix(in srgb, #526079 30%, var(--panel-2)),
-    color-mix(in srgb, #69452f 20%, var(--panel-2))
+    rgb(42, 44, 47),
+    rgb(41, 31, 21)
   );
   color: var(--text);
   font: inherit;
@@ -2309,11 +2373,11 @@ onBeforeUnmount(() => {
 }
 
 .history-update-button {
-  border-color: color-mix(in srgb, #d39a65 48%, var(--border));
+  border-color: rgb(126, 94, 64);
   background: linear-gradient(
     120deg,
-    color-mix(in srgb, #d39a65 20%, var(--panel-2)),
-    color-mix(in srgb, #7895b4 17%, var(--panel-2))
+    rgb(62, 48, 32),
+    rgb(41, 43, 43)
   );
 }
 
@@ -2361,7 +2425,7 @@ onBeforeUnmount(() => {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: linear-gradient(110deg, color-mix(in srgb, #526079 34%, var(--panel-2)), color-mix(in srgb, #69452f 24%, var(--panel-2)));
+  background: linear-gradient(110deg, rgb(44, 46, 51), rgb(44, 33, 23));
   color: var(--muted);
   font-size: 10px;
   font-weight: 600;
@@ -2372,7 +2436,7 @@ onBeforeUnmount(() => {
 }
 
 .history-table tbody tr:hover:not(:has(.history-empty)) {
-  background: linear-gradient(90deg, color-mix(in srgb, #d39a65 9%, transparent), color-mix(in srgb, #7895b4 5%, transparent));
+  background: linear-gradient(90deg, rgba(211, 154, 101, 0.09), rgba(120, 149, 180, 0.05));
 }
 
 .history-table td small {
@@ -2436,7 +2500,7 @@ onBeforeUnmount(() => {
   padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: linear-gradient(135deg, color-mix(in srgb, #526079 24%, var(--panel-2)), color-mix(in srgb, #69452f 18%, var(--panel-2)));
+  background: linear-gradient(135deg, rgb(39, 39, 40), rgb(39, 30, 21));
   color: var(--text);
   font-size: 10px;
 }
@@ -2468,7 +2532,7 @@ onBeforeUnmount(() => {
 
 .calendar-grid {
   padding: 7px 5px;
-  border: 1px solid color-mix(in srgb, #8295ae 24%, var(--border));
+  border: 1px solid rgb(68, 65, 64);
   border-radius: 12px;
   background:
     linear-gradient(145deg, #101216, #11100f);
@@ -2500,7 +2564,7 @@ onBeforeUnmount(() => {
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: linear-gradient(135deg, color-mix(in srgb, #526079 24%, var(--panel-2)), color-mix(in srgb, #69452f 18%, var(--panel-2)));
+  background: linear-gradient(135deg, rgb(39, 39, 40), rgb(39, 30, 21));
   color: var(--text);
   font-size: 18px;
   cursor: pointer;
@@ -2547,14 +2611,14 @@ onBeforeUnmount(() => {
   padding: 0;
   border: 0;
   border-radius: 9px;
-  background: linear-gradient(145deg, color-mix(in srgb, #526079 11%, #111316), color-mix(in srgb, #69452f 8%, #11100f));
+  background: linear-gradient(145deg, rgb(24, 27, 33), rgb(24, 20, 18));
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
 }
 
 .calendar-day:hover {
-  background: linear-gradient(135deg, color-mix(in srgb, #526079 22%, var(--panel-2)), color-mix(in srgb, #69452f 17%, var(--panel-2)));
+  background: linear-gradient(135deg, rgb(38, 38, 38), rgb(39, 29, 20));
 }
 
 .calendar-day.outside {
@@ -2564,7 +2628,7 @@ onBeforeUnmount(() => {
 
 .calendar-day.inRange {
   border-radius: 8px;
-  background: linear-gradient(90deg, color-mix(in srgb, #d39a65 19%, transparent), color-mix(in srgb, #7895b4 12%, transparent));
+  background: linear-gradient(90deg, rgba(211, 154, 101, 0.19), rgba(120, 149, 180, 0.12));
 }
 
 .calendar-day.selected {
@@ -2597,7 +2661,7 @@ onBeforeUnmount(() => {
   padding: 0 13px;
   border: 1px solid var(--border);
   border-radius: 9px;
-  background: linear-gradient(135deg, color-mix(in srgb, #526079 24%, var(--panel-2)), color-mix(in srgb, #69452f 18%, var(--panel-2)));
+  background: linear-gradient(135deg, rgb(39, 39, 40), rgb(39, 30, 21));
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
@@ -2662,7 +2726,7 @@ onBeforeUnmount(() => {
   padding: 5px 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: linear-gradient(135deg, color-mix(in srgb, #526079 24%, var(--panel-2)), color-mix(in srgb, #69452f 18%, var(--panel-2)));
+  background: linear-gradient(135deg, rgb(39, 39, 40), rgb(39, 30, 21));
   color: var(--muted);
   font-size: 10px;
 }
@@ -2858,11 +2922,11 @@ onBeforeUnmount(() => {
   .mobile-history-card {
     min-width: 0;
     padding: 11px;
-    border: 1px solid color-mix(in srgb, #8295ae 34%, var(--border));
+    border: 1px solid rgb(76, 76, 78);
     border-radius: 12px;
     background:
-      radial-gradient(ellipse at 90% 0%, color-mix(in srgb, #8295ae 18%, transparent), transparent 48%),
-      linear-gradient(145deg, color-mix(in srgb, #526079 45%, var(--panel)), color-mix(in srgb, #69452f 30%, var(--panel)) 58%, color-mix(in srgb, #253541 38%, var(--panel)));
+      radial-gradient(ellipse at 90% 0%, rgba(130, 149, 174, 0.18), transparent 48%),
+      linear-gradient(145deg, rgb(44, 50, 60), rgb(41, 29, 22) 58%, rgb(22, 28, 32));
   }
 
   .mobile-history-card > header {
@@ -2871,7 +2935,7 @@ onBeforeUnmount(() => {
     justify-content: space-between;
     gap: 8px;
     padding-bottom: 8px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+    border-bottom: 1px solid rgba(48, 39, 29, 0.78);
   }
 
   .mobile-history-card time {
@@ -2880,12 +2944,26 @@ onBeforeUnmount(() => {
     font-variant-numeric: tabular-nums;
   }
 
+  /*
+   * 买/卖那颗小胶囊。
+   * ⚠️ 原来底色是 `color-mix(in srgb, currentColor 12%, transparent)` —— 就是「文字色的 12%」。
+   *    现在按买 / 卖 / 默认把三种文字色（`--ok` / `--bad` / `--text`）各自写死一份，
+   *    效果一样但不再依赖 `color-mix()`（原因见文件顶部那段的说明）。
+   */
   .mobile-history-card .history-side {
     min-width: 45px;
     padding: 3px 8px;
     border: 1px solid currentColor;
     border-radius: 999px;
-    background: linear-gradient(110deg, color-mix(in srgb, currentColor 12%, transparent), transparent);
+    background: rgba(240, 241, 243, 0.12);
+  }
+
+  .mobile-history-card .history-side.buy {
+    background: rgba(114, 214, 160, 0.14);
+  }
+
+  .mobile-history-card .history-side.sell {
+    background: rgba(255, 116, 128, 0.14);
   }
 
   .mobile-history-details {
@@ -2921,7 +2999,7 @@ onBeforeUnmount(() => {
     min-width: 0;
     gap: 8px;
     padding-top: 7px;
-    border-top: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+    border-top: 1px solid rgba(48, 39, 29, 0.78);
   }
 
   .mobile-history-card > footer span {

@@ -445,7 +445,12 @@ function bjPartsOf(time: number | string | Date) {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false
+    /*
+     * ⚠️ 用 `hourCycle: 'h23'`，别写 `hour12: false` —— 后者在部分引擎（含部分
+     *    Android WebView）会按 **h24** 解析，午夜那根刻度就变成「24:00」
+     *    （用户 2026-10-09：「K 线图的 X 坐标轴不应该有 24 点，应该是 0 点」）。
+     */
+    hourCycle: 'h23'
   }).formatToParts(d))
     o[p.type] = p.value
   return o

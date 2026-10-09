@@ -129,6 +129,18 @@ CREATE TABLE IF NOT EXISTS user_pins (
 );
 CREATE INDEX IF NOT EXISTS user_pins_user_idx ON user_pins (user_id, sort);
 
+-- 账户统计的每用户配置（2026-10-09，见 db/stats-settings.ts）。
+-- 用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」——
+-- 这两项以前只写浏览器 localStorage，换设备 / 换 App 就丢，现在按用户存库。
+CREATE TABLE IF NOT EXISTS user_stats_settings (
+  user_id    BIGINT        PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  -- 收益率基准金额（USDT），必须 > 0
+  benchmark  NUMERIC(24,8) NOT NULL DEFAULT 1000,
+  -- 金额显示单位：usd（美元）/ cny（人民币）
+  currency   TEXT          NOT NULL DEFAULT 'usd',
+  updated_at TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+
 -- 登录会话：前端存 token，请求带 Authorization: Bearer <token>
 -- （SSE 带不了请求头，所以也接受 ?token=，见 server.ts 的 currentUser）。
 CREATE TABLE IF NOT EXISTS sessions (

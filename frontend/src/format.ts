@@ -113,7 +113,13 @@ const BJ = new Intl.DateTimeFormat('en-CA', {
   minute: '2-digit',
   // 秒也要（bjTimeSec 用）；只读自己需要的字段，所以对 bjTime/bjShort 没影响
   second: '2-digit',
-  hour12: false
+  /*
+   * ⚠️ 必须用 `hourCycle: 'h23'`，**不能**写 `hour12: false`。
+   * 两者都表达「24 小时制」，但 `hour12: false` 在部分引擎里会解析成 **h24** ——
+   * 于是午夜 00:00 被格式化成 **24:00**（用户 2026-10-09 报：K 线 X 轴出现 24 点）。
+   * `h23` 是明确口径：00–23，午夜就是 00。
+   */
+  hourCycle: 'h23'
 })
 
 function bjParts(d: Date): Record<string, string> {

@@ -19,9 +19,11 @@ import {
   disableTotp,
   enableTotp,
   fetchSessions,
+  fetchStatsSettings,
   fetchTotpState,
   revokeOtherSessions,
   revokeSession,
+  saveStatsSettings as saveStatsSettingsApi,
   setupTotp,
   type DeviceSession
 } from '../api'
@@ -245,11 +247,55 @@ async function copySecret(): Promise<void> {
 
 /* ------------------------- 基本信息 ------------------------- */
 
+/* ------------------- 账户统计配置（2026-10-09） ------------------- */
+
+const statsBenchmark = ref('1000')
+const statsCurrency = ref<'usd' | 'cny'>('usd')
+const statsBusy = ref(false)
+const statsMsg = ref('')
+const statsErr = ref('')
+
+async function loadStatsSettings(): Promise<void> {
+  try {
+    const {settings} = await fetchStatsSettings()
+    statsBenchmark.value = String(settings.benchmark)
+    statsCurrency.value = settings.currency
+  } catch (e) {
+    statsErr.value = (e as Error).message
+  }
+}
+
+async function saveStats(): Promise<void> {
+  if (statsBusy.value) return
+  const base = Number(statsBenchmark.value)
+  if (!Number.isFinite(base) || base <= 0) {
+    statsErr.value = '收益率基准必须大于 0'
+    return
+  }
+  statsBusy.value = true
+  statsMsg.value = ''
+  statsErr.value = ''
+  try {
+    const {settings} = await saveStatsSettingsApi({
+      benchmark: base,
+      currency: statsCurrency.value
+    })
+    statsBenchmark.value = String(settings.benchmark)
+    statsCurrency.value = settings.currency
+    statsMsg.value = '已保存'
+  } catch (e) {
+    statsErr.value = (e as Error).message
+  } finally {
+    statsBusy.value = false
+  }
+}
+
 onMounted(() => {
   name.value = user.value?.username ?? ''
   void loadSessions()
   void loadTotp()
   void loadShell()
+  void loadStatsSettings()
 })
 
 /* ------------------------- App 体检单 ------------------------- */
@@ -344,6 +390,54 @@ async function changePw(): Promise<void> {
           @click="saveName"
         >
           {{ nameBusy ? '保存中…' : '保存' }}
+        </button>
+      </div>
+    </section>
+
+    <!--
+      账户统计配置（用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」）。
+      跟「我的 → 复盘 → 账户统计」右上角齿轮里的是**同一份**（服务端 /api/stats-settings，
+      按用户存库），两处改哪边都会同步 —— 所以这里也放一个入口，省得非要进统计页才能改。
+    -->
+    <section v-if="tab === 'account'" class="panel">
+      <h2>账户统计配置</h2>
+      <p class="hint">
+        收益率基准与金额显示单位；跟「复盘 → 账户统计」右上角配置里的是同一份（存在服务器上，换设备也在）。
+      </p>
+      <label>
+        <span>收益率基准金额（USDT）</span>
+        <input
+          v-model="statsBenchmark"
+          type="number"
+          min="0.01"
+          step="any"
+          inputmode="decimal"
+        />
+      </label>
+      <label>
+        <span>金额显示单位</span>
+        <div class="seg-inline">
+          <button
+            type="button"
+            :class="{on: statsCurrency === 'usd'}"
+            @click="statsCurrency = 'usd'"
+          >
+            美元
+          </button>
+          <button
+            type="button"
+            :class="{on: statsCurrency === 'cny'}"
+            @click="statsCurrency = 'cny'"
+          >
+            人民币
+          </button>
+        </div>
+      </label>
+      <p v-if="statsErr" class="err">{{ statsErr }}</p>
+      <p v-if="statsMsg" class="ok">{{ statsMsg }}</p>
+      <div class="row">
+        <button class="btn primary" type="button" :disabled="statsBusy" @click="saveStats">
+          {{ statsBusy ? '保存中…' : '保存' }}
         </button>
       </div>
     </section>
@@ -691,6 +785,32 @@ label {
 label span {
   font-size: 12px;
   color: var(--muted);
+}
+/* 说明小字（账户统计配置那块用） */
+.hint {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+/* 「美元 / 人民币」这种两选一：并排两个按钮，选中的那种高亮 */
+.seg-inline {
+  display: flex;
+  gap: 6px;
+}
+.seg-inline button {
+  flex: 1 1 0;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+.seg-inline button.on {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 input {
   width: 100%;
