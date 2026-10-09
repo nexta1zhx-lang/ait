@@ -38,7 +38,6 @@ import {
   type ExchangeOpenOrder,
   type ExchangeOverview,
   type ExchangePositionCycle,
-  type ExchangePositionOrder,
   type ExchangeTrade
 } from '../api'
 import {ago, bjTime, bjTimeSec, fixed, fmt} from '../format'
@@ -832,7 +831,7 @@ const tabTotal = computed(() => {
   if (tab.value === 'pos') return positions.value.length
   if (tab.value === 'ord') return shownOrderCount.value
   if (tab.value === 'inc') return shownCycles.value.length
-  if (tab.value === 'trades') return props.trades?.length ?? 0
+  if (tab.value === 'trades') return tradeGroups.value.length
   if (tab.value === 'flow') return props.income?.length ?? 0
   return 0
 })
@@ -933,11 +932,74 @@ const visiblePositions = computed(() =>
 /** 「一键平仓」交上去的全部持仓标识（不是屏幕上铺出来的那几条） */
 const posRefAll = computed(() => positions.value.map(posRef))
 
-const visibleTrades = computed(() => {
-  const list = shownTrades.value
-  return cap.value === Number.POSITIVE_INFINITY
-    ? list
-    : list.slice(0, cap.value)
+/* ---------------- 成交按「同一时间」合并（用户 2026-10-10） ----------------
+ *
+ * 用户：「多个订单合并显示均价等合并后的信息」「同一时间币安下单可能是小单子」——
+ * 币安一张单常被拆成**好几笔小成交**（同一秒、同币、同向），逐笔平铺出来一屏全是
+ * 零碎小单，看不出「这一下成交了多少、均价多少、手续费多少」。
+ * ⇒ 把**同一秒 + 同币种 + 同方向（+ 同一套 Key）**的几笔并成一行，报均价与合计。
+ *
+ * ⚠️ 手续费直接相加是安全的：分组键里带了币种，同一币种的手续费币种相同。
+ */
+interface MergedTrade {
+  /** 分组键（同键 = 同一秒 / 同币 / 同向 / 同账户） */
+  key: string
+  /** 这一组最早那一刻（列表本来就按时间倒序，取第一条即可） */
+  datetime: string | null
+  symbol: string
+  side: string
+  /** 均价（加权）：合计价值 / 合计数量 */
+  price: number
+  amount: number
+  cost: number
+  fee: number
+  feeCurrency: string
+  /** 合并进来的笔数（`1` = 没并） */
+  count: number
+  keyName?: string
+}
+
+/** 到秒的时间键（北京时间）—— 同一个字符串 = 同一秒 */
+function secKey(input: string | number | null | undefined): string {
+  return input ? bjTimeSec(input) : ''
+}
+
+const tradeGroups = computed<MergedTrade[]>(() => {
+  const out: MergedTrade[] = []
+  const at = new Map<string, MergedTrade>()
+  for (const t of shownTrades.value) {
+    const key = `${secKey(t.datetime)}|${t.symbol}|${t.side}|${t.keyName ?? ''}`
+    const hit = at.get(key)
+    if (hit) {
+      hit.amount += t.amount
+      hit.cost += t.cost
+      hit.fee += t.fee
+      hit.count += 1
+      hit.price = hit.amount > 0 ? hit.cost / hit.amount : hit.price
+      continue
+    }
+    const row: MergedTrade = {
+      key,
+      datetime: t.datetime,
+      symbol: t.symbol,
+      side: t.side,
+      price: t.price,
+      amount: t.amount,
+      cost: t.cost,
+      fee: t.fee,
+      feeCurrency: t.feeCurrency,
+      count: 1,
+      keyName: t.keyName
+    }
+    at.set(key, row)
+    out.push(row)
+  }
+  return out
+})
+
+const visibleTradeGroups = computed(() => {
+  const list = tradeGroups.value
+  return cap.value === Number.POSITIVE_INFINITY ? list : list.slice(0, cap.value)
 })
 
 /** 资金动向：整本钱账本（后端已按时间倒序、跨账户合并好） */
@@ -1030,18 +1092,83 @@ function holdText(sec: number): string {
  * 逐笔那一行的动作标签。
  * ⚠️ 一段里的**最后一笔减仓就是「平仓」** —— 算法上仓位归零的那一笔才收尾
  *    （减仓和全平都说成「减仓」会让人以为这段还开着）。
+ *
+ * ⚠️ 2026-10-10 起明细按「同一秒同向」合并（见 `cycleOrderGroups`）：判「平仓」看的是
+ *    这一组里**有没有原始序列的最后一笔**（`last`），不能再拿合并后的下标去比 ——
+ *    合并之后下标对不上，最后那笔会被错标成「减仓」。
  */
-function orderAction(
-  c: ExchangePositionCycle,
-  o: ExchangePositionOrder,
-  i: number
-): string {
+function orderAction(c: ExchangePositionCycle, o: MergedCycleOrder): string {
   /* 第一笔**建仓**的成交就是「开仓」——
      以前一律写「加仓」，看着像是「在已有仓位上又加了一笔」。 */
-  if (!o.reduce) return i === 0 ? '开仓' : '加仓'
-  if (c.closed && i === c.orders.length - 1) return '平仓'
+  if (!o.reduce) return o.first ? '开仓' : '加仓'
+  if (c.closed && o.last) return '平仓'
   return '减仓'
 }
+
+/**
+ * 仓位明细里**同一秒、同方向**的几笔小成交也并成一行（跟「成交历史」一个口径）。
+ *
+ * ⚠️ 分组键里带 `reduce`：开仓的几笔和减仓的几笔不能混成一行，不然「开仓 / 平仓」
+ *    的动作标签、以及「已实现盈亏」都说不清是谁的。
+ */
+interface MergedCycleOrder {
+  key: string
+  time: string
+  side: 'buy' | 'sell'
+  /** 均价（加权）：合计价值 / 合计数量 */
+  price: number
+  amount: number
+  /** 合计价值（= 均价 × 合计数量）—— 明细里那一列「价值」 */
+  cost: number
+  fee: number
+  /** 合计已实现盈亏（减仓 / 平仓那几笔才有） */
+  realized: number
+  count: number
+  reduce: boolean
+  /** 这一组含原始序列的第一笔 / 最后一笔 —— 决定标「开仓」还是「平仓」 */
+  first: boolean
+  last: boolean
+}
+
+const cycleOrderGroups = computed<MergedCycleOrder[]>(() => {
+  const c = openCycle.value
+  if (!c) return []
+  const out: MergedCycleOrder[] = []
+  const at = new Map<string, MergedCycleOrder>()
+  c.orders.forEach((o, i) => {
+    const cost = o.price * o.amount
+    const key = `${secKey(o.time)}|${o.side}|${o.reduce ? 'r' : 'o'}`
+    const hit = at.get(key)
+    const isLast = i === c.orders.length - 1
+    if (hit) {
+      hit.amount += o.amount
+      hit.cost += cost
+      hit.fee += o.fee
+      hit.realized += o.realized
+      hit.count += 1
+      hit.price = hit.amount > 0 ? hit.cost / hit.amount : hit.price
+      if (isLast) hit.last = true
+      return
+    }
+    const row: MergedCycleOrder = {
+      key,
+      time: o.time,
+      side: o.side,
+      price: o.price,
+      amount: o.amount,
+      cost,
+      fee: o.fee,
+      realized: o.realized,
+      count: 1,
+      reduce: o.reduce,
+      first: i === 0,
+      last: isLast
+    }
+    at.set(key, row)
+    out.push(row)
+  })
+  return out
+})
 
 /* ---------------- 格式化 ---------------- */
 
@@ -1982,7 +2109,7 @@ const RANGES = [
                 </button>
               </header>
               <ul class="cyc-orders">
-                <li v-for="(o, i) in openCycle.orders" :key="o.id">
+                <li v-for="o in cycleOrderGroups" :key="o.key">
                   <!--
                     每一笔**只报这张单本身**（用户 2026-10-06：「明细样式再改，只显示订单，
                     时间写全放右侧，重新布局」）：方向 / 动作 + **右侧写全的时间**
@@ -1995,12 +2122,15 @@ const RANGES = [
                          （「买卖标签放在时间后」「行为放在最右侧」「实现盈利放在行为左侧」）
                       ② 「价格数量放在时间下」**换行**从左边起 …… 最右是价值
                     ⚠️ 别再调了。
+                    ⚠️ 2026-10-10：同一秒同向的几笔小成交并成一行（`cycleOrderGroups`），
+                       这时「价格」改叫「均价」，并在买卖后面标「N 笔」。
                   -->
                   <div class="ord-1">
                     <span class="dim tiny ord-time">{{ bjTimeSec(o.time) }}</span>
                     <span class="side" :class="o.side === 'buy' ? 'buy' : 'sell'">
                       {{ o.side === 'buy' ? '买' : '卖' }}
                     </span>
+                    <span v-if="o.count > 1" class="ord-merge">{{ o.count }} 笔</span>
                     <span class="spacer" />
                     <span
                       v-if="o.realized !== 0"
@@ -2009,7 +2139,7 @@ const RANGES = [
                     >
                       {{ signedMoney(o.realized) }}
                     </span>
-                    <span class="ord-act">{{ orderAction(openCycle, o, i) }}</span>
+                    <span class="ord-act">{{ orderAction(openCycle, o) }}</span>
                   </div>
                   <!--
                     第二行：价 / 量（各自带名字，不用乘号）＋ 右边**这一笔的仓位价值**
@@ -2017,12 +2147,15 @@ const RANGES = [
                     价值就跟在它下面，一竖列看下来是齐的）；最后是这一笔的实现盈亏。
                   -->
                   <div class="ord-2 dim tiny">
-                    <span>价格 <b class="num ord-px">{{ fmt(o.price) }}</b></span>
+                    <span>
+                      {{ o.count > 1 ? '均价' : '价格' }}
+                      <b class="num ord-px">{{ fmt(o.price) }}</b>
+                    </span>
                     <span>数量 <b class="num">{{ qty(o.amount) }}</b></span>
                     <span class="spacer" />
                     <!-- 价值永远在最后 ⇒ 它的右边缘 = 上一行「行为」那条竖线，每笔都齐 -->
                     <span class="ord-val">
-                      价值 <b class="num">{{ fmt(o.price * o.amount, 2) }} USDT</b>
+                      价值 <b class="num">{{ fmt(o.cost, 2) }} USDT</b>
                     </span>
                   </div>
                 </li>
@@ -2063,9 +2196,11 @@ const RANGES = [
                  （见 `.t-cols`）
             ⚠️ 改前第一行右边只有「价」、第二行左边挤三样、最右边再挂账号标签和
                时间 —— 一屏几十条里有三个对齐点，扫起来眼睛要来回跳。
+            ⚠️ 2026-10-10：币安一张单常拆成好几个小成交（同一秒）⇒ 同一秒同向的几笔
+               并成一行（`visibleTradeGroups`），这时「价格」改叫「均价」、另标「N 笔」。
           -->
-          <ul v-if="visibleTrades.length" class="rows trades">
-            <li v-for="t in visibleTrades" :key="`${t.keyName ?? ''}-${t.id}`">
+          <ul v-if="visibleTradeGroups.length" class="rows trades">
+            <li v-for="t in visibleTradeGroups" :key="t.key">
               <div class="t-line">
                 <span class="side" :class="t.side === 'buy' ? 'buy' : 'sell'">
                   {{ sideText(t.side) }}
@@ -2078,6 +2213,7 @@ const RANGES = [
                   跟币种隔着大半行，扫的时候连不起来是哪套 key 的成交。
                 -->
                 <span v-if="t.keyName" class="ktag">{{ t.keyName }}</span>
+                <span v-if="t.count > 1" class="t-merge">{{ t.count }} 笔</span>
                 <span class="spacer" />
                 <!--
                   右边这个数**自己报名字**，
@@ -2093,7 +2229,7 @@ const RANGES = [
               </div>
               <div class="t-cols dim">
                 <span class="t-pair">
-                  <em>价格</em>
+                  <em>{{ t.count > 1 ? '均价' : '价格' }}</em>
                   <span class="num">{{ fmt(t.price) }}</span>
                 </span>
                 <span class="t-pair">
@@ -2964,6 +3100,15 @@ const RANGES = [
   font-size: 11px;
   color: var(--muted);
 }
+/* 「N 笔」：同一秒同向的几笔小成交并成一行（用户 2026-10-10） */
+.cyc-orders .ord-merge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--border, #26282e);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
 .cyc-orders .ord-px {
   color: var(--text, #e8e8e8);
   font-weight: var(--fw-mid, 500);
@@ -3558,6 +3703,15 @@ const RANGES = [
   row-gap: 2px;
   margin-top: 5px;
   font-size: 11.5px;
+}
+/* 「N 笔」：同一秒同向的几笔小成交并成一行（用户 2026-10-10，跟明细那个同一套） */
+.t-merge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--border, #26282e);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--muted);
 }
 .t-pair {
   display: flex;

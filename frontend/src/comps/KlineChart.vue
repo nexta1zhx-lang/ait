@@ -8,6 +8,7 @@ import {
   placeStopOrder,
   type Candle,
   type LevelSR,
+  type TradeFill,
   type TradeOpenOrder,
   type TradePositionRow
 } from '../api'
@@ -1054,6 +1055,9 @@ function orderLineList(): OrderLine[] {
  */
 function barTimeOf(ms: number): number | null {
   if (!candles.length) return null
+  /* ⚠️ 时间戳坏掉（`NaN` / 缺失）时不能往下走：`NaN` 参与比较恒为假，
+     二分最后会退化成第一根 K 线 —— 全部成交点堆在开头，就是「位置不对」。 */
+  if (!Number.isFinite(ms) || ms <= 0) return null
   const sec = Math.floor(ms / 1000)
   const first = Math.floor(candles[0]!.timestamp / 1000)
   if (sec < first) return null
@@ -1067,6 +1071,20 @@ function barTimeOf(ms: number): number | null {
   return Math.floor(candles[lo]!.timestamp / 1000)
 }
 
+/**
+ * 成交时刻（毫秒）。
+ *
+ * ⚠️ **不能只信 `time`**（2026-10-10 踩到）：老后端（`/api/exchange/trade/history`
+ *    改回 `time` 之前）只回 `datetime` 字符串，那时 `t.time` 恒为 `undefined` ——
+ *    成交点会全堆到第一根 K 线（用户报的「位置不对」），加了防御之后又会**一个都不画**
+ *    （用户报的「图上看不到标记」）。所以两种字段都认：优先 `time`，否则解析 `datetime`。
+ */
+function fillTimeMs(t: TradeFill): number {
+  if (Number.isFinite(t.time) && t.time > 0) return t.time
+  const parsed = t.datetime ? Date.parse(t.datetime) : NaN
+  return Number.isFinite(parsed) ? parsed : NaN
+}
+
 /** 成交点（买 = 往上箭头、卖 = 往下箭头），位置按这笔价跟那根 K 线的高低摆 */
 function renderOrderMarkers(): void {
   if (!refs) return
@@ -1075,17 +1093,19 @@ function renderOrderMarkers(): void {
     overlaySymbol.value === baseToExSymbol(props.symbol) &&
     candles.length > 0
   const list = on ? overlayFills.value : []
-  const markers: any[] = []
+  const markersByBar = new Map<string, any>()
   for (const t of list) {
-    const time = barTimeOf(t.time)
+    const time = barTimeOf(fillTimeMs(t))
     if (time === null) continue
     const buy = t.side === 'buy'
+    const key = `${time}:${buy ? 'buy' : 'sell'}`
+    if (markersByBar.has(key)) continue
     /*
      * ⚠️ 成交点用**比蜡烛更亮**的一对绿 / 红（蜡烛是 #5eba89 / #e35561）：
      *    这一点是「我在这儿成交过」的事件标记，压在蜡烛的红绿里就找不着了。
      *    配置里那个小圆点（`.oset-dot[data-kind='his']`）用的是同一对颜色。
      */
-    markers.push({
+    markersByBar.set(key, {
       time,
       position: buy ? 'belowBar' : 'aboveBar',
       color: buy ? MARKER_BUY : MARKER_SELL,
@@ -1093,6 +1113,7 @@ function renderOrderMarkers(): void {
       text: ''
     })
   }
+  const markers = [...markersByBar.values()]
   /* ⚠️ LWC 要求按时间升序（后端已经排过，这里再兜一次，别信上游） */
   markers.sort((a, b) => a.time - b.time)
   if (!orderMarkers) {

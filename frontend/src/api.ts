@@ -1603,6 +1603,13 @@ export interface TradeFill {
   fee: number
   /** 成交时间（毫秒） */
   time: number
+  /**
+   * 成交时间（ISO 字符串）—— **老后端的兼容字段**。
+   * 2026-10-10 之前这个接口只回 `datetime`，前端却按 `time` 取 ⇒ 图上成交点
+   * 全部落到第一根 K 线（时间取不到）。后端已改成回 `time`，这里留着兜底：
+   * 万一后端还没重启（新前端配老后端），`time` 缺失时就用它解析。
+   */
+  datetime?: string | null
 }
 
 /**

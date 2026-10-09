@@ -4330,11 +4330,9 @@ async function route(
         side: r.side,
         price: r.price,
         amount: r.amount,
-        cost: r.cost,
         fee: r.fee,
-        feeCurrency: r.feeCurrency,
-        realized: r.realized,
-        datetime: r.datetime
+        realizedPnl: r.realized,
+        time: r.datetime ? Date.parse(r.datetime) : 0
       }))
       return sendJson(res, 200, {ok: true, trades, error: null})
     } catch (e) {
