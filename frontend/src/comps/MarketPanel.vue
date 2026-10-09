@@ -175,9 +175,25 @@ let stopped = false
 /** 正在补「基准价」那一列（换基准的轻量路，见 `loadBase`） */
 const loadingBase = ref(false)
 
+/**
+ * 上一次整表拉成功的时刻 + 新鲜度窗口（2026-10-09）。
+ *
+ * 用户的主场景是「行情 tab 和开单分析 tab 来回跳」，每次切回来 `sync()` 都会要求
+ * 补一次整表 —— 实测他那一分钟 `/api/markets` 被拉了 8 次。而整表**本身有实时兜底**：
+ * `tickerStream` 的增量一直在 patch（`applyBatch`），20 秒内那份足够新。
+ */
+let lastSnapshotAt = 0
+const SNAPSHOT_FRESH_MS = 20_000
+
+/**
+ * 上一次置顶拉成功的时刻 + 新鲜度窗口（2026-10-09，跟上面同一个道理）。
+ * 置顶只有用户自己点星才变 —— 那时走 `onTogglePin` 的响应更新，不经过这里。
+ */
+let lastPinsAt = 0
+const PINS_FRESH_MS = 20_000
+
 /** 拉一次全表（初载 / 兜底 / 重同步都用它） */
-async function loadSnapshot(): Promise<void> {
-  if (loading.value) return
+async function loadSnapshot(): Promise<void> {  if (loading.value) return
   loading.value = true
   /*
    * `since`（基准时刻）在这里取：换了基准等于换了一份底稿（后端要跟着补 `baseClose`），
@@ -187,6 +203,7 @@ async function loadSnapshot(): Promise<void> {
   try {
     const d = await fetchMarkets(undefined, since)
     if (stopped) return
+    lastSnapshotAt = Date.now()
     // 以整表为准：新上的币会进来，下架的自然没了
     byPair.clear()
     for (const r of d.rows) byPair.set(r.pair.toUpperCase(), r)
@@ -315,11 +332,20 @@ function sync(): void {
    * 放进去的话那一格永远拿不到置顶（列表倒是正常，因为下面 `!byPair.size` 会补一次
    * 快照，于是现象特别迷惑：币都看得到、就是星全是灰的）。
    * 一发 GET 很小，跟「要不要收实时推送」是两回事。
+   *
+   * ★ 2026-10-09：**加了新鲜度窗口**。用户的主场景是「行情 tab 和开单分析 tab 来回跳」，
+   *   而 `sync()` 每次都会被叫到（`active` 翻转 + 前后台翻转）—— 原来这里**无条件**
+   *   发一次 `/api/pins` + 一次 `/api/markets`，来回切 10 次就是 20 发。
+   *   实测用户那一分钟 195 个请求里，`/api/pins` 13 次、`/api/markets` 8 次。
+   *
+   *   为什么可以跳过：这两份数据都有**实时兜底** —— 行情表由 `tickerStream` 的增量
+   *   一直在 patch（见 `applyBatch`），置顶只有用户自己点星时才变（那时
+   *   `onTogglePin` 直接拿响应更新，不走这里）。所以 20 秒内的那份足够新。
    */
-  void loadPins()
+  if (Date.now() - lastPinsAt > PINS_FRESH_MS) void loadPins()
   if (shouldRun()) {
     // 回来先补一次全表：中间漏掉的增量不追了，直接拿最新的
-    void loadSnapshot()
+    if (Date.now() - lastSnapshotAt > SNAPSHOT_FRESH_MS) void loadSnapshot()
     start()
     return
   }
@@ -401,6 +427,7 @@ const isPinned = (base: string): boolean => pinSet.value.has(base)
 async function loadPins(): Promise<void> {
   try {
     const r = await fetchPins()
+    lastPinsAt = Date.now()
     pins.value = r.pins
     pinMax.value = r.max
   } catch {

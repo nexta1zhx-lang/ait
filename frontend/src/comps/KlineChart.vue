@@ -1857,6 +1857,15 @@ function overlayWanted(): boolean {
   return !!props.active && overlayEnabled() && isForeground()
 }
 
+/**
+ * 上一次 `pullOverlay()` 取数的键（`symbol|keyId`）与时刻（2026-10-09）。
+ * 见 `pullOverlay` 里的说明：只用来挡住「切页回来」，不挡 SSE 的即时补读。
+ */
+let lastPullKey = ''
+let lastPullAt = 0
+/** 叠加层的「够新」窗口：来回切页 15 秒内不重拉 */
+const OVERLAY_FRESH_MS = 15_000
+
 async function pullOverlay(): Promise<void> {
   if (!overlayWanted()) {
     /* 这一页不要订单信息了 → 持仓订阅也跟着放掉（一个请求都不发） */
@@ -1868,6 +1877,19 @@ async function pullOverlay(): Promise<void> {
    *   换了「下单账户」会自动重绑（`bindOverlayPositions` 里判 keyId）。
    */
   bindOverlayPositions(tradeKey.value?.id)
+  /*
+   * ★ 2026-10-09：**切页回来不再重拉**（用户的主场景就是「行情 tab 和开单分析 tab 来回跳」，
+   *   实测他那一分钟挂单/成交/持仓被各拉了 5~6 遍）。
+   *
+   * ⚠️ 窗口**只加在这里**（激活这条路），**不能加进 `refreshTradeOverlay` 里** ——
+   *    下面那条 SSE 事件驱动的补读（`orders` / `fill` → `overlayBump`）是**必须立刻发**的，
+   *    加了窗口就会出现「刚挂的单子要等窗口过期才画上线」（用户 2026-10-07 刚报过慢 15 秒的那个问题）。
+   *    换币也不会被它挡住：键里带了 symbol，换币即换键。
+   */
+  const key = `${props.symbol}|${tradeKey.value?.id ?? ''}`
+  if (key === lastPullKey && Date.now() - lastPullAt < OVERLAY_FRESH_MS) return
+  lastPullKey = key
+  lastPullAt = Date.now()
   await refreshTradeOverlay(props.symbol, tradeKey.value?.id)
 }
 
