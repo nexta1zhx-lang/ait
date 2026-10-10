@@ -1739,14 +1739,54 @@ button.danger {
 }
 
 .mkt-search {
-  flex: 1 1 90px;
+  flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
   padding: 5px 9px;
   font-size: 12px;
   border-radius: var(--r-sm);
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--text);
+}
+
+/*
+ * 搜索框 + 清空那颗叉（用户 2026-10-10：「合约行情搜索框加个叉快速清掉」）。
+ * `flex: 1 1 90px` 从 `.mkt-search` 挪到这一层 —— 宽度让外层去争，
+ * 里面那颗叉才能用 `position: absolute` 钉在输入框右端。
+ */
+.mkt-find {
+  position: relative;
+  display: flex;
+  flex: 1 1 90px;
+  min-width: 0;
+}
+
+/* 有字时才出现（`v-if`），所以右内边距常备 —— 免得打字时文字被叉压住 */
+.mkt-find .mkt-search {
+  padding-right: 24px;
+}
+
+.mkt-find .mkt-clear {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mkt-find .mkt-clear:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
 }
 
 /*
@@ -4254,6 +4294,68 @@ body.fixed-viewport .split {
 
 .tk-head .tk-fav.on svg {
   fill: currentColor;
+}
+
+/*
+ * 黑名单那颗小锁（挨着收藏那颗星，用户 2026-10-10）：
+ * 点一下 → 确认框 → 这个币 24 小时不能开单。锁着的时候**染成警示色**。
+ */
+.tk-head .tk-ban {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.tk-head .tk-ban svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+}
+
+/*
+ * ⚠️ 锁着时这颗是 `disabled`（不让重复点、也没法解锁），但**不能灰掉** ——
+ *    它表示「锁生效中」，灰掉会被读成「这功能不可用」。所以把 disabled 的透明度顶回来。
+ */
+.tk-head .tk-ban.on,
+.tk-head .tk-ban.on:disabled {
+  color: var(--bad);
+  opacity: 1;
+}
+
+/*
+ * 右上角那枚**黑名单倒计时**（用户 2026-10-10：「右侧显示倒计时」）——
+ * 摆在价格那一行的右端，跟 MM 徽章同一排。
+ */
+.tk-head .tk-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+  color: color-mix(in srgb, var(--bad) 88%, var(--text));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tk-head .tk-lock svg {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+}
+
+.tk-head .tk-lock b {
+  font-weight: var(--fw-mid, 500);
 }
 
 /*

@@ -129,6 +129,18 @@ CREATE TABLE IF NOT EXISTS user_pins (
 );
 CREATE INDEX IF NOT EXISTS user_pins_user_idx ON user_pins (user_id, sort);
 
+--- 黑名单（用户 2026-10-10）：把某个币**锁住不让开单**，到 until 为止。
+--- 用户自己给自己上锁（防手痒、报复性开单），所以**不提供提前解锁** —— 只按时间过期。
+--- 只存 base（BTC，不带 /USDT），跟 user_pins 一个口径。
+CREATE TABLE IF NOT EXISTS user_blacklist (
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  base       TEXT        NOT NULL,
+  until      TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, base)
+);
+CREATE INDEX IF NOT EXISTS user_blacklist_user_idx ON user_blacklist (user_id, until);
+
 -- 账户统计的每用户配置（2026-10-09，见 db/stats-settings.ts）。
 -- 用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」——
 -- 这两项以前只写浏览器 localStorage，换设备 / 换 App 就丢，现在按用户存库。

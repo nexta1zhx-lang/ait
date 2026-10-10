@@ -35,6 +35,13 @@ import {
   maxPinnedBases,
   toggleFavorite
 } from '../pins'
+import {
+  blacklistHours,
+  ensureBlacklist,
+  lockCurrentBase,
+  lockLeftMs
+} from '../blacklist'
+import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
 import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
@@ -75,7 +82,7 @@ import {
   refreshConfig,
   refreshingBalance
 } from '../store'
-import {stopTicker, watchTicker} from '../ticker'
+import {nowTick, stopTicker, watchTicker} from '../ticker'
 import {
   VERDICT_TEXT,
   bjShort,
@@ -94,6 +101,12 @@ onMounted(() =>
   void ensurePins().catch(e =>
     showToast(`读取收藏失败：${(e as Error).message}`, 'bad')
   )
+)
+/* 黑名单也拉一次（那颗小锁的禁用态 + 右侧倒计时都靠它；拉不到就交给后端拦下单） */
+onMounted(() =>
+  void ensureBlacklist().catch(() => {
+    /* 拉不到不打扰：这只是显示用，真下单后端还会拦一道 */
+  })
 )
 
 /*
@@ -362,6 +375,49 @@ async function toggleCurrentFavorite(): Promise<void> {
   }
 }
 
+/* ---------------- 黑名单（用户 2026-10-10） ---------------- */
+
+/** 当前这个币还在黑名单里锁着吗（跟着每秒跳的 `nowTick` 走，到点自己就变 false） */
+const currentSymbolLocked = computed(
+  () => lockLeftMs(symbol.value.trim().toUpperCase(), nowTick.value) > 0
+)
+const banBusy = ref(false)
+
+/**
+ * 「加入黑名单」——**必须二次确认**，而且把话说全。
+ *
+ * 这是给自己上锁：点下去 24 小时内开不了这个币的单，**而且没有提前解锁**。
+ * 所以确认框里三件事都要写清楚（锁多久 / 平仓不受影响 / 不能提前解除），
+ * 别让人以为跟收藏一样点错了再点一下就能回来。
+ */
+async function confirmBlacklist(): Promise<void> {
+  const base = symbol.value.trim().toUpperCase()
+  if (!base || banBusy.value || currentSymbolLocked.value) return
+  const ok = await askConfirm({
+    title: `把 ${base} 加入黑名单？`,
+    body: [
+      {t: `加入后 ${blacklistHours.value} 小时内不能开 ${base} 的单。`, tone: 'warn'},
+      {t: '减仓 / 平仓不受影响 —— 手里有仓随时能跑。', tone: 'num'},
+      {t: '⚠️ 这期间不能提前解除，到点自动失效。', tone: 'warn'}
+    ],
+    okText: '加入黑名单',
+    danger: true
+  })
+  if (!ok) return
+  banBusy.value = true
+  try {
+    const until = await lockCurrentBase(base)
+    showToast(
+      `已把 ${base} 关进黑名单：${bjTime(until)} 才能开单`,
+      'ok'
+    )
+  } catch (e) {
+    showToast((e as Error).message, 'bad')
+  } finally {
+    banBusy.value = false
+  }
+}
+
 /* ---------------- 手机端「＋ 添加案例」---------------- */
 /*
  * 窄屏不再有「添加案例」那一格（那套表单要在图上看过程、还要填备注，手机上来不及）：
@@ -408,6 +464,8 @@ onActivated(() => {
   void ensurePins().catch(e =>
     showToast(`读取收藏失败：${(e as Error).message}`, 'bad')
   )
+  /* 黑名单可能在别处（另一台设备 / 另一个标签页）刚锁过，切回来对一次 */
+  void ensureBlacklist().catch(() => {})
   if (firstActivate) {
     firstActivate = false
     return
@@ -1002,6 +1060,47 @@ const heatRows = computed(() => {
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path
                       d="M12 2.6l2.9 5.9 6.5.95-4.7 4.6 1.1 6.45L12 17.45 6.2 20.5l1.1-6.45-4.7-4.6 6.5-.95z"
+                    />
+                  </svg>
+                </button>
+                <!--
+                  黑名单（用户 2026-10-10）：挨着收藏那颗星。
+                  点一下 → 确认框 → 这个币 24 小时不能开单（**后端也拦**，不是只禁按钮）。
+                  ⚠️ 已经在黑名单里就**禁用**：解锁只能等时间到（没有「点一下出来」这回事，
+                     不然就成了「点错再点回来」，那这锁就没意义了）。
+                -->
+                <button
+                  type="button"
+                  class="ghost tiny tk-ban"
+                  :class="{on: currentSymbolLocked}"
+                  :disabled="banBusy || currentSymbolLocked || !symbol.trim()"
+                  :aria-label="
+                    currentSymbolLocked
+                      ? `${symbol.toUpperCase()} 在黑名单里`
+                      : `把 ${symbol.toUpperCase()} 加入黑名单`
+                  "
+                  :title="
+                    currentSymbolLocked
+                      ? `${symbol.toUpperCase()} 已在黑名单（倒计时见右侧），到点自动解除`
+                      : `加入黑名单：${blacklistHours} 小时内不能开这个币的单`
+                  "
+                  @click="confirmBlacklist"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle
+                      cx="12"
+                      cy="12"
+                      r="8.6"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    />
+                    <path
+                      d="M6.2 17.8L17.8 6.2"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
                     />
                   </svg>
                 </button>

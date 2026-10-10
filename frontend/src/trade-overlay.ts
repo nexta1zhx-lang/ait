@@ -396,3 +396,46 @@ export async function sweepOrphanOrders(keyId?: number): Promise<OrphanSweep> {
   markSweep()
   return cleanOrphans(undefined, keyId)
 }
+
+/**
+ * **刚才平了仓** ⇒ 立刻清这个币的残留平仓单（用户 2026-10-10）。
+ *
+ * 用户：「使用测试账户小单 20 美元测试，现在挂单的在 k 线，我平仓后没有及时撤单，线还在」——
+ * 币安不会因为仓位归零就自动撤掉那几张「平仓保护」单（止损 / 止盈 / 全平型条件单），
+ * 它们还挂在账户里，图上那几条线就是照着它们画的（**图没画错，是单真还在**）。
+ *
+ * 以前只有两条路会清，都太慢：
+ *   · `refreshTradeOverlay` 里那次「顺手清」—— 要等下一次取数轮上；
+ *   · 每 5 分钟一轮的账户级盘点。
+ * 平完仓这一下是**最该立刻清**的时刻，所以从下单面板直接叫一声。
+ *
+ * ⚠️ 只传 `symbol`（带交易对查挂单是 1 权重）；整账户那一路是 80 权重，
+ *    只有「一键平仓」才配用（见 `sweepOrphansForAccount`）。
+ */
+export async function sweepOrphansAfterClose(
+  base: string,
+  keyId?: number
+): Promise<number> {
+  const symbol = baseToExSymbol(base)
+  const r = await cleanOrphans(symbol, keyId)
+  /* 撤掉了 ⇒ 立刻重画一次（不然那几条线要等下一个触发点才消失） */
+  if (r.cancelled > 0 && overlayEnabled()) await refreshTradeOverlay(base, keyId)
+  return r.cancelled
+}
+
+/**
+ * 「一键平仓」之后盘一遍**整个账户**的残留平仓单。
+ *
+ * ⚠️ 跟定时那轮不一样：这里**无视 5 分钟节流**（`force`）—— 刚把仓位全平掉是
+ *    用户明确要的动作，那一发 80 权重该花；定时那轮绕过节流才是问题（见 `sweepDue`）。
+ */
+export async function sweepOrphansForAccount(
+  keyId?: number,
+  force = false
+): Promise<OrphanSweep> {
+  if (!force && !sweepDue()) {
+    return {cancelled: 0, symbols: [], error: null, skipped: true}
+  }
+  markSweep()
+  return cleanOrphans(undefined, keyId)
+}

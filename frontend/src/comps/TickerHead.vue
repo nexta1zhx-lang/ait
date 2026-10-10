@@ -9,7 +9,8 @@
  * 数据来自「../ticker」（15 秒刷一次），拿不到就显示「—」，不挡页面。
  */
 import {computed, onBeforeUnmount, ref, watch} from 'vue'
-import {fixed, fmt, price} from '../format'
+import {bjTime, fixed, fmt, price} from '../format'
+import {lockLeftMs, lockText, lockUntilOf} from '../blacklist'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
 import {priceDigitsOf} from '../store'
 
@@ -120,8 +121,7 @@ const rangeTitle = computed(() => {
   return `24h 低 ${pxText(d?.low24h)} · 高 ${pxText(d?.high24h)}`
 })
 
-/** 成交额：中文量级，别糊一长串数字 */
-function big(v: number | null | undefined): string {
+/** 成交额：中文量级，别糊一长串数字 */function big(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return '—'
   const n = Number(v)
   if (Math.abs(n) >= 1e8) return `${(n / 1e8).toFixed(2)}亿`
@@ -167,6 +167,24 @@ const rows = computed(() => {
   const d = ticker.value
   return [{k: '24h成交额', v: big(d?.quoteVolume24h)}]
 })
+
+/**
+ * **黑名单倒计时**（用户 2026-10-10）：「加入黑名单后 24 小时不得开单，**右侧显示倒计时**」。
+ *
+ * 就摆在价格那一行的右端（MM 徽章那一排）—— 在 K 线上看盘时一眼能看到还剩多久。
+ *
+ * ⚠️ 跟着 `nowTick`（每秒跳）走：在这里直接读 `Date.now()` 的话模板不会重算，
+ *    那串数字会定住不动。
+ */
+const lockLeft = computed(() => lockLeftMs(props.symbol, nowTick.value))
+const lockLabel = computed(() => lockText(lockLeft.value))
+const lockTitle = computed(() => {
+  const until = lockUntilOf(props.symbol)
+  return (
+    `${props.symbol.toUpperCase()} 在黑名单里：还有 ${lockLabel.value} 才能开单` +
+    (until > 0 ? `（约 ${bjTime(until)} 解锁）` : '')
+  )
+})
 </script>
 
 <template>
@@ -199,17 +217,54 @@ const rows = computed(() => {
           <b>{{ changePct }}</b>
         </span>
         <!--
+          **黑名单倒计时**（用户 2026-10-10）：「加入黑名单后 24 小时不得开单，右侧显示倒计时」。
+          跟 MM 徽章同一排（价格那一行的右端）—— 看盘时一眼看到还剩多久。
+          ⚠️ 秒表跟着 `nowTick` 走（见上面 `lockLeft`），别改成自己读 `Date.now()`。
+        -->
+        <span v-if="lockLeft > 0" class="tk-lock" :title="lockTitle">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M7.5 10V7.2a4.5 4.5 0 0 1 9 0V10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+            <rect
+              x="4.5"
+              y="10"
+              width="15"
+              height="10.5"
+              rx="2.2"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            />
+          </svg>
+          <b class="num">{{ lockLabel }}</b>
+        </span>
+        <!--
           价格这一行的**最右边**（谁给内容由外层插槽决定，这个组件本身不认得具体徽章）——
           2026-10-07 用户：「mm放在 下面最右侧和价格那一排」：MM 保证金率就摆这儿。
           ⚠️ 位置是 `.tk-price` 的右端（`margin-left: auto`），不是币种那一行。
         -->
         <slot name="price-end" />
       </div>
-      <div v-if="rangePos !== null" class="tk-range" :title="rangeTitle">
+      <!--
+        ⚠️ 这一条**永远占着位置**（用户 2026-10-10：「k 线的 24 小时柱状条要给个占位」）：
+           行情还没到 / 高低相等时只留**空的那条轨道** —— 一条横杠，不填满、不放现价点、
+           也不写「—」。以前是整块不渲染 ⇒ 顶部这块高度跳一下（价格那几行跟着窜）。
+      -->
+      <div
+        class="tk-range"
+        :title="rangePos === null ? '24h 高低还没取到' : rangeTitle"
+      >
         <span class="tk-range-label">24h</span>
         <span class="tk-range-track">
-          <i class="tk-range-fill" :style="{width: rangePos + '%'}" />
-          <em class="tk-range-dot" :style="{left: rangePos + '%'}" />
+          <template v-if="rangePos !== null">
+            <i class="tk-range-fill" :style="{width: rangePos + '%'}" />
+            <em class="tk-range-dot" :style="{left: rangePos + '%'}" />
+          </template>
         </span>
       </div>
     </div>

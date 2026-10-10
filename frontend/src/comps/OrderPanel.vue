@@ -64,9 +64,11 @@ import {isForeground, onForegroundChange} from '../live'
 import {testOrder} from '../settings'
 import {contracts} from '../store'
 import {askConfirm} from '../confirm'
-import {freshLivePrice, ticker} from '../ticker'
+import {freshLivePrice, nowTick, ticker} from '../ticker'
 import {showToast} from '../toast'
 import {loadTradeKeys, tradeKey} from '../trade-account'
+import {sweepOrphansAfterClose, sweepOrphansForAccount} from '../trade-overlay'
+import {lockLeftMs, lockText} from '../blacklist'
 import {useSwipeTabs} from '../swipe-tabs'
 import ReduceSheet from './ReduceSheet.vue'
 
@@ -100,6 +102,23 @@ const info = ref<TradeInfoResult | null>(null)
 const loading = ref(false)
 const busy = ref(false)
 const levBusy = ref(false)
+
+/* ---------------- 黑名单（用户 2026-10-10） ---------------- */
+
+/**
+ * 这个币还锁多久（毫秒）；`0` = 没锁。
+ *
+ * ⚠️ 跟着 `nowTick`（每秒跳）走 —— 直接读 `Date.now()` 的话模板不会重算。
+ * ⚠️ 这里只管**按钮禁不禁用**；真正拦下单的是后端那道闸。
+ */
+const banLeft = computed(() => lockLeftMs(props.symbol, nowTick.value))
+/** 锁着 ⇒ 做多 / 做空 两颗按钮都禁用 */
+const locked = computed(() => banLeft.value > 0)
+
+/** 提交那一刻现算一次（比模板里那个每秒刷的值更贴当下） */
+function lockedNow(): boolean {
+  return lockLeftMs(props.symbol, Date.now()) > 0
+}
 /**
  * 面板上这个杠杆值，**跟交易所确认过**了吗。
  *
@@ -513,6 +532,15 @@ async function ensureLeverage(): Promise<boolean> {
  */
 async function submit(dir: 'long' | 'short'): Promise<void> {
   if (busy.value || levBusy.value) return
+  /*
+   * 黑名单：这个币锁着就**不让开单**（用户 2026-10-10）。
+   * 按钮那边已经禁用了，这里再挡一次 —— 键盘 / 手势有可能绕过 disabled 的视觉判断。
+   * （真下单时后端还会拦一道，见 `/api/exchange/trade/order`。）
+   */
+  if (lockedNow()) {
+    say(`${props.symbol.toUpperCase()} 在黑名单里，还要 ${lockText(banLeft.value)} 才能开单`)
+    return
+  }
   side.value = dir
   /* 报错统一走提示：先把「为什么下不了」弹出来，不占内容区 */
   if (blocker.value) {
@@ -757,6 +785,12 @@ async function confirmReduce(pct: number): Promise<void> {
         'ok'
       )
       void loadPositions()
+      /*
+       * 平掉一部分也可能把仓位清成 0（弹层里选 100%）—— 那几张「平仓保护」单
+       * （止损 / 止盈 / 全平型条件单）不会自己消失，图上的线还在。
+       * 这里立刻清一次（后端只撤**真的没仓位**的那几张，没清空就什么都不动）。
+       */
+      if (!r.test) void sweepOrphansAfterClose(baseOf(p.symbol), keyId.value)
     } else {
       buzz([20, 60, 20])
       say(r.error || '全平失败')
@@ -834,6 +868,12 @@ async function closeOne(p: TradePositionRow): Promise<void> {
         'ok'
       )
       void loadPositions()
+      /*
+       * 全平之后**立刻**清这个币的残留平仓单（用户 2026-10-10：「平仓后没有及时撤单，
+       * 线还在」）—— 币安不会因为仓位归零就自动撤那几张止损 / 止盈单，
+       * 而图上的线是照它们画的（图没错，是单真还在）。
+       */
+      if (!r.test) void sweepOrphansAfterClose(baseOf(p.symbol), keyId.value)
     } else {
       buzz([20, 60, 20])
       say(r.error || '平仓失败')
@@ -884,6 +924,11 @@ async function closeAll(): Promise<void> {
         'ok'
       )
       void loadPositions()
+      /*
+       * 一键平仓 = 整个账户全平 ⇒ 盘一遍账户的残留平仓单（`force`：无视 5 分钟节流，
+       * 刚全平这一下该花那 80 权重）。不然那几条线要等下一个触发点才消失。
+       */
+      if (!r.test) void sweepOrphansForAccount(keyId.value, true)
     } else {
       buzz([20, 60, 20])
       say(r.error || '一键平仓失败')
@@ -1261,8 +1306,12 @@ onMounted(async () => {
         <button
           type="button"
           class="ord-submit long"
-          :disabled="busy || levBusy"
-          title="做多（买入开仓）"
+          :disabled="busy || levBusy || locked"
+          :title="
+            locked
+              ? `${symbol.toUpperCase()} 在黑名单里：还有 ${lockText(banLeft)} 才能开单`
+              : '做多（买入开仓）'
+          "
           @click="submit('long')"
         >
           {{ busySide === 'long' ? '提交中…' : '做多' }}
@@ -1270,8 +1319,12 @@ onMounted(async () => {
         <button
           type="button"
           class="ord-submit short"
-          :disabled="busy || levBusy"
-          title="做空（卖出开仓）"
+          :disabled="busy || levBusy || locked"
+          :title="
+            locked
+              ? `${symbol.toUpperCase()} 在黑名单里：还有 ${lockText(banLeft)} 才能开单`
+              : '做空（卖出开仓）'
+          "
           @click="submit('short')"
         >
           {{ busySide === 'short' ? '提交中…' : '做空' }}

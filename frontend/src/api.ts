@@ -199,6 +199,29 @@ export const togglePin = (base: string) =>
     base
   })
 
+/* ---------------- 黑名单（每用户，2026-10-10） ---------------- */
+
+/**
+ * 锁着的币 + 各自解锁时刻（用户 2026-10-10：「加入黑名单后 24 小时不得开单」）。
+ *
+ * ⚠️ 只有**读**和**锁**，没有「解锁」：这是给自己上锁用的，到期自动失效
+ *    （留个解锁按钮就等于没锁）。`hours` 是后端定的时长（24）。
+ */
+export const fetchBlacklist = () =>
+  get<{entries: {base: string; until: string}[]; hours: number}>('/api/blacklist')
+
+/** 把一个币关进去；回来的是**锁完之后的完整列表**（跟前端那份对齐） */
+export const lockBase = (base: string) =>
+  post<{
+    entries: {base: string; until: string}[]
+    hours: number
+    /** 本来就在锁里（没续期） */
+    already: boolean
+    /** 这一条的解锁时刻 */
+    until: string
+    error: string | null
+  }>('/api/blacklist', {base})
+
 /* ---------------- 通用 ---------------- */
 
 /**

@@ -721,11 +721,30 @@ const arrowOf = (v: number | null): string =>
   <div class="mkt">
     <!-- 搜索：榜单按钮（成交额 / 涨幅 / 跌幅）已按用户要求删掉，排序全在表头上 -->
     <div class="mkt-bar">
-      <input
-        v-model="keyword"
-        class="mkt-search"
-        placeholder="搜币种，如 BTC"
-      />
+      <!--
+        搜索框带一颗**清空的叉**（用户 2026-10-10：「合约行情搜索框加个叉快速清掉」）——
+        只在有字时出现；点一下回到全量列表（`keyword` 就是过滤词本身，清它即可）。
+        ⚠️ 外面这层 `.mkt-find` 是为了**把叉钉在输入框里**（`position: relative` 的锚点）。
+      -->
+      <span class="mkt-find">
+        <input
+          v-model="keyword"
+          class="mkt-search"
+          placeholder="搜币种，如 BTC"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button
+          v-if="keyword"
+          type="button"
+          class="mkt-clear"
+          title="清空搜索"
+          aria-label="清空搜索"
+          @click="keyword = ''"
+        >
+          ✕
+        </button>
+      </span>
     </div>
 
     <!--

@@ -35,6 +35,7 @@ import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
 import {isForeground} from '../live'
 import {setAvailableBalance} from '../positions'
+import {sweepOrphansAfterClose, sweepOrphansForAccount} from '../trade-overlay'
 import {bjTime} from '../format'
 import LedgerRangeSheet from './LedgerRangeSheet.vue'
 import {bjDayStart, rangeToInterval, TYPE_NAME, type RangeKey} from '../ledger'
@@ -770,6 +771,12 @@ async function confirmReduce(pct: number): Promise<void> {
           : `已平仓 ${baseOf(r.symbol)} ${pct}%`
       )
       void doRefresh()
+      /*
+       * 平仓之后**立刻**清这个币的残留平仓单（用户 2026-10-10：「平仓后没有及时撤单，
+       * 线还在」）—— 币安不会因为仓位归零就撤掉那几张止损 / 止盈单。
+       * 后端只撤**真的没仓位**的那几张，所以「只平了一部分」时什么都不动。
+       */
+      if (!res.test) void sweepOrphansAfterClose(baseOf(r.symbol), resolveKeyId(r.keyId, r.keyName))
     } else {
       sayMsg(res.error || '全平失败', 'bad')
     }
@@ -805,6 +812,8 @@ async function closeRow(p: PositionRef): Promise<void> {
     if (res.ok) {
       sayMsg(res.test ? `测试全平通过校验：${name}（没进撮合）` : `已全平 ${name}`)
       void doRefresh()
+      /* 全平这一条 ⇒ 立刻清它残留的平仓单（理由见 `confirmReduce` 那处注释） */
+      if (!res.test) void sweepOrphansAfterClose(name, resolveKeyId(p.keyId, p.keyName))
     } else {
       sayMsg(res.error || '平仓失败', 'bad')
     }
@@ -866,6 +875,8 @@ async function closeAllRows(rows: PositionRef[]): Promise<void> {
   posBusy.value = true
   let done = 0
   const failed: string[] = []
+  /** 真的平出东西的那几套账户 —— 平完挨个清一次残留平仓单（见下面） */
+  const closedIds = new Set<number>()
   try {
     for (const id of ids) {
       /*
@@ -875,8 +886,10 @@ async function closeAllRows(rows: PositionRef[]): Promise<void> {
        */
       const res = await closeTradePositions(undefined, id, test)
       const n = res.orders?.length ?? 0
-      if (res.ok) done += n
-      else failed.push(`${nameOf(id)}（${res.error || '失败'}）`)
+      if (res.ok) {
+        done += n
+        if (n > 0) closedIds.add(id)
+      } else failed.push(`${nameOf(id)}（${res.error || '失败'}）`)
     }
     if (failed.length) sayMsg(`平掉 ${done} 条，失败：${failed.join('、')}`, 'bad')
     else
@@ -884,6 +897,12 @@ async function closeAllRows(rows: PositionRef[]): Promise<void> {
         test ? `测试平仓通过校验：${done} 条（没进撮合）` : `已全部平仓：${done} 条`
       )
     void doRefresh()
+    /*
+     * 全平之后清一次各账户的残留平仓单（用户 2026-10-10：「平仓后没有及时撤单，线还在」）。
+     * ⚠️ **逐套**清（`keyId` 不能省）：不传 id 只清默认那套，另外几套的单会漏在那儿。
+     *    `force`：刚全平这一下无视 5 分钟节流，该花这些权重。
+     */
+    for (const id of closedIds) void sweepOrphansForAccount(id, true)
   } catch (e) {
     sayMsg(msg(e), 'bad')
   } finally {

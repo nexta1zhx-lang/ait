@@ -87,6 +87,7 @@ import {
   verifyTotp
 } from './util/totp'
 import {MAX_PINS, listPins, togglePin} from './db/pins'
+import {BLACKLIST_HOURS, listBlacklist, lockBase, lockedUntil} from './db/blacklist'
 import {getStatsSettings, saveStatsSettings} from './db/stats-settings'
 import {
   MARKET_TYPES,
@@ -3249,6 +3250,36 @@ async function route(
     }
   }
 
+  /* ---- 黑名单（每用户，2026-10-10）---- */
+  /*
+   * 用户：「在 k 线界面收藏按钮旁加个图标，点击后弹窗确认，加入黑名单后 24 小时不得开单」。
+   *
+   * ⚠️ **没有「解锁」接口** —— 到期自己失效（`until > now()` 才算锁着）。
+   *    这是给自己上锁用的，留个按钮就等于没锁（要强行解开得直接改库，有摩擦就够了）。
+   */
+  if (p === '/api/blacklist' && method === 'GET') {
+    const entries = await listBlacklist(me.id)
+    return sendJson(res, 200, {entries, hours: BLACKLIST_HOURS})
+  }
+
+  /** 关进去 24 小时（前端那颗小锁按一下、确认框点「加入黑名单」之后才走到这儿） */
+  if (p === '/api/blacklist' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const r = await lockBase(me.id, str(body.base))
+      return sendJson(res, 200, {
+        entries: await listBlacklist(me.id),
+        hours: BLACKLIST_HOURS,
+        already: r.already,
+        until: r.entry.until,
+        error: null
+      })
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
   /* ---- 账户统计配置（每用户，2026-10-09）---- */
   /*
    * 用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」。
@@ -4166,6 +4197,27 @@ async function route(
        *    漏传 / 传了别的值一律当测试单。
        */
       const test = body.test !== false
+      /*
+       * 黑名单（用户 2026-10-10）：锁着的币**不让开单**。
+       *
+       * ⚠️ 只拦**开仓**（`!reduceOnly`）—— 减仓 / 平仓照常放行：手里有仓就必须跑得掉，
+       *    把出口一起锁上是会出事的。平仓走的是另一个接口，本来也不经过这里。
+       * ⚠️ 前端按钮也会禁用，但那只是样子：**这道闸在后端**，绕开界面直接打接口也拦。
+       */
+      if (!body.reduceOnly) {
+        const lock = await lockedUntil(me.id, str(body.symbol, 'BTCUSDT'))
+        if (lock) {
+          const leftMin = Math.max(1, Math.ceil((lock.getTime() - Date.now()) / 60000))
+          const hh = Math.floor(leftMin / 60)
+          const left = hh > 0 ? `${hh} 小时 ${leftMin % 60} 分` : `${leftMin} 分`
+          return sendJson(res, 200, {
+            ok: false,
+            error:
+              `${String(str(body.symbol, '')).toUpperCase()} 在黑名单里：` +
+              `还要 ${left} 才能开单（到点自动解除）`
+          })
+        }
+      }
       const order = await placeOrder(
         {
           exchange: key.exchange,

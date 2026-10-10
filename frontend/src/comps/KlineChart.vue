@@ -1943,7 +1943,21 @@ function scheduleOverlayPull(): void {
   ordersPullTimer = setTimeout(() => {
     ordersPullTimer = null
     lastOrdersPullAt = Date.now()
-    if (overlayWanted()) void pullOverlay()
+    if (!overlayWanted()) return
+    /*
+     * ⚠️ 这里**必须直连 `refreshTradeOverlay`**，不能再走 `pullOverlay()`：
+     *    `pullOverlay` 里那个 15 秒「切页新鲜度窗口」会把这条**事件驱动**的补读一起挡掉。
+     *    2026-10-10 用户报的「平仓后没有及时撤单、线还在」就是这么来的 ——
+     *    平仓的 SSE `fill` 明明到了，但 15 秒内刚拉过一次 ⇒ 这一发被窗口吞掉；
+     *    而「平仓后顺手清残留单」正是藏在 `refreshTradeOverlay` 里的，
+     *    于是图上那几条已无仓位的平仓线只能等窗口过期、或者 5 分钟那轮盘点。
+     *    `lastPullKey/lastPullAt` 照旧更新，免得紧接着的「切页回来」又白拉一次。
+     */
+    lastPullKey = `${props.symbol}|${tradeKey.value?.id ?? ''}`
+    lastPullAt = Date.now()
+    /* 顺手保证持仓订阅绑着（同一个 key 会直接返回，不会重复订） */
+    bindOverlayPositions(tradeKey.value?.id)
+    void refreshTradeOverlay(props.symbol, tradeKey.value?.id)
   }, wait)
 }
 
