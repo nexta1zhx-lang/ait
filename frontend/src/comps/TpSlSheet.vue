@@ -265,7 +265,7 @@ const qtyOf = (r: Row) => ((props.target?.amount ?? 0) * r.pct) / 100
     <div v-if="open" class="sheet-mask" @click="emit('close')" />
     <section
       v-if="open"
-      class="sheet sheet-confirm"
+      class="sheet sheet-confirm warm-skin"
       role="dialog"
       aria-label="止盈 / 止损"
     >

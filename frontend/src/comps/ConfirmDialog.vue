@@ -60,7 +60,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true))
 <template>
   <Teleport to="body">
     <!-- `@click.self`：只有点到遮罩本身才算取消，点卡片里面不算 -->
-    <div v-if="pendingConfirm" class="dlg-mask" @click.self="cancel">
+    <!--
+      `warm-skin`：跟着「账户统计 / 交易所账户 / 合约」那几页的暖色皮肤走
+      （用户 2026-10-10：「中间弹窗模块也要改」）。变量定义在 `style.css` 的 `.warm-skin`。
+      ⚠️ 这是**全站共用**的那一个确认框（`askConfirm`）⇒ 所有页面的确认框都会变暖。
+    -->
+    <div v-if="pendingConfirm" class="dlg-mask warm-skin" @click.self="cancel">
       <div
         class="dlg"
         :class="{danger: pendingConfirm.danger}"

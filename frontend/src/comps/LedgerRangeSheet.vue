@@ -114,7 +114,7 @@ function apply(): void {
     <div v-if="modelValue" class="sheet-mask" @click="emit('update:modelValue', false)" />
     <section
       v-if="modelValue"
-      class="sheet sheet-confirm range-sheet"
+      class="sheet sheet-confirm range-sheet warm-skin"
       role="dialog"
       aria-label="周期范围"
     >
@@ -296,7 +296,8 @@ function apply(): void {
 .rr-btn.main {
   background: var(--accent);
   border-color: var(--accent);
-  color: #0b0d12;
+  /* 主色是浅暖色，上面的字必须压深（用暖调的墨色，别用冷蓝黑） */
+  color: var(--accent-ink, #231603);
   font-weight: 600;
 }
 </style>

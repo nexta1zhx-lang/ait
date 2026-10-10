@@ -209,7 +209,7 @@ function offsetLabel(min: number): string {
 <template>
   <Teleport to="body">
     <div v-if="open" class="sheet-mask" @click="emit('close')" />
-    <section v-if="open" class="sheet cfg-sheet" role="dialog" aria-label="配置">
+    <section v-if="open" class="sheet cfg-sheet warm-skin" role="dialog" aria-label="配置">
       <header class="sheet-head">
         <b>配置</b>
         <button class="ghost tiny" title="关掉" @click="emit('close')">✕</button>

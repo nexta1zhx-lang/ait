@@ -751,7 +751,7 @@ const heatRows = computed(() => {
           不占资源：不在这一格时传 `active=false`，组件会把推送和轮询都停掉。
         -->
         <div v-show="leftTab === 'market'" class="scroll-body">
-          <section class="panel mkt-panel">
+          <section class="panel mkt-panel warm-skin">
             <!--
               标题右侧那个「共 N 个合约」是 MarketPanel `count` 事件报上来的 ——
               统计跟着**筛选后的名单**走（搜索 / 榜单变了它也跟着变）。

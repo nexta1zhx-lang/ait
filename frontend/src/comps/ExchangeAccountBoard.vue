@@ -3963,4 +3963,185 @@ const RANGES = [
     overscroll-behavior: auto;
   }
 }
+
+/* ==================== ★ 暖色皮肤：对齐「账户统计」（2026-10-10） ====================
+ *
+ * 用户：「交易所账户页面修改风格和账户统计风格一致有设计感」。
+ *
+ * ⚠️ 调色板**不在这一节里** —— 它挂在整格的根节点上
+ *    （`ExchangeAccountLivePanel.vue` 的 `.live`）：那一层管住板子 / 列表 / 空态 /
+ *    报错条，而页面外壳（底栏、一级 tab 那条 `PaneShell`）不受影响，因为它是全站共享的。
+ *    这一节只做**块级版式**，形状照抄 `AccountStatsView.vue`：
+ *      · `.capital-hero`   → ① 净资产卡（暖描边 + 右上角一圈琥珀微光）
+ *      · `.metric-card`    → ③ 合约·仓位那六格（原来是「1px 分隔线 + 六格文字」）
+ *      · `.stats-segments` → ④ 账户 tab / 二级 tab（胶囊分段器）
+ *      · `.sec-title`      → 段标题那一档字号
+ * ⚠️ 这一节**不许写 `color-mix()`**（Android System WebView 算不出来，见账户统计那页
+ *    2026-10-09 的坑）；要半透明就直接写 `rgba()`。
+ */
+
+/* 块间距跟着账户统计走（那边 `.account-stats` 是 14px，这里原来 10px） */
+.exb {
+  gap: 12px;
+}
+
+/* ---------------- ① 净资产：跟 hero 卡同一张脸 ---------------- */
+/*
+ * 特异性靠 scoped 多出来的那个属性选择器（`.hero[data-v-…]`）压过全局的 `.panel`，
+ * 所以只写属性、不用 `!important`。
+ */
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: 18px 18px 16px;
+  border: 1px solid rgb(98, 76, 48);
+  border-radius: var(--r-lg);
+  background:
+    radial-gradient(ellipse at 88% 2%, rgba(255, 193, 107, 0.1), transparent 42%),
+    linear-gradient(115deg, var(--panel), rgb(20, 17, 14));
+}
+/* 「净资产」当 overline 排（账户统计 `.capital-overline` 同款：小字 + 拉开字距） */
+.hero-k {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+.hero-v {
+  font-size: clamp(30px, 8vw, 38px);
+  font-weight: var(--fw-bold);
+  letter-spacing: -0.035em;
+}
+/* 卡里那几颗小按钮（划转 / USDT·CNY / 刷新）：暖色胶囊，跟账户统计的工具条一个调子 */
+.hero .ghost {
+  border-radius: 999px;
+  border-color: rgba(255, 193, 107, 0.22);
+  background: rgba(255, 193, 107, 0.07);
+  color: #ffd291;
+}
+/* 「配置」那颗图标按钮：跟账户统计工具条那几颗一样，做成带渐变的方形图标按钮 */
+.acct-bar .cfg {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border-color: var(--border);
+  background: linear-gradient(
+    145deg,
+    rgb(30, 24, 20),
+    var(--panel) 55%,
+    rgb(18, 19, 20)
+  );
+  color: var(--text);
+}
+
+/* ---------------- ③ 合约·仓位：六格改成六张小卡 ---------------- */
+/*
+ * 原来是「一条分隔线 + 六格文字」（像一张表）；账户统计那边是**一格一张小卡**
+ * （`.metric-card`：11px 圆角 + 暖描边 + 极淡的冷灰/暖棕渐变）。照它的做，
+ * 上排「账户的钱」+ 下排「仓位的事」就是 3×2 的小卡阵列。
+ * ⚠️ 分隔线要一起撤掉（`border-top` / `padding-top`）：有了卡片再画线就是双线。
+ */
+.grid3 {
+  gap: 8px 9px;
+  margin-top: 10px;
+  padding-top: 0;
+  border-top: 0;
+}
+/* 第二排跟第一排一样（原来它是「接着上一张表」的写法：间距 10px、无线） */
+.grid3 + .grid3 {
+  margin-top: 8px;
+}
+.grid3 > div {
+  justify-content: center;
+  min-height: 56px;
+  padding: 8px 10px;
+  border: 1px solid rgba(48, 39, 29, 0.72);
+  border-radius: 11px;
+  background:
+    radial-gradient(ellipse at 12% 0%, rgba(120, 136, 163, 0.09), transparent 62%),
+    linear-gradient(145deg, rgb(21, 22, 24), rgb(24, 19, 16));
+}
+.grid3 .k {
+  letter-spacing: 0.02em;
+}
+.grid3 b {
+  margin-top: 2px;
+  font-weight: var(--fw-mid);
+}
+
+/* ---------------- 段标题 ---------------- */
+/*
+ * 段标题跟账户统计同一个层级：**标题 13px / 600 保持亮色**，右边那截副标题压到 10px
+ * 并压暗（`.dim.tiny` 原来是 11.5px，跟标题只差 0.5px，两截糊成一行灰字）。
+ */
+.pn-h h2 {
+  font-size: 13px;
+  font-weight: 600;
+}
+.pn-h .tiny {
+  font-size: 10px;
+}
+
+/* ---------------- ④ 账户 tab / 二级 tab：胶囊分段器 ---------------- */
+/*
+ * 全局的 `.seg`（`SegTabs.vue`）是**矩形 + 按钮之间画分隔线**的老样子，全站还有别处
+ * 在用 ⇒ **只在这一页**换成账户统计那套胶囊（`.stats-segments`）：壳子是「暖描边 +
+ * 999px 圆角 + 一点冷→暖的底色渐变」，选中那一格是琥珀实心渐变的胶囊。
+ * ⚠️ 两种形状都要管：账户 tab 的 `.acct-tabs` **本身就是**那颗 `.seg`；
+ *    二级 tab 外面还套了一层横向可滚的 `.seg-scroll`，里面的 `.seg` 得把自己
+ *    画的那圈边框/底色撤掉。
+ */
+.acct-tabs,
+.seg-scroll {
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: linear-gradient(120deg, rgb(19, 19, 21), rgb(18, 15, 13));
+}
+.seg-scroll > .seg {
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+}
+/*
+ * ⚠️ 按钮在子组件（`SegTabs.vue`）里 ⇒ 必须 `:deep()` 才够得着；
+ *    字号比正文小一档（账户统计那颗分段器也是 10~11px 的量级）。
+ * ⚠️ 这里连 `border: 0` 一起写：全局 `.seg button` 会在按钮**右边**画分隔线。
+ */
+.acct-tabs :deep(button),
+.seg-scroll :deep(button) {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.acct-tabs :deep(button.active),
+.seg-scroll :deep(button.active) {
+  background: linear-gradient(
+    112deg,
+    rgba(255, 217, 158, 0.25) 0%,
+    rgba(255, 193, 107, 0.15) 52%,
+    rgba(243, 154, 63, 0.09) 100%
+  );
+  color: #ffd291;
+  box-shadow: inset 0 0 0 1px rgba(255, 193, 107, 0.12);
+}
+
+/* ---------------- ⑤ 币种占比那三条：分类色改暖 ---------------- */
+/*
+ * 原来 `.c2c` 是蓝 `#5b8def`、`.sp` 是青 `#4cc4b0` —— 那是冷色底那套的分类色，
+ * 铺在暖棕的卡上会跳出来。改成暖底上仍然分得开的三色：琥珀（合约，`--accent`）/
+ * 粉（C2C，就是官方那个分类色 `--data-3`）/ 绿（现货）。
+ * ⚠️ 图例里那三颗小方块用的是**同一批类名**，改一处两处一起变，别只在条上改。
+ */
+.c2c {
+  background: var(--data-3, #e08aa8);
+}
+.sp {
+  background: var(--ok, #72d6a0);
+}
 </style>

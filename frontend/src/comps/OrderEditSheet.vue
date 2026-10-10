@@ -134,7 +134,7 @@ function fmtQty(v: number): string {
     <div v-if="open" class="sheet-mask" @click="emit('close')" />
     <section
       v-if="open && target"
-      class="sheet sheet-confirm os-sheet"
+      class="sheet sheet-confirm os-sheet warm-skin"
       role="dialog"
       aria-label="修改挂单"
     >

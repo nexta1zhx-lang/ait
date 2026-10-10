@@ -65,7 +65,7 @@ function onPickMarket(base: string): void {
   <div ref="rootRef" class="split m-market mkt-page">
     <div class="col">
       <div class="scroll-body">
-        <section class="panel mkt-panel">
+        <section class="panel mkt-panel warm-skin">
           <h2>
             合约行情
             <span v-if="marketCount" class="mkt-count">

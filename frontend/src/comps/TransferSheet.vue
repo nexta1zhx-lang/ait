@@ -219,7 +219,7 @@ async function submit(): Promise<void> {
 <template>
   <Teleport to="body">
     <div v-if="open" class="sheet-mask" @click="emit('close')" />
-    <section v-if="open" class="sheet" role="dialog" aria-label="划转">
+    <section v-if="open" class="sheet warm-skin" role="dialog" aria-label="划转">
       <header class="sheet-head">
         <b>划转</b>
         <button class="ghost tiny" title="关掉" @click="emit('close')">✕</button>

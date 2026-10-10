@@ -1985,27 +1985,30 @@ button.danger {
  *    · 波形动态（单线横流 / 三条波带 / 底部声波条 / 同心涟漪 / 行进亮段 / 呼吸光）
  *      —— 用户：「算了不要了，改为 7 方案」。
  *    ⇒ 这里**只有纯色**：没有渐变、没有动画、没有遮罩。
+ *    （2026-10-10 并到统一暖色皮肤之后**这条依然成立** —— 换的只是色值，没加特效。）
  *
- * 主色从低饱和暖沙 `#d3b583` 提亮成暖橙 `#ffb347`（只在这一格）：排序箭头、
- * 置顶星、置顶行的币名、选中行底色都跟着它走（它们取的本来就是 `--blue*` / `--accent*`）。
+ * ★★ 2026-10-10 **调色板并到全站那一套暖色皮肤**（`.warm-skin`，见本文件上方那一节）：
+ *    用户「合约界面也改一下」—— 要的是跟「账户统计 / 交易所账户」同一个色系。
+ *    并之前这一格自己有一份（主色是更鲜的暖橙 `#ffb347`，而且用了 `color-mix()`）：
+ *      · 琥珀统一成 **`#ffc16b`**（账户统计那个主色）：排序箭头、置顶星、置顶行币名、
+ *        选中行底色都跟着它走（它们取的本来就是 `--blue*` / `--accent*`）；
+ *      · 边框 / 底色 / 次要文字由 `.warm-skin` 那份给（`.mkt-panel` 自己不再定义）；
+ *      · `color-mix()` 全部撤掉（安卓 System WebView 算不出来，见账户统计那页 2026-10-09 的坑）。
  *
- * ⚠️ **范围只到行情这一格**（`.mkt-panel` 在合约页和开单分析页各挂一次，两处一起生效）。
- *    整站其它地方仍是 :root 的暖沙主色。
- *    要全站推：把下面这几行搬到 `:root`。但 ⚠️ **K 线的蜡烛色是写死的**
- *    （`KlineChart.vue` / `MiniKline.vue` + 成交量柱的 `rgba()`），动涨跌色时必须连它们一起改。
- * ⚠️ `--blue` / `--blue-soft` 这两个历史别名**要显式再写一遍**：`--blue: var(--accent)`
- *    是在 `:root` 上声明的，别指望它在这里跟着新 `--accent` 变（写出来最稳，也少一层推理）。
+ * ⚠️ **范围**：`.mkt-panel` 在合约页和开单分析页各挂一次，两处一起生效 —— 这两处都会变成
+ *    暖色皮肤（同一个组件，两边色系不一致更怪）。挂类的地方见两个 view 的模板。
+ *
+ * ⚠️⚠️ **只有涨跌色例外，故意还回全站值**：这一格（尤其开单分析页左栏）旁边就是 K 线的
+ *    蜡烛，而**蜡烛色是写死的**（`KlineChart.vue` / `MiniKline.vue` + 成交量柱的 `rgba()`）。
+ *    涨跌色要是跟着账户统计那套变（更亮的薄荷绿 / 粉红），同一屏上行情列表和蜡烛就是
+ *    两种红绿。⇒ 要用 `.warm-skin` 那套薄荷绿/粉红，必须**连蜡烛一起改**，别只改这里。
+ *    （特异性 `.mkt-panel.warm-skin`(0,2,0) 压得过 `.warm-skin`(0,1,0)，所以跟写法位置无关。）
  */
-.mkt-panel {
-  --panel: #0d0c0b;
-  --panel-2: #16130f;
-  --border: #242019;
-  --accent: #ffb347;
-  --accent-soft: color-mix(in srgb, #ffb347 13%, transparent);
-  --accent-line: color-mix(in srgb, #ffb347 42%, transparent);
-  --accent-ink: #231603;
-  --blue: #ffb347;
-  --blue-soft: color-mix(in srgb, #ffb347 13%, transparent);
+.mkt-panel.warm-skin {
+  --ok: #5eba89;
+  --ok-soft: rgba(94, 186, 137, 0.14);
+  --bad: #e35561;
+  --bad-soft: rgba(227, 85, 97, 0.14);
 }
 
 /*
@@ -7347,6 +7350,125 @@ button.badge:disabled {
   }
 
   /* ---- 预测历史：饼图铺成网格（列表换卡片写在 HistoryView 里）---- */
+}
+
+/* ==================== ★★ 暖色皮肤（2026-10-10） ==================== */
+/*
+ * 跟「账户统计」同一套调色板：**谁挂这个类，谁的整棵子树就变暖**
+ * （用户 2026-10-10：「交易所账户页面修改风格和账户统计风格一致有设计感」）。
+ *
+ * 为什么要在 `style.css` 里放一份：`<Teleport to="body">` 的弹层**不继承**页面那一格的
+ * 变量（DOM 上它根本不在页面子树里），所以「交易所账户」那一页自己打开的弹层得各挂一次
+ * 这个类 —— 定义放一处、用的时候加个类名，别每个弹层各抄一份变量。
+ *
+ * 用在哪：
+ *   · `ExchangeAccountLivePanel.vue` 的 `.live` —— 「交易所账户」整格；
+ *   · 这一页会打开的弹层：划转 / 平仓 / 止盈止损 / 改单 / 资金区间 / 配置；
+ *   · **行情面板**（`ContractsView.vue` / `AnalyzeView.vue` 里的 `.mkt-panel`）—— 「合约」页
+ *     整页 + 「开单分析」页左栏那一格。⚠️ 那一格**故意不换涨跌色**（旁边就是 K 线蜡烛，
+ *     蜡烛色是写死的），见本文件 `.mkt-panel.warm-skin` 上面那段说明；
+ *   · **居中的确认框**（`ConfirmDialog.vue` 的 `.dlg-mask`，`askConfirm` 那套）——
+ *     全站共用，所以所有页面的确认框都是暖的（用户 2026-10-10：「中间弹窗模块也要改」）。
+ * ⚠️ 页面的**外壳**（底栏、一级 tab 那条 `PaneShell`）故意不挂 —— 那是全站共享的，
+ *    两个页面看到的是同一条壳，才有「同一套系统」的感觉。
+ * ⚠️ 值要跟 `AccountStatsView.vue` 顶部 `.account-stats` 那份**保持一致**（那页是这套色的
+ *    源头与对照物）：这边改了，那边也得跟着改，不然两个页面会各自漂移。
+ * ⚠️⚠️ 这里**一律不写 `color-mix()`**：这台机器的 Android System WebView 算不出来，
+ *    带 `color-mix()` 的边框会退成 `currentColor`（亮灰白边）—— 账户统计那页
+ *    2026-10-09 就栽在这上面，所以全部写死的 `rgb()` / `rgba()`。
+ */
+.warm-skin {
+  --panel: #0d0c0b;
+  --panel-2: #19150f;
+  --card: #19150f;
+  --border: #30271d;
+  --line: rgba(48, 39, 29, 0.6);
+  --accent: #ffc16b;
+  --accent-soft: rgba(255, 193, 107, 0.13);
+  --accent-line: rgba(255, 193, 107, 0.52);
+  --accent-ink: #231603;
+  --blue: #ffc16b;
+  --blue-soft: rgba(255, 193, 107, 0.13);
+  --ok: #72d6a0;
+  --ok-soft: rgba(114, 214, 160, 0.14);
+  --bad: #ff7480;
+  --bad-soft: rgba(255, 116, 128, 0.14);
+  --muted: #aaa398;
+  /*
+   * 两档「比 `--muted` 再淡一点」的次要文字色。它们全站**没有定义**（`--dim` 是板子 /
+   * 改单弹层里的次要说明、`--fg-dim` 是下拉刷新那条），以前走的是冷灰兜底值
+   * （`#999` / `#8b93a1`）—— 暖底上会是一撮冷灰，所以在这里补上。
+   */
+  --dim: #9b948a;
+  --fg-dim: #9b948a;
+}
+
+/*
+ * 标题：全站 `h2` 是冷蓝灰 `#cdd9e5`（配冷底写的），暖底上会泛蓝 ⇒ 这一套里换成正文色。
+ * （`.pn-h h2` 那种自带字号/字重的更具体的规则照旧生效，这条只管颜色。）
+ */
+.warm-skin h2 {
+  color: var(--text);
+}
+
+/*
+ * 表格分隔线：全站 `.table td` 的下边框是配冷底写死的冷蓝灰 `rgba(42, 52, 65, 0.55)`
+ * —— 暖底上是一道偏蓝的线，这里换成暖色的 `--line`（`.table th` 自带的是 `--border`，
+ * 跟着变量走，不用管）。
+ */
+.warm-skin .table td {
+  border-bottom-color: var(--line);
+}
+
+/*
+ * 确认框的**外观**：卡片和两颗键都不铺纯色（用户 2026-10-10：
+ * 「确认不要纯色的背景，改为设计感点的」）—— 形状照抄账户统计那个日期弹窗
+ * （`AccountStatsView.vue` 的 `.apply-range` / `.clear-range` 与 `.capital-hero`）。
+ *
+ * 卡片：右上角一圈琥珀微光 + 一层「冷灰 → 暖棕」的斜向渐变，边框提到 `rgb(98,76,48)`
+ *       （跟 hero 卡那条暖描边同一个值）。
+ */
+.warm-skin .dlg {
+  border-color: rgb(98, 76, 48);
+  background:
+    radial-gradient(ellipse at 88% 0%, rgba(255, 193, 107, 0.09), transparent 46%),
+    linear-gradient(150deg, rgb(23, 20, 17), var(--panel) 72%);
+}
+
+/*
+ * 取消键：跟账户统计那个「清除」键同款（斜向的冷灰 → 暖棕，比纯色块厚一点）。
+ * ⚠️ `button.ghost` 的底色是 `var(--panel-2)` 那种纯色，这里要连 `background` 一起盖掉。
+ */
+.warm-skin .dlg-actions button.ghost {
+  background: linear-gradient(135deg, rgb(39, 39, 40), rgb(39, 30, 21));
+  color: var(--text);
+}
+
+/* 确定键：跟账户统计那个「应用」键同款 —— 琥珀渐变 + 深墨字（深底上纯琥珀反而发闷） */
+.warm-skin .dlg-actions button:not(.ghost) {
+  border: 1px solid var(--accent);
+  background: linear-gradient(110deg, #ffe0ad, #d8894d);
+  color: #151515;
+  font-weight: 600;
+}
+
+/*
+ * 破坏性确认键（`ConfirmDialog.vue` 的 `.dlg-danger`）。
+ *
+ * 基础样式用的是 `:root` 那个 `--bad-fill`（`color-mix(srgb, var(--bad) 88%, #000)`，
+ * 挑它是因为「白字对比度 ≥ 4.5」）。两件事在这里必须处理：
+ *   · `color-mix()` 在这台机器的**安卓 System WebView 上算不出来** ⇒ 背景会直接失效成
+ *     透明，白字贴在面板上等于没有按钮（跟账户统计那页 2026-10-09 的坑同一类）；
+ *   · 就算算得出来，暖色皮肤这套的 `--bad` 更亮（`#ff7480`），88% 那档白字只有 **3.3**。
+ * ⇒ 这里用同形状的**深玫红渐变**（最亮那档白字对比度 4.85、最暗那档更高），色相也在暖粉这一族。
+ *
+ * ⚠️⚠️ 这条跟上面「确定键」那条**优先级一样（0,3,1）**，靠**书写顺序**压过去 ——
+ *     别把它挪到上面去，否则危险键会被染成琥珀。
+ */
+.warm-skin .dlg-actions button.dlg-danger {
+  border-color: #8e3a44;
+  background: linear-gradient(110deg, #b8505a, #8e3a44);
+  color: #fff;
 }
 
 /* ==================== 配置（从底部弹出来） ==================== */

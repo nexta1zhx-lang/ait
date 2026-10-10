@@ -65,7 +65,7 @@ function money(v: number): string {
 <template>
   <Teleport to="body">
     <div v-if="open" class="sheet-mask" @click="emit('close')" />
-    <section v-if="open" class="sheet" role="dialog" aria-label="平仓">
+    <section v-if="open" class="sheet warm-skin" role="dialog" aria-label="平仓">
       <header class="sheet-head">
         <b>平仓 · {{ name }} {{ sideText }}</b>
         <button class="ghost tiny" title="关掉" @click="emit('close')">✕</button>

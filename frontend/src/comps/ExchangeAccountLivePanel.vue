@@ -1952,7 +1952,7 @@ onUnmounted(stopWork)
 
 <template>
   <div
-    class="live"
+    class="live warm-skin"
     @touchstart.passive="onPullStart"
     @touchmove.passive="onPullMove"
     @touchend.passive="onPullEnd"
@@ -2126,6 +2126,18 @@ onUnmounted(stopWork)
 </template>
 
 <style scoped>
+/*
+ * ★★ 2026-10-10 暖色皮肤：这一格跟「账户统计」共用一套调色板
+ *    （用户：「交易所账户页面修改风格和账户统计风格一致有设计感」）。
+ *
+ * 变量**不写在这里** —— 它定义在 `style.css` 的 `.warm-skin`（一处定义、各处加类名，
+ * 因为 `Teleport` 出去的弹层继承不到这里的变量）：
+ *   · 这一格的根节点带着它 ⇒ 整棵子树（板子 / 列表 / 空态 / 报错条 / 下拉指示条）一起变；
+ *   · 页面外壳（底栏、一级 tab 那条 `PaneShell`）**故意不挂** —— 那是全站共享的，
+ *     两个页面看到同一条壳才有「同一套系统」的感觉；
+ *   · 这一页打开的弹层各自挂一份（见那几个 `*Sheet.vue` 的 `.sheet` 根节点）。
+ * 块级版式（hero 卡 / 六格小卡 / 胶囊分段器）在 `ExchangeAccountBoard.vue` 末尾那一节。
+ */
 .live {
   display: flex;
   flex-direction: column;
@@ -2133,6 +2145,7 @@ onUnmounted(stopWork)
   /* 下拉指示条挂在它上面（absolute），所以它得是定位祖先 */
   position: relative;
 }
+
 /*
  * 下拉刷新指示条（移动端）。
  * ⚠️ `translate(-50%, Npx)` 里的 N 由脚本给（阻尼后的拖动距离）——
