@@ -13,17 +13,15 @@
  *   · **两步验证**（用户：「admin 这个账号设备认证可以做吗」→ 选了 TOTP）——
  *     ⚠️ **只有管理员看得到这块**（后端也按 is_admin 挡着）
  */
-import {computed, onMounted, ref} from 'vue'
+import {computed, onMounted, ref, watch} from 'vue'
 import {
   authChangePassword,
   disableTotp,
   enableTotp,
   fetchSessions,
-  fetchStatsSettings,
   fetchTotpState,
   revokeOtherSessions,
   revokeSession,
-  saveStatsSettings as saveStatsSettingsApi,
   setupTotp,
   type DeviceSession
 } from '../api'
@@ -40,21 +38,42 @@ import LlmConfigView from './LlmConfigView.vue'
  * 支持多个）；其余内容放两个 tab —— 账户信息 / 登录设备」。
  *
  * 所以这页现在顶上一条分段 tab：
- *   · 账户信息：身份卡 + 基本信息 + 两步验证 + 修改密码 + 退出
+ *   · 账户信息：身份卡（右上「编辑」改用户名/密码 · 退出登录的图标按钮）+ 两步验证
+ *     + 登录设备 + App 体检单
  *   · 交易所：绑多套交易所 API Key
- *   · 登录设备：多端登录的会话列表（踢设备）
+ *   · 模型配置：多把大模型密钥 + 用量统计
  *
  * 用户 2026-10-06：「模型配置移动到个人信息」——
  * 又从「我的」把「模型配置」（多把大模型密钥 + 用量统计）搬进来当第四段，
  * 不再单独占一格。
+ *
+ * ★ 2026-10-11（用户两轮：
+ *   「账户统计配置去掉，基本信息和修改密码放到顶部账户旁添加按钮弹窗修改，样式和账户统一风格一致」
+ *   →「退出字样去掉，退出登录放到用户卡片里面图标按钮显示，登录设备 tab 去掉，内容放到账户信息下面」）：
+ *   · **删掉「账户统计配置」那张卡**（2026-10-09 加的重复入口）—— 那份配置跟
+ *     「我的 → 账户统计」右上角齿轮里的是同一份（按用户存库），统计页照旧能改；
+ *   · 「基本信息」（用户名）与「修改密码」从两张卡片**收进身份卡右边那颗「编辑」的弹层**
+ *     （底部弹层 `.sheet`，跟「交易所账户」页的弹层同一套）；
+ *   · 「退出」那张卡没了，退出登录变成身份卡里的**图标按钮**（`title`/`aria-label` 是它的
+ *     可读文案）；「编辑」也去掉了汉字，两颗都是纯图标；
+ *   · 退出**先弹二次确认**（用户：「退出要确认弹窗」）—— 32px 的小图标紧挨着「编辑」，
+ *     误触一下就登出太糙了；
+ *   · 「登录设备」不再是独立 tab（四格收成三格），那一段并进「账户信息」、排在「两步验证」
+ *     后面，列表给了高度上限（`max-height: 46vh`）自己滚；
+ *   · 整页挂 `.warm-skin` + 胶囊分段 tab，跟「交易所账户 / 账户统计」统一风格。
  */
-type ProfTab = 'account' | 'exchange' | 'llm' | 'devices'
+type ProfTab = 'account' | 'exchange' | 'llm'
 
+/**
+ * 顶上那条分段 tab。
+ * ★ 2026-10-11（用户：「登录设备 tab 去掉，内容放到账户信息下面」）——
+ *   原来第四格是「登录设备」，现在那一段并进「账户信息」里的最后一张卡，
+ *   tab 只剩三格。⚠️ 这一段不在地址栏里（`tab` 就是组件内的 ref），所以没有老链接要兜。
+ */
 const TABS: {value: ProfTab; label: string}[] = [
   {value: 'account', label: '账户信息'},
   {value: 'exchange', label: '交易所'},
-  {value: 'llm', label: '模型配置'},
-  {value: 'devices', label: '登录设备'}
+  {value: 'llm', label: '模型配置'}
 ]
 
 const tab = ref<ProfTab>('account')
@@ -247,47 +266,43 @@ async function copySecret(): Promise<void> {
 
 /* ------------------------- 基本信息 ------------------------- */
 
-/* ------------------- 账户统计配置（2026-10-09） ------------------- */
+/* ------------------- 账号设置弹层（2026-10-11） ------------------- */
 
-const statsBenchmark = ref('1000')
-const statsCurrency = ref<'usd' | 'cny'>('usd')
-const statsBusy = ref(false)
-const statsMsg = ref('')
-const statsErr = ref('')
+/*
+ * 用户名 + 修改密码收进这颗「编辑」按钮的弹层（用户 2026-10-11：
+ * 「基本信息和修改密码放到顶部账户旁添加按钮弹窗修改」）。
+ *
+ * ⚠️ 每次打开都重新对齐：用户名拉回当前账号（上次可能改了没保存），密码框和提示清空
+ *    —— 不然上次输错的红字、或半截密码会留在框里，看着像「已经填好了」。
+ * ⚠️ 原来这页还有一张「账户统计配置」卡（2026-10-09 加的入口），**2026-10-11 删了**
+ *    （用户：「账户统计配置去掉」）—— 那份配置没丢：它跟「我的 → 账户统计」右上角齿轮里
+ *    的是**同一份**（`/api/stats-settings`，按用户存库），统计页那边照旧能改。
+ */
+const editOpen = ref(false)
+watch(editOpen, on => {
+  if (!on) return
+  name.value = user.value?.username ?? ''
+  oldPw.value = ''
+  newPw.value = ''
+  nameMsg.value = ''
+  nameErr.value = ''
+  pwMsg.value = ''
+  pwErr.value = ''
+})
 
-async function loadStatsSettings(): Promise<void> {
-  try {
-    const {settings} = await fetchStatsSettings()
-    statsBenchmark.value = String(settings.benchmark)
-    statsCurrency.value = settings.currency
-  } catch (e) {
-    statsErr.value = (e as Error).message
-  }
-}
-
-async function saveStats(): Promise<void> {
-  if (statsBusy.value) return
-  const base = Number(statsBenchmark.value)
-  if (!Number.isFinite(base) || base <= 0) {
-    statsErr.value = '收益率基准必须大于 0'
-    return
-  }
-  statsBusy.value = true
-  statsMsg.value = ''
-  statsErr.value = ''
-  try {
-    const {settings} = await saveStatsSettingsApi({
-      benchmark: base,
-      currency: statsCurrency.value
-    })
-    statsBenchmark.value = String(settings.benchmark)
-    statsCurrency.value = settings.currency
-    statsMsg.value = '已保存'
-  } catch (e) {
-    statsErr.value = (e as Error).message
-  } finally {
-    statsBusy.value = false
-  }
+/**
+ * 退出登录：**先二次确认**（用户 2026-10-11：「退出要确认弹窗」）。
+ *
+ * 它现在是一颗 32px 的小图标，紧挨着「编辑」那颗 —— 误触一下就登出太糙了。
+ * 走全站那个确认框（`askConfirm` → `ConfirmDialog`，暖色皮肤下它也是暖的）。
+ */
+async function logoutAsk(): Promise<void> {
+  const ok = await askConfirm({
+    title: '退出登录？',
+    body: '这台设备要重新登录才能进来。',
+    okText: '退出'
+  })
+  if (ok) await logout()
 }
 
 onMounted(() => {
@@ -295,7 +310,6 @@ onMounted(() => {
   void loadSessions()
   void loadTotp()
   void loadShell()
-  void loadStatsSettings()
 })
 
 /* ------------------------- App 体检单 ------------------------- */
@@ -355,7 +369,7 @@ async function changePw(): Promise<void> {
 </script>
 
 <template>
-  <div class="profile">
+  <div class="profile warm-skin">
     <SegTabs class="prof-tabs" v-model="tab" :options="TABS" />
 
     <section v-if="tab === 'account'" class="panel who">
@@ -366,78 +380,38 @@ async function changePw(): Promise<void> {
           {{ user?.isAdmin ? '管理员' : '普通账号' }}
         </small>
       </div>
-    </section>
-
-    <section v-if="tab === 'account'" class="panel">
-      <h2>基本信息</h2>
-      <label>
-        <span>用户名</span>
-        <input
-          v-model="name"
-          type="text"
-          maxlength="20"
-          placeholder="2~20 位，中英文 / 数字 / _ -"
-          @keyup.enter="saveName"
-        />
-      </label>
-      <p v-if="nameErr" class="err">{{ nameErr }}</p>
-      <p v-if="nameMsg" class="ok">{{ nameMsg }}</p>
-      <div class="row">
+      <!--
+        ★ 2026-10-11（用户：「基本信息和修改密码放到顶部账户旁添加按钮弹窗修改」+
+        「退出字样去掉，退出登录放到用户卡片里面图标按钮显示」→「退出要确认弹窗，编辑不要汉字」）——
+        用户名 / 改密码收进「编辑」的弹层，退出登录收成图标按钮。
+        两颗**都是纯图标**（用户要求「编辑不要汉字」）：图形 + `title`/`aria-label` 说明，
+        不写文字 —— 这一行省下来的宽度留给用户名。
+      -->
+      <div class="who-act">
         <button
-          class="btn primary"
+          class="who-edit"
           type="button"
-          :disabled="nameBusy"
-          @click="saveName"
+          title="改用户名 / 改密码"
+          aria-label="改用户名 / 改密码"
+          @click="editOpen = true"
         >
-          {{ nameBusy ? '保存中…' : '保存' }}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 20h4.2L19 9.2a2.1 2.1 0 0 0 0-3L17.8 5a2.1 2.1 0 0 0-3 0L4 15.8V20Z" />
+            <path d="M13.6 5.4 18.6 10.4" />
+          </svg>
         </button>
-      </div>
-    </section>
-
-    <!--
-      账户统计配置（用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」）。
-      跟「我的 → 账户统计」右上角齿轮里的是**同一份**（服务端 /api/stats-settings，
-      按用户存库），两处改哪边都会同步 —— 所以这里也放一个入口，省得非要进统计页才能改。
-    -->
-    <section v-if="tab === 'account'" class="panel">
-      <h2>账户统计配置</h2>
-      <p class="hint">
-        收益率基准与金额显示单位；跟「我的 → 账户统计」右上角配置里的是同一份（存在服务器上，换设备也在）。
-      </p>
-      <label>
-        <span>收益率基准金额（USDT）</span>
-        <input
-          v-model="statsBenchmark"
-          type="number"
-          min="0.01"
-          step="any"
-          inputmode="decimal"
-        />
-      </label>
-      <label>
-        <span>金额显示单位</span>
-        <div class="seg-inline">
-          <button
-            type="button"
-            :class="{on: statsCurrency === 'usd'}"
-            @click="statsCurrency = 'usd'"
-          >
-            美元
-          </button>
-          <button
-            type="button"
-            :class="{on: statsCurrency === 'cny'}"
-            @click="statsCurrency = 'cny'"
-          >
-            人民币
-          </button>
-        </div>
-      </label>
-      <p v-if="statsErr" class="err">{{ statsErr }}</p>
-      <p v-if="statsMsg" class="ok">{{ statsMsg }}</p>
-      <div class="row">
-        <button class="btn primary" type="button" :disabled="statsBusy" @click="saveStats">
-          {{ statsBusy ? '保存中…' : '保存' }}
+        <button
+          class="who-out"
+          type="button"
+          title="退出登录"
+          aria-label="退出登录"
+          @click="logoutAsk"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 4h3.2A1.8 1.8 0 0 1 20 5.8v12.4A1.8 1.8 0 0 1 18.2 20H15" />
+            <path d="M10.5 8.5 7 12l3.5 3.5" />
+            <path d="M7 12h8.5" />
+          </svg>
         </button>
       </div>
     </section>
@@ -448,63 +422,7 @@ async function changePw(): Promise<void> {
     <!-- 模型配置：多把大模型密钥 + 用量统计（用户 2026-10-06 从「我的」搬进来） -->
     <LlmConfigView v-if="tab === 'llm'" />
 
-    <section v-if="tab === 'devices'" class="panel">
-      <h2>
-        登录设备
-        <small v-if="sessions.length">共 {{ sessions.length }} 台</small>
-      </h2>
-
-      <p class="note">
-        同一账号可以在多台设备上同时登着，互不影响。看到不认识的就把它踢下线。
-      </p>
-
-      <ul class="devices">
-        <li v-for="s in sessions" :key="s.id" :class="{on: s.current}">
-          <div class="d-main">
-            <b>{{ s.device }}</b>
-            <span v-if="s.current" class="badge">本机</span>
-          </div>
-          <div class="d-sub">
-            <span v-if="s.ip">{{ s.ip }}</span>
-            <span>最后活跃 {{ seenText(s.lastSeenAt) }}</span>
-            <span class="dim"
-              >登录于 {{ bjTime(s.createdAt).slice(5, 16) }}</span
-            >
-          </div>
-          <div class="d-act">
-            <button
-              class="mini"
-              type="button"
-              :disabled="sessBusy"
-              @click="kick(s)"
-            >
-              {{ s.current ? '退出登录' : '下线' }}
-            </button>
-          </div>
-        </li>
-      </ul>
-
-      <p v-if="sessErr" class="err">{{ sessErr }}</p>
-      <p v-if="sessMsg" class="ok">{{ sessMsg }}</p>
-      <div class="row">
-        <button
-          class="btn"
-          type="button"
-          :disabled="sessBusy || otherCount === 0"
-          @click="kickOthers"
-        >
-          除本机外全部下线{{ otherCount ? `（${otherCount}）` : '' }}
-        </button>
-        <button
-          class="btn"
-          type="button"
-          :disabled="sessBusy"
-          @click="loadSessions"
-        >
-          刷新
-        </button>
-      </div>
-    </section>
+    <!-- 登录设备：★ 2026-10-11 整段挪到「账户信息」那格的末尾（原来是独立的第四个 tab） -->
 
     <!-- 两步验证：只有管理员看得到（后端也按 is_admin 挡着） -->
     <section v-if="isAdmin && tab === 'account'" class="panel">
@@ -634,37 +552,68 @@ async function changePw(): Promise<void> {
       </div>
     </section>
 
+    <!-- 修改密码：★ 2026-10-11 从这一页的卡片挪进「编辑」弹层（见文件末尾那个弹层） -->
+
+    <!--
+      登录设备：★ 2026-10-11 从原来那个独立 tab 挪进来（用户：「登录设备 tab 去掉，
+      内容放到账户信息下面」）—— 放在「两步验证」后面（同属账号安全这一类），
+      列表给个高度上限、自己滚：这一页跟「账户页」一个口径，不让长列表把整页拖长。
+    -->
     <section v-if="tab === 'account'" class="panel">
-      <h2>修改密码</h2>
-      <label>
-        <span>原密码</span>
-        <input
-          v-model="oldPw"
-          type="password"
-          autocomplete="current-password"
-        />
-      </label>
-      <label>
-        <span>新密码</span>
-        <input
-          v-model="newPw"
-          type="password"
-          autocomplete="new-password"
-          placeholder="至少 6 位"
-        />
-      </label>
-      <p v-if="pwErr" class="err">{{ pwErr }}</p>
-      <p v-if="pwMsg" class="ok">{{ pwMsg }}</p>
+      <h2>
+        登录设备
+        <small v-if="sessions.length">共 {{ sessions.length }} 台</small>
+      </h2>
+
+      <p class="note">
+        同一账号可以在多台设备上同时登着，互不影响。看到不认识的就把它踢下线。
+      </p>
+
+      <ul class="devices">
+        <li v-for="s in sessions" :key="s.id" :class="{on: s.current}">
+          <div class="d-main">
+            <b>{{ s.device }}</b>
+            <span v-if="s.current" class="badge">本机</span>
+          </div>
+          <div class="d-sub">
+            <span v-if="s.ip">{{ s.ip }}</span>
+            <span>最后活跃 {{ seenText(s.lastSeenAt) }}</span>
+            <span class="dim"
+              >登录于 {{ bjTime(s.createdAt).slice(5, 16) }}</span
+            >
+          </div>
+          <div class="d-act">
+            <button
+              class="mini"
+              type="button"
+              :disabled="sessBusy"
+              @click="kick(s)"
+            >
+              {{ s.current ? '退出登录' : '下线' }}
+            </button>
+          </div>
+        </li>
+      </ul>
+
+      <p v-if="sessErr" class="err">{{ sessErr }}</p>
+      <p v-if="sessMsg" class="ok">{{ sessMsg }}</p>
       <div class="row">
         <button
-          class="btn primary"
+          class="btn"
           type="button"
-          :disabled="pwBusy"
-          @click="changePw"
+          :disabled="sessBusy || otherCount === 0"
+          @click="kickOthers"
         >
-          {{ pwBusy ? '提交中…' : '修改密码' }}
+          除本机外全部下线{{ otherCount ? `（${otherCount}）` : '' }}
         </button>
-        <span class="dim tiny">改完所有设备都要重新登录</span>
+        <button
+          class="btn"
+          type="button"
+          :disabled="sessBusy"
+          @click="loadSessions"
+        >
+          刷新
+        </button>
       </div>
     </section>
 
@@ -712,12 +661,91 @@ async function changePw(): Promise<void> {
       </ul>
     </section>
 
-    <section v-if="tab === 'account'" class="panel">
-      <h2>退出</h2>
-      <div class="row">
-        <button class="btn" type="button" @click="logout">退出登录</button>
-      </div>
-    </section>
+    <!-- 退出：★ 2026-10-11 卡片删了（「退出字样去掉」），退出登录收成身份卡里那颗图标按钮 -->
+
+    <!--
+      ★ 2026-10-11「账号设置」弹层（用户：「基本信息和修改密码放到顶部账户旁添加按钮弹窗修改」）。
+
+      两个决定：
+        · **做成底部弹层**，不是居中小框 —— 这一页的表单弹层跟「交易所账户」那一页
+          （划转 / 平仓 / 配置）是同一套 `.sheet`，而「和账户统一风格一致」就是要同一套；
+          底部弹层在手机上也更好按（拇指够得到），居中框更适合「确认一件事」。
+        · **挂 `warm-skin`**：`Teleport` 到 body 之后继承不到页面那棵树的变量
+          （`.profile` 上那份），所以每个弹层都得自己挂一次 —— 见 `style.css` 那一节。
+    -->
+    <Teleport to="body">
+      <div v-if="editOpen" class="sheet-mask" @click="editOpen = false" />
+      <section
+        v-if="editOpen"
+        class="sheet warm-skin edit-sheet"
+        role="dialog"
+        aria-label="账号设置"
+      >
+        <header class="sheet-head">
+          <b>账号设置</b>
+          <button
+            type="button"
+            class="sheet-x"
+            title="关闭"
+            @click="editOpen = false"
+          >
+            ✕
+          </button>
+        </header>
+
+        <!-- 用户名：一行「标签 —— 输入框 —— 保存」，跟配置弹层一个排版 -->
+        <div class="sheet-row">
+          <span class="rk">用户名</span>
+          <input
+            v-model="name"
+            type="text"
+            maxlength="20"
+            placeholder="2~20 位，中英文 / 数字 / _ -"
+            @keyup.enter="saveName"
+          />
+          <button
+            class="btn primary"
+            type="button"
+            :disabled="nameBusy"
+            @click="saveName"
+          >
+            {{ nameBusy ? '保存中…' : '保存' }}
+          </button>
+        </div>
+        <p v-if="nameErr" class="err">{{ nameErr }}</p>
+        <p v-if="nameMsg" class="ok">{{ nameMsg }}</p>
+
+        <!-- 修改密码：两行输入 + 一颗按钮（改完所有会话都会被踢，见 `changePw`） -->
+        <div class="sheet-row col">
+          <span class="rk">修改密码</span>
+          <input
+            v-model="oldPw"
+            type="password"
+            autocomplete="current-password"
+            placeholder="原密码"
+          />
+          <input
+            v-model="newPw"
+            type="password"
+            autocomplete="new-password"
+            placeholder="新密码（至少 6 位）"
+          />
+          <p v-if="pwErr" class="err">{{ pwErr }}</p>
+          <p v-if="pwMsg" class="ok">{{ pwMsg }}</p>
+          <div class="row">
+            <button
+              class="btn primary"
+              type="button"
+              :disabled="pwBusy"
+              @click="changePw"
+            >
+              {{ pwBusy ? '提交中…' : '修改密码' }}
+            </button>
+            <span class="dim tiny">改完所有设备都要重新登录</span>
+          </div>
+        </div>
+      </section>
+    </Teleport>
   </div>
 </template>
 
@@ -740,8 +768,7 @@ async function changePw(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-.avatar {
+}.avatar {
   width: 44px;
   height: 44px;
   border-radius: 50%;
@@ -760,6 +787,66 @@ async function changePw(): Promise<void> {
 .who-text small {
   color: var(--muted);
   font-size: 12px;
+}
+/*
+ * 身份卡右侧那一组按钮：「编辑」（改用户名 / 改密码）+ 退出登录。
+ * ★ 2026-10-11 用户：「编辑不要汉字」⇒ 两颗**都是纯图标的正方形**（32×32）。
+ * 主次靠底色分：「编辑」是暖色胶囊（主操作），退出是中性底 + muted（次要）。
+ */
+.who-act {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.who-edit {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgba(255, 193, 107, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 193, 107, 0.07);
+  color: #ffd291;
+  cursor: pointer;
+}
+/*
+ * 退出登录：**只有图标**（用户 2026-10-11：「退出字样去掉，退出登录放到用户卡片里面
+ * 图标按钮显示」）。中性底 + muted —— 它旁边那颗「编辑」是主操作，别抢一样的权重。
+ */
+.who-out {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+.who-edit svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.who-out svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 h2 {
   margin: 0 0 12px;
@@ -785,32 +872,6 @@ label {
 label span {
   font-size: 12px;
   color: var(--muted);
-}
-/* 说明小字（账户统计配置那块用） */
-.hint {
-  margin: 0 0 12px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-/* 「美元 / 人民币」这种两选一：并排两个按钮，选中的那种高亮 */
-.seg-inline {
-  display: flex;
-  gap: 6px;
-}
-.seg-inline button {
-  flex: 1 1 0;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 12px;
-}
-.seg-inline button.on {
-  border-color: var(--accent);
-  color: var(--accent);
 }
 input {
   width: 100%;
@@ -928,6 +989,17 @@ input.code {
   list-style: none;
   margin: 0 0 4px;
   padding: 0;
+  /*
+   * ★ 2026-10-11：这段从独立 tab 挪进「账户信息」之后跟别的内容挤在一页里了
+   * （实测 admin 账号 21 台设备），给个高度上限让它自己滚 —— 口径跟账户页一致：
+   * 长列表内滚，不让整页无限长。滚条不画（跟这一页其它滚动容器一个规矩）。
+   */
+  max-height: 46vh;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.devices::-webkit-scrollbar {
+  display: none;
 }
 .devices li {
   display: grid;
@@ -1043,5 +1115,100 @@ input.code {
   .codes {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ==================== ★ 2026-10-11：跟「交易所账户」统一风格 ==================== */
+/*
+ * 用户：「样式和账户统一风格一致」。
+ * 底色/描边/主色那套变量挂在模板根节点的 `warm-skin` 上（定义见 `style.css` 那一节，
+ * 跟「账户统计 / 交易所账户 / 合约」是同一份），这里只补两处**形状**：
+ * 分段 tab 换成胶囊、段标题对齐到 13px，以及新弹层里的排版。
+ */
+
+/*
+ * 分段 tab（账户信息 / 交易所 / 模型配置 / 登录设备）—— 换成账户页那套**胶囊分段器**
+ * （全局 `.seg` 是「矩形 + 按钮之间画分隔线」的老样子，账户页也是在那页里换掉的）。
+ */
+.prof-tabs {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: linear-gradient(120deg, rgb(19, 19, 21), rgb(18, 15, 13));
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.prof-tabs::-webkit-scrollbar {
+  display: none;
+}
+/* ⚠️ 按钮在子组件（`SegTabs.vue`）里 ⇒ 必须 `:deep()` 才够得着 */
+.prof-tabs :deep(button) {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.prof-tabs :deep(button.active) {
+  background: linear-gradient(
+    112deg,
+    rgba(255, 217, 158, 0.25) 0%,
+    rgba(255, 193, 107, 0.15) 52%,
+    rgba(243, 154, 63, 0.09) 100%
+  );
+  color: #ffd291;
+  box-shadow: inset 0 0 0 1px rgba(255, 193, 107, 0.12);
+}
+
+/* 段标题：跟账户页的段标题同一档（那边 `.pn-h h2` 也是 13px / 600） */
+h2 {
+  font-size: 13px;
+}
+
+/*
+ * 「账号设置」弹层的内容排版 —— 跟「配置」那个弹层同一套写法（标签在左、控件贴右，
+ * 一条一行；`.col` 那种是上下堆）。
+ * ⚠️ `Teleport` 之后 scoped 样式仍然生效（`data-v` 写在元素上），但**变量**吃不到页面
+ *    那棵树 —— 所以弹层自己挂了 `warm-skin`（见模板那段说明）。
+ */
+.edit-sheet .sheet-row {
+  padding: 10px 0;
+}
+.edit-sheet .sheet-row.col {
+  gap: 10px;
+}
+.edit-sheet .rk {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+/* 一行那种：输入框吃掉中间，两边是标签和按钮 */
+.edit-sheet .sheet-row:not(.col) input {
+  flex: 1 1 auto;
+  /* ⚠️ 必须显式 `width: auto`：本页顶上那条 `input { width: 100% }` 是给竖排表单写的，
+     它会让输入框一个人占满整行，把「保存」挤成两行（实测 393px 下按钮只有 ~34px 宽）。 */
+  width: auto;
+  min-width: 0;
+}
+/* 按钮永远整颗、不折行（同「换行会被挤扁」那个道理） */
+.edit-sheet .sheet-row .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.edit-sheet input {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.edit-sheet .row {
+  margin-top: 0;
+}
+.edit-sheet .err,
+.edit-sheet .ok {
+  margin: 0;
 }
 </style>

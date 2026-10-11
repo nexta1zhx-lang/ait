@@ -1790,40 +1790,11 @@ button.danger {
 }
 
 /*
- * 「基准以来」那一行（用户 2026-10-07：「行情排行榜可以自己选一个时刻来排」）——
- * 只在换了基准时出现（搜索框和表头之间），把「这一榜是哪一刻以来的」说清楚：
- * 手机上悬停不出 tooltip，只能靠这一行。✕ 回到默认的 24h 口径。
+ * ⚠️ `.mkt-basebar`（「基准以来」那一行，含 `.mb-k` / `.mb-v` / `.mb-x`）
+ *    **2026-10-11 删掉了**（用户：「合约顶部时间基准横幅去掉」）。
+ *    口径现在只由表头那两个字表示（「今日涨跌」/「基准涨跌」），
+ *    回默认 24h 的入口在「配置 → 基准时间」。
  */
-.mkt-basebar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  padding: 5px 9px;
-  border-radius: var(--r-sm);
-  background: var(--accent-soft);
-  font-size: 11.5px;
-  line-height: 1.2;
-}
-
-.mkt-basebar .mb-k {
-  color: var(--muted);
-}
-
-.mkt-basebar .mb-v {
-  font-family: var(--mono);
-  color: var(--text);
-}
-
-.mkt-basebar .mb-x {
-  margin-left: auto;
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  cursor: pointer;
-}
 
 /*
  * ⚠️ `.mkt-meta`（共 N 个合约 / 刚刚更新 / 刷新）那一行 2026-10-03 已删：
@@ -7471,7 +7442,18 @@ button.badge:disabled {
   color: #fff;
 }
 
+/*
+ * 原生控件（勾选框 / 单选 / range / 进度条）的强调色：浏览器默认是**亮蓝**，
+ * 暖色底上很跳（「账户统计」配置里的币种单选框、「交易所」里的沙盒勾选框就是它）。
+ * `accent-color` 一句话统一成琥珀，而且它是**继承属性** ⇒ 挂在 `.warm-skin` 上就够了
+ * （支持范围：Chrome 93+ / 这台机器的 WebView 114 也在内）。
+ */
+.warm-skin {
+  accent-color: var(--accent);
+}
+
 /* ==================== 配置（从底部弹出来） ==================== */
+
 /*
  * 入口在 K 线头部最右边那颗齿轮（`SettingsSheet.vue`）。
  * 组件用 `<Teleport to="body">`，所以样式必须写在全局，不能写 scoped。

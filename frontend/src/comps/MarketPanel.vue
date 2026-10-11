@@ -207,6 +207,11 @@ async function loadSnapshot(): Promise<void> {  if (loading.value) return
     for (const r of d.rows) byPair.set(r.pair.toUpperCase(), r)
     version.value++
     error.value = ''
+    /*
+     * 记下「这份底稿是按哪个基准补的」—— 只有它还是当前基准时才算数
+     * （拉的过程中基准被改了的话，`finally` 里会再拉一次，别在这里记错）。
+     */
+    if (since === baseSince.value) loadedBaseSince = since
   } catch (e) {
     if (!stopped) error.value = (e as Error).message
   } finally {
@@ -346,6 +351,19 @@ function sync(): void {
   if (shouldRun()) {
     // 回来先补一次全表：中间漏掉的增量不追了，直接拿最新的
     if (Date.now() - lastSnapshotAt > SNAPSHOT_FRESH_MS) void loadSnapshot()
+    /*
+     * ★ 2026-10-11 修「切完基准第一次进来涨跌全是 —」（用户当天报的）：
+     *   换基准那一刻这一格**可能在后台**（切去了别的 tab / 别的页面）——
+     *   那时 `watch(rankBase)` 里的 `shouldRun()` 直接 return，一列都没补；
+     *   而上面那条「快照还新就跳过」又会把整表重拉也跳过 ⇒ 整列停在「—」，
+     *   一直到 5 分钟后那次重同步才自己好。
+     *   所以这里对一下「表里那份 `baseClose` 是按哪一刻补的」，对不上就补那一列
+     *   （走 `loadBase()` 的轻量路 ≈10KB，**别用整表重拉顶**）。
+     * ⚠️ 放在 `loadSnapshot()` **后面**：它自己会按当前基准补一列，那条跑过就不用再来一次。
+     */
+    else if (baseActive.value && loadedBaseSince !== baseSince.value) {
+      void loadBase()
+    }
     start()
     return
   }
@@ -563,26 +581,22 @@ const baseActive = computed(() => rankBase.value.kind !== 'off')
  */
 const baseSince = computed(() => rankSinceMs(rankBase.value))
 
-/** `480` → `UTC+8`；`330` → `UTC+5:30`（半小时时区也画得对） */
-function tzLabel(offsetMin: number): string {
-  const sign = offsetMin < 0 ? '-' : '+'
-  const abs = Math.abs(offsetMin)
-  const h = Math.floor(abs / 60)
-  const m = abs % 60
-  return `UTC${sign}${h}${m ? `:${String(m).padStart(2, '0')}` : ''}`
-}
-
 /** 列头文案：时区日切 = 「今日涨跌」；任意时刻 = 「基准涨跌」 */
 const chgLabel = computed(() =>
   rankBase.value.kind === 'tz' ? '今日涨跌' : '基准涨跌'
 )
 
-/** 表上方那一行要显示的基准（手机上没有悬停，得看得见） */
-const baseText = computed(() => {
-  const b = rankBase.value
-  if (b.kind === 'off') return ''
-  return `${tzLabel(b.min)} 00:00 日切`
-})
+/**
+ * 表里那份 `baseClose` 是**按哪个基准时刻**补的（没换基准时是 `null`）。
+ *
+ * 光看 `rankBase` 判不出「这一列到底补没补上」：换基准那一刻这一格**可能在后台**
+ * （切到别的 tab / 别的页面，`active=false`）—— 那时 `watch(rankBase)` 里的
+ * `shouldRun()` 直接 return，一次请求都没发；等切回来时 `sync()` 又会因为
+ * 「快照还不到 20 秒」跳过整表重拉 ⇒ 整列停在「—」**直到 5 分钟后那次重同步**
+ * （用户 2026-10-11 报的就是这个：「配置切换时间基准，点击合约第一次不显示涨跌，显示 --」）。
+ * 所以记住「补的是哪一刻」，`sync()` 里对不上就补那一列。
+ */
+let loadedBaseSince: number | null = null
 
 /**
  * 这一行**界面上的涨跌幅**（%）—— 换没换基准都走它。
@@ -591,6 +605,8 @@ const baseText = computed(() => {
  * · 换了基准 → `last / baseClose - 1` **现算**：`last` 每秒都在被行情增量刷新，
  *   而 `baseClose` 是基准时刻的死数 ⇒ 这一列会跟着秒级跳动（跟头部「1天 / 3天…」同一套路）。
  *   那一刻没有基准价（`baseClose` 是 null）就返回 null → 界面显示「—」。
+ * ⚠️ 正常情况下不该看到「—」：补那一列的两条路（`loadSnapshot` / `loadBase`）都会记
+ *    `loadedBaseSince`，`sync()` 里对不上就重补 —— 只有那一刻币安那边真的没有价才留「—」。
  */
 function chgOf(r: MarketRow): number | null {
   if (rankBase.value.kind === 'off') return r.change24hPct
@@ -599,11 +615,6 @@ function chgOf(r: MarketRow): number | null {
   if (base === null || base === undefined || !(base > 0)) return null
   if (last === null || last === undefined || !Number.isFinite(last)) return null
   return (last / base - 1) * 100
-}
-
-/** 从行情条上那颗 ✕ 回到默认口径（跟配置里的「24h」是同一件事） */
-function useDefaultBase(): void {
-  rankBase.value = {kind: 'off'}
 }
 
 /**
@@ -635,6 +646,7 @@ async function loadBase(): Promise<void> {
     for (const r of byPair.values()) r.baseClose = d.closes[r.symbol] ?? null
     /* 就地改完对象字段不会自己触发渲染 ⇒ 抬一下 version（表里就是拿它当依赖的） */
     version.value++
+    loadedBaseSince = since
     error.value = ''
   } catch (e) {
     if (!stopped) error.value = (e as Error).message
@@ -659,6 +671,7 @@ watch(rankBase, (next, prev) => {
      */
     for (const r of byPair.values()) r.baseClose = null
     version.value++
+    loadedBaseSince = null
     return
   }
   void loadBase()
@@ -748,22 +761,13 @@ const arrowOf = (v: number | null): string =>
     </div>
 
     <!--
-      换了基准就说清「这一榜是哪一刻以来的」—— 手机上没有 hover，得看得见；
-      ✕ 一键回到默认的 24h 口径。
+      ★ 2026-10-11 **「基准以来」那一行删了**（用户：「合约顶部时间基准横幅去掉」）——
+      原来换了基准就在这里摆一行「今日涨跌 / UTC+8 00:00 日切 ✕」，让手机上也看得见口径。
+      现在这一格的**表头**就是口径本身（`baseActive ? chgLabel : '涨跌幅'` ⇒ 「今日涨跌」/
+      「基准涨跌」），横幅是重复的一行，还占掉列表高度。
+      ⚠️ 换回默认 24h 的入口在「配置 → 基准时间」那颗 `24h`（`SettingsSheet.vue`），
+        别以为删了横幅就没法回去了。
     -->
-    <div v-if="baseActive" class="mkt-basebar">
-      <span class="mb-k">{{ chgLabel }}</span>
-      <span class="mb-v">{{ baseText }}</span>
-      <button
-        type="button"
-        class="mb-x"
-        title="回到 24h 涨跌幅（默认）"
-        aria-label="回到 24h 涨跌幅"
-        @click="useDefaultBase"
-      >
-        ✕
-      </button>
-    </div>
 
     <!-- 星号操作的提示（超上限等）；点一下关掉 -->
     <p v-if="pinTip" class="mkt-tip" @click="pinTip = ''">{{ pinTip }}</p>

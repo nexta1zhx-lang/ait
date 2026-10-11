@@ -2,8 +2,12 @@
 /**
  * 服务器监测（「我的 → 管理 → 服务器」）。
  *
- * 数据来自 `GET /api/server-status`（见 `backend/src/system.ts`）——
- * 后端只给**当下这一瞬**，曲线是这里按秒轮询、自己攒出来的（只留最近 3 分钟）。
+ * 数据来自 `GET /api/server-status?minutes=30`（见 `backend/src/system.ts`）——
+ * **后端自己采样**（每 5 秒一个点、滚动保留最近 2 小时，只在进程内存里），
+ * 曲线直接用它回的历史；前端只是每 5 秒拉一次（`POLL_MS`，对齐后端的采样节奏）。
+ *
+ * ★ 2026-10-11：**「自动刷新」那颗开关删了**（用户：「服务器永远自动刷新，前端配置去掉」）
+ *   —— 进来就一直是 5 秒一轮，只剩标题右边那颗「刷新」手动补一次。
  *
  * echarts 走**按需引入**（`echarts/core` + 用到的图表/组件）。
  * ⚠️ 别改成 `import * as echarts from 'echarts'`，那样会把整个 echarts 打进包里。
@@ -14,8 +18,7 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
-  shallowRef,
-  watch
+  shallowRef
 } from 'vue'
 import {C, darkTooltip, echarts, type ECharts} from '../chart-theme'
 import {fetchServerStatus, type ServerStatus} from '../api'
@@ -37,7 +40,6 @@ const WINDOW_MIN = 30
 
 const s = ref<ServerStatus | null>(null)
 const error = ref('')
-const auto = ref(true)
 const updatedAt = ref<number | null>(null)
 
 const cpuEl = ref<HTMLElement | null>(null)
@@ -86,7 +88,7 @@ const loading = computed(() => !s.value && !error.value)
 
 /* ---------------- 拉数 ---------------- */
 
-async function load(manual = false): Promise<void> {
+async function load(): Promise<void> {
   try {
     /*
      * 曲线**全部来自后端的历史**（`?minutes=`）——
@@ -98,8 +100,11 @@ async function load(manual = false): Promise<void> {
     render()
   } catch (e) {
     error.value = (e as Error).message || '取服务器状态失败'
-    // 手动点的才打断自动刷新，自己挂的就静默重试
-    if (manual) auto.value = false
+    /*
+     * ★ 2026-10-11：以前这里会 `auto.value = false`（「手动点的才打断自动刷新」）——
+     *   现在**永远自动刷新**（用户：「服务器永远自动刷新，前端配置去掉」），
+     *   所以失败就静默等下一轮（5 秒后重试），不再有「被打断」这个状态。
+     */
   }
 }
 
@@ -301,10 +306,10 @@ function onResize(): void {
   memChart.value.resize()
 }
 
-// 换了窗口立刻重拉一次（后端会把那段历史一起回来，不用自己攒）
-watch(auto, v => {
-  if (v) void load()
-})
+/*
+ * ★ 2026-10-11：原来这里有一条 `watch(auto, v => { if (v) void load() })`
+ *   （勾上「自动刷新」立刻补一次）—— 开关删了，这条也删了。
+ */
 
 onMounted(async () => {
   await load()
@@ -325,7 +330,8 @@ onMounted(async () => {
   }
   window.addEventListener('resize', onResize)
   timer = window.setInterval(() => {
-    if (auto.value) void load()
+    /* 永远自动刷新（2026-10-11 起没有开关了）—— 这个定时器就是它 */
+    void load()
   }, POLL_MS)
 })
 
@@ -356,11 +362,12 @@ onBeforeUnmount(() => {
         {{ bjTime(updatedAt).slice(-8) }} 更新
       </span>
       <span class="spacer" />
-      <label class="auto">
-        <input v-model="auto" type="checkbox" />
-        自动刷新
-      </label>
-      <button class="ghost tiny" @click="load(true)">刷新</button>
+      <!--
+        ★ 2026-10-11：「自动刷新」那颗勾选框删了（用户：「服务器永远自动刷新，前端配置去掉」）
+        —— 这块本来就是给自己看的体检单，5 秒一轮几乎不要钱（后端每 5 秒采一点），
+        留个「手动关掉」的口子反而让人以为停着不动。现在只剩「刷新」这颗手动补一次的。
+      -->
+      <button class="ghost tiny" @click="load()">刷新</button>
     </div>
 
     <p v-if="loading" class="loading">正在读取服务器状态…</p>
@@ -599,14 +606,7 @@ onBeforeUnmount(() => {
   color: var(--muted);
   font-size: 12px;
 }
-.auto {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 12px;
-  cursor: pointer;
-}
+/* ⚠️ `.auto`（那颗「自动刷新」勾选框的样式）2026-10-11 跟着开关一起删了 */
 
 .cards {
   display: grid;
