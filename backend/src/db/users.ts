@@ -15,6 +15,8 @@ import {describeDevice} from '../util/device'
  *     **第一个注册的账号**会把之前没有归属的老数据认领走
  *   · **多端登录**：每个设备一条会话，互不影响；账号能看到有哪些设备在线、
  *     单独踢掉某一台（本文件下面的 listSessions / revokeSession）
+ *   · **会话滑动续期**（2026-10-11）：有请求就往后推有效期（剩余不足 20 天才推、
+ *     封顶 `created_at + 90 天`），见下面「会话」那段的 `SESSION_RENEW_DAYS`
  *   · **两步验证**（TOTP）：只有管理员能开，见 `util/totp.ts` + 下面的 TOTP 一节
  */
 
@@ -93,6 +95,22 @@ function cleanPassword(v: unknown): string {
 
 /** 登录有效期：30 天 */
 const SESSION_DAYS = 30
+
+/**
+ * 会话**滑动续期**（2026-10-11）。
+ *
+ * 以前 token 是**签发那一刻定死的 30 天**，天天在用也一样到点掉线。
+ * 现在改成「有活动就往后推」：
+ *   · 剩余不足 `SESSION_RENEW_DAYS` 天才推（推到 `SESSION_DAYS` 天）——
+ *     否则每个请求都在改 `expires_at`，白白写库；
+ *   · 但**不能无限续**：`created_at` 起算满 `SESSION_MAX_DAYS` 天就封顶，
+ *     token 万一泄露也不会被续成「永久」。到那天照样要重新登录。
+ *
+ * ⚠️ 真正的节流在 server.ts 的 `touchSoon()`（同一 token 每分钟最多写一次），
+ *    所以这里只管「推多少」，不用自己限流。
+ */
+const SESSION_RENEW_DAYS = 20
+const SESSION_MAX_DAYS = 90
 
 export interface SessionResult {
   token: string
@@ -222,11 +240,34 @@ export async function revokeOtherSessions(
   return rows.length
 }
 
-/** 刷新「最后活跃」（调用方自己限流，别每个请求都写） */
+/**
+ * 刷新「最后活跃」**顺带滑动续期**（调用方自己限流，别每个请求都写）。
+ *
+ * 两件事一条 SQL 搞定：
+ *   · `last_seen_at` —— 「登录设备」列表的排序 / 显示；
+ *   · `expires_at`   —— 剩余不足 `SESSION_RENEW_DAYS` 天才推，
+ *     且封顶在 `created_at + SESSION_MAX_DAYS`（见上面那段的说明）。
+ *
+ * ⚠️ `GREATEST` 是**防倒退**：正常流程下 `expires_at` 永远 ≤ 封顶值、且小于
+ *    `now() + SESSION_DAYS`，所以推完只会往后；留着它是为了万一有历史行
+ *    （手写 INSERT 之类）的 `expires_at` 比封顶还晚时，别反而把人**提前踢下线**。
+ */
 export async function touchSession(token: string): Promise<void> {
-  await query('UPDATE sessions SET last_seen_at = now() WHERE token = $1', [
-    token
-  ])
+  await query(
+    `UPDATE sessions
+        SET last_seen_at = now(),
+            expires_at = CASE
+              WHEN expires_at < now() + interval '${SESSION_RENEW_DAYS} days'
+                THEN GREATEST(
+                       expires_at,
+                       LEAST(now() + interval '${SESSION_DAYS} days',
+                             created_at + interval '${SESSION_MAX_DAYS} days')
+                     )
+              ELSE expires_at
+            END
+      WHERE token = $1`,
+    [token]
+  )
 }
 
 /**

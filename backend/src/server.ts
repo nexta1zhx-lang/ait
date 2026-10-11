@@ -2741,6 +2741,10 @@ async function authUser(
  * 用户 2026-10-04：「账户支持多端登录」→ 设备列表要显示最后活跃时间。
  * 每个请求都写一行库太浪费（一次分析就是十几个请求），所以**同一 token
  * 每分钟最多写一次** —— 精确到分钟够用了。
+ *
+ * ★ 2026-10-11：这一次写库现在还**顺带做滑动续期**（`touchSession` 里一起改
+ *   `expires_at`）—— 所以节流不只为了省写，也顺手把「活动就续期」的频率
+ *   压到每分钟一次，见 `db/users.ts` 的 `SESSION_RENEW_DAYS`。
  */
 const touchAt = new Map<string, number>()
 const TOUCH_MS = 60_000

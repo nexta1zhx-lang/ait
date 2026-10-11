@@ -190,6 +190,12 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 1. ~~后端鉴权~~ ✅ **已完成**（2026-10-04）：用户名 + 密码（scrypt）登录、30 天会话、
    多端登录与设备管理、管理员两步验证（TOTP）。业务接口全部要登录，
    只有行情 / K 线 / 币种 / 图标 / 下载清单是公开的。
+   - **会话自动续期**（2026-10-11）：token 不再是「签发那刻定死的 30 天」——
+     每次带 token 的请求都会把有效期往后推（**同一 token 每分钟最多写一次库**，
+     节流在 `server.ts` 的 `touchSoon()`）。
+     推的规则：剩余**不足 20 天**才推、推到 30 天；**封顶在 `created_at + 90 天`**，
+     所以 token 泄露也不会变相「永久」——撑死 90 天必须重新登录。
+     相关常量在 `backend/src/db/users.ts`（`SESSION_RENEW_DAYS` / `SESSION_MAX_DAYS`）。
    - 请求要带 `Authorization: Bearer <token>`（`api.ts` 的 `req()` 自动加）；
      SSE（EventSource）发不了请求头，所以走 `?token=`。
    - ⚠️ **开了两步验证的账号，旧版 App 登不进去**（旧包拿到的是 `{needTotp}` 而不是 token）
