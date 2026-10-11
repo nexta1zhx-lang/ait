@@ -26,5 +26,9 @@ logs/
 # `data/contracts.json` 是**要提交**的那份基准名单，别一起忽略）
 data/icons/
 
+# 市值排名的落盘缓存（backend 自己写的运行产物，见 data/marketcap.ts）——
+# 免费接口会 429，所以最近一次成功的那份存盘、重启也带着；它是缓存不是基准，别提交
+data/marketcap-ranks.json
+
 # 编辑器本地配置（每个人那份不一样，不进仓库）
 .vscode/

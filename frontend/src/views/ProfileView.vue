@@ -31,7 +31,6 @@ import {askConfirm} from '../confirm'
 import {shellInfo, type ShellInfo} from '../native'
 import SegTabs from '../comps/SegTabs.vue'
 import ExchangeKeys from '../comps/ExchangeKeys.vue'
-import LlmConfigView from './LlmConfigView.vue'
 
 /*
  * 用户 2026-10-04（本轮）：「个人信息下添加交易所内容（可新增交易所和 key，
@@ -62,7 +61,7 @@ import LlmConfigView from './LlmConfigView.vue'
  *     后面，列表给了高度上限（`max-height: 46vh`）自己滚；
  *   · 整页挂 `.warm-skin` + 胶囊分段 tab，跟「交易所账户 / 账户统计」统一风格。
  */
-type ProfTab = 'account' | 'exchange' | 'llm'
+type ProfTab = 'account' | 'exchange'
 
 /**
  * 顶上那条分段 tab。
@@ -70,10 +69,15 @@ type ProfTab = 'account' | 'exchange' | 'llm'
  *   原来第四格是「登录设备」，现在那一段并进「账户信息」里的最后一张卡，
  *   tab 只剩三格。⚠️ 这一段不在地址栏里（`tab` 就是组件内的 ref），所以没有老链接要兜。
  */
+/*
+ * ★ 2026-10-12：「模型配置」那一格搬走了 —— 用户「ai 提示词 tab 改为模型配置，
+ *   个人信息中的模型配置内容提出到这个页面和 ai 提示词合并改为 3 个子 tab」。
+ *   现在它在「我的 → 模型配置」（`ModelPaneView`：密钥配置 / 用量统计 / AI 提示词），
+ *   这一页只剩账户信息 / 交易所两格。
+ */
 const TABS: {value: ProfTab; label: string}[] = [
   {value: 'account', label: '账户信息'},
-  {value: 'exchange', label: '交易所'},
-  {value: 'llm', label: '模型配置'}
+  {value: 'exchange', label: '交易所'}
 ]
 
 const tab = ref<ProfTab>('account')
@@ -419,8 +423,6 @@ async function changePw(): Promise<void> {
     <!-- 交易所：绑多套 Key（用户 2026-10-04 新增，独立成一个 tab） -->
     <ExchangeKeys v-if="tab === 'exchange'" />
 
-    <!-- 模型配置：多把大模型密钥 + 用量统计（用户 2026-10-06 从「我的」搬进来） -->
-    <LlmConfigView v-if="tab === 'llm'" />
 
     <!-- 登录设备：★ 2026-10-11 整段挪到「账户信息」那格的末尾（原来是独立的第四个 tab） -->
 
@@ -758,8 +760,8 @@ async function changePw(): Promise<void> {
 
 /*
  * 账户信息 / 交易所那几段是表单，太宽了不好读，压到 560px。
- * 「模型配置」（`.llm`）自带密钥表 + 用量统计，要占满整行，所以不在这里限宽。
- * （以前是 `.profile` 自己 `max-width: 560px`，会把整页连同那一格一起压窄。）
+ * （2026-10-12 起「模型配置」不在这一页了 —— 它自带宽表格、要占满整行，
+ *  所以这条「限宽」以前才要给它让路；现在这一页两格都是表单，一律限宽。）
  */
 .profile > section.panel {
   max-width: 560px;

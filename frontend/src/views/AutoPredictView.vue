@@ -1,0 +1,606 @@
+<script setup lang="ts">
+/**
+ * **自动化预测**（用户 2026-10-12：「新建一个页面叫自动化预测 在预测历史后面」「可调参数
+ * 改为前端配置 留着」「显筛选的币种」）。
+ *
+ * 这一页是"后台自动跑"的门面：
+ *
+ *   ① **筛选的币种** —— 按现在的参数扫一轮（后端 `scan/rules.ts`）。纯 SQL 读本地 K 线，
+ *      **不调模型、不花钱**、一两百毫秒，可以随便重扫。表格只留三列：
+ *      币种 / 原因（命中哪条规则）/ 涨跌幅，**点一行跳 K 线**去看图。
+ *   ② **参数弹窗** —— 扫描门槛（存库 `user_scan_settings`，见后端 `db/scan-settings.ts`）。
+ *      存库而不是 localStorage：**扫描是网页没开的时候跑的**，参数必须在服务端。
+ *
+ * ★ 2026-10-12 用户定的两条版式（「后续界面都是这样」）：
+ *   · 「样式更改为账户统计样式」⇒ 根节点挂 `.warm-skin`（暖色皮肤，跟账户统计同一套变量），
+ *     表格用「边框 + 圆角 + 细横线」那种（对齐账户统计的历史表）；
+ *   · 「表单改为弹窗简短不需要描述」「选出来的不要卡片展示，表格显示币种原因涨跌幅」
+ *     ⇒ 参数收进底部弹层（跟 K 线页那颗「配置」同一套 `.sheet`），**一行一项、不写说明**；
+ *     候选列表从卡片改成三列表格。
+ *
+ * ⚠️ 后面几段（定时扫描 → 快讯式判定 → App 通知）还没接：这里只解决"看清挑出来的是哪些币、
+ *    参数怎么改"，以及"点一下去看图"。
+ */
+import {computed, onMounted, ref} from 'vue'
+import {
+  fetchScanPicks,
+  fetchScanSettings,
+  saveScanSettings,
+  type ScanParams,
+  type ScanPick,
+  type ScanPicks
+} from '../api'
+import {bjTime, int} from '../format'
+import {showToast} from '../toast'
+import {MOBILE_MAX, leftTab, pickSymbol, prefetchSymbol} from '../analyze'
+
+/** 已保存的那份参数（弹层打开时拿它当草稿的底稿） */
+const params = ref<ScanParams | null>(null)
+const picks = ref<ScanPick[]>([])
+const meta = ref<Omit<ScanPicks, 'params' | 'picks' | 'error'> | null>(null)
+
+const loading = ref(false)
+const error = ref('')
+
+/* ---------------- 参数弹层（草稿态：关掉不保存就丢弃） ---------------- */
+
+const sheetOpen = ref(false)
+const draft = ref<ScanParams | null>(null)
+const saving = ref(false)
+
+function openSheet(): void {
+  if (!params.value) return
+  // 深拷一层：弹层里改了又关掉，界面上那份不能跟着变
+  draft.value = {...params.value, rules: {...params.value.rules}}
+  sheetOpen.value = true
+}
+
+function closeSheet(): void {
+  sheetOpen.value = false
+  draft.value = null
+}
+
+async function saveSheet(): Promise<void> {
+  if (!draft.value) return
+  saving.value = true
+  error.value = ''
+  try {
+    params.value = (await saveScanSettings(draft.value)).params
+    closeSheet()
+    showToast('参数已保存')
+    // 参数改了候选就变了：直接重扫，所见即所得
+    await loadPicks()
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    saving.value = false
+  }
+}
+
+/**
+ * 成交额门槛在界面上用**百万 USDT**（`3.00 M`）：原始值是 `3000000`，
+ * 手机上七个数字一行放不下，也没人愿意数零。
+ */
+const turnoverM = computed({
+  get: () => Math.round((draft.value?.minTurnover ?? 0) / 10_000) / 100,
+  set: (v: number) => {
+    if (draft.value) draft.value.minTurnover = Math.max(0, Math.round((Number(v) || 0) * 1e6))
+  }
+})
+
+/** 主周期那排胶囊 */
+const TFS = [
+  {value: '15m' as const, label: '15m'},
+  {value: '1h' as const, label: '1h'},
+  {value: '4h' as const, label: '4h'}
+]
+
+/** 规则开关（每一行左边一个开关，右边是它自己的阈值） */
+const RULES = [
+  {key: 'breakout' as const, label: 'A 放量突破'},
+  {key: 'dip' as const, label: 'B 深跌转折'},
+  {key: 'rally' as const, label: 'C 爆拉'},
+  {key: 'volume' as const, label: 'D 量能异动'}
+]
+
+/* ---------------- 数据 ---------------- */
+
+async function loadPicks(): Promise<void> {
+  loading.value = true
+  error.value = ''
+  try {
+    const r = await fetchScanPicks()
+    picks.value = r.picks
+    params.value = r.params
+    meta.value = {
+      at: r.at,
+      timeframe: r.timeframe,
+      scanned: r.scanned,
+      excludedTop: r.excludedTop,
+      rankMissing: r.rankMissing,
+      ruleHits: r.ruleHits,
+      ms: r.ms
+    }
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(async () => {
+  try {
+    params.value = (await fetchScanSettings()).params
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+  await loadPicks()
+})
+
+/**
+ * 点一行 → 跳 K 线看这个币。
+ *
+ * 跟「合约行情」点一行是同一个做法（`ContractsView.onPickMarket`）：
+ * 先把 K 线数据预取出去（服务端走本地库，很快），再换币种；
+ * **窄屏还得把左栏切到「K 线」那一格**，否则图在另一边、看不见。
+ */
+function openKline(base: string): void {
+  prefetchSymbol(base)
+  pickSymbol(base)
+  if (window.innerWidth <= MOBILE_MAX) leftTab.value = 'chart'
+}
+
+/** 「现在」= 最后一根**已收盘** K 线的收盘时刻 */
+const atText = computed(() => (meta.value ? bjTime(meta.value.at) : '—'))
+
+/**
+ * 表格上面那一行信息。
+ *
+ * ⚠️ 拼成**一整句**而不是写几个 `<span>`：模板里元素之间的空格会被 Vue 吃掉，
+ *    上一版就贴成了「排掉 21 个· 140ms」。
+ */
+const metaText = computed(() => {
+  const m = meta.value
+  if (!m) return ''
+  const parts = [
+    m.timeframe,
+    `截止 ${atText.value}`,
+    `参与打分 ${int(m.scanned)} 个`,
+    rangeText.value
+  ]
+  if (!m.rankMissing) parts.push(`排掉 ${m.excludedTop} 个`)
+  parts.push(`${m.ms}ms`)
+  return parts.join(' · ')
+})
+
+const rangeText = computed(() => {
+  const p = params.value
+  if (!p) return '—'
+  return p.excludeTopRank > 0 ? `市值前 ${p.excludeTopRank} 不扫` : '不看市值排名'
+})
+
+/** 命中原因：多条时用 ` · ` 连（表格一行放得下） */
+function reason(p: ScanPick): string {
+  return p.ruleLabels.join(' · ')
+}
+
+function pct(v: number): string {
+  return `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}%`
+}
+
+function pctClass(v: number): string {
+  return v >= 0 ? 'up' : 'down'
+}
+</script>
+
+<template>
+  <!-- `.warm-skin` = 账户统计那套暖色（用户 2026-10-12：「样式更改为账户统计样式」） -->
+  <div class="col auto warm-skin">
+    <div v-if="error" class="error">{{ error }}</div>
+
+    <section class="panel">
+      <div class="sec-head">
+        <h2>
+          筛选的币种
+          <span class="tag">{{ picks.length }} 个</span>
+        </h2>
+        <div class="sec-actions">
+          <button
+            class="ghost tiny"
+            :disabled="loading"
+            title="按现在的参数重扫一轮"
+            @click="loadPicks"
+          >
+            {{ loading ? '…' : '重扫' }}
+          </button>
+          <button class="ghost tiny" title="扫描参数" @click="openSheet">参数</button>
+        </div>
+      </div>
+
+      <!-- 一行信息：数据截止 / 参与打分多少 / 排掉多少 / 用时（不写"这是干什么的"） -->
+      <p class="meta-line">
+        {{ metaText }}
+        <span v-if="meta?.rankMissing" class="warn">
+          · 市值排名没拉到 ⇒「市值前 N 不扫」这条没生效
+        </span>
+      </p>
+
+      <p v-if="loading && !picks.length" class="dim">扫描中…</p>
+      <p v-else-if="!picks.length" class="dim">这一轮没有候选（阈值偏严，或者行情真的没事）。</p>
+
+      <div v-else class="tbl-wrap">
+        <table class="pick-table">
+          <thead>
+            <tr>
+              <th>币种</th>
+              <th>原因</th>
+              <th class="r">涨跌幅</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="p in picks"
+              :key="p.symbol"
+              :title="`${p.base} · 看 K 线`"
+              @click="openKline(p.base)"
+            >
+              <td class="base">{{ p.base }}</td>
+              <td class="dim">{{ reason(p) }}</td>
+              <td class="r num" :class="pctClass(p.pct24)">{{ pct(p.pct24) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 参数弹层：跟 K 线页那颗「配置」同一套（`.sheet`），一行一项、不写说明 -->
+    <Teleport to="body">
+      <div v-if="sheetOpen" class="sheet-mask" @click="closeSheet" />
+      <section v-if="sheetOpen && draft" class="sheet warm-skin" role="dialog" aria-label="扫描参数">
+        <header class="sheet-head">
+          <b>扫描参数</b>
+          <button class="ghost tiny" title="关掉（不保存）" @click="closeSheet">✕</button>
+        </header>
+
+        <div class="sheet-row">
+          <span class="rk">主周期</span>
+          <div class="ctl seg">
+            <button
+              v-for="t in TFS"
+              :key="t.value"
+              type="button"
+              class="ghost tiny"
+              :class="{on: draft.timeframe === t.value}"
+              @click="draft.timeframe = t.value"
+            >
+              {{ t.label }}
+            </button>
+          </div>
+        </div>
+
+        <div class="sheet-row">
+          <span class="rk">成交额门槛</span>
+          <div class="ctl">
+            <input
+              v-model.number="turnoverM"
+              type="number"
+              min="0"
+              step="0.5"
+              inputmode="decimal"
+              title="24h 成交额低于此值的合约不进候选（单位：百万 USDT）"
+            />
+            <span class="unit">M</span>
+          </div>
+        </div>
+
+        <div class="sheet-row">
+          <span class="rk">每类取前</span>
+          <div class="ctl">
+            <input
+              v-model.number="draft.perRule"
+              type="number"
+              min="1"
+              max="30"
+              step="1"
+              inputmode="numeric"
+            />
+          </div>
+        </div>
+
+        <div class="sheet-row">
+          <span class="rk">候选上限</span>
+          <div class="ctl">
+            <input
+              v-model.number="draft.maxPicks"
+              type="number"
+              min="1"
+              max="60"
+              step="1"
+              inputmode="numeric"
+            />
+          </div>
+        </div>
+
+        <div class="sheet-row">
+          <span class="rk">市值前 N</span>
+          <div class="ctl">
+            <input
+              v-model.number="draft.excludeTopRank"
+              type="number"
+              min="0"
+              max="500"
+              step="5"
+              inputmode="numeric"
+            />
+            <span class="unit">名</span>
+          </div>
+        </div>
+
+        <div class="sheet-row">
+          <span class="rk">上市天数</span>
+          <div class="ctl">
+            <input
+              v-model.number="draft.minAgeDays"
+              type="number"
+              min="0"
+              step="1"
+              inputmode="numeric"
+            />
+            <span class="unit">天</span>
+          </div>
+        </div>
+
+        <!-- 四条规则：一行一条 —— 左边开关 + 名字，右边它自己的阈值 -->
+        <div v-for="r in RULES" :key="r.key" class="sheet-row rule-row">
+          <button
+            type="button"
+            class="switch"
+            :class="{on: draft.rules[r.key]}"
+            :title="draft.rules[r.key] ? '开着，点一下关掉' : '关着，点一下打开'"
+            @click="draft.rules[r.key] = !draft.rules[r.key]"
+          >
+            <span />
+          </button>
+          <span class="rk">{{ r.label }}</span>
+
+          <div class="ctl">
+            <template v-if="r.key === 'breakout'">
+              <span class="unit">量比 ≥</span>
+              <input
+                v-model.number="draft.breakoutVol"
+                type="number"
+                min="1"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </template>
+            <template v-else-if="r.key === 'dip'">
+              <span class="unit">24h ≤</span>
+              <input
+                v-model.number="draft.dipPct"
+                type="number"
+                min="0"
+                step="1"
+                inputmode="numeric"
+              />
+              <span class="unit">% 量比 ≥</span>
+              <input
+                v-model.number="draft.dipVol"
+                type="number"
+                min="1"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </template>
+            <template v-else-if="r.key === 'rally'">
+              <span class="unit">24h ≥</span>
+              <input
+                v-model.number="draft.rallyPct"
+                type="number"
+                min="0"
+                step="1"
+                inputmode="numeric"
+              />
+              <span class="unit">%</span>
+            </template>
+            <template v-else>
+              <span class="unit">量比 ≥</span>
+              <input
+                v-model.number="draft.spikeVol"
+                type="number"
+                min="1"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </template>
+          </div>
+        </div>
+
+        <div class="sheet-row save-row">
+          <button class="primary wide" :disabled="saving" @click="saveSheet">
+            {{ saving ? '保存中…' : '保存' }}
+          </button>
+        </div>
+      </section>
+    </Teleport>
+  </div>
+</template>
+
+<style scoped>
+.auto {
+  gap: 10px;
+}
+
+.sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sec-head h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.sec-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* 数据截止那一行：小字、灰、可换行（手机上会折成两行） */
+.meta-line {
+  margin: 6px 0 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.meta-line .warn {
+  color: #e0a03c;
+}
+
+/*
+ * 表格：账户统计那张历史表的样子 —— 一个边框 + 圆角的框，里面是细横线，
+ * 字号小、数字等宽。三列：**币种 / 原因 / 涨跌幅**（用户 2026-10-12 定）。
+ */
+.tbl-wrap {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  overflow: hidden;
+}
+
+.pick-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.pick-table th,
+.pick-table td {
+  padding: 10px;
+  text-align: left;
+}
+
+.pick-table th {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: var(--fw-normal, 400);
+}
+
+/* 点一行 = 跳 K 线 ⇒ 给个按得下去的高度 */
+.pick-table tbody tr {
+  cursor: pointer;
+  border-top: 1px solid var(--line);
+}
+
+.pick-table tbody tr:active {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+@media (hover: hover) {
+  .pick-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.035);
+  }
+}
+
+.pick-table .base {
+  font-weight: var(--fw-mid, 500);
+}
+
+.pick-table .r {
+  text-align: right;
+}
+
+.pick-table .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.up {
+  color: var(--ok);
+}
+
+.down {
+  color: var(--bad);
+}
+
+/* ---------------- 参数弹层（`.sheet` 那套是全站的，这里只补尺寸） ----------------
+ *
+ * ★ 2026-10-12 用户：「参数弹窗 选项字体缩小，能在一行就在一行」——
+ *   一条一项**钉死在一行里**（`nowrap`：标签不许换行、控件不许掉到下一行），
+ *   字号整体小一号、上下留白收掉，11 行一屏基本看得完。
+ *   配套：标签文案也跟着缩短（「每类取前 / 市值前 N / 上市天数」），
+ *   长文案靠 `title` 兜（悬停才看得见）。
+ */
+.sheet-row {
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: 7px 0;
+}
+
+.rk {
+  font-size: 12.5px;
+}
+
+.sheet-row input {
+  width: 64px;
+  min-height: 30px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* 控件那一组也不许换行（`.ctl` 全局是 `flex-wrap: wrap`） */
+.sheet-row .ctl {
+  flex-wrap: nowrap;
+}
+
+/* B 那条要放两个输入框（跌幅 + 量比），窄一点才排得下 */
+.rule-row input {
+  width: 54px;
+}
+
+.unit {
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* 规则那几行左边是开关，别跟标签挤在一起 */
+.rule-row {
+  gap: 6px;
+}
+
+/* 主周期那排胶囊小一号 */
+.seg button {
+  padding: 4px 9px;
+  font-size: 11.5px;
+}
+
+/* 保存那颗也收一点（原来 40px 高在这份弹层里偏胖） */
+.save-row {
+  padding: 9px 0 2px;
+}
+
+.save-row .wide {
+  min-height: 34px;
+  font-size: 12.5px;
+}
+
+/* 主周期那排胶囊：选中的点亮（跟配置弹层里的胶囊一个样子） */
+.seg button.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.save-row .wide {
+  width: 100%;
+}
+</style>

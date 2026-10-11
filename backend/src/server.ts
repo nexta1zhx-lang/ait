@@ -103,6 +103,8 @@ import {
 import {MAX_PINS, listPins, togglePin} from './db/pins'
 import {BLACKLIST_HOURS, listBlacklist, lockBase, lockedUntil} from './db/blacklist'
 import {getStatsSettings, saveStatsSettings} from './db/stats-settings'
+import {getScanParams, saveScanParams} from './db/scan-settings'
+import {pickCandidates} from './scan/rules'
 import {
   MARKET_TYPES,
   MAX_EXCHANGE_KEYS,
@@ -3391,6 +3393,45 @@ async function route(
     return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
 
+  /* ---- 自动化预测：扫描参数 + 当前这一轮的候选（2026-10-12） ----
+   *
+   * 用户 2026-10-12：「可调参数 改为前端配置 留着」「新建一个页面叫自动化预测…
+   * 显筛选的币种」。所以这两条接口服务「开单分析 → 自动化预测」那一页：
+   *   · `/api/scan/settings` —— 参数读写（跟 `/api/stats-settings` 一个路数：按用户存库）
+   *   · `/api/scan/picks`    —— **只挑候选**（纯 SQL 读本地 K 线，不调模型、不花钱）
+   *
+   * ⚠️ `picks` 是只读快照：它不落库、不写 `analyses`、也不发通知。
+   *    真正的后台定时扫描是后面那一段的事（`scan/scanner.ts`），这一版先让人能在网页上看清"筛出来的币种"。
+   */
+  if (p === '/api/scan/settings') {
+    if (method === 'GET') {
+      return sendJson(res, 200, {params: await getScanParams(me.id), error: null})
+    }
+    if (method === 'PUT' || method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      // 脏值不报错，`normalizeScanParams` 自己收口（能修的修、不能修的落回默认）
+      return sendJson(res, 200, {params: await saveScanParams(me.id, body), error: null})
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  if (p === '/api/scan/picks') {
+    if (method !== 'GET') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const atRaw = Number(url.searchParams.get('at'))
+    try {
+      const params = await getScanParams(me.id)
+      const result = await pickCandidates({
+        userId: me.id,
+        params,
+        at: Number.isFinite(atRaw) && atRaw > 0 ? atRaw : null
+      })
+      return sendJson(res, 200, {params, ...result, error: null})
+    } catch (e) {
+      return sendJson(res, 502, {error: (e as Error).message})
+    }
+  }
+
   /* ---- 用量统计 ---- */
   if (p === '/api/usage' || p === '/api/usage/summary') {
     const days = url.searchParams.get('days')
@@ -3400,6 +3441,9 @@ async function route(
         usageSummary({
           userId: me.id,
           days: Number(days ?? 30),
+          // 任意区间（用的是「带日历图标的日期输入框」，见 `UsageView`）
+          from: url.searchParams.get('from'),
+          to: url.searchParams.get('to'),
           recent: Number(recent ?? 10),
           kind: url.searchParams.get('kind'),
           // 只看某把密钥的用量（模型配置页里点某一把）
@@ -3433,6 +3477,8 @@ async function route(
       const page = await usageCalls({
         userId: me.id,
         days: Number(url.searchParams.get('days') ?? 30),
+        from: url.searchParams.get('from'),
+        to: url.searchParams.get('to'),
         kind: url.searchParams.get('kind'),
         keyId: Number(url.searchParams.get('keyId')) || null,
         limit: Number(url.searchParams.get('limit') ?? 50),

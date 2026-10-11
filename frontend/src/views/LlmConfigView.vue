@@ -8,13 +8,14 @@
  * 三件事：
  *   ① 密钥列表 —— 每把显示名字 / 掩码 / 模型 / **它自己的用量**，可编辑 / 设默认 / 删
  *   ② 只有「新增 / 编辑」才弹窗（平时就是一张清单）
- *   ③ 用量统计并进这一页，并且能按密钥筛（统计跟 key 绑定）
+ *
+ * ★ 2026-10-12：原来这里还把「用量统计」整段嵌在下面（③），现在拆出去了 ——
+ *   用量是「我的 → 模型配置」里的**第二个子 tab**（`UsageView`，见 `ModelPaneView`）。
+ *   这一份只负责密钥；汇率还是在这里顺手拉一次，因为密钥行要按汇率显示人民币金额。
  *
  * ⚠️ 真 Key 不出网：接口只回掩码（`sk-a****3456`），输入框留空 = 不改。
  */
 import {computed, onMounted, ref} from 'vue'
-import SegTabs from '../comps/SegTabs.vue'
-import UsageView from './UsageView.vue'
 import {
   createLlmKey,
   deleteLlmKey,
@@ -168,18 +169,6 @@ async function remove(k: LlmKey): Promise<void> {
   }
 }
 
-/* ---------------- 用量：按密钥筛 ---------------- */
-
-const filterKey = ref<number | null>(null)
-
-const keyFilters = computed(() => [
-  {value: null as number | null, label: '全部密钥'},
-  ...keys.value.map(k => ({
-    value: k.id as number | null,
-    label: k.isDefault ? `${k.name}（默认）` : k.name
-  }))
-])
-
 onMounted(async () => {
   await load()
   // 顺手拿一次汇率（跟用量页同一个接口，很轻）
@@ -258,15 +247,6 @@ onMounted(async () => {
         </div>
       </div>
     </section>
-
-    <!-- ② 用量统计（跟密钥绑定） -->
-    <section class="panel usage-bar">
-      <h2>用量统计</h2>
-      <span class="spacer" />
-      <SegTabs v-model="filterKey" :options="keyFilters" />
-    </section>
-
-    <UsageView :key-id="filterKey" />
 
     <!-- ③ 新增 / 编辑弹窗 -->
     <Teleport to="body">
@@ -468,13 +448,6 @@ h2 small {
 .btn:disabled {
   opacity: 0.6;
   cursor: default;
-}
-
-.usage-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 /* 弹窗 */

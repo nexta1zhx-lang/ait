@@ -12,6 +12,7 @@ import {
   type TradeOpenOrder,
   type TradePositionRow
 } from '../api'
+import IconCalendar from './IconCalendar.vue'
 import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
@@ -3802,19 +3803,7 @@ onBeforeUnmount(() => {
           "
           @click="openPicker"
         >
-          <svg
-            viewBox="0 0 24 24"
-            width="14"
-            height="14"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="3" y="5" width="18" height="15.5" rx="2.5" />
-            <path d="M3 10h18M8 3.2v3.6M16 3.2v3.6" />
-          </svg>
+          <IconCalendar />
         </button>
         <span v-if="fromMs" class="foot-time">{{ bjTime(fromMs) }}</span>
         <span

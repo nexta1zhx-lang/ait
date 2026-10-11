@@ -74,7 +74,9 @@ export const routes = [
    *     · 预测历史 / 知识库 → 「开单分析」的左栏 tab（`?t=history|kb`）；
    *     · 账户统计          → **这一页的第二格**（`?p=stats`，紧跟交易所账户）。
    *
-   * 子页用 `?p=exchange|stats|profile|admin`，管理的二级 tab 用 `?t=users|server`。
+   * 子页用 `?p=exchange|stats|profile|model|admin`；
+   * 二级 tab 用 `?t=` —— 管理是 `users|server`，模型配置是 `keys|usage|prompts`。
+   * ★ 2026-10-12：「模型配置」从「个人信息」里搬出来成一级 tab（原来叫「AI 提示词」）。
    */
   {
     path: '/me',
@@ -107,10 +109,15 @@ export const routes = [
     path: '/history',
     redirect: to => analyzeTab('history', to.query)
   },
-  // 「用量」并进了「模型配置」，而「模型配置」现在在「我的 → 个人信息」里
+  /*
+   * 「用量」→ 「我的 → 模型配置 → 用量统计」。
+   * ★ 2026-10-12：模型配置从「个人信息」里搬出来成了**一级 tab**（标签就叫「模型配置」），
+   *   里面三个子 tab：密钥配置 / 用量统计 / AI 提示词（`?t=keys|usage|prompts`）。
+   *   所以老书签 `/usage` 现在落到 `?p=model&t=usage`。
+   */
   {
     path: '/usage',
-    redirect: to => ({path: '/me', query: {...to.query, p: 'profile'}})
+    redirect: to => ({path: '/me', query: {...to.query, p: 'model', t: 'usage'}})
   },
   // 「知识库」现在是「开单分析」左栏的一格
   {path: '/knowledge', redirect: to => analyzeTab('kb', to.query)},

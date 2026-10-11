@@ -28,6 +28,7 @@ import StepsPanel from '../comps/StepsPanel.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import HistoryView from './HistoryView.vue'
+import AutoPredictView from './AutoPredictView.vue'
 import PredictHistory from '../comps/PredictHistory.vue'
 import AnswerBody from '../comps/AnswerBody.vue'
 import {
@@ -194,9 +195,16 @@ const tabs = computed(() => {
 const route = useRoute()
 const router = useRouter()
 
-/** `?t=` 的取值：`chart` 是窄屏专属那格，其余在 `LEFT_TABS` 里 */
+/**
+ * `?t=` 的取值：`chart` 是窄屏专属那格，其余在 `LEFT_TABS` 里。
+ *
+ * ⚠️ `history` 是**老值**（2026-10-12 之前「预测历史」是独立一格）：
+ *    它跟「实时分析」合并成「预测结果」之后，老书签 / 老链接（`/history`、
+ *    `/me?p=replay` 都由 `router.ts` 转成 `?t=history`）必须还能落对地方 —— 映射到 `live`。
+ */
 function readTab(v: unknown): LeftTab | null {
   if (v === 'chart') return 'chart'
+  if (v === 'history') return 'live'
   return LEFT_TABS.some(t => t.value === v) ? (v as LeftTab) : null
 }
 
@@ -565,8 +573,10 @@ const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
           : leftTab === 'test'
             ? 'm-test'
             : 'm-analysis',
-        // 「历史分析」「合约行情」各自再挂一个类：窄屏要让它跟「K 线」一样吃满整屏
-        leftTab === 'history' ? 'm-history' : '',
+        // 「合约行情」再挂一个类：窄屏要让它跟「K 线」一样吃满整屏
+        // ⚠️ 原来这里还有 `leftTab === 'history' ? 'm-history' : ''` —— 2026-10-12
+        //    「预测历史」并进「预测结果」之后它就没主了（留着的后果是那条 `:not(.m-history)`
+        //    判据把合并后那一格自己的滚动关掉，反过来坏事），所以删掉、`style.css` 里那套也清了。
         leftTab === 'market' ? 'm-market' : '',
         // 切 tab 的滑入方向（见上面 paneAnim）：'pane-l' | 'pane-r' | ''
         paneAnim ? 'pane-' + paneAnim : ''
@@ -634,7 +644,12 @@ const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
           </section>
         </div>
 
-        <!-- ② 实时分析 / 测试（两块共用同一套渲染：测试多一块「结束线」面板） -->
+        <!--
+          ② 预测结果 / 测试（两块共用同一套渲染：测试多一块「结束线」面板）
+          ★ 2026-10-12 合并：这一格原来是「实时分析」，下面是**并列**的另一格「预测历史」；
+            用户要求「实时分析和预测历史合并改为预测结果」—— 于是历史列表挂到这一格末尾，
+            一次滚动看全：本次结论在上、以往记录在下。
+        -->
         <template v-if="leftTab === 'live' || leftTab === 'test'">
           <div class="scroll-body">
             <!-- 测试模式：在图上点一根，定下「我看到哪一刻」 -->
@@ -748,12 +763,19 @@ const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
               </section>
 
             </template>
+
+            <!--
+              预测历史（原「预测历史」那一格）：每次分析留下的那一句话。
+              `embedded` = 嵌在会滚的父容器里 ⇒ 列表自己不再滚、不再抢高度
+              （否则一页里套两层滚动条，手机上最难用）。
+            -->
+            <PredictHistory embedded />
           </div>
         </template>
 
-        <!-- ② 预测历史：每次分析留下的那一句话（币种 + 时间段能筛） -->
-        <div v-else-if="leftTab === 'history'" class="scroll-body">
-          <PredictHistory />
+        <!-- ②' 自动化预测：扫描参数（可调参数） + 这一轮筛出来的币种（2026-10-12） -->
+        <div v-else-if="leftTab === 'auto'" class="scroll-body">
+          <AutoPredictView />
         </div>
 
         <!-- ③ 知识库：2026-10-10 从「我的 → 复盘」挪进来，替掉原来的「历史分析」 -->

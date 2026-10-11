@@ -2032,6 +2032,74 @@ export const fetchStatsSettings = () =>
 export const saveStatsSettings = (input: StatsSettings) =>
   put<{settings: StatsSettings; error: string | null}>('/api/stats-settings', input)
 
+/* ---------------- 自动化预测：扫描参数 + 候选币种（2026-10-12） ---------------- */
+
+/**
+ * 扫描参数 —— **字段与后端 `db/scan-settings.ts` 的 `ScanParams` 一一对应**，别只改一边。
+ *
+ * 用户 2026-10-12：「可调参数 改为前端配置 留着」—— 这些数原来写在方案文档里，
+ * 现在存库、在「自动化预测」页上改。
+ */
+export interface ScanParams {
+  timeframe: '15m' | '1h' | '4h'
+  perRule: number
+  maxPicks: number
+  minTurnover: number
+  minAgeDays: number
+  /** **市值排名前 N 不扫**（0 = 不排除）—— 用户 2026-10-12：「市值前 30 不扫」 */
+  excludeTopRank: number
+  rules: {breakout: boolean; dip: boolean; rally: boolean; volume: boolean}
+  breakoutVol: number
+  dipPct: number
+  dipVol: number
+  rallyPct: number
+  spikeVol: number
+}
+
+/** 一条候选（后端 `scan/rules.ts` 的 `ScanPick`） */
+export interface ScanPick {
+  base: string
+  symbol: string
+  rules: string[]
+  ruleLabels: string[]
+  price: number
+  pct24: number
+  turnover24: number
+  volRatio: number
+  vsHigh20: number
+  offLow24: number
+  rank: number | null
+}
+
+/** `/api/scan/picks` 的回应：参数 + 这一轮的结果 */
+export interface ScanPicks {
+  params: ScanParams
+  /** 这一轮看的"现在"（最后一根已收盘 K 线的收盘时刻，ISO） */
+  at: string
+  timeframe: ScanParams['timeframe']
+  /** 参与打分的币数（过了状态 / 新币 / 成交额门槛的） */
+  scanned: number
+  /** 因为「市值前 N」被排掉的有几个 */
+  excludedTop: number
+  /** 市值排名没拉到 ⇒「市值前 N 不扫」这条没生效（界面要提示出来） */
+  rankMissing: boolean
+  /** 各类规则命中的原始个数（去重配额之前） */
+  ruleHits: Record<string, number>
+  picks: ScanPick[]
+  ms: number
+  error: string | null
+}
+
+export const fetchScanSettings = () =>
+  get<{params: ScanParams; error: string | null}>('/api/scan/settings')
+
+export const saveScanSettings = (input: ScanParams) =>
+  put<{params: ScanParams; error: string | null}>('/api/scan/settings', input)
+
+/** 跑一轮选币（纯 SQL，不调模型、不花钱） */
+export const fetchScanPicks = (at?: number) =>
+  get<ScanPicks>(`/api/scan/picks${at ? `?at=${at}` : ''}`)
+
 /* ---------------- 万能划转（2026-10-05） ---------------- */
 
 /**
@@ -2852,6 +2920,9 @@ export interface Money {
 
 export interface UsageSummary {
   days: number
+  /** 区间模式下的两头（`YYYY-MM-DD`）；按「最近 N 天」查时是 null */
+  from: string | null
+  to: string | null
   rate: number
   totals: UsageTotals
   byDay: UsageBucket[]
@@ -2873,6 +2944,12 @@ export interface UsageCallPage {
 
 export interface UsageQuery {
   days: number
+  /**
+   * 任意区间（`YYYY-MM-DD`，含头含尾的北京自然日）—— 日期输入框选的。
+   * ★ 2026-10-12：给了它就不再按 `days` 算（`days` 只留着当兜底 / 兼容老调用）。
+   */
+  from?: string | null
+  to?: string | null
   kind: '' | 'judge' | 'extract'
   /** 只看某把密钥（llm_key_id）；不传 / 0 = 全部 */
   keyId?: number | null
@@ -2880,6 +2957,10 @@ export interface UsageQuery {
 
 function usageQs(q: UsageQuery, extra: Record<string, string | number> = {}) {
   const p = new URLSearchParams({days: String(q.days)})
+  if (q.from && q.to) {
+    p.set('from', q.from)
+    p.set('to', q.to)
+  }
   if (q.kind) p.set('kind', q.kind)
   if (q.keyId) p.set('keyId', String(q.keyId))
   for (const [k, v] of Object.entries(extra)) p.set(k, String(v))

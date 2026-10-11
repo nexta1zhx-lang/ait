@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, onMounted, ref, watch} from 'vue'
+import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import StatCards, {type StatCard} from '../comps/StatCards.vue'
 import CostTrend from '../comps/CostTrend.vue'
 import SegTabs from '../comps/SegTabs.vue'
@@ -12,12 +12,13 @@ import {
   type UsageRow,
   type UsageSummary
 } from '../api'
-import {ago, bjTime, cny, int, ms, pct, tok, usd} from '../format'
-import AccountBar from '../comps/AccountBar.vue'
+import DateRangeCalendar from '../comps/DateRangeCalendar.vue'
+import IconCalendar from '../comps/IconCalendar.vue'
+import {bjTime, cny, int, ms, pct, tok, usd} from '../format'
 
 /**
- * 用量统计。原来是一个独立页签，2026-10-04 用户要求
- * 「用量移到此界面（模型配置）」→ 现在嵌在 `LlmConfigView` 里。
+ * 用量统计。原来是一个独立页签，之后并进「模型配置」；★ 2026-10-12 起它是
+ * 「我的 → 模型配置」里的**第二个子 tab**（`ModelPaneView`：密钥配置 / 用量统计 / AI 提示词）。
  *
  * `keyId` 是"只看哪把密钥"（父组件传进来）—— 统计可以跟密钥绑定分开看。
  */
@@ -27,22 +28,77 @@ const props = withDefaults(defineProps<{keyId?: number | null}>(), {
 
 /* ---------------- 筛选 ---------------- */
 
-const RANGES = [
-  {value: 1, label: '今天'},
-  {value: 7, label: '7 天'},
-  {value: 30, label: '30 天'},
-  {value: 90, label: '90 天'},
-  {value: 365, label: '1 年'}
-]
-
 const KINDS = [
   {value: '' as const, label: '全部用途'},
   {value: 'judge' as const, label: '开单分析'},
   {value: 'extract' as const, label: '案例提炼'}
 ]
 
-const days = ref(30)
+/*
+ * ★ 2026-10-12 用户：「把『今天/7天/30天…』那排日期筛选，换成带日历图标的日期输入框
+ *   （点开选任意区间，图标复用 K 线页那颗）」。
+ *
+ * 所以这里不再有「N 天」那排胶囊，改成 `from`/`to` 两个**北京自然日**（含头含尾），
+ * 默认最近 30 天（跟以前一样）。日期全是 `YYYY-MM-DD` 字符串，比较 / 显示都不碰时区。
+ */
+const BJ = 'Asia/Shanghai'
+const bjToday = (): string =>
+  new Intl.DateTimeFormat('en-CA', {timeZone: BJ}).format(new Date())
+const bjShift = (day: string, n: number): string => {
+  const d = new Date(day + 'T00:00:00Z')
+  d.setUTCDate(d.getUTCDate() + n)
+  return d.toISOString().slice(0, 10)
+}
+
+const from = ref(bjShift(bjToday(), -29))
+const to = ref(bjToday())
 const kind = ref<'' | 'judge' | 'extract'>('')
+
+const rangeText = computed(() =>
+  from.value === to.value ? from.value : `${from.value} ~ ${to.value}`
+)
+
+/* ---------------- 日期弹层 ---------------- */
+
+/*
+ * 日历**不在这里画** —— 用共用的 `DateRangeCalendar`（就是「账户统计」那颗，
+ * 用户 2026-10-12：「日历复用的是账户统计的日历」）。这里只管弹不弹、选了之后存哪。
+ */
+const pickerOpen = ref(false)
+
+/** 这一页要的快捷项（比账户统计多一个「今天」） */
+const QUICK = [
+  {label: '今天', days: 1},
+  {label: '近 7 天', days: 7},
+  {label: '近 30 天', days: 30},
+  {label: '近 90 天', days: 90}
+]
+
+/** 点弹层外面 / 按 Esc 关掉 */
+function onDocDown(e: PointerEvent): void {
+  if (!pickerOpen.value) return
+  if ((e.target as HTMLElement)?.closest?.('.rng')) return
+  pickerOpen.value = false
+}
+function onKey(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && pickerOpen.value) pickerOpen.value = false
+}
+onMounted(() => {
+  document.addEventListener('pointerdown', onDocDown, true)
+  document.addEventListener('keydown', onKey)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onDocDown, true)
+  document.removeEventListener('keydown', onKey)
+})
+
+function applyRange(v: {from: string; to: string}): void {
+  // 应用时把空的补成「今天」——统计口径上两头都得有日子
+  from.value = v.from || bjToday()
+  to.value = v.to || v.from || bjToday()
+  if (from.value > to.value) [from.value, to.value] = [to.value, from.value]
+  pickerOpen.value = false
+}
 
 /* ---------------- 数据 ---------------- */
 
@@ -53,10 +109,12 @@ const limit = ref(50)
 const offset = ref(0)
 const loading = ref(true)
 const error = ref('')
-const updatedAt = ref<number | null>(null)
 
 const query = computed(() => ({
-  days: days.value,
+  /** ⚠️ 后端还认 `days`（老口径 / 兜底），这里固定给个值，实际按 `from`/`to` 走 */
+  days: 30,
+  from: from.value,
+  to: to.value,
   kind: kind.value,
   keyId: props.keyId
 }))
@@ -75,7 +133,6 @@ async function load() {
     summary.value = s
     rows.value = page.rows
     total.value = page.total
-    updatedAt.value = Date.now()
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -98,7 +155,7 @@ async function loadPage() {
 }
 
 onMounted(load)
-watch([days, kind, () => props.keyId], () => {
+watch([from, to, kind, () => props.keyId], () => {
   offset.value = 0
   load()
 })
@@ -287,27 +344,41 @@ const symbolText = (r: UsageRow) =>
 </script>
 
 <template>
-  <div class="col">
-    <!--
-      模型 + 余额：**只管窄屏**（宽屏在顶栏）。顶栏窄屏收起来了，
-      所以这一块是手机上切模型/看余额的唯一入口 —— 显隐交给 CSS（.usage-account）。
-    -->
-    <AccountBar class="usage-account" />
-
+  <div class="col usage">
     <!-- 筛选 -->
     <section
       class="panel"
       style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap"
     >
-      <SegTabs v-model="days" :options="RANGES" />
+      <!--
+        日期：**带日历图标的输入框**（用户 2026-10-12 要求换掉「今天/7天/30天…」那排胶囊，
+        点开选任意区间；图标用的是 K 线页那颗 —— 共用组件 `IconCalendar`）。
+      -->
+      <div class="rng">
+        <button
+          type="button"
+          class="rng-btn"
+          :class="{on: pickerOpen}"
+          title="点开选日期（任意区间）"
+          @click="pickerOpen = !pickerOpen"
+        >
+          <IconCalendar :size="14" />
+          <span class="rng-text">{{ rangeText }}</span>
+          <span class="rng-caret">▾</span>
+        </button>
+
+        <div v-if="pickerOpen" class="rng-pop">
+          <DateRangeCalendar
+            :from="from"
+            :to="to"
+            :quick="QUICK"
+            :clear-text="null"
+            @apply="applyRange"
+          />
+        </div>
+      </div>
+
       <SegTabs v-model="kind" :options="KINDS" />
-      <span style="flex: 1"></span>
-      <span v-if="updatedAt" class="dim">
-        {{ ago(new Date(updatedAt).toISOString()) }}更新
-      </span>
-      <button class="ghost" :disabled="loading" @click="load">
-        {{ loading ? '加载中…' : '刷新' }}
-      </button>
     </section>
 
     <div v-if="error" class="error">
@@ -321,7 +392,7 @@ const symbolText = (r: UsageRow) =>
     <!-- 趋势 -->
     <section class="panel">
       <h2>
-        每天花费 <span class="tag">最近 {{ days }} 天</span>
+        每天花费 <span class="tag">{{ rangeText }}</span>
       </h2>
       <CostTrend
         :days="summary?.byDay ?? []"
@@ -482,6 +553,89 @@ const symbolText = (r: UsageRow) =>
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* ---------------- 日期输入框 + 日历弹层 ---------------- */
+
+/*
+ * ★ 2026-10-12 用户：「把『今天/7天/30天…』那排日期筛选，换成带日历图标的日期输入框
+ *   （点开选任意区间，图标复用 K 线页那颗）」。
+ *
+ * 样子做成**输入框**（跟「合约行情」那个搜索框同一套皮）：圆角框 + 左内嵌日历图标 +
+ * 右侧小三角；点开往下弹一个手写日历（不引日期库）。区间是**北京自然日、含头含尾**。
+ */
+.rng {
+  position: relative;
+  min-width: 0;
+}
+
+.rng-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.rng-btn:hover,
+.rng-btn.on {
+  border-color: var(--accent-line);
+}
+.rng-btn :deep(svg) {
+  color: var(--muted);
+  flex: none;
+}
+.rng-text {
+  white-space: nowrap;
+}
+.rng-caret {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.rng-pop {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 268px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+/*
+ * ★ 2026-10-12 用户：「统计卡片缩小布局」。
+ *
+ * 顶部那 6 张 KPI 卡原来是 150px 起、数值 20px，一屏占得太多；这里**只在用量页**
+ * 收小（全局 `.cards` 不动 —— 它是 `StatCards.vue` 的样式，别的地方还要按原样用）。
+ */
+.usage :deep(.cards) {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+}
+.usage :deep(.card) {
+  padding: 8px 10px;
+  border-radius: 8px;
+  gap: 1px;
+}
+.usage :deep(.card .k) {
+  font-size: 10.5px;
+}
+.usage :deep(.card .v) {
+  font-size: 16px;
+}
+.usage :deep(.card .sub) {
+  font-size: 10.5px;
 }
 
 .two {

@@ -10,7 +10,10 @@
  *   存进来的也是一整篇 ⇒ 这一列塞不下。所以这里只取**第一句**（`markdownToPlain`），
  *   想看全文去点开那条（原文照旧整段存在库里）。
  *
- * 挂在「开单分析 → 预测历史」那一格（`AnalyzeView` 的左栏）。
+ * ★ 2026-10-12：用户把「实时分析」和「预测历史」两格合并成「预测结果」，
+ *   于是这个列表**挂在分析那一格的下面**（`AnalyzeView` 的左栏，`embedded` 模式）。
+ *   挂上去之后它不能再自己撑高 / 自己滚 —— 外层 `.scroll-body` 已经在滚了，
+ *   两层滚动条在手机上最难用（`embedded` 那个 prop 就是干这个的）。
  */
 import {computed, onMounted, ref} from 'vue'
 import {
@@ -21,6 +24,12 @@ import {
 import {ago, bjTime, fmt} from '../format'
 import {askConfirm} from '../confirm'
 import {markdownToPlain} from '../markdown'
+
+/**
+ * `embedded`：嵌在**自己会滚**的父容器里（合并后的「预测结果」那一格）。
+ * 这时列表不再 `flex: 1 1 auto` 撑满、也不再自己 `overflow-y: auto`。
+ */
+const props = withDefaults(defineProps<{embedded?: boolean}>(), {embedded: false})
 
 /** 列表里那一行：抹成一句纯文字，太长就截断 */
 function summary(line: string | null | undefined): string {
@@ -105,7 +114,7 @@ async function remove(row: PredictionRow) {
 </script>
 
 <template>
-  <section class="panel hist-panel warm-skin">
+  <section class="panel hist-panel warm-skin" :class="{embedded: props.embedded}">
     <h2>
       预测历史
       <span class="tag">共 {{ total }} 条</span>
@@ -184,6 +193,15 @@ async function remove(row: PredictionRow) {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* 嵌在会滚的父容器里（合并后的「预测结果」）：高度交给内容，自己不滚 */
+.hist-panel.embedded {
+  flex: 0 0 auto;
+}
+.hist-panel.embedded .pred-list {
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 .filter-row {

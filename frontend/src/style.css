@@ -615,11 +615,6 @@ a {
   color: var(--bad);
 }
 
-/* 「用量」页里那份默认不显示，只有窄屏（顶栏收起）才露 */
-.account.usage-account {
-  display: none;
-}
-
 .topmeta {
   display: flex;
   align-items: center;
@@ -6093,9 +6088,6 @@ button.badge:disabled {
   .topbar {
     display: none;
   }
-  .account.usage-account {
-    display: flex;
-  }
   .brand .sub {
     display: none;
   }
@@ -6476,31 +6468,12 @@ button.badge:disabled {
   /*
    * 「历史分析」那一格：跟「K 线」一样吃满除 tab 行之外的整屏。
    *
-   * 为什么非给个确定高度：这一格的列表条数是**量容器高度算出来的**
-   * （AnalyzeView 的 measureHistoryRows）。容器高度由内容撑 → 12 条 → 分量出来还是 12 条，
-   * 就卡在这个死循环里，一屏只摆 12 行、底下空一大片（用户：「历史界面高度不对」）。
-   * 高度定死之后，列表把整格填满，行数自然跟着算对。
-   *
-   * ⚠️ 这一格**只有一栏**（`.side` 那格在窄屏是 display:none），所以模板就写一行；
-   * 千万别写成 `auto minmax(0,1fr)` 再配 `grid-row: 2` —— 空的第一行照样占掉一个
-   * `gap: 10px`，整栏（含 tab 行）会被往下推 10px（用户：「点击历史分析 tab tab 栏有偏移」，
-   * 实测三个 tab 的 tab 行 y = 64 / 64 / **74**）。
+   * ⚠️ 2026-10-12：「预测历史」并进「预测结果」（用户：「实时分析和预测历史合并改为预测结果」），
+   * 它原来那套 `m-history`（整格定高 + 列表按容器高度算行数）整段删掉了 ——
+   * 现在它只是分析那一格末尾的一块，跟着父容器一起滚。
+   * 留着那套还有个副作用：`.split.m-analysis:not(.m-history)` 那条判据会把合并后那一格
+   * 自己的滚动关掉，等于把「预测结果」这一格弄成不能滚。
    */
-  body.fixed-viewport:has(.split.m-history) #app {
-    height: 100vh;
-    height: 100dvh;
-    overflow: auto;
-  }
-  body.fixed-viewport:has(.split.m-history) .analyze,
-  body.fixed-viewport:has(.split.m-history) .split {
-    flex: 1 1 auto;
-    min-height: 0;
-  }
-  .split.m-history {
-    grid-template-rows: minmax(0, 1fr);
-    min-height: calc(100vh - 170px);
-    min-height: calc(100dvh - 170px);
-  }
   /*
    * 「实时分析」（以及窄屏进不去的「测试」）：这两格原来**漏了**，结果谁都不滚。
    *
@@ -6535,11 +6508,11 @@ button.badge:disabled {
   }
   /*
    * 内容区自己滚（要压过上面 `.split > .col, .split .scroll-body { overflow: visible }`）。
-   * ⚠️ `:not(.m-history):not(.m-market)` —— 模板里「历史分析 / 合约行情」也会戴上
-   * `m-analysis`（那条 class 是 `chart → test → 其余` 的三分支），而它们各自那套
-   * 「高度定死 + 内部自己滚」已经调好了，别在这里再给它们套一层 scroll。
+   * ⚠️ `:not(.m-market)` —— 模板里「合约行情」也会戴上 `m-analysis`
+   * （那条 class 是 `chart → test → 其余` 的三分支），而它自己那套
+   * 「高度定死 + 内部自己滚」已经调好了，别在这里再给它套一层 scroll。
    */
-  .split.m-analysis:not(.m-history):not(.m-market) .scroll-body,
+  .split.m-analysis:not(.m-market) .scroll-body,
   .split.m-test .scroll-body {
     overflow-y: auto;
     overflow-x: hidden;
@@ -6713,15 +6686,6 @@ button.badge:disabled {
   .split.m-market .mkt-table .pin-b svg {
     width: 12px;
     height: 12px;
-  }
-  /*
-   * 历史分析：**去掉圆角的框**（用户 2026-10-03）。
-   * 跟行情列表一个做法：通栏 + 无边框 + 直角，看着跟上面的 tab 带子连成一块。
-   */
-  .split.m-history .hist-panel {
-    margin: 0 -14px;
-    border: 0;
-    border-radius: 0;
   }
   /* 画布**贴边**（只在头部 / 底部那些行上补内边距），跟「宽度全屏」对得上 */
   .chart-side .chart-head,

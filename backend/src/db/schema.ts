@@ -153,6 +153,16 @@ CREATE TABLE IF NOT EXISTS user_stats_settings (
 
 -- 登录会话：前端存 token，请求带 Authorization: Bearer <token>
 -- （SSE 带不了请求头，所以也接受 ?token=，见 server.ts 的 currentUser）。
+-- 自动化预测的扫描参数（2026-10-12，见 db/scan-settings.ts）。
+-- 用户 2026-10-12：「可调参数 改为前端配置 留着」—— 主周期 / 条数配额 / 成交额门槛 /
+-- 四条规则的开关与阈值都存这里：网页上改，扫描器按它跑（网页没开的时候也要生效）。
+CREATE TABLE IF NOT EXISTS user_scan_settings (
+  user_id    BIGINT      PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  -- 整份参数（字段与校验见 db/scan-settings.ts 的 ScanParams / normalizeScanParams）
+  params     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   token      TEXT        PRIMARY KEY,
   user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,

@@ -154,9 +154,20 @@ export const error = ref('')
  */
 export const LEFT_TABS = [
   {value: 'market' as const, label: '合约行情'},
-  {value: 'live' as const, label: '实时分析'},
+  /*
+   * ★ 2026-10-12 用户：「实时分析和预测历史合并改为预测结果」——
+   *   原来「实时分析」和「预测历史」是并列两格，可它们看的是同一件事
+   *   （一句话结论：上面是刚跑出来的，下面是以前跑过的）。现在合成一格：
+   *   上面是本次的分析过程 + 结论卡，下面接预测历史列表。
+   *
+   * ⚠️ `value` 仍然是 `'live'`，不改 —— 老链接 `?t=live`、以及
+   *    `leftTab === 'live'` 那一堆判断（含 `test` 共用同一套渲染）都不用动；
+   *    老链接 `?t=history` 由 `AnalyzeView.readTab` 映射过来。
+   */
+  {value: 'live' as const, label: '预测结果'},
   {value: 'test' as const, label: '测试'},
-  {value: 'history' as const, label: '预测历史'},
+  /* 用户 2026-10-12：「新建一个页面叫自动化预测 在预测历史后面」 */
+  {value: 'auto' as const, label: '自动化预测'},
   {value: 'kb' as const, label: '知识库'},
   {value: 'add' as const, label: '添加案例'}
 ]

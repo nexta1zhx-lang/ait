@@ -24,7 +24,7 @@ import PaneShell from '../comps/PaneShell.vue'
 import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
 import ProfileView from './ProfileView.vue'
 import AdminView from './AdminView.vue'
-import PromptsView from './PromptsView.vue'
+import ModelPaneView, {type ModelTab} from './ModelPaneView.vue'
 import {user} from '../session'
 
 /*
@@ -35,7 +35,7 @@ const AccountStatsView = defineAsyncComponent(
   () => import('./AccountStatsView.vue')
 )
 
-type Pane = 'exchange' | 'stats' | 'profile' | 'prompts' | 'admin'
+type Pane = 'exchange' | 'stats' | 'profile' | 'model' | 'admin'
 
 /** 「管理」里那两半 */
 export type AdminTab = 'users' | 'server'
@@ -51,8 +51,12 @@ const PANES: {value: Pane; label: string}[] = [
   {value: 'exchange', label: '交易所账户'},
   {value: 'stats', label: '账户统计'},
   {value: 'profile', label: '个人信息'},
-  // 2026-10-11：用户要「自己定义提示词」→ 提示词正文回到数据库、这一页可编辑
-  {value: 'prompts', label: 'AI 提示词'},
+  /*
+   * ★ 2026-10-12：用户「ai 提示词 tab 改为模型配置，个人信息中的模型配置内容提出到这个页面
+   *   和 ai 提示词合并改为 3 个子 tab（密钥配置 / 用量统计 / AI 提示词）」——
+   *   所以这一格的标签改成「模型配置」，内容交给 `ModelPaneView` 挂三段。
+   */
+  {value: 'model', label: '模型配置'},
   // 只有管理员看得到。里面还有二级 tab：用户管理 / 服务器
   {value: 'admin', label: '管理'}
 ]
@@ -71,11 +75,17 @@ function readPane(v: unknown): Pane {
   //    「复盘」那半（`?p=replay&r=…`）已经拆走（预测历史 / 知识库 去开单分析，
   //    账户统计留在这一页），`router.ts` 会把它们转成新写法 —— 这里再兜一层，
   //    别渲染出空白。
-  if (v === 'llm' || v === 'usage') return 'profile'
+  // ★ 2026-10-12：`llm`（模型配置）/ `usage`（用量）/ `prompts`（AI 提示词）现在都是
+  //   「模型配置」这一格里的子 tab —— 具体落哪一段由下面 `applyRoute()` 决定
+  if (v === 'llm' || v === 'usage' || v === 'prompts') return 'model'
   if (v === 'replay') return 'stats'
-  if (v === 'stats' || v === 'profile' || v === 'prompts' || v === 'admin')
-    return v
+  if (v === 'stats' || v === 'profile' || v === 'model' || v === 'admin') return v
   return 'exchange'
+}
+
+/** 「模型配置」那三段：密钥配置（默认）/ 用量统计 / AI 提示词 */
+function readModelTab(v: unknown): ModelTab {
+  return v === 'usage' || v === 'prompts' ? v : 'keys'
 }
 
 /** 管理页里当前看的是哪一半；只有 `?t=server` 才算服务器，其余都当用户管理 */
@@ -101,6 +111,7 @@ const pane = ref<Pane>(readPane(route.query.p))
 const rootRef = ref<{$el?: HTMLElement} | null>(null)
 useScrollMemory(() => rootRef.value?.$el ?? null)
 const adminTab = ref<AdminTab>('users')
+const modelTab = ref<ModelTab>('keys')
 
 /**
  * 交易所账户那一格**只要进来过一次就一直留着**（`v-show` 藏起来，不卸载）。
@@ -168,6 +179,21 @@ function applyRoute(): void {
   // 老链接：`?p=status` 以前是独立的一格，现在直接落在「管理 → 服务器」
   // （它没有 `?t=`，所以要单独兜一下）
   adminTab.value = raw === 'status' ? 'server' : readAdminTab(route.query.t)
+  /*
+   * 模型配置那三段的子 tab：
+   *   · `?p=prompts`（老链接 = 「AI 提示词」那一格）→ 落在 **AI 提示词** 那一段；
+   *   · `?p=usage`（更老的「用量」独立页）→ 落在 **用量统计**；
+   *   · 其余（`?p=model` / `?p=llm`）→ 默认 **密钥配置**。
+   * `?t=` 写了就听它的（刷新 / 分享链接靠这个）。
+   */
+  modelTab.value =
+    route.query.t !== undefined
+      ? readModelTab(route.query.t)
+      : raw === 'prompts'
+        ? 'prompts'
+        : raw === 'usage'
+          ? 'usage'
+          : 'keys'
 }
 
 applyRoute()
@@ -176,14 +202,19 @@ applyRoute()
 watch([() => route.query.p, () => route.query.t], applyRoute)
 
 /** 只把字符串型的 query 带下去（`?id=` 那种要留着，抽屉靠它自动弹） */
-function writeQuery(p: Pane, t: AdminTab): void {
+function writeQuery(p: Pane, t: AdminTab, m: ModelTab = modelTab.value): void {
   const q: Record<string, string> = {}
   for (const [k, val] of Object.entries(route.query)) {
     if (typeof val === 'string') q[k] = val
   }
   q.p = p
-  // ⚠️ 二级 tab 只在「管理 → 服务器」时才写进地址栏，`?t=users` 是多余的
+  /*
+   * 二级 tab 只在**非默认**那种情况下写进地址栏：
+   *   · 管理：只有「服务器」才写（`?t=users` 是多余的）；
+   *   · 模型配置：只有「用量统计 / AI 提示词」才写（默认是「密钥配置」）。
+   */
   if (p === 'admin' && t === 'server') q.t = 'server'
+  else if (p === 'model' && m !== 'keys') q.t = m
   else delete q.t
   void router.replace({query: q})
 }
@@ -197,6 +228,11 @@ function setPane(v: Pane): void {
 function setAdminTab(v: AdminTab): void {
   adminTab.value = v
   writeQuery('admin', v)
+}
+
+function setModelTab(v: ModelTab): void {
+  modelTab.value = v
+  writeQuery('model', adminTab.value, v)
 }
 </script>
 
@@ -251,11 +287,16 @@ function setAdminTab(v: AdminTab): void {
       @update:tab="setAdminTab"
     />
     <!--
-      AI 提示词：切走即卸载（它没有轮询 / 订阅，重挂很便宜）。
+      模型配置（密钥配置 / 用量统计 / AI 提示词 三段）：切走即卸载 —— 三段都没有
+      轮询 / 订阅，重挂很便宜（用量那段会重拉一次统计）。
       ⚠️ 必须是**独立的 `v-if`**，跟在 AdminView 那个 `v-else-if` 后面 ——
          原因跟上面 `ProfileView` 那段一样（别接进那条链子里）。
     -->
-    <PromptsView v-if="pageAlive && pane === 'prompts'" />
+    <ModelPaneView
+      v-if="pageAlive && pane === 'model'"
+      :tab="modelTab"
+      @update:tab="setModelTab"
+    />
   </PaneShell>
 </template>
 

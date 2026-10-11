@@ -121,7 +121,11 @@ export interface UsageBucket extends UsageTotals {
 }
 
 export interface UsageSummary {
+  /** 最近 N 天那个口径（区间模式下只用来当兜底文案） */
   days: number
+  /** 任意区间的两头（`YYYY-MM-DD`，北京自然日）；没给区间就是 null */
+  from: string | null
+  to: string | null
   since: string
   totals: UsageTotals
   byDay: UsageBucket[]
@@ -218,13 +222,40 @@ function daysOf(v: unknown, fallback = 30): number {
   return Math.max(1, Math.min(3650, Math.round(n)))
 }
 
-/** 拼 WHERE（全部走白名单 / 数字，无注入面） */
-function whereSql(days: number, kind: UsageKind | null, hasKey: boolean) {
+/**
+ * 时间范围：**最近 N 天**（`days`）或**任意区间**（`from`/`to`，含头含尾的北京自然日）。
+ *
+ * ★ 2026-10-12：用户要把「今天/7天/30天…」换成**带日历图标的日期输入框（任意区间）**，
+ *   所以除了 `days` 还认 `from`/`to`（`YYYY-MM-DD`）。两个都给就按区间走。
+ */
+function dayKey(v: unknown): string | null {
+  const s = String(v ?? '').trim()
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null
+}
+
+/** 拼 WHERE（`days` 是数字、`from`/`to` 已校验成 `YYYY-MM-DD`，无注入面） */
+function whereSql(
+  range: {days: number; from?: string | null; to?: string | null},
+  kind: UsageKind | null,
+  hasKey: boolean
+) {
   // $1 = user_id（调用方传入）；$2 = llm_key_id（只按密钥筛时才有）
-  const parts = [
-    `u.user_id = $1`,
-    `u.created_at >= now() - interval '${days} days'`
-  ]
+  const parts = [`u.user_id = $1`]
+  const from = dayKey(range.from)
+  const to = dayKey(range.to)
+  if (from && to) {
+    /*
+     * ⚠️ 用 `AT TIME ZONE 'Asia/Shanghai'` 把「北京的那一天 00:00」翻成时刻再比 ——
+     *    跟上面按天分组（`byDay` 的 key 就是北京日期）同一套口径，否则跨月那几天会错位。
+     *    时刻是常量表达式，索引照样用得上。
+     */
+    parts.push(
+      `u.created_at >= ((DATE '${from}' + time '00:00') AT TIME ZONE 'Asia/Shanghai')`,
+      `u.created_at <  ((DATE '${to}' + interval '2 days') AT TIME ZONE 'Asia/Shanghai')`
+    )
+  } else {
+    parts.push(`u.created_at >= now() - interval '${range.days} days'`)
+  }
   if (kind) parts.push(`u.kind = '${kind}'`)
   if (hasKey) parts.push(`u.llm_key_id = $2`)
   return parts.join(' AND ')
@@ -240,6 +271,9 @@ export async function usageSummary(opts: {
   /** 只看谁的用量（用户隔离）；null = 没归属 */
   userId: number | null
   days?: number
+  /** 任意区间（含头含尾的北京自然日，`YYYY-MM-DD`）；跟 `days` 一起给时它优先 */
+  from?: string | null
+  to?: string | null
   recent?: number
   /** 只看某类调用 */
   kind?: UsageKind | string | null
@@ -250,7 +284,8 @@ export async function usageSummary(opts: {
   const recent = Math.max(0, Math.min(500, Math.round(opts.recent ?? 10)))
   const kind = kindOf(opts.kind)
   const keyId = Number(opts.keyId) > 0 ? Number(opts.keyId) : null
-  const where = whereSql(days, kind, keyId !== null)
+  const where = whereSql({days, from: opts.from, to: opts.to}, kind, keyId !== null)
+  const range = {from: dayKey(opts.from), to: dayKey(opts.to)}
   const params = keyId === null ? [opts.userId] : [opts.userId, keyId]
 
   const totalsRow = await query<RawBucket>(
@@ -309,6 +344,9 @@ export async function usageSummary(opts: {
   const t = totalsRow[0]
   return {
     days,
+    // 前端拿这两个显示「哪一段」（区间模式）—— 没给区间就退回「最近 N 天」
+    from: range.from,
+    to: range.to,
     since: new Date(Date.now() - days * 86_400_000).toISOString(),
     totals: t
       ? {
@@ -353,6 +391,9 @@ export async function usageCalls(opts: {
   /** 只看谁的用量（用户隔离）；null = 没归属 */
   userId: number | null
   days?: number
+  /** 任意区间（含头含尾的北京自然日，`YYYY-MM-DD`）；跟 `days` 一起给时它优先 */
+  from?: string | null
+  to?: string | null
   kind?: UsageKind | string | null
   /** 只看某把密钥；不传 = 全部 */
   keyId?: number | null
@@ -362,7 +403,7 @@ export async function usageCalls(opts: {
   const days = daysOf(opts.days)
   const kind = kindOf(opts.kind)
   const keyId = Number(opts.keyId) > 0 ? Number(opts.keyId) : null
-  const where = whereSql(days, kind, keyId !== null)
+  const where = whereSql({days, from: opts.from, to: opts.to}, kind, keyId !== null)
   const params = keyId === null ? [opts.userId] : [opts.userId, keyId]
   const limit = Math.max(1, Math.min(500, Math.round(opts.limit ?? 50)))
   const offset = Math.max(0, Math.round(opts.offset ?? 0))

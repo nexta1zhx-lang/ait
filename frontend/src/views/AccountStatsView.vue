@@ -16,6 +16,7 @@ import {
 } from '../api'
 import {echarts, type ECharts} from '../chart-theme'
 import {parseBinanceC2cFile} from '../binance-c2c'
+import DateRangeCalendar from '../comps/DateRangeCalendar.vue'
 
 /* 局部暖金与石墨色板，避免影响其它页面。 */
 const P = {
@@ -74,7 +75,6 @@ const c2cFileInput = ref<HTMLInputElement | null>(null)
 const draftFrom = ref('')
 const draftTo = ref('')
 const beijingToday = () => new Date(Date.now() + 8 * 60 * 60 * 1000)
-const calendarMonth = ref(monthStart(beijingToday()))
 const roiChartEl = ref<HTMLElement | null>(null)
 const dailyChartEl = ref<HTMLElement | null>(null)
 const drawdownChartEl = ref<HTMLElement | null>(null)
@@ -191,10 +191,6 @@ function roiValue(value: number): string {
   return `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(2)}%`
 }
 
-function monthStart(date: Date): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
-}
-
 function dateStart(value: string): number | null {
   if (!value) return null
   const [year, month, day] = value.split('-').map(Number)
@@ -214,90 +210,20 @@ function displayDate(value: string): string {
   return value ? value.replaceAll('-', '.') : ''
 }
 
-const monthLabel = computed(() =>
-  `${calendarMonth.value.getUTCFullYear()}年${calendarMonth.value.getUTCMonth() + 1}月`
-)
-
-const calendarCells = computed(() => {
-  const first = monthStart(calendarMonth.value)
-  const mondayOffset = (first.getUTCDay() + 6) % 7
-  const selectedFrom = draftFrom.value
-  const selectedTo = draftTo.value
-  const today = dateKey(beijingToday())
-  return Array.from({length: 42}, (_, index) => {
-    const date = new Date(first)
-    date.setUTCDate(index - mondayOffset + 1)
-    const key = dateKey(date)
-    return {
-      key,
-      day: date.getUTCDate(),
-      currentMonth: date.getUTCMonth() === first.getUTCMonth(),
-      today: key === today,
-      selected: key === selectedFrom || key === selectedTo,
-      inRange: Boolean(selectedFrom && selectedTo && key > selectedFrom && key < selectedTo)
-    }
-  })
-})
-
-const activeQuickRange = computed(() => {
-  if (!draftFrom.value && !draftTo.value) return 'all'
-  const today = beijingToday()
-  const end = dateKey(today)
-  for (const days of [7, 30, 90]) {
-    const start = new Date(today)
-    start.setUTCDate(start.getUTCDate() - days + 1)
-    if (draftFrom.value === dateKey(start) && draftTo.value === end) return `${days}`
-  }
-  return ''
-})
-
-function chooseQuickRange(days: number | null): void {
-  if (days === null) {
-    draftFrom.value = ''
-    draftTo.value = ''
-    calendarMonth.value = monthStart(beijingToday())
-    return
-  }
-  const end = beijingToday()
-  const start = new Date(end)
-  start.setUTCDate(start.getUTCDate() - days + 1)
-  draftFrom.value = dateKey(start)
-  draftTo.value = dateKey(end)
-  calendarMonth.value = monthStart(start)
-}
-
-function shiftMonth(delta: number): void {
-  const next = new Date(calendarMonth.value)
-  next.setUTCMonth(next.getUTCMonth() + delta)
-  calendarMonth.value = monthStart(next)
-}
-
-function chooseDate(key: string): void {
-  if (!draftFrom.value || draftTo.value || key < draftFrom.value) {
-    draftFrom.value = key
-    draftTo.value = ''
-    return
-  }
-  draftTo.value = key
-}
-
-function clearDateRange(): void {
-  draftFrom.value = ''
-  draftTo.value = ''
-}
-
+/*
+ * 日期弹层里的**日历本身**在 `DateRangeCalendar`（用户 2026-10-12：「日历复用的是账户统计的
+ * 日历」→ 抽成共用组件，用量页也跟着用同一颗）。这里只剩三件事：开弹层、把草稿镜像到标题上、
+ * 点「应用」时落库到 `from/to` 再拉数。
+ */
 function openDatePicker(): void {
   draftFrom.value = from.value
   draftTo.value = to.value
-  const initial = from.value || dateKey(beijingToday())
-  const parts = initial.split('-').map(Number)
-  calendarMonth.value = monthStart(new Date(Date.UTC(parts[0], parts[1] - 1, 1)))
   showDatePicker.value = true
 }
 
-function applyDateRange(): void {
-  from.value = draftFrom.value
-  to.value = draftTo.value
+function applyDateRange(range: {from: string; to: string}): void {
+  from.value = range.from
+  to.value = range.to
   showDatePicker.value = false
   void load()
 }
@@ -1129,32 +1055,12 @@ onBeforeUnmount(() => {
             </div>
             <button class="date-close" type="button" aria-label="关闭" @click="showDatePicker = false">×</button>
           </header>
-          <nav class="quick-ranges" aria-label="快捷日期范围">
-            <button type="button" :class="{active: activeQuickRange === '7'}" @click="chooseQuickRange(7)">近 7 天</button>
-            <button type="button" :class="{active: activeQuickRange === '30'}" @click="chooseQuickRange(30)">近 30 天</button>
-            <button type="button" :class="{active: activeQuickRange === '90'}" @click="chooseQuickRange(90)">近 90 天</button>
-            <button type="button" :class="{active: activeQuickRange === 'all'}" @click="chooseQuickRange(null)">全部</button>
-          </nav>
-          <div class="calendar-head">
-            <button type="button" aria-label="上个月" @click="shiftMonth(-1)">‹</button>
-            <strong>{{ monthLabel }}</strong>
-            <button type="button" aria-label="下个月" @click="shiftMonth(1)">›</button>
-          </div>
-          <div class="calendar-grid">
-            <span v-for="day in ['一', '二', '三', '四', '五', '六', '日']" :key="day" class="weekday">{{ day }}</span>
-            <button
-              v-for="cell in calendarCells"
-              :key="cell.key"
-              type="button"
-              class="calendar-day"
-              :class="{outside: !cell.currentMonth, selected: cell.selected, inRange: cell.inRange, today: cell.today}"
-              @click="chooseDate(cell.key)"
-            >{{ cell.day }}</button>
-          </div>
-          <footer class="date-modal-actions">
-            <button type="button" class="clear-range" @click="clearDateRange">清除日期</button>
-            <button type="button" class="apply-range" @click="applyDateRange">应用</button>
-          </footer>
+          <DateRangeCalendar
+            :from="from"
+            :to="to"
+            @change="v => { draftFrom = v.from; draftTo = v.to }"
+            @apply="applyDateRange"
+          />
         </section>
       </div>
       <div v-if="showConfig" class="date-modal-mask" @click.self="showConfig = false">
@@ -2282,29 +2188,6 @@ onBeforeUnmount(() => {
   height: 260px;
 }
 
-.quick-ranges {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  margin: 16px 0 14px;
-}
-
-.quick-ranges button {
-  min-height: 34px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: linear-gradient(135deg, #17191d, #171513);
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.quick-ranges button.active {
-  border-color: var(--accent-line);
-  background: linear-gradient(112deg, rgba(255, 217, 158, 0.19), rgba(243, 154, 63, 0.08));
-  color: #ffd291;
-}
-
 .chart-empty {
   display: grid;
   min-height: 80px;
@@ -2519,7 +2402,6 @@ onBeforeUnmount(() => {
 }
 
 .date-modal-head,
-.calendar-head,
 .date-modal-actions {
   display: flex;
   align-items: center;
@@ -2539,14 +2421,6 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 
-.calendar-grid {
-  padding: 7px 5px;
-  border: 1px solid rgb(68, 65, 64);
-  border-radius: 12px;
-  background:
-    linear-gradient(145deg, #101216, #11100f);
-}
-
 .date-modal-head h3 {
   margin: 0;
   font-size: 15px;
@@ -2563,8 +2437,7 @@ onBeforeUnmount(() => {
   color: var(--accent);
 }
 
-.date-close,
-.calendar-head button {
+.date-close {
   display: grid;
   place-items: center;
   box-sizing: border-box;
@@ -2582,81 +2455,6 @@ onBeforeUnmount(() => {
 .clear-range:hover {
   border-color: var(--accent);
   color: var(--accent);
-}
-
-.calendar-head {
-  margin-bottom: 9px;
-}
-
-.calendar-head strong {
-  font-size: 13px;
-}
-
-.calendar-head button {
-  width: 28px;
-  height: 28px;
-  font-size: 21px;
-  line-height: 1;
-}
-
-.calendar-grid {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 4px 2px;
-}
-
-.weekday {
-  padding: 5px 0;
-  color: var(--muted);
-  font-size: 10px;
-  text-align: center;
-}
-
-.calendar-day {
-  position: relative;
-  width: 100%;
-  min-width: 0;
-  height: 36px;
-  padding: 0;
-  border: 0;
-  border-radius: 9px;
-  background: linear-gradient(145deg, rgb(24, 27, 33), rgb(24, 20, 18));
-  color: var(--text);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.calendar-day:hover {
-  background: linear-gradient(135deg, rgb(38, 38, 38), rgb(39, 29, 20));
-}
-
-.calendar-day.outside {
-  color: var(--muted);
-  opacity: 0.42;
-}
-
-.calendar-day.inRange {
-  border-radius: 8px;
-  background: linear-gradient(90deg, rgba(211, 154, 101, 0.19), rgba(120, 149, 180, 0.12));
-}
-
-.calendar-day.selected {
-  border-radius: 9px;
-  background: linear-gradient(115deg, #ffe0ad, #d8894d);
-  color: #151515;
-  font-weight: 700;
-  opacity: 1;
-}
-
-.calendar-day.today:not(.selected)::after {
-  position: absolute;
-  right: 5px;
-  bottom: 4px;
-  left: 5px;
-  height: 2px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, #ffe0ad, #d8894d);
-  content: '';
 }
 
 .date-modal-actions {
