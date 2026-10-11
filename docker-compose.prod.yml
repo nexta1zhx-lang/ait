@@ -62,6 +62,12 @@ services:
         PREBUILT: ${PREBUILT:-0}
     container_name: ca-app
     restart: unless-stopped
+    # ★ 2026-10-11：默认只有 10 秒，到点 SIGKILL —— 而应用在 SIGTERM 时要**等这一分钟收盘**
+    #   （最多 60 秒 + 余量，见 server.ts 的 SHUTDOWN_BUDGET_MS / kline-recorder.ts 的
+    #   alignShutdownToMinute）才落库退出，为的是让库里那条 1m 链断在整分钟上、重启后不掉桶
+    #   （docs/EXCHANGE.md 第 58 节）。这里给 75 秒，比应用的 70 秒预算宽一点。
+    #   代价：每次发布最多多等 60 秒（这段时间旧进程还活着、仍在服务，用户无额外停机）。
+    stop_grace_period: 75s
     # environment 的优先级高于 env_file，所以 .env 里本地的
     # PGHOST=localhost / PGPORT=5432 在这里被覆盖成容器内的 db
     environment:

@@ -698,6 +698,95 @@ export async function readRecentCandles(
 }
 
 /**
+ * 一个桶里「已收盘的 1m」按币汇总出来的那一份（**只给内存累加器预热用**，不落库）。
+ * 字段跟 `Agg` 一一对应，外加 `bars` / `firstMs` / `lastMs` 三个用来判桶完不完整的。
+ */
+export interface Bucket1mSum {
+  symbol: string
+  /** 桶里最早 / 最晚一根 1m 的开盘时间（毫秒） */
+  firstMs: number
+  lastMs: number
+  /** 桶里实际有几根 1m —— 跟 `firstMs..lastMs` 该有的根数对不上就是中间漏了分钟 */
+  bars: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  quoteVolume: number
+  trades: number
+  takerBuyVolume: number
+}
+
+/**
+ * 把某个桶 `[fromMs, toMs)` 里**已收盘的 1m** 按 symbol 汇总好（`GROUP BY symbol`，一次查询）。
+ *
+ * 给谁用：底座启动时把各高周期的内存累加器「接回桶头」（`data/kline-recorder.ts` 的
+ * `hydrateAggs`）—— 这样重启后累加器不再是「从桶中间开始」的残桶，那一根就不会被丢。
+ * **只读、不写库**：写路径仍旧只有 `saveCandles` 一处（值校验 + 记账钩子都在那儿）。
+ *
+ * ⚠️ 走带 symbol 的那档索引（`candles_1m_<日>_exchange_market_type_interval_symbol_op_idx`），
+ *    桶越大越贵：最大是 1d 桶（全天 1m，几万到几十万行）。**只该在启动时跑一次**，
+ *    别拿它当常规读路径（常规读走 `readRecentCandles` / `readRangeCandles`）。
+ */
+export async function sum1mInBucket(a: {
+  symbols: string[]
+  fromMs: number
+  toMs: number
+  scope: {exchange: string; marketType: string}
+}): Promise<Bucket1mSum[]> {
+  if (!a.symbols.length || a.fromMs >= a.toMs) return []
+  const rows = await query<{
+    symbol: string
+    first_ms: string
+    last_ms: string
+    bars: string
+    open: number
+    high: number
+    low: number
+    close: number
+    volume: number
+    quote_volume: number
+    trades: number
+    taker_buy_volume: number
+  }>(
+    `SELECT symbol,
+            (extract(epoch FROM min(open_time)) * 1000)::bigint AS first_ms,
+            (extract(epoch FROM max(open_time)) * 1000)::bigint AS last_ms,
+            count(*) AS bars,
+            (array_agg(open  ORDER BY open_time ASC))[1]  AS open,
+            max(high) AS high,
+            min(low)  AS low,
+            (array_agg(close ORDER BY open_time DESC))[1] AS close,
+            sum(volume) AS volume,
+            sum(quote_volume) AS quote_volume,
+            sum(trades) AS trades,
+            sum(taker_buy_volume) AS taker_buy_volume
+       FROM candles
+      WHERE exchange = $4 AND market_type = $5 AND interval = '1m'
+        AND symbol = ANY($1::text[])
+        AND open_time >= to_timestamp($2::bigint / 1000.0)
+        AND open_time <  to_timestamp($3::bigint / 1000.0)
+      GROUP BY symbol`,
+    [a.symbols, a.fromMs, a.toMs, a.scope.exchange, a.scope.marketType]
+  )
+  return rows.map(r => ({
+    symbol: r.symbol,
+    firstMs: Number(r.first_ms),
+    lastMs: Number(r.last_ms),
+    bars: Number(r.bars),
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    volume: Number(r.volume),
+    quoteVolume: Number(r.quote_volume),
+    trades: Number(r.trades),
+    takerBuyVolume: Number(r.taker_buy_volume)
+  }))
+}
+
+/**
  * 由 1m **重算**某个高周期的一段桶。
  *
  * 什么时候用：补了缺口之后（回补的 1m 是直接写库的，没经过内存累加器）。

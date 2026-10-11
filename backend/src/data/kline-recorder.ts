@@ -52,6 +52,7 @@ import {
   saveCandles,
   saveKlineRecon,
   sumClosed1m,
+  sum1mInBucket,
   verifyPendingChecks,
   type HighInterval,
   type KlineInterval,
@@ -63,6 +64,14 @@ import {RateBudgetError, takeWeight} from '../util/rate-budget'
 import type {Candle, MarketType, Timeframe} from '../types'
 
 const MIN_MS = 60_000
+/**
+ * 退出等整分钟时**多留的余量**（见 `alignShutdownToMinute`）。
+ *
+ * 实测（2026-10-11，525 个币）：整分钟那一刻起，收盘帧**分几秒陆续到**齐 ——
+ * 整点后 +2 秒只到了 459/525，+4 秒（也就是下一次 flush 那一轮）才 525/525。
+ * 所以余量给到 6 秒（`FLUSH_MS` 4 秒 + 2 秒安全垫），别卡在 2 秒上（那样会丢十几个币）。
+ */
+const SHUTDOWN_CLOSE_MARGIN_MS = 6_000
 const MS: Record<KlineInterval, number> = {
   '1m': MIN_MS,
   '5m': 5 * MIN_MS,
@@ -373,6 +382,9 @@ const stats = {
   repairedSymbols: 0,
   backfilled1m: 0,
   repairedHigh: 0,
+  /** 启动预热：从库里 1m 接回桶头的（币×周期）数；其中仍是残桶的那个数单列 */
+  hydratedAggs: 0,
+  hydratedPartial: 0,
   seeded: 0,
   seedLimited: 0,
   lastFlushAt: 0,
@@ -645,8 +657,9 @@ function push(
  *
  * ⚠️ **残桶绝不写**：换桶时如果上一个桶没等齐（启动时从桶中间开始记、或中间漏了分钟），
  *    写下去就是一条**量偏小**的假 K 线，而且会盖掉 seed/repair 灌进来的交易所口径。
- *    残桶靠两条路补：启动那次由 `seedHistory()` 的 REST 覆盖；
- *    运行中的漏分钟由 `onKline` 排进修复队列（`repairSymbol` 再问交易所）。
+ *    残桶靠三条路补：① 启动时 `hydrateAggs()` 用库里 1m 把累加器接回桶头（这样正常重启
+ *    **根本不会**产生残桶）；② 真丢了 1m 的那种，由 `onKline` 排进修复队列；
+ *    ③ 巡检/续灌（`repairSweep` / `seedHistory`）兜底。
  */
 function rollup(st: SymState, openTime: number, bar: Bar): void {
   for (const it of HIGH_INTERVALS) {
@@ -724,6 +737,95 @@ async function flush(): Promise<void> {
     else stats.dropped += rows.length
   } finally {
     flushing = false
+  }
+}
+
+/* ---------------- 启动预热：把累加器接回桶头 ---------------- */
+
+/**
+ * 启动时用**库里已收盘的 1m** 把各高周期的内存累加器接回「桶头」（2026-10-11 修）。
+ *
+ * 为什么需要它（线上实测的坑）：进程一重启，累加器是空的、从桶中间开始 ⇒ 被判残桶
+ * （`Agg.partial`）、**故意不落库**。而两条兜底路都够不着它：
+ *   · `seedHistory()` 的规则是「库里最后一根还新（< 2 个周期）就跳过」——
+ *     重启那一刻最后一根**必然**在 1 个周期之内，所以正好跳过，那一根永远轮不到灌；
+ *   · `repairSweep()` 只扫 **1m 有没有落后**；容器重建只停几秒，1m 一根都不缺
+ *     （WS 的 1m 是累计值，回来就拿到完整那根）⇒ 根本不排修。
+ * 结果：**每次发布（= 重启）都会把「重启时开着的那根桶」丢掉**，5m/15m 图上少一根
+ * 约 5~20 分钟才被巡检/续灌补回来（补出来的是 `repair` / `seed` 口径，
+ * 顺带把 `trades` 抹成 0）。实测：今天 09:32 那次重启掉了 5m/15m 的 `01:30`；
+ * 上一次发布掉了 1h 的 `15:00`（`source=seed`）与 4h 的 `12:00`。
+ *
+ * 修法就是这里：同一个桶，库里那几根 1m 是**现成的**（本地库、0 权重），
+ * 把它们汇总起来当累加器的起点 ⇒ 重启后累加器从桶头开始、不再残 ⇒ 正常收盘落库。
+ *
+ * ⚠️ **安全边界一点不放松**：只有当桶里从第一分钟起、且在库里一根不缺时才 `partial=false`。
+ *    重启时真丢了 1m（停机几秒以上）⇒ 这里照样判残桶、照样不写，交给原来的巡检/修复路径
+ *    （那条路会先补 1m 再把高周期滚出来）。
+ * ⚠️ 必须在 `open()` **之前**跑：之后就有实时帧在动 `live1m` / `aggs` 了，两边会打架。
+ */
+async function hydrateAggs(): Promise<void> {
+  if (!cfg || !symbols.length) return
+  const scope = {exchange: cfg.exchange, marketType: cfg.marketType}
+  const list = symbols.map(s => s.symbol)
+  const bySymbol = new Map<string, SymState>()
+  for (const s of symbols) {
+    const st = states.get(s.pair.toUpperCase())
+    if (st) bySymbol.set(s.symbol, st)
+  }
+  const now = Date.now()
+  let filled = 0
+  let partial = 0
+  for (const it of HIGH_INTERVALS) {
+    const ms = MS[it]
+    const bucket = Math.floor(now / ms) * ms
+    const rows = await sum1mInBucket({
+      symbols: list,
+      fromMs: bucket,
+      toMs: bucket + ms,
+      scope
+    }).catch(e => {
+      /* 预热只是「让重启不掉桶」的优化：库读不出来不是致命错误，退回旧行为即可 */
+      console.warn(`[kline] 累加器预热读库失败（${it}）：${(e as Error).message.slice(0, 120)}`)
+      return []
+    })
+    for (const r of rows) {
+      const st = bySymbol.get(r.symbol)
+      /* 已经有累加器了（按构造不会：预热在开流之前）⇒ 内存那根是活的，别覆盖 */
+      if (!st || st.aggs.has(it)) continue
+      /* 缺头（桶第一分钟没赶上）或中间漏了分钟 ⇒ 仍旧是残桶，不写（见 Agg.partial） */
+      const missing = r.firstMs !== bucket || r.bars < (r.lastMs - r.firstMs) / MIN_MS + 1
+      st.aggs.set(it, {
+        bucket,
+        partial: missing,
+        /* 下一根该来的 1m 接着库里最晚那根往下数 ⇒ 实时流一对接就知道有没有漏分钟 */
+        nextMs: r.lastMs + MIN_MS,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: r.volume,
+        quoteVolume: r.quoteVolume,
+        trades: r.trades,
+        takerBuyVolume: r.takerBuyVolume
+      })
+      /*
+       * 顺手把「最后一个已收盘 1m」接上：这样**开工后第一根实时 1m** 就能判出
+       * 「我们停机那几分钟」是空的（`onKline` 里那条 `lastClosedMs` 比较），
+       * 直接排进修复队列 —— 不用等 60 秒后那轮 `repairSweep`。
+       */
+      if (r.lastMs > st.lastClosedMs) st.lastClosedMs = r.lastMs
+      filled++
+      if (missing) partial++
+    }
+  }
+  stats.hydratedAggs = filled
+  stats.hydratedPartial = partial
+  if (filled) {
+    console.log(
+      `[kline] 累加器预热：${filled} 个（币×周期）从库里 1m 接回桶头` +
+        (partial ? `，其中 ${partial} 个开头/中间缺分钟仍按残桶对待` : '')
+    )
   }
 }
 
@@ -1082,6 +1184,11 @@ const SLOW_TASK_MS_DEFAULT = 3_000
 const SLOW_TASK_MS: Record<string, number> = {
   补缺口: 120_000,
   灌历史: 120_000,
+  /*
+   * 启动预热（每档一条 SQL，最大那档是 1d 桶的全天 1m）。本地 500 币实测 ~0.1 秒，
+   * 给到 10 秒：真超过说明库那边不对劲（`candles` 少了带 symbol 的索引 / 盘忙），该告警。
+   */
+  累加器预热: 10_000,
 }
 const taskStats: Record<string, {lastMs: number; lastAt: number; runs: number; slow: number}> = {}
 
@@ -1961,6 +2068,12 @@ async function boot(): Promise<void> {
     console.warn(`[kline] 读生命周期表失败（不影响运行）：${(e as Error).message.slice(0, 100)}`)
   }
   console.log(`[kline] 底座启动：${symbols.length} 个合约，1 条上游连接（只订 1m）`)
+  /*
+   * ⚠️ 顺序要紧：**先预热累加器，再开流**（`open()`）。
+   *    反过来就晚了 —— 实时帧一进来就会把 `aggs` 按「从桶中间开始」建出来（残桶），
+   *    预热再写就是打架。见 `hydrateAggs()` 的说明（修 2026-10-11「重启掉一根」）。
+   */
+  await timed('累加器预热', hydrateAggs)
   await open()
   timers.push(setInterval(() => void timed('落库', flush), FLUSH_MS))
   timers.push(setInterval(logStats, STATS_MS))
@@ -2004,6 +2117,36 @@ async function boot(): Promise<void> {
   void seedHistory1m()
 }
 
+/**
+ * 退出前把「最后一分钟」收完整：等到**下一个整分钟 + 一点余量**再关，让库里那条 1m 链
+ * **断在整分钟上**（2026-10-11，配合 `hydrateAggs()` 修「重启掉一根桶」）。
+ *
+ * 为什么需要它：容器重建时旧进程死在某一分钟中间 ⇒ 那一分钟的 1m **按设计不写**
+ *   （未收盘的桶不落库，见 `Agg.partial` 的说明）⇒ 本地就永久缺那 1 分钟。
+ *   而「缺头/缺中间」的桶会被判残桶丢弃 ⇒ 所有档（5m/15m/1h/4h/1d）都掉一根，
+ *   要等巡检/续灌慢慢补。等到整分钟再退，这 1 分钟就是**完整的**，下一个进程
+ *   预热时能拿到「桶头到最后一分钟」的全部 1m ⇒ 桶完整 ⇒ 正常落库、一根都不掉。
+ *
+ * ⚠️ 只在 **SIGTERM**（容器编排/`docker stop`）时等 —— Ctrl+C 是 SIGINT，
+ *    开发时按一下要等最多 60 秒就太烦人了（见 server.ts 的退出处理）。
+ * ⚠️ 需要 `stop_grace_period` 放宽到 75 秒，否则 Docker 默认 10 秒就 SIGKILL（见
+ *    `docker-compose.prod.yml`）。
+ *
+ * @returns 实际等了多久（毫秒）；没等就返回 0
+ */
+export async function alignShutdownToMinute(): Promise<number> {
+  /* 底座没在跑 / 上游那条流已经断了 ⇒ 等下去也收不到收盘帧，别拖时间 */
+  if (!started || stopped || sock?.readyState !== 1) return 0
+  /* + CLOSE_MARGIN_MS：收盘帧到我们手上还要走一段网络，留点余量再落库 */
+  const wait = MIN_MS - (Date.now() % MIN_MS) + SHUTDOWN_CLOSE_MARGIN_MS
+  console.log(
+    `[kline] 退出：等这一分钟收盘（${(wait / 1000).toFixed(1)} 秒）再落库 —— ` +
+      `这样库里那条 1m 链断在整分钟上，下一个进程预热就不会掉桶`
+  )
+  await sleep(wait)
+  return wait
+}
+
 export async function stopKlineRecorder(): Promise<void> {
   if (!started || stopped) return
   stopped = true
@@ -2017,6 +2160,15 @@ export async function stopKlineRecorder(): Promise<void> {
   }
   sock = null
   await flush()
+  /*
+   * ⚠️ `flush()` 在**已经有一次写在飞**时会直接返回（`flushing` 守卫）—— 那一次写的是它当时
+   *    取走的那批，我们刚推的还在 buffer 里。所以这里复查一眼：还剩就再写一次（最多 1 秒）。
+   *    退出那一刻正好压上一次 flush 的概率不大，但这 1 分钟不能丢（见 `alignShutdownToMinute`）。
+   */
+  for (let i = 0; i < 10 && buffer.length; i++) {
+    await sleep(100)
+    await flush()
+  }
 }
 
 export interface KlineRecorderStats {
@@ -2036,6 +2188,10 @@ export interface KlineRecorderStats {
   backfilled1m: number
   /** 直连交易所补回来的**高周期**行数（2026-10-08 起：哪档缺就直连哪档） */
   repairedHigh: number
+  /** 启动预热：从库里 1m 接回桶头的（币×周期）数（见 `hydrateAggs`） */
+  hydratedAggs: number
+  /** 其中开头缺分钟 / 中间漏分钟、仍按残桶对待的数量（这些桶照旧靠巡检补） */
+  hydratedPartial: number
   seeded: number
   seedLimited: number
   pendingRepairs: number
@@ -2082,6 +2238,8 @@ export async function klineRecorderStats(): Promise<KlineRecorderStats> {
     repairedSymbols: stats.repairedSymbols,
     backfilled1m: stats.backfilled1m,
     repairedHigh: stats.repairedHigh,
+    hydratedAggs: stats.hydratedAggs,
+    hydratedPartial: stats.hydratedPartial,
     seeded: stats.seeded,
     seedLimited: stats.seedLimited,
     pendingRepairs: repairQueue.size,

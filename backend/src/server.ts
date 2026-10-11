@@ -214,6 +214,7 @@ import {
   klineStoreStats
 } from './data/kline-store'
 import {
+  alignShutdownToMinute,
   discoverContracts,
   klineRecorderStats,
   runFullStaleSweep,
@@ -5593,21 +5594,48 @@ async function main(): Promise<void> {
     })
 }
 
-/** 退出时把 Vite 与数据库连接池关干净，别留孤儿进程 */
+/**
+ * 优雅退出的总预算：交易所关流（≤5 秒）+ 等整分钟（≤62 秒）+ 落库，留点余量。
+ * ⚠️ 必须**小于** `docker-compose.prod.yml` 里 app 的 `stop_grace_period`（75 秒），
+ *    否则到点被 SIGKILL，等整分钟白等（见下面的 SIGTERM 处理）。
+ */
+const SHUTDOWN_BUDGET_MS = 70_000
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
+
+/**
+ * 退出时把 Vite 与数据库连接池关干净，别留孤儿进程。
+ *
+ * ★ 2026-10-11：**SIGTERM 时等这一分钟收盘再退**（`alignShutdownToMinute()`）——
+ *   配合 K 线底座的 `hydrateAggs()`，这样容器重建 / 发布重启**不会再掉一根桶**
+ *   （见 docs/EXCHANGE.md 第 58 节）。三个时间预算要一起看，别只改一个：
+ *     · 交易所关流（写锚点 + 删 listenKey）≤ 5 秒（跟以前一样，别卡在联网上）；
+ *     · 等整分钟 ≤ 60 秒 + 6 秒余量（余量按实测定，见 SHUTDOWN_CLOSE_MARGIN_MS）；
+ *     · 前两步**并行**，所以合计 ≤ 66 秒 + 落库，留够 `SHUTDOWN_BUDGET_MS`（70 秒）——
+ *       必须**小于** `docker-compose.prod.yml` 里 app 的 `stop_grace_period`（75 秒），
+ *       否则到点被 SIGKILL，这一分钟的 1m 照样丢。
+ * ⚠️ Ctrl+C 发的是 SIGINT：开发时不等（否则按一下要干等最多 60 秒）。等整分钟这件事
+ *    只对「编排器让你退」有意义。
+ */
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
-    /*
-     * 退出前：给交易所那边写一条「关闭锚点」快照 + 删 listenKey 断流。
-     * ⚠️ 给 5 秒上限 —— docker stop 默认 10 秒后就 SIGKILL，别卡在联网上
-     *    （写锚点要每条 key 打一次 REST，约 2s/条）。
-     */
+    const waitForMinute = sig === 'SIGTERM'
     void Promise.race([
       (async () => {
-        await stopExchangeStreams()
-        /* K 线底座：把攒着的那批点落库再关（最多几秒） */
+        /*
+         * ① 交易所关流（写「关闭锚点」快照 + 删 listenKey 断流，约 2 秒/条 key）
+         * ② 等整分钟再落库（K 线那边）
+         * 两件事互不相干（关的是账户流，K 线那条 WS 自己一条连接、也不共用 agent 的销毁），
+         * 所以**并行**跑：总时长取两者较大者（≤5 秒 / ≤66 秒），而不是相加。
+         */
+        await Promise.all([
+          Promise.race([stopExchangeStreams(), sleep(5000)]),
+          /* 只有 SIGTERM 才等整分钟；SIGINT（Ctrl+C）不等，见函数头说明 */
+          waitForMinute ? alignShutdownToMinute() : Promise.resolve(0)
+        ])
+        /* ③ K 线底座：把攒着的那批点落库再关（最多几秒） */
         await stopKlineRecorder()
       })(),
-      new Promise(r => setTimeout(r, 5000))
+      sleep(SHUTDOWN_BUDGET_MS)
     ])
       .catch(() => undefined)
       .then(() => Promise.resolve(viteDev?.close()))
