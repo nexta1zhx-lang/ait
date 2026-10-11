@@ -35,10 +35,12 @@
 - **只有一个 Node 进程**：`backend/src/server.ts` 同时提供 API 和 `frontend/dist`
   静态文件。`NODE_ENV=production` 时它会跳过 Vite，只托管已构建产物，
   所以线上**不需要装 vite / tsx**（镜像里 `npm ci --omit=dev` 就够）。
-- **提示词在代码里**（`backend/src/llm/prompts.ts` 的 `PREDICT_PROMPT` / `EXTRACT_PROMPT`）。
-  2026-10-04 从数据库搬过来的 —— 改提示词要改代码 + 重新部署（见下面「后续更新」）。
-  老表 `ai_docs` / `ai_doc_versions` 没删，程序不再读写它；想退回数据库那套，
-  正文按 id 捞：predict = 9、extract = 7。
+- **提示词在数据库里**（`ai_docs`，`kind=predict`）—— 网页「我的 → AI 提示词」改，
+  即时生效（每次分析都重新读库，**不用重启、不用重新部署**）。
+  库里是**一份份拼的**：一份正文（判断依据）+ 一份「# 输出」（语气），按 `sort` 拼。
+  代码里只剩**语气预设表**（`backend/src/llm/tone-presets.ts`）：启动时把库里缺的那几份补上
+  （补出来是**关着**的，绝不覆盖已有的），所以改预设要改代码 + 重新部署。
+  ⚠️ **本机改的提示词不会自己上去** —— 要按下面「提示词怎么同步到线上」把两张表搬过去。
 - 进程崩了由 Docker 自己拉起（`restart: unless-stopped`），**不需要 pm2**。
 
 ---
@@ -422,10 +424,55 @@ SELECT pg_cancel_backend(pid) FROM pg_stat_activity
 
 - **要重新 build 镜像的**（走上面这套）：后端 / 前端源码、`Dockerfile`、
   `docker-compose.prod.yml`、`Caddyfile`、`config/calibers.yaml`、`data/`、
-  **`backend/src/llm/prompts.ts`（提示词）**
+  **`backend/src/llm/tone-presets.ts`（语气预设）**
 - **不用更新**：账号 / 标签模板 / 案例库（都在数据库里，网页上改即时生效）
+- **要同步数据库的**：提示词（`ai_docs` + `ai_doc_versions`，见下面那一节）
 - **在服务器上改的**：`.env`（只剩 `PGPASSWORD` / 汇率这些）—— 服务器上直接编辑后
   `restart app`，**别**拿本机那份覆盖
+
+### 提示词怎么同步到线上（只搬两张表）
+
+提示词在库里（`ai_docs` + `ai_doc_versions`），**不随代码走**。改完提示词要一次性搬到线上：
+
+```bash
+KEY=~/.ssh/LightsailDefaultKey-ap-northeast-1.pem
+HOST=ubuntu@52.194.6.144
+
+# ① 本机：只把这两张表打成一个小包（几十 KB；⚠️ 别整库 dump —— 284M 里大头是 candles，
+#    而线上 K 线是 WS 一直在写的，整份覆盖等于把线上行情往回倒）
+docker exec ca-postgres pg_dump -U ca -d crypto_advisor -Fc \
+  -t ai_docs -t ai_doc_versions > /tmp/ca-prompts.dump
+
+# ② 线上：先备份当前那两张表（回滚就用它）
+ssh -i $KEY $HOST "sudo docker exec ca-postgres pg_dump -U ca -d crypto_advisor -Fc \
+  -t ai_docs -t ai_doc_versions > ~/prompts-before-\$(date +%F-%H%M).dump"
+
+# ③ 上传 + 恢复
+scp -i $KEY /tmp/ca-prompts.dump $HOST:/tmp/ca-prompts.dump
+ssh -i $KEY $HOST "
+  sudo docker cp /tmp/ca-prompts.dump ca-postgres:/tmp/ca-prompts.dump &&
+  sudo docker exec ca-postgres psql -U ca -d crypto_advisor -q \
+    -c 'TRUNCATE ai_doc_versions, ai_docs RESTART IDENTITY;' &&
+  sudo docker exec ca-postgres pg_restore -U ca -d crypto_advisor --data-only --no-owner \
+    -t ai_docs /tmp/ca-prompts.dump &&                     # ⚠️ 顺序要紧：先父表
+  sudo docker exec ca-postgres pg_restore -U ca -d crypto_advisor --data-only --no-owner \
+    -t ai_doc_versions /tmp/ca-prompts.dump &&             # 再子表（有外键）
+  sudo docker exec ca-postgres psql -U ca -d crypto_advisor -q \
+    -c \"SELECT setval('ai_docs_id_seq', (SELECT max(id) FROM ai_docs));\" \
+    -c \"SELECT setval('ai_doc_versions_id_seq', (SELECT max(id) FROM ai_doc_versions));\"
+"
+
+# ④ 验收（这两行应当与线上一致）
+curl -s https://bitcoooin.cn/api/health        # rules.sources / systemChars 就是拼出来的提示词
+```
+
+三个坑（2026-10-12 都踩过）：
+
+- **`pg_restore` 会先恢复子表** ⇒ 外键报 `ai_doc_versions_doc_id_fkey` 违反。
+  所以**分两次**、先 `ai_docs` 后 `ai_doc_versions`（上面就是这么写的）。
+- **`TRUNCATE ... RESTART IDENTITY` 之后必须 `setval`** —— 否则序列停在 1，
+  下一次「新建提示词」直接主键冲突。
+- **不需要重启 app**：提示词每次分析都重新读库。`/api/health` 里那串 `rules.sources` 就是凭证。
 
 ### ⚠️ 三条不能忘（`scripts/release.sh` 已经帮你挡住了）
 
