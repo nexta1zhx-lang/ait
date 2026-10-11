@@ -33,8 +33,7 @@ function tagsRuleOf(templates: readonly string[]): string {
 /**
  * 拼 system prompt。
  *
- * 正文来自**代码常量**：`llm/prompts.ts` 的 `EXTRACT_PROMPT`（2026-10-04 之前
- * 在数据库 `ai_docs` 的 kind=extract 文档里，用户要求写死代码后搬出来了）。
+ * 正文来自**数据库**：`ai_docs` 里 kind=extract 那份文档（「我的 → AI 提示词」里改）。
  * ⚠️ 代码里**没有兜底文案** —— 库里没写就直接报错，不拿内置文本充数。
  */
 export function buildExtractPrompt(
@@ -44,7 +43,7 @@ export function buildExtractPrompt(
   const text = base.trim()
   if (!text)
     throw new Error(
-      '内置的「知识库提炼」提示词是空的 —— 这是代码 bug（见 `llm/prompts.ts`）。'
+      '知识库提炼的提示词是空的 —— 去「我的 → AI 提示词」写一份（kind=extract）。'
     )
   const rule = tagsRuleOf(templates)
   return text.includes(TAG_SLOT)

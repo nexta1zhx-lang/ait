@@ -225,7 +225,7 @@ onMounted(load)
               <div class="u-meta">
                 <span class="dim small">建于 {{ bjTime(u.createdAt) }}</span>
                 <span class="dim small">
-                  {{ u.stats.analyses }} 条分析 · {{ u.stats.knowledge }} 条知识库
+                  {{ u.stats.analyses }} 条预测 · {{ u.stats.knowledge }} 条知识库
                 </span>
               </div>
             </div>

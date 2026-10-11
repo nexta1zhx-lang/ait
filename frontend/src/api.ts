@@ -690,10 +690,102 @@ export interface RulesInfo {
 }
 
 /*
- * 2026-10-04：原来这里的「AI 提示词文档」一整节（列表 / 增删改 / 版本 / 预览）全删了。
- * 用户说「AI 提示词界面没什么用，都要和代码绑定，直接去掉相关逻辑，写死代码」——
- * 提示词现在是 `backend/src/llm/prompts.ts` 里的常量，前端不再碰它。
+ * 2026-10-04：这里的「AI 提示词文档」一节曾经删过（当时提示词写死在代码里）。
+ * ★ 2026-10-10 又搬回来了：提示词重新放回数据库（`ai_docs`，kind=predict），
+ *   在「我的 → AI 提示词」里改，即改即生效。
  */
+
+/* ---------------- AI 提示词文档（存数据库） ---------------- */
+
+/**
+ * predict = 开单分析用的那份（唯一一条链路）；
+ * extract = 知识库提炼；
+ * role / rule = 旧版留下的，不再参与分析。
+ */
+export type DocKind = 'role' | 'rule' | 'extract' | 'predict'
+
+export interface AiDoc {
+  id: number
+  kind: DocKind
+  name: string
+  content: string
+  enabled: boolean
+  sort: number
+  updatedAt: string
+}
+
+export interface AiDocVersion {
+  id: number
+  docId: number
+  name: string
+  kind: DocKind
+  chars: number
+  savedAt: string
+}
+
+/** 拼 prompt 的概览 —— 页面顶部那条「这次会发什么」 */
+export interface AiAssembly {
+  enabled: boolean
+  origin: 'db' | 'documents'
+  sources: string[]
+  hash: string
+  /** 分析预测那份的字数（就这一份） */
+  predictChars: number
+  /** 知识库提炼那份（跟分析不是一条链路，单独报） */
+  extractChars: number
+  extractSources: string[]
+  extractHash: string
+  updatedAt: string | null
+  warnings: string[]
+}
+
+/** 语气预设（后端 `llm/tone-presets.ts` 定义，这里只用来渲染「新建」下拉） */
+export interface TonePreset {
+  id: string
+  label: string
+  hint: string
+  name: string
+  output: string
+}
+
+export const fetchAiDocs = () =>
+  get<{docs: AiDoc[]; tones: TonePreset[]; assembly: AiAssembly}>('/api/ai-docs')
+
+export const createAiDoc = (input: {
+  kind: DocKind
+  name: string
+  content?: string
+}) => post<{doc: AiDoc}>('/api/ai-docs', input)
+
+export const updateAiDoc = (
+  id: number,
+  patch: {
+    kind?: DocKind
+    name?: string
+    content?: string
+    enabled?: boolean
+    sort?: number
+  }
+) => put<{doc: AiDoc}>(`/api/ai-docs/${id}`, patch)
+
+export const deleteAiDoc = (id: number) => del<{ok: true}>(`/api/ai-docs/${id}`)
+
+export const fetchAiVersions = (id: number) =>
+  get<{versions: AiDocVersion[]}>(`/api/ai-docs/${id}/versions`)
+
+export const fetchAiVersion = (versionId: number) =>
+  get<{version: AiDocVersion & {content: string}}>(
+    `/api/ai-versions/${versionId}`
+  )
+
+export const restoreAiVersion = (versionId: number) =>
+  post<{doc: AiDoc}>(`/api/ai-versions/${versionId}/restore`, {})
+
+/** 看这次真正发出去的 system prompt（`kind='extract'` 看知识库提炼那份） */
+export const fetchAiPreview = (kind?: 'extract') =>
+  get<{system: string; enabled: boolean; sources: string[]; hash: string}>(
+    kind ? `/api/ai-preview?kind=${kind}` : '/api/ai-preview'
+  )
 
 export interface UsageHeadline {
   todayCalls: number
@@ -2058,7 +2150,13 @@ export const fetchCandles = (
  */
 export type ChangeWindow = 'd1' | 'd3' | 'd7' | 'm1' | 'm3' | 'y1'
 
-/** 顶部那条行情（价格 / 24h / 标记指数 / 资金费率 / 持仓量 / 多周期涨幅） */
+/**
+ * 顶部那条行情（价格 / 24h / 标记指数 / 资金费率 / 持仓量 / 多周期涨幅）。
+ *
+ * ⚠️ 它只是**首帧底稿**：价格那几项随后由 SSE 的 `ticker` 事件覆盖，
+ *    资金费率 / 指数价 / 下次收取时间由 SSE 的 `mark` 事件覆盖（见 `MarkPatch`）。
+ *    所以这条 REST 60 秒一发就够了（`ticker.ts` 的 `SLOW_MS`）。
+ */
 export interface TickerInfo {
   symbol: string
   pair: string
@@ -2203,6 +2301,26 @@ export interface TickerPatch {
 }
 
 /**
+ * 一批**标记价**增量里的一个币 —— 就是币安 `markPriceUpdate` 那四个字段。
+ *
+ * 只有 `pair`（`BTCUSDT`）能落到具体币上；其余三个换币 / 换页都不影响，
+ * 但 `fundingRate` 每 8 小时才变一次、`nextFundingTime` 定了就不动，
+ * 所以实际每秒变的主要是 `markPrice` / `indexPrice`。
+ */
+export interface MarkPatch {
+  /** 交易所原始交易对（BTCUSDT），跟 `TickerPatch.pair` 一个口径 */
+  pair: string
+  /** 标记价格 */
+  markPrice: number
+  /** 指数价格 */
+  indexPrice: number | null
+  /** 当期资金费率（小数，0.0001 = 0.01%） */
+  fundingRate: number | null
+  /** 下次资金费用时间（毫秒） */
+  nextFundingTime: number | null
+}
+
+/**
  * 订阅**全市场行情**实时推送（SSE）。
  *
  * 上游是币安的 `!ticker@arr`（一条流管所有币，后端中转）：
@@ -2216,16 +2334,21 @@ export interface TickerPatch {
  */
 export function tickerStream(
   onBatch: (updates: TickerPatch[]) => void,
-  onReconnect?: () => void
+  onReconnect?: () => void,
+  onMark?: (updates: MarkPatch[]) => void
 ): () => void {
+  const names = ['ticker']
+  if (onMark) names.push('mark')
   return sharedSse(
     '/api/tickers/stream',
-    ['ticker'],
+    names,
     {
-      events: ['ticker'],
-      onEvent: (_name, data) => {
+      events: names,
+      onEvent: (name, data) => {
         const d = data as {updates?: TickerPatch[]}
-        if (d?.updates?.length) onBatch(d.updates)
+        if (!d?.updates?.length) return
+        if (name === 'mark') onMark?.(d.updates as unknown as MarkPatch[])
+        else onBatch(d.updates)
       },
       onReconnect
     },
@@ -2287,51 +2410,20 @@ export interface TfStat {
   structure: Structure
 }
 
-export interface Heat {
-  fundingRate: number | null
-  openInterest: number | null
-  openInterestChangePct: number | null
-  quoteVolume24h: number | null
-  change24hPct: number | null
-  amplitude24hPct: number | null
-  longShortRatio: number | null
-  high24h: number | null
-  low24h: number | null
-}
-
-/**
- * 判档：A 顺势单 / A-W 顺势双底 / S 突破 / V 超跌极速V反 / B 不该做 / unclear 说不清
- *
- * ⚠️ 已废弃：不再判档了（改成预测 + 标签概率）。
- * 老记录里还有这些值，历史页读回来要能显示，类型先留着。
+/*
+ * 已删除（2026-10-11）：`Heat`（资金费率 / 持仓量 / 多空比 / 24h 涨跌振幅成交额）。
+ * 用户：「热度不要，不需要」—— 分析不再取它、提示词里没有它、页面上那块也没了。
+ * 行情条 / 合约列表那套 24h 数据是另一条链（`TickerInfo`），不受影响。
  */
-export type Grade = 'A' | 'A-W' | 'S' | 'V' | 'B' | 'unclear'
-
-/** 形状标签 + 它现在有多成立 */
-export interface JudgeTag {
-  name: string
-  /** 0~100 */
-  probability: number
-}
 
 /**
- * AI 的判断结果 —— **只有这六个字段**。
+ * AI 的判断结果 —— **就一句话**。
  *
- * 2026-10-02 改成「预测」：不再判档，改成预测接下来最大概率的走法，
- * 同时给每个形状标签一个概率。
+ * ★ 2026-10-11：档位 / 标签 / 概率 / 理由 / 走势 / 推荐 全删了，
+ *   只留一句话（能不能做 + 进场价 + 止损价）。内容由数据库那份提示词说了算。
  */
 export interface Judge {
-  /** 形状标签，按概率从高到低（最多 2 个；池子里没有的会新造） */
-  tags: JudgeTag[]
-  /** 为什么这么看，要落到具体数据上 */
-  reason: string
-  /** 接下来最大概率会走成什么样（方向和节奏） */
-  outlook: string
-  /** 上面那个走势的概率，0~100 */
-  probability: number
-  verdict: 'go' | 'wait' | 'no_go'
-  /** 推荐怎么做：现在做什么、什么条件下动手、什么条件下不碰 */
-  recommendation: string
+  line: string
 }
 
 /** 一个周期的行情（后端把 K 线切成小段读出来的文字） */
@@ -2358,8 +2450,6 @@ export interface AnalyzeStep {
 }
 
 export interface AnalyzeResult {
-  /** 存档编号；后端落库失败时为 null（分析结果照常返回） */
-  analysisId: number | null
   symbol: string
   exchange: string
   /** 是不是「回到某一刻」的测试跑（测试跑不存档） */
@@ -2367,9 +2457,11 @@ export interface AnalyzeResult {
   /** 测试跑的时间点（毫秒）；实时跑是 null */
   at: number | null
   price: number
-  heat: Heat
-  change24hPct: number | null
-  fundingRate: number | null
+  /**
+   * 每个周期的 K 线是从哪儿来的：`db` = 本地库（底座写的），`rest` = 交易所现拉。
+   * 只给「分析过程」里说明这次吃的是哪份数据。
+   */
+  sources: {timeframe: string; from: 'db' | 'rest'}[]
   /** 主周期 = 我在图上看的那个 */
   primary: string
   /** 各周期行情：主周期 + 跟着取的辅助周期 */
@@ -2813,165 +2905,43 @@ export const fetchUsageCalls = (
     })}`
   )
 
-/* ---------------- 历史存档 ---------------- */
+/* ---------------- 预测历史 ---------------- */
 
 /**
- * 一次分析的存档行（列表用）。
+ * 一次分析留下的**那一句话**（列表用）。
  *
- * 2026-10-02 大简化后，「事后结算」（outcome / R 倍数 / MFE / MAE）已删除：
- * 没有止损止盈就没有 R 可算。表里那几列还留着（老记录要能读），新记录一律 null。
+ * 2026-10-11 重置：输出只剩一句话，存档也就只剩它。
+ * 表里那些老列（档位 / 标签 / 仓位 / 结算…）留着读老记录，不再往里写。
  */
-export interface AnalysisRow {
+export interface PredictionRow {
   id: number
   symbol: string
-  exchange: string
-  marketType: string
-  timeframes: string[]
-  grade: string | null
-  /** 现在存的就是 AI 那段 reason */
-  gradeReason: string | null
-  /** 形状标签 + 概率（新记录才有；老记录是 [] 或老结构） */
-  tags: JudgeTag[]
-  verdict: string | null
+  /** AI 给的结论原文 */
+  line: string
+  /** 分析那一刻的现价 */
   price: number | null
-  model: string | null
-  rulesHash: string | null
-  costUsd: number | null
-  latencyMs: number | null
   createdAt: string
 }
 
-export interface GradeStat {
-  grade: string
-  calls: number
-  /** 其中给了「可做」的次数 */
-  goCount: number
-}
-
-/** 一个形状标签在这段时间里出现了多少次、平均概率多少 */
-export interface TagStat {
-  name: string
-  calls: number
-  /** 平均概率 0~100；老记录没有概率就是 null */
-  avgProbability: number | null
-}
-
-export interface AnalysisStats {
-  total: number
-  costUsd: number
-  /** 标签分布（老档位统计已废弃） */
-  byTag: TagStat[]
-  bySymbol: {symbol: string; calls: number}[]
-}
-
-/**
- * AI 的原始输出（历史详情用）。
- *
- * 新记录 = 六个字段（tags / reason / outlook / probability / verdict /
- * recommendation）；老记录是旧结构（字段多得多，tags 还只是字符串数组），
- * 所以这里用宽松类型，展示前统一过一遍 `tagsOf()`。
- */
-export type JudgeResultLike = Record<string, unknown>
-
-/**
- * 从 result 里安全地把标签取成 `{name, probability}` ——
- * 老记录的 tags 是纯字符串数组，这里补一个默认概率（0，页面上不显示百分比）。
- */
-export function tagsOf(result: JudgeResultLike | null | undefined): JudgeTag[] {
-  const t = result?.tags
-  if (!Array.isArray(t)) return []
-  const out: JudgeTag[] = []
-  for (const x of t) {
-    if (typeof x === 'string') {
-      if (x.trim()) out.push({name: x.trim(), probability: 0})
-    } else if (x && typeof x === 'object') {
-      const o = x as {name?: unknown; probability?: unknown}
-      const name = String(o.name ?? '').trim()
-      if (!name) continue
-      const p = Math.round(Number(o.probability))
-      out.push({name, probability: Number.isFinite(p) ? p : 0})
-    }
-  }
-  return out
-}
-
-export interface AnalysisDetail extends AnalysisRow {
-  ccxtSymbol: string | null
-  chartTimeframe: string | null
-  promptTokens: number | null
-  completionTokens: number | null
-  attempts: number | null
-  /** 老记录才有（新记录把 reason 存在 gradeReason 列） */
-  verdictReason: string | null
-  result: JudgeResultLike | null
-  snapshot: {
-    price?: number
-    timeframes?: TfStat[]
-    heat?: Heat
-    structure?: Structure
-  }
-  meta: Record<string, unknown>
-  rules: {
-    hash: string
-    sources: string[]
-    system: string
-    body: string
-  } | null
-}
-
-export interface AnalysisQuery {
-  symbol: string
-  grade: string
-  verdict: string
-  /** 只看打了这个形状标签的（空 = 全部） */
-  tag: string
-  actionable: boolean
+export interface PredictionQuery {
+  /** 空 = 全部币种 */
+  symbol?: string
   days: number
   limit: number
   offset: number
 }
 
-export interface AnalysisPage {
-  rows: AnalysisRow[]
-  total: number
-  stats: AnalysisStats
-  /** 美元 → 人民币汇率，跟用量页共用 */
-  rate: number
-}
-
-function analysisQs(
-  q: AnalysisQuery,
-  extra: Record<string, string | number> = {}
-) {
+export const fetchPredictions = (q: PredictionQuery) => {
   const p = new URLSearchParams({
     days: String(q.days),
     limit: String(q.limit),
     offset: String(q.offset)
   })
   if (q.symbol) p.set('symbol', q.symbol)
-  if (q.grade) p.set('grade', q.grade)
-  if (q.verdict) p.set('verdict', q.verdict)
-  if (q.tag) p.set('tag', q.tag)
-  if (q.actionable) p.set('actionable', '1')
-  for (const [k, v] of Object.entries(extra)) p.set(k, String(v))
-  return p.toString()
+  return get<{rows: PredictionRow[]; total: number}>(`/api/analyses?${p}`)
 }
 
-export const fetchAnalyses = (
-  q: AnalysisQuery,
-  opts: {limit?: number; offset?: number} = {}
-) =>
-  get<AnalysisPage>(
-    `/api/analyses?${analysisQs(q, {
-      limit: opts.limit ?? q.limit,
-      offset: opts.offset ?? q.offset
-    })}`
-  )
-
-export const fetchAnalysis = (id: number) =>
-  get<{analysis: AnalysisDetail}>(`/api/analyses/${id}`)
-
-export const deleteAnalysis = (id: number) =>
+export const deletePrediction = (id: number) =>
   del<{ok: boolean}>(`/api/analyses/${id}`)
 
 /* ---------------- 下载 ---------------- */

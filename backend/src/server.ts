@@ -13,6 +13,19 @@ import {
 } from './contracts'
 import {marketCapRanks, rankOf, refreshMarketCapRanks} from './data/marketcap'
 import {fullSystem, loadExtractRules, loadRules} from './rules'
+import {buildSystemPrompt} from './llm/prompt'
+import {buildExtractPrompt} from './llm/extract'
+import {ensureTonePresets, TONE_PRESETS} from './llm/tone-presets'
+import {
+  createDoc,
+  deleteDoc,
+  getVersion,
+  listDocs,
+  listVersions,
+  restoreVersion,
+  updateDoc,
+  type DocKind
+} from './db/prompts'
 import {
   checkDb,
   closePool,
@@ -47,6 +60,7 @@ import {
   usageHeadline,
   usageSummary
 } from './db/usage'
+import {deleteAnalysis, listAnalyses, saveAnalysis} from './db/analyses'
 import {
   ADMIN_USERNAME,
   accountForTotp,
@@ -182,14 +196,6 @@ import {
   setDefaultLlmKey,
   updateLlmKey
 } from './db/llm-keys'
-import {
-  analysisStats,
-  deleteAnalysis,
-  getAnalysis,
-  listAnalyses,
-  saveAnalysis,
-  saveRulesVersion
-} from './db/analyses'
 import {oneLineCost, usdToCny} from './llm/pricing'
 import {fetchBalance, fetchModels, type ModelsResult} from './llm/account'
 import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
@@ -223,7 +229,13 @@ import {
   startKlineRecorder,
   stopKlineRecorder
 } from './data/kline-recorder'
-import {subscribeKline, subscribeTickers} from './data/kline-stream'
+import {
+  observeMarkPrice,
+  subscribeKline,
+  subscribeMarkPrice,
+  subscribeTickers,
+  type MarkInfo
+} from './data/kline-stream'
 import {buildContext} from './context/builder'
 import {judge, type JudgeMeta, type JudgeResult} from './llm/client'
 import {Candle, MarketSnapshot, MarketType, Timeframe} from './types'
@@ -1056,137 +1068,20 @@ async function handleCandles(
   })
 }
 
-/* ---------------- 启动预热：常用币的头部行情 ---------------- */
-
 /**
- * 只吞不吐的响应壳。
+ * 头部行情条缓存（`/api/ticker` 每次都要打交易所，必须缓存）。
  *
- * ⚠️ 只能喂给 `handleTicker` 这种「只调 `sendJson(res, ...)`」的处理函数
- *    （`sendJson` 只用到 `writeHead` + `end`）。
- */
-function silentResponse(): http.ServerResponse {
-  return {
-    writeHead: () => {},
-    end: () => {}
-  } as unknown as http.ServerResponse
-}
-
-/**
- * 头部行情（`/api/ticker`）的预热名单 = 成交额前 N ∪ |24h 涨跌| > 20%
- * （正在异动的币用户大概率会去看）。
+ * ⚠️ `ttl = stale = 15 秒`：过期就**阻塞**拉一份新的（`ticker.ts` 那边一分钟轮询一次，
+ *    所以基本每次都真去拉）。15 秒是 2026-10-05 定的 —— 设宽了会「一分钟才动一下」
+ *    （用户：「k 线上面成交量 / 高低价这些数据都没更新」）。
  *
- * ⚠️ **为什么只有行情条还留着预热**：那条接口一个币要并发打 4 趟交易所
- *    （ticker + 资金费率 + 持仓量 + 日线基点），**冷启实测 ~1.07s** ——
- *    点一个新币，头顶那条行情要空一秒
- *    （用户 2026-10-04：「k 线图上面的数据信息能否缓存，现在感觉太慢了」）。
- *    预热后第一发就是缓存命中（1~2ms）。
- *
- * ⚠️ ⚠️ **K 线不再预热**（2026-10-07 P1）：读路径已改成「内存 → 库 → REST」，
- *    冷启第一次点币只是一个本地库读（毫秒级、**0 权重**）。
- *    以前那套 `warmCandlesCache`（60 币 × 2 周期 × 每周期一发上游）与
- *    `kline-store` 的每 10 秒保活都已删除，别照着旧记忆再加回来。
- */
-/** 成交额前多少个 */
-const WARM_TOP_VOL = 60
-/** |24h 涨跌幅| 超这个百分比也算要暖的（正在异动，用户大概率会去看） */
-const WARM_BIG_MOVE_PCT = 20
-/** 拿不到行情清单时的兜底名单 */
-const WARM_FALLBACK = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE']
-
-async function warmPicks(): Promise<string[]> {
-  try {
-    const cfg = loadConfig()
-    const rows = await fetchMarketList({
-      exchangeId: cfg.exchange,
-      marketType: cfg.marketType,
-      apiBase: cfg.apiBase
-    })
-    const picked = new Set(
-      [...rows]
-        .sort((a, b) => (b.quoteVolume24h ?? 0) - (a.quoteVolume24h ?? 0))
-        .slice(0, WARM_TOP_VOL)
-        .map(r => r.base)
-    )
-    for (const r of rows) {
-      if (Math.abs(r.change24hPct ?? 0) > WARM_BIG_MOVE_PCT) picked.add(r.base)
-    }
-    return [...picked]
-  } catch {
-    /* 交易所抖了就拿不到清单 —— 退回常用那几个，别因为预热把启动流程搞挂 */
-    return WARM_FALLBACK
-  }
-}
-
-/**
- * 同时最多预热几个币的头部行情。
- *
- * ⚠️ 每个币要并发打 4 趟交易所，不限并发会在启动瞬间把币安权重打满。
- */
-const WARM_TICKER_CONC = 3
-
-/**
- * 启动预热：把同一批币的**头部行情条**也先取好。
- *
- * 为什么需要：`/api/ticker` 一次要并发打 4 趟交易所（ticker + 资金费率 + 持仓量 +
- * 366 根日线），**冷启实测 ~1.07s** —— 点一个新币，头顶那条行情要空一秒
- *（用户 2026-10-04：「k 线图上面的数据信息能否缓存，现在感觉太慢了」）。
- * 预热后就是缓存命中（1~2ms）。
- *
- * ⚠️ 走的是同一个 `handleTicker`（假 URL + 丢弃响应的 res）—— 缓存 key 对得上。
- */
-async function warmTickerCache(
-  bases: string[]
-): Promise<{ok: number; total: number}> {
-  let ok = 0
-  let i = 0
-  const worker = async (): Promise<void> => {
-    while (i < bases.length) {
-      const symbol = bases[i++]
-      try {
-        await handleTicker(
-          new URL(`/api/ticker?symbol=${symbol}`, 'http://warm.local'),
-          silentResponse()
-        )
-        ok += 1
-      } catch {
-        /* 暖不到就算了 */
-      }
-    }
-  }
-  await Promise.all(
-    Array.from({length: Math.min(WARM_TICKER_CONC, bases.length)}, () =>
-      worker()
-    )
-  )
-  return {ok, total: bases.length}
-}
-
-/**
- * 头部行情条缓存。
- *
- * ⚠️ 2026-10-04 把 TTL 从 **15 秒拉到 60 秒**：
- *    15 秒太短 —— 客户端本就是 15 秒一刷，等于**每 15 秒就把当前活跃币重打一遍上游**
- *   （一次 4 趟）。而这个接口冷启实测 **~1.07s**，用户感受得到的慢就在这。
- *    60 秒内直接回；60 秒以上**先给旧的、后台再刷**。
- *
- * ⚠️⚠️ 又一轮（用户：「不是添加了行情预热功能吗 60 个币种怎么还是慢」）：
- *    `stale` 原来是 **10 分钟** —— 也就是说**启动预热只顶 10 分钟**：
- *    一个币超过 10 分钟没人看，再点它就走 ③「老老实实等一次」（实测
- *    `/api/ticker?symbol=XRP` **699ms**、BNB **318ms**，冷启最差 1.07s）。
- *    60 个币，用户不可能每 10 分钟全看一遍，于是「预热过」的币照样等一秒。
- *    现在 `stale` 拉到 **24 小时**：预热过的币一整天都走 ②「先给旧的、后台再刷」，
- *    **永远不会阻塞**；真放了 24 小时没人看，才回退到 ③ 等一次。
- *    价格晚一点无所谓 —— 前端头部吃的实时价是 K 线 WS 推的（`ticker.ts` 的
- *    `freshLivePrice`），资金费率倒计时也是本地算的；而且**每次访问都会顺手后台刷一份**。
- *    cap 200 → 300：装下预热那批（成交额前 60 ∪ 异动），再留点余量给随手点开的币。
- *
- * ⚠️⚠️ 2026-10-05 又改回来（用户：「k 线上面成交量 / 高低价这些数据都没更新」）：
- *    60 秒太「钝」—— 前端 15 秒一刷，可这 60 秒里每次都返回同一份；`stale` 设成
- *    24 小时的本意是「先给旧的、后台再刷」，但客户端只会在**下一次**轮询（15 秒后）
- *    才拿到新的，表现就是「一分钟才动一下」，用户以为坏了。
- *    现在直接 `ttl = stale = 15 秒`：**过期就阻塞拉一份新的**（第 ③ 条路），
- *    客户端每次轮询拿到的都是 15 秒以内的数据。一次 4 趟上游、15 秒一遍，
- *    对一台个人服务器 + 币安 2400 权重/分钟 完全无压力。
+ * ★ 2026-10-11：**启动预热撤掉了**（`warmTickerCache` / `warmPicks` 整块删除）。
+ *   当初留它的理由是「冷启 1.07s」，而那一秒主要花在现拉 366 根日线上 —— 那条早改成
+ *   读本地库了（`dailySeries`）；现在冷启实测 **0.15s**。反倒是预热自己：一次要对
+ *   成交额前 60 ∪ 异动币各打两三趟上游，而这份缓存的 ttl 只有 15 秒 ⇒ 预热出来的
+ *   东西**十几秒后就全过期**，只有正好在这 15 秒里点到名单里的币才享到那 5ms。
+ *   顺带：首帧的资金费率 / 指数价现在优先吃 WS 那份（`data/mark-cache.ts`），
+ *   这两样也不必再为此打 `/fapi/v1/premiumIndex`。
  */
 const tickerCache = makeCache<TickerInfo>(15_000, 15_000, 300)
 
@@ -1216,6 +1111,11 @@ async function handleTicker(url: URL, res: http.ServerResponse): Promise<void> {
         apiBase: config.apiBase
       })
     )
+    /*
+     * 顺手把这个币的标记价订上（只 U 本位永续有这条流）——
+     * 资金费率 / 倒计时从此由 WS 秒级推，REST 这份只当底稿和兜底。
+     */
+    if (config.marketType === 'swap' && data.pair) demandMark(data.pair)
     sendJson(res, 200, data)
   } catch (e) {
     // 头部行情挂了不该拖垮整个页面：前端自己会把这项显示成「—」
@@ -1390,7 +1290,6 @@ function baseSymbol(ccxtSymbol: string): string {
 export type {AnalyzeStep}
 
 export interface AnalyzeOutcome {
-  analysisId: number | null
   symbol: string
   ccxtSymbol: string
   exchange: string
@@ -1400,13 +1299,11 @@ export interface AnalyzeOutcome {
   /** 测试跑的时间点（毫秒）；实时跑是 null */
   at: number | null
   price: number
-  heat: MarketSnapshot['heat']
-  change24hPct: number | null
-  fundingRate: number | null
-  openInterest: number | null
+  /** 每个周期的 K 线是从本地库还是交易所来的（给「分析过程」显示） */
+  sources: MarketSnapshot['sources']
   /** 主周期（图上那个） */
   primary: Timeframe
-  /** 各周期的切段描述 */
+  /** 行情块 —— 只有主周期一个（最近 100 根逐根） */
   blocks: MarketSnapshot['blocks']
   /** 主周期的 K 线（给前端画图） */
   candles: MarketSnapshot['candles']
@@ -1487,6 +1384,20 @@ function parseAt(raw: string | null): number | null {
  * 一次分析的全过程。
  * 网页（JSON）、网页（SSE 进度）、命令行都走这里，避免几份实现各写一遍。
  */
+/**
+ * 「分析过程」里那句数据来源。
+ *
+ * `db` = 底座常驻写的本地库（毫秒级、0 上游权重）；`rest` = 交易所现拉
+ * （库里没有 / 太旧 / 不在覆盖范围时的兜底）。见 `data/market.ts` 的 `seriesCandles`。
+ */
+function sourceText(sources: MarketSnapshot['sources']): string {
+  const db = sources.filter(s => s.from === 'db').map(s => s.timeframe)
+  const rest = sources.filter(s => s.from === 'rest').map(s => s.timeframe)
+  if (!rest.length) return `数据：本地库（${db.join(' / ')}）`
+  if (!db.length) return `数据：交易所现拉（${rest.join(' / ')}）`
+  return `数据：本地库（${db.join(' / ')}）+ 交易所兜底（${rest.join(' / ')}）`
+}
+
 async function runAnalysis(opts: {
   /** 谁在分析（用户系统） */
   userId: number
@@ -1516,8 +1427,8 @@ async function runAnalysis(opts: {
   }
   endRules(
     rules.bodyEnabled
-      ? `${rules.sources.join('、')} · 角色 ${rules.system.length} 字 + 规则 ${rules.body.length} 字 · ${rules.hash}`
-      : '（没有启用的角色/规则文档，本次按知识库经验判断）'
+      ? `${rules.sources.join('、')} · ${rules.system.length} 字 · ${rules.hash}`
+      : '（没有启用的分析预测提示词 —— 去「我的 → AI 提示词」写一份）'
   )
 
   // 用哪把密钥：**默认**那把（多密钥，2026-10-04）；用量会记到它名下
@@ -1531,29 +1442,7 @@ async function runAnalysis(opts: {
   /** 主周期看多少天（前端传的是「图上那段」的天数；没传就用配置默认值） */
   const days = Math.max(1, opts.days || config.lookbackDays)
 
-  // 2. 可用的标签池
-  //    **复用**两处现有的东西，不另建一套标签体系：
-  //      · 标签模板（网页「历史知识库」页维护）
-  //      · 知识库里已经用过的标签
-  //    注意：只给标签词，**不给经验正文** —— 经验暂时不注入。
-  const endTags = step('tags', '取可用的标签')
-  let tags: string[] = []
-  try {
-    const [templates, used] = await Promise.all([
-      loadTagTemplates(opts.userId),
-      listTags(opts.userId)
-    ])
-    tags = [...new Set([...templates, ...used.map(u => u.tag)])]
-  } catch (e) {
-    console.warn('[analyze] 读取标签池失败:', (e as Error).message)
-  }
-  endTags(
-    tags.length
-      ? `${tags.length} 个：${tags.slice(0, 6).join(' / ')}…`
-      : '没有标签可用'
-  )
-
-  // 3. 拉行情
+  // 2. 拉行情
   const endFetch = step(
     'fetch',
     testAt
@@ -1579,14 +1468,17 @@ async function runAnalysis(opts: {
   }
   endFetch(
     `${snapshot.symbol} · 主周期 ${timeframe}（图上 ${days} 天）· ` +
-      snapshot.blocks.map(b => `${b.timeframe} ${b.bars} 根`).join(' / ') +
-      ` · 现价 ${snapshot.price}`
+      `现价 ${snapshot.price}` +
+      ` · 发给 AI：${snapshot.blocks.map(b => `${b.timeframe} ${b.bars} 根`).join(' / ')}` +
+      ` · ${sourceText(snapshot.sources)}`
   )
 
   // 4. 构建上下文
   const endCtx = step('context', '构建喂给 AI 的行情快照')
   const context = buildContext(snapshot)
-  endCtx(`${context.length} 字（K 线切成小段描述，不算口径）`)
+  endCtx(
+    `${context.length} 字（主周期最近 ${snapshot.blocks[0]?.bars ?? 0} 根逐根，不算口径）`
+  )
 
   // 5. 调用大模型
   const endJudge = step('judge', `调用 ${config.llm.model} 判断`)
@@ -1597,7 +1489,6 @@ async function runAnalysis(opts: {
       snapshot,
       context,
       prompt: rules.system,
-      tags,
       config
     }))
   } catch (e) {
@@ -1612,13 +1503,8 @@ async function runAnalysis(opts: {
       (meta.attempts > 1 ? ` · 重试 ${meta.attempts} 次` : '')
   )
 
-  const chartTimeframe = '1h'
-
-  // 6. 记账并存档
-  const endArchive = step(
-    'archive',
-    testAt ? '记账（测试跑不存档）' : '记账并存档'
-  )
+  // 6. 记账 + 存档：历史就存这一句话（测试跑不存档）
+  const endArchive = step('archive', '记账')
   const billed = await recordUsage({
     userId: opts.userId,
     llmKeyId: resolved.keyId,
@@ -1630,51 +1516,32 @@ async function runAnalysis(opts: {
     attempts: meta.attempts,
     latencyMs: meta.latencyMs
   })
-
-  let analysisId: number | null = null
-  try {
-    await saveRulesVersion({
-      hash: rules.hash,
-      system: fullSystem(rules.system),
-      body: rules.body,
-      sources: rules.sources
-    })
-    // 测试跑是「回到过去重放」，不是真实的一笔 —— 不存档，
-    // 否则历史列表和胜率统计里会混进一堆事后诸葛
-    if (!testAt) {
-      analysisId = await saveAnalysis({
+  if (testAt === null && result.line.trim()) {
+    // 旁路：存档失败不该把这次分析搞挂
+    try {
+      await saveAnalysis({
         userId: opts.userId,
         symbol: baseSymbol(snapshot.symbol),
         ccxtSymbol: snapshot.symbol,
         exchange: config.exchange,
         marketType: config.marketType,
-        timeframes: [timeframe],
-        chartTimeframe,
-        judge: result,
-        snapshot,
-        meta: {model: meta.model, days},
+        timeframe,
+        line: result.line.trim(),
+        price: snapshot.price,
         model: meta.model,
-        rulesHash: rules.hash,
-        llmUsageId: billed?.id ?? null,
-        usage: meta.usage,
         costUsd: billed?.costUsd ?? null,
+        llmUsageId: billed?.id ?? null,
         latencyMs: meta.latencyMs,
-        attempts: meta.attempts
+        promptTokens: meta.usage.promptTokens,
+        completionTokens: meta.usage.completionTokens
       })
+    } catch (e) {
+      console.error('[analyses] 存档失败：', (e as Error).message)
     }
-  } catch (e) {
-    console.warn('[analyze] 存档失败:', (e as Error).message)
   }
-  endArchive(
-    testAt
-      ? `测试跑（${bjFull(testAt)}）不存档 · 花费 ${oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)}`
-      : analysisId === null
-        ? '存库失败（不影响本次结论）'
-        : `存档 #${analysisId} · 花费 ${oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)}`
-  )
+  endArchive(oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs))
 
   return {
-    analysisId,
     symbol: baseSymbol(snapshot.symbol),
     ccxtSymbol: snapshot.symbol,
     exchange: config.exchange,
@@ -1682,10 +1549,7 @@ async function runAnalysis(opts: {
     testMode: testAt !== null,
     at: testAt,
     price: snapshot.price,
-    heat: snapshot.heat,
-    change24hPct: snapshot.heat.change24hPct,
-    fundingRate: snapshot.heat.fundingRate,
-    openInterest: snapshot.heat.openInterest,
+    sources: snapshot.sources,
     primary: snapshot.primary,
     blocks: snapshot.blocks,
     candles: snapshot.candles,
@@ -1699,7 +1563,7 @@ async function runAnalysis(opts: {
         hash: rules.hash,
         warnings: rules.warnings
       },
-      tagCount: tags.length,
+      tagCount: 0,
       // 本次调用的 token 与花费（统计用）
       usage: {
         callId: billed?.id ?? null,
@@ -1802,6 +1666,46 @@ async function handleKlineStream(
 }
 
 /**
+ * 标记价（`{sym}@markPrice@1s`）的**按需订阅**：谁看过这个币的行情条，就替谁订一会儿。
+ *
+ * ★ 2026-10-11：资金费率 / 指数价 / 下次收取时间**本来就是 WS 推的**
+ *   （`markPriceUpdate` 里的 `r` / `i` / `T`）—— 以前这里只有「有持仓的币」才订
+ *   （见 `data/kline-stream.ts` 的 `subscribeMarkPrice` 注释），于是行情条那两个数
+ *   只能靠 REST `/fapi/v1/premiumIndex`。现在按「正在看的币」补订，走 WS 推给前端。
+ *
+ * ⚠️ 保留 10 分钟：前端每 60 秒会来一发 `/api/ticker`（兜底底稿）续期；
+ *    用户一直不看了就自动退订，别白占一条流。
+ */
+const MARK_KEEP_MS = 10 * 60_000
+const markDemand = new Map<string, {stop: () => void; timer: NodeJS.Timeout}>()
+
+/** 让 `raw`（`BTCUSDT`）的标记价保持被订阅状态 */
+function demandMark(rawSymbol: string): void {
+  const raw = String(rawSymbol ?? '').trim().toUpperCase()
+  if (!/^[A-Z0-9]+USDT$/.test(raw)) return
+  const cur = markDemand.get(raw)
+  if (cur) {
+    clearTimeout(cur.timer)
+    cur.timer = setTimeout(() => releaseMark(raw), MARK_KEEP_MS)
+    return
+  }
+  /* 监听器本身不做事：把四件套转给前端的是下面那个 `observeMarkPrice` 旁听者 */
+  const stop = subscribeMarkPrice(raw, () => undefined)
+  markDemand.set(raw, {
+    stop,
+    timer: setTimeout(() => releaseMark(raw), MARK_KEEP_MS)
+  })
+}
+
+function releaseMark(raw: string): void {
+  const cur = markDemand.get(raw)
+  if (!cur) return
+  clearTimeout(cur.timer)
+  cur.stop()
+  markDemand.delete(raw)
+}
+
+/**
  * 全市场行情实时推送（SSE，上游是币安的 `!ticker@arr`）。
  *
  * 事件 `ticker` 推的是**一批增量**：只有刚变过的两三百个币（1 秒一批）。
@@ -1828,6 +1732,16 @@ async function handleTickerStream(
   const unsubscribe = subscribeTickers(patches =>
     send('ticker', {updates: patches})
   )
+  /*
+   * 标记价那一批（资金费率 / 指数价 / 下次收取时间）——
+   * 上游 `{sym}@markPrice@1s` 每秒一条，只订「有人正看着」的那几个币
+   * （订阅见 `demandMark`）。前端拿它盖掉 60 秒一次那份 REST 底稿。
+   */
+  const stopMark = observeMarkPrice((pair, info: MarkInfo) =>
+    send('mark', {updates: [{pair, ...info}]})
+  )
+  /** 这条连接收尾了没有（`res.on('close')` 里翻真，见下面那段注释） */
+  let closed = false
   /* 心跳必须是具名事件，理由同上 */
   const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
@@ -1844,12 +1758,13 @@ async function handleTickerStream(
    *     每秒一轮，看着像「连上了但没数据」。
    * 页面「持仓盈利不实时」就是这个 —— 跟 WS、跟算在哪都无关。
    */
-  let closed = false
   const done = () => {
     if (closed) return
     closed = true
     clearInterval(beat)
     unsubscribe()
+    /* 标记价那个旁听也要摘掉，别让「没人看」的连接一直占着 */
+    stopMark()
   }
   res.on('close', done)
 }
@@ -2520,6 +2435,172 @@ async function handleCollectStream(
   } finally {
     res.end()
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* AI 提示词文档（分析预测 / 知识库提炼，全部存数据库）                   */
+/* ------------------------------------------------------------------ */
+
+/** 提示词文档类型（认不出的返回 null，由调用方决定默认值） */
+const asDocKind = (v: unknown): DocKind | null =>
+  v === 'predict' || v === 'extract' || v === 'role' || v === 'rule'
+    ? (v as DocKind)
+    : null
+
+/** 列表 + 「这次真正会发出去什么」的概览 */
+async function handleListAiDocs(res: http.ServerResponse): Promise<void> {
+  try {
+    const [docs, bundle, extract] = await Promise.all([
+      listDocs(),
+      loadRules(),
+      loadExtractRules()
+    ])
+    sendJson(res, 200, {
+      docs,
+      /** 「+ 新建分析预测」用的语气预设（同一份定义在 `llm/tone-presets.ts`、启动时会播种） */
+      tones: TONE_PRESETS,
+      assembly: {
+        enabled: bundle.bodyEnabled,
+        origin: bundle.origin,
+        sources: bundle.sources,
+        hash: bundle.hash,
+        predictChars: bundle.system.length,
+        extractChars: extract.system.length,
+        extractSources: extract.sources,
+        extractHash: extract.hash,
+        updatedAt: bundle.updatedAt,
+        warnings: bundle.warnings
+      }
+    })
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleCreateAiDoc(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req).catch(() => null)
+  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+  const kind = asDocKind(body.kind) ?? 'predict'
+  const name = str(body.name).trim()
+  if (!name) return sendJson(res, 400, {error: '请给这份文档起个名字'})
+  try {
+    const doc = await createDoc({
+      kind,
+      name,
+      content: typeof body.content === 'string' ? body.content : ''
+    })
+    sendJson(res, 200, {doc})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleUpdateAiDoc(
+  id: number,
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const body = await readJsonBody(req).catch(() => null)
+  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+  const patch: Parameters<typeof updateDoc>[1] = {}
+  if (typeof body.name === 'string') patch.name = body.name
+  if (typeof body.content === 'string') patch.content = body.content
+  if (typeof body.enabled === 'boolean') patch.enabled = body.enabled
+  const kind = asDocKind(body.kind)
+  if (kind) patch.kind = kind
+  if (body.sort !== undefined) patch.sort = Number(body.sort) || 0
+  try {
+    const doc = await updateDoc(id, patch)
+    if (!doc) return sendJson(res, 404, {error: '文档不存在'})
+    sendJson(res, 200, {doc})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleDeleteAiDoc(
+  id: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    const ok = await deleteDoc(id)
+    sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '文档不存在'})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleListAiVersions(
+  docId: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    sendJson(res, 200, {versions: await listVersions(docId)})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleGetAiVersion(
+  versionId: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    const v = await getVersion(versionId)
+    if (!v) return sendJson(res, 404, {error: '版本不存在'})
+    sendJson(res, 200, {version: v})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+async function handleRestoreAiVersion(
+  versionId: number,
+  res: http.ServerResponse
+): Promise<void> {
+  try {
+    const doc = await restoreVersion(versionId)
+    if (!doc) return sendJson(res, 404, {error: '版本不存在'})
+    sendJson(res, 200, {doc})
+  } catch (e) {
+    sendJson(res, 503, {error: dbHelpMessage(e)})
+  }
+}
+
+/**
+ * 看看这次真正发出去的 system prompt 长什么样。
+ *
+ * `?kind=extract` 看知识库提炼那份（它不是通过 buildSystemPrompt 拼的，
+ * 而是正文 + 标签规则）。
+ */
+async function handleAiPreview(
+  url: URL,
+  res: http.ServerResponse,
+  user: User
+): Promise<void> {
+  if (url.searchParams.get('kind') === 'extract') {
+    const [extract, templates] = await Promise.all([
+      loadExtractRules(),
+      loadTagTemplates(user.id)
+    ])
+    sendJson(res, 200, {
+      system: buildExtractPrompt(extract.system, templates),
+      enabled: extract.enabled,
+      sources: extract.sources,
+      hash: extract.hash
+    })
+    return
+  }
+  const bundle = await loadRules()
+  sendJson(res, 200, {
+    system: buildSystemPrompt(bundle.system),
+    enabled: bundle.bodyEnabled,
+    sources: bundle.sources,
+    hash: bundle.hash
+  })
 }
 
 async function handleListCases(
@@ -5212,47 +5293,76 @@ async function route(
     return
   }
 
-  /* ---- 分析存档 ---- */
+  /* ---- 预测历史（每次分析存的那一句话） ---- */
   if (p === '/api/analyses') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
     try {
-      const [list, stats] = await Promise.all([
-        listAnalyses({
-          userId: me.id,
-          symbol: url.searchParams.get('symbol') ?? undefined,
-          grade: url.searchParams.get('grade') ?? undefined,
-          verdict: url.searchParams.get('verdict') ?? undefined,
-          tag: url.searchParams.get('tag') ?? undefined,
-          actionableOnly: url.searchParams.get('actionable') === '1',
-          limit: Number(url.searchParams.get('limit') ?? 30),
-          offset: Number(url.searchParams.get('offset') ?? 0)
-        }),
-        analysisStats(Number(url.searchParams.get('days') ?? 365), me.id)
-      ])
-      sendJson(res, 200, {...list, stats, rate: usdToCny(1)})
+      const symbol = (url.searchParams.get('symbol') ?? '').trim()
+      const page = await listAnalyses({
+        userId: me.id,
+        symbol: symbol || undefined,
+        days: Math.max(1, Number(url.searchParams.get('days') ?? 30)),
+        limit: Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 50))),
+        offset: Math.max(0, Number(url.searchParams.get('offset') ?? 0))
+      })
+      sendJson(res, 200, page)
+    } catch (e) {
+      sendJson(res, 503, {error: dbHelpMessage(e)})
+    }
+    return
+  }
+  if (p.startsWith('/api/analyses/')) {
+    const m = p.match(/^\/api\/analyses\/(\d+)$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    if (method !== 'DELETE')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    try {
+      const ok = await deleteAnalysis(me.id, Number(m[1]))
+      sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '没这条记录'})
     } catch (e) {
       sendJson(res, 503, {error: dbHelpMessage(e)})
     }
     return
   }
 
-  if (p.startsWith('/api/analyses/')) {
-    const m = p.match(/\/(\d+)$/)
-    if (!m) return sendJson(res, 404, {error: 'Not Found'})
-    const id = Number(m[1])
-
-    if (method === 'DELETE') {
-      const ok = await deleteAnalysis(id, me.id)
-      return sendJson(
-        res,
-        ok ? 200 : 404,
-        ok ? {ok: true} : {error: '记录不存在'}
-      )
-    }
+  /* ---- AI 提示词文档（分析预测 / 知识库提炼，全部存数据库） ---- */
+  if (p === '/api/ai-docs') {
+    if (method === 'GET') return handleListAiDocs(res)
+    if (method === 'POST') return handleCreateAiDoc(req, res)
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+  if (p === '/api/ai-preview') {
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    const row = await getAnalysis(id, me.id).catch(() => null)
-    if (!row) return sendJson(res, 404, {error: '记录不存在'})
-    return sendJson(res, 200, {analysis: row})
+    return handleAiPreview(url, res, me)
+  }
+  if (p.startsWith('/api/ai-docs/')) {
+    const mv = p.match(/^\/api\/ai-docs\/(\d+)\/versions$/)
+    if (mv) {
+      if (method !== 'GET')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      return handleListAiVersions(Number(mv[1]), res)
+    }
+    const m = p.match(/^\/api\/ai-docs\/(\d+)$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+    if (method === 'PUT') return handleUpdateAiDoc(id, req, res)
+    if (method === 'DELETE') return handleDeleteAiDoc(id, res)
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+  if (p.startsWith('/api/ai-versions/')) {
+    const mr = p.match(/^\/api\/ai-versions\/(\d+)\/restore$/)
+    if (mr) {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      return handleRestoreAiVersion(Number(mr[1]), res)
+    }
+    const m = p.match(/^\/api\/ai-versions\/(\d+)$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    return handleGetAiVersion(Number(m[1]), res)
   }
 
   /* ---- 知识库 ---- */
@@ -5435,6 +5545,17 @@ async function main(): Promise<void> {
         (adminNote ? '；' : '') + '已把 .env 里的大模型配置搬到管理员账号'
     }
     /*
+     * 语气预设（2026-10-12 用户：「你直接后端给我预设上去」）：
+     * 库里没有同名那份就补一份 —— **默认关着**，用户想用哪个就打哪个的勾。
+     * 预设表在 `llm/tone-presets.ts`（同一份还通过 `/api/ai-docs` 发给前端当新建模板）。
+     */
+    const tonesAdded = await ensureTonePresets().catch(() => [] as string[])
+    if (tonesAdded.length) {
+      console.log(
+        `  语气预设  补了 ${tonesAdded.length} 份（都没打勾）：${tonesAdded.join('、')}`
+      )
+    }
+    /*
      * 老的单条 `user_llm` → 多把密钥里的「默认」那把
      * （只搬一次，搬完把老表清空，免得用户删光密钥后被老数据复活）。
      */
@@ -5495,9 +5616,9 @@ async function main(): Promise<void> {
     const days = loadConfig().keepDays
     void pruneOldData(days)
       .then(r => {
-        if (r.analyses || r.usage) {
+        if (r.usage) {
           console.log(
-            `  清理流水  保留 ${r.keepDays} 天：删掉分析 ${r.analyses} 条、用量 ${r.usage} 条`
+            `  清理流水  保留 ${r.keepDays} 天：删掉用量 ${r.usage} 条`
           )
         }
       })
@@ -5546,17 +5667,6 @@ async function main(): Promise<void> {
     })
       .then(() => {
         console.log('  交易所  实例已预热（loadMarkets 完成）')
-        /* 交易所热了之后，把常用几个币的**头部行情条**先取好（见 `warmPicks` 的说明） */
-        void warmPicks()
-          .then(bases => warmTickerCache(bases))
-          .then(t => {
-            console.log(
-              `  行情条  已预热 ${t.ok}/${t.total}（点币种顶部行情不等交易所）`
-            )
-          })
-          .catch(() => {
-            /* 内部已经逐个 try 过了，这里只是兜底 */
-          })
       })
       .catch(e =>
         console.warn(`  交易所  ⚠️ 预热失败：${(e as Error).message}`)

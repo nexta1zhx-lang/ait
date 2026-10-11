@@ -4,15 +4,19 @@
  * 全局一份：顶部信息和底部涨幅是同一个数据源，别各拉各的。
  *
  * 两个源：
- *   · **价格 / 24h 涨跌 / 高低 / 成交量** —— SSE `/api/tickers/stream` 增量
+ *   · **价格 / 24h 涨跌 / 高低 / 成交量** —— SSE `/api/tickers/stream` 的 `ticker` 事件
  *     （后端从币安 `!ticker@arr` 中转，每秒一批，**不打交易所、不计权重**）；
- *   · **资金费率 / 持仓量 / 指数价 / 各窗口涨跌** —— 流里没有，仍走 `/api/ticker`，
- *     但 60 秒一次就够（资金费 8 小时才结一次）。
+ *   · **资金费率 / 下次收取时间 / 指数价** —— 同一条 SSE 的 `mark` 事件
+ *     （后端从币安 `{sym}@markPrice@1s` 中转，消息里的 `r` / `T` / `i`）。
+ *     ★ 2026-10-11 以前这三样走 REST `/api/ticker`（`premiumIndex`），
+ *       现在只留它当**首帧底稿 + 兜底**（`SLOW_MS` 一次），实时值以 WS 为准。
+ *   · **持仓量 / 各窗口涨跌** —— 流里没有，仍只走 `/api/ticker`。
  */
 import {computed, ref} from 'vue'
 import {
   fetchTicker,
   tickerStream,
+  type MarkPatch,
   type TickerInfo,
   type TickerPatch
 } from './api'
@@ -123,9 +127,31 @@ function applyTickerBatch(updates: TickerPatch[]): void {
 }
 
 /**
+ * 把标记价那批里属于**当前这只币**的一条盖到头上（1 秒级，零权重）。
+ *
+ * 资金费率 / 倒计时从此是**推送**来的：以前这两个数字要等 `SLOW_MS` 那发 REST
+ * （最坏情况差一分钟才更新，而币安的 `markPriceUpdate` 每秒就带一次）。
+ */
+function applyMarkBatch(updates: MarkPatch[]): void {
+  const cur = ticker.value
+  if (!cur || !cur.pair) return
+  const m = updates.find(u => u.pair === cur.pair)
+  if (!m) return
+  ticker.value = {
+    ...cur,
+    markPrice: m.markPrice,
+    indexPrice: m.indexPrice ?? cur.indexPrice,
+    fundingRate: m.fundingRate ?? cur.fundingRate,
+    nextFundingAt: m.nextFundingTime ?? cur.nextFundingAt,
+    updatedAt: Date.now()
+  }
+}
+
+/**
  * 跟着币种走：换币立刻拉一次底稿；之后
- *   · 价格类 → 吃 SSE 增量（秒级）；
- *   · 资金费率 / 持仓量那些 → `SLOW_MS` 一次 REST。
+ *   · 价格类 → 吃 SSE 的 `ticker` 增量（秒级）；
+ *   · 资金费率 / 指数价 / 倒计时 → 吃 SSE 的 `mark` 增量（秒级，上游是币安标记价流）；
+ *   · 持仓量 / 各窗口涨跌 → `SLOW_MS` 一次 REST（这两样流里确实没有）。
  *
  * 同一个币重复调用不会重开定时器（否则每切一次 tab 就多一个）。
  */
@@ -149,7 +175,7 @@ export function watchTicker(next: string): void {
   timer = setInterval(() => void load(), SLOW_MS)
   /* 全市场增量（换币不用重连：这条流管所有币，只是筛的那只变了） */
   if (!stopStream)
-    stopStream = tickerStream(applyTickerBatch, () => void load())
+    stopStream = tickerStream(applyTickerBatch, () => void load(), applyMarkBatch)
   if (!clock) clock = setInterval(() => (nowTick.value = Date.now()), 1000)
 }
 

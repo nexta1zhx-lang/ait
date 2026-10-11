@@ -5,11 +5,6 @@ const A = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',
   dim: '\x1b[2m',
-  red: '\x1b[31m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  cyan: '\x1b[36m',
   gray: '\x1b[90m'
 }
 
@@ -45,22 +40,12 @@ export interface RenderInfo {
   days?: number
 }
 
-/** 档位 → 中文名 */
-const GRADE_NAME: Record<string, string> = {
-  A: '顺势单',
-  'A-W': '顺势双底',
-  S: '突破',
-  V: '超跌极速V反',
-  B: '不该做',
-  unclear: '说不清'
-}
-
-function verdictBanner(v: JudgeResult['verdict']): string {
-  if (v === 'go') return paint(A.green, `${A.bold}✅ 可做${A.reset}`)
-  if (v === 'wait') return paint(A.yellow, `${A.bold}⏸  等待${A.reset}`)
-  return paint(A.red, `${A.bold}⛔ 不做${A.reset}`)
-}
-
+/**
+ * 终端里画一次判断。
+ *
+ * ★ 2026-10-11：结论就是**一句话**（能不能做 + 进场价 + 止损价），
+ *   原来的档位 / 标签 / 概率 / 理由 / 走势 / 推荐 六块全删了。
+ */
 export function render(
   snap: MarketSnapshot,
   judge: JudgeResult,
@@ -74,22 +59,12 @@ export function render(
     `${A.bold}${snap.symbol}${A.reset}  @${snap.exchange}   ${paint(A.dim, new Date(snap.timestamp).toISOString().slice(0, 16) + 'Z')}`
   )
   L.push(
-    `当前价: ${A.bold}${fmt(snap.price)}${A.reset}   ${verdictBanner(judge.verdict)}` +
+    `当前价: ${A.bold}${fmt(snap.price)}${A.reset}` +
       (info.days ? `   ${paint(A.dim, `回溯 ${info.days} 天`)}` : '')
   )
   L.push(rule)
 
-  L.push(`结论:  ${judge.verdict}`)
-  if (judge.tags.length)
-    L.push(
-      `标签:  ${judge.tags.map(t => `${t.name} ${t.probability}%`).join(' / ')}`
-    )
-  if (judge.outlook)
-    L.push(
-      `走势:  ${judge.outlook}${paint(A.dim, `（概率 ${judge.probability}%）`)}`
-    )
-  if (judge.reason) L.push(`理由:  ${judge.reason}`)
-  if (judge.recommendation) L.push(`推荐:  ${judge.recommendation}`)
+  L.push(`${A.bold}${judge.line}${A.reset}`)
 
   L.push(rule)
   L.push(

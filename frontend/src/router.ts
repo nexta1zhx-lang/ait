@@ -26,11 +26,11 @@ function restQuery(query: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * 「预测历史 / 知识库」现在挂在「开单分析」的左栏，用 `?t=records|kb` 定位
+ * 「预测历史 / 知识库」现在挂在「开单分析」的左栏，用 `?t=history|kb` 定位
  * （见 `views/AnalyzeView.vue` 里那段「左栏 tab 记进地址栏」）。
  */
 function analyzeTab(
-  tab: 'records' | 'kb',
+  tab: 'history' | 'kb',
   query: Record<string, unknown>
 ): {path: string; query: Record<string, unknown>} {
   return {path: '/analyze', query: {...restQuery(query), t: tab}}
@@ -71,7 +71,7 @@ export const routes = [
    *
    * ★ 2026-10-10 把「复盘」拆了（用户：「去掉 1 级菜单里的复盘」「把预测历史和知识库
    *   挪到开单分析里，原有的历史分析去掉」「账户统计是在『我的』里面，交易所账户后面」）：
-   *     · 预测历史 / 知识库 → 「开单分析」的左栏 tab（`?t=records|kb`）；
+   *     · 预测历史 / 知识库 → 「开单分析」的左栏 tab（`?t=history|kb`）；
    *     · 账户统计          → **这一页的第二格**（`?p=stats`，紧跟交易所账户）。
    *
    * 子页用 `?p=exchange|stats|profile|admin`，管理的二级 tab 用 `?t=users|server`。
@@ -94,20 +94,18 @@ export const routes = [
         return {path: '/me', query: {...restQuery(to.query), p: 'stats'}}
       if (p === 'replay' || p === 'records' || p === 'kb' || p === 'history') {
         const kb = p === 'kb' || to.query.r === 'kb'
-        return analyzeTab(kb ? 'kb' : 'records', to.query)
+        return analyzeTab(kb ? 'kb' : 'history', to.query)
       }
       return true
     },
     meta: {title: '我的', nav: '我的'}
   },
   /*
-   * 老书签 / 老链接（含 `/history?id=106` 这种详情链接）→ 「开单分析 → 预测历史」，
-   * 其余 query 原样带过去（`id` 会被 `HistoryView` 读到并直接弹详情）。
+   * 老书签 `/history` → 「开单分析 → 预测历史」，其余 query 原样带过去。
    */
   {
     path: '/history',
-    redirect: to =>
-      analyzeTab(to.query.tab === 'kb' ? 'kb' : 'records', to.query)
+    redirect: to => analyzeTab('history', to.query)
   },
   // 「用量」并进了「模型配置」，而「模型配置」现在在「我的 → 个人信息」里
   {
@@ -122,8 +120,7 @@ export const routes = [
    */
   {
     path: '/replay',
-    redirect: to =>
-      analyzeTab(to.query.p === 'kb' || to.query.r === 'kb' ? 'kb' : 'records', to.query)
+    redirect: to => analyzeTab('history', to.query)
   },
   {
     path: '/download',
@@ -132,11 +129,11 @@ export const routes = [
     meta: {title: '下载 App', nav: '下载'}
   },
   /*
-   * 「AI 提示词」页 2026-10-04 已删（用户：「没什么用，都要和代码绑定」）——
-   * 提示词现在是 `backend/src/llm/prompts.ts` 里的常量。
-   * 老书签 / 老链接进 /prompts 会被下面那条捕到，直接回落地页，不留白屏。
+   * 「AI 提示词」现在挂在「我的」页里（个人信息后面那一格）——
+   * 正文存数据库 `ai_docs`（kind=predict），网页上改、即改即生效。
+   * 老书签 / 直接输 /prompts 一律转到「我的 · AI 提示词」。
    */
-  {path: '/prompts', redirect: '/contracts'},
+  {path: '/prompts', redirect: {path: '/me', query: {p: 'prompts'}}},
   {path: '/:pathMatch(.*)*', redirect: '/contracts'}
 ]
 

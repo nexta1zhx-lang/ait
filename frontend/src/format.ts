@@ -172,51 +172,6 @@ export function bjInputToMs(v: string): number {
   return Number.isFinite(ms) ? ms : 0
 }
 
-/** ---------------------------------------------------------------- 推荐做法分段 */
-/**
- * AI 的 `recommendation` 要求写成固定三行（`现在：` / `动手：` / `别碰：`）。
- * 这里把它拆成一段段好按行渲染：
- *   - 模型可能写成三行，也可能挤成一行、还可能带 **加粗** —— 都容错
- *   - 老记录是一整段没前缀的 → 原样返回一段（`k` 为空，当普通段落渲染）
- */
-export interface RecPart {
-  /** 前缀；老记录没前缀就是空串 */
-  k: string
-  v: string
-  /** 配色用 */
-  tone: 'now' | 'do' | 'dont' | 'plain'
-}
-
-const REC_TONE: Record<string, RecPart['tone']> = {
-  现在: 'now',
-  开单: 'do',
-  // 2026-10-03 之前的写法，老记录里还是「动手」，一起认
-  动手: 'do',
-  别碰: 'dont'
-}
-
-export function splitRec(text: string | undefined | null): RecPart[] {
-  const raw = (text ?? '').trim()
-  if (!raw) return []
-  // 先统一成「一个前缀一行」，两种写法就都能吃下了
-  const marked = raw.replace(
-    /\s*\*{0,2}\s*(现在|开单|动手|别碰)\s*\*{0,2}\s*[:：]\s*/g,
-    (_m, k: string) => `\n${k}:`
-  )
-  const parts: RecPart[] = []
-  for (const line of marked.split('\n')) {
-    const s = line.trim()
-    if (!s) continue
-    const m = s.match(/^(现在|开单|动手|别碰)[:：]\s*(.*)$/)
-    if (m && m[2].trim()) {
-      parts.push({k: m[1], v: m[2].trim(), tone: REC_TONE[m[1]] ?? 'plain'})
-    } else {
-      parts.push({k: '', v: s, tone: 'plain'})
-    }
-  }
-  return parts
-}
-
 /** MM/DD HH:mm */
 export function bjShort(input: number | string | Date): string {
   const d =
@@ -308,41 +263,6 @@ export function richText(src: string | undefined | null): string {
 
 /* ---------------- 业务文案 ---------------- */
 
-export const TREND_TEXT: Record<string, string> = {
-  up: '↑ 上涨',
-  down: '↓ 下跌',
-  range: '→ 震荡',
-  // 极少数情况下某周期没给方向（数据不足），模型会明确回 unknown
-  unknown: '— 无方向数据'
-}
-
-/**
- * 档位文案。
- *
- * ⚠️ key 必须和 `backend/src/llm/schema.ts` 的 grade 枚举一模一样 ——
- * 对不上的会直接显示成原始值（如「C」），看着像没翻译。
- */
-export const GRADE_TEXT: Record<string, string> = {
-  A: 'A 档 · 顺势单',
-  'A-W': 'A-W 档 · 顺势双底',
-  S: 'S 档 · 突破',
-  V: 'V 档 · 超跌极速V反',
-  B: 'B 档 · 不该做',
-  unclear: '说不清'
-}
-
-/**
- * 档位颜色：顺势三档（A / A-W / S）是绿的，逆势 V 是黄的，B 是红的。
- * 对应 `style.css` 里的 `.grade.*`。
- */
-export function gradeTone(g?: string | null): string {
-  if (!g) return ''
-  if (g === 'B') return 'b'
-  if (g === 'V') return 'v'
-  if (g === 'unclear') return 'unclear'
-  return g.toLowerCase()
-}
-
 /**
  * 这段行情是什么。
  *
@@ -363,55 +283,4 @@ export function moveText(m?: string | null): string {
 export function moveCls(m?: string | null): string {
   if (!m) return 'none'
   return MOVE_TEXT[m]?.cls ?? 'none'
-}
-
-/**
- * 结论的中文说法 —— **只在这一份**。
- *
- * 筛选栏、结论分布饼图、列表/详情里的徽标全从它取，
- * 别再各处自己写「等 / 观望」这种两套词。
- * （key 就是 AI 输出契约里的 `verdict` 取值）
- */
-export const VERDICT_LABEL: Record<string, string> = {
-  go: '可做',
-  wait: '观望',
-  no_go: '不可做'
-}
-
-export const VERDICT_TEXT: Record<string, [string, string]> = {
-  go: [`✅ ${VERDICT_LABEL.go}`, 'go'],
-  wait: [`⏸ ${VERDICT_LABEL.wait}`, 'wait'],
-  no_go: [`⛔ ${VERDICT_LABEL.no_go}`, 'no']
-}
-
-/** 结构简称：高点↑ 低点↑ */
-export function structureText(s?: {
-  higherHighs?: boolean
-  lowerHighs?: boolean
-  higherLows?: boolean
-  lowerLows?: boolean
-}): string {
-  if (!s) return '—'
-  const parts: string[] = []
-  if (s.higherHighs) parts.push('高点↑')
-  if (s.lowerHighs) parts.push('高点↓')
-  if (s.higherLows) parts.push('低点↑')
-  if (s.lowerLows) parts.push('低点↓')
-  return parts.length ? parts.join(' ') : '结构不明'
-}
-
-/** 结构全称（悬停提示用） */
-export function structureFull(s?: {
-  higherHighs?: boolean
-  lowerHighs?: boolean
-  higherLows?: boolean
-  lowerLows?: boolean
-}): string {
-  if (!s) return ''
-  const parts: string[] = []
-  if (s.higherHighs) parts.push('更高的高点')
-  if (s.lowerHighs) parts.push('更低的高点')
-  if (s.higherLows) parts.push('更高的低点')
-  if (s.lowerLows) parts.push('更低的低点')
-  return parts.length ? parts.join(' + ') : '结构不明'
 }

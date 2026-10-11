@@ -51,7 +51,6 @@ import {
   orphanSweepTargets
 } from '../exchange-stream'
 import type {JudgeResult} from '../llm/client'
-import {OUTPUT_CONTRACT} from '../llm/prompt'
 import {judgeSchema} from '../llm/schema'
 import {render} from '../output/render'
 import type {MarketSnapshot} from '../types'
@@ -60,69 +59,8 @@ import type {MarketSnapshot} from '../types'
 /* ① 契约防漂移                                                        */
 /* ------------------------------------------------------------------ */
 
-/** 契约骨架里声明的顶层字段（骨架里就 2 空格缩进的 "xxx": 那些） */
-function contractFields(): string[] {
-  return [...OUTPUT_CONTRACT.matchAll(/^ {2}"([A-Za-z][A-Za-z0-9_]*)":/gm)].map(
-    m => m[1]
-  )
-}
-
-/** 撕掉 .catch() 包装 */
-const unwrap = (t: any) =>
-  typeof t?.removeCatch === 'function' ? t.removeCatch() : t
-
-/** 取某个 zod 枚举的取值 */
-function zodOptions(t: any): string[] {
-  const opts = unwrap(t)?.options
-  return Array.isArray(opts) ? opts : []
-}
-
-/**
- * 契约里的字段名必须和 `judgeSchema` 一致。
- *
- * 为什么必须卡：schema 里到处是 `.catch()` 兜底，**只改一边不会报错**，
- * 只会静默把字段丢掉或补默认值 —— 这种问题肉眼很难发现。
- */
-function checkContract(): boolean {
-  let ok = true
-  const declared = contractFields()
-  const actual = Object.keys(judgeSchema.shape)
-
-  const missing = actual.filter(k => !declared.includes(k))
-  const extra = declared.filter(k => !actual.includes(k))
-  if (missing.length) {
-    console.error(`❌ 契约少字段（zod 有、提示词没写）：${missing.join('、')}`)
-    ok = false
-  }
-  if (extra.length) {
-    console.error(`❌ 契约多字段（提示词写了、zod 没有）：${extra.join('、')}`)
-    ok = false
-  }
-
-  const enums: [string, string[]][] = [
-    ['verdict', zodOptions(judgeSchema.shape.verdict)]
-  ]
-  for (const [name, opts] of enums) {
-    if (!opts.length) {
-      console.error(`❌ 取不到 ${name} 的枚举（zod 结构变了？）`)
-      ok = false
-      continue
-    }
-    if (!OUTPUT_CONTRACT.includes(opts.join(' | '))) {
-      console.error(
-        `❌ 契约里 ${name} 的取值和 zod 不一致，应为：${opts.join(' | ')}`
-      )
-      ok = false
-    }
-  }
-
-  if (ok) {
-    console.log(
-      `契约一致性: ✅ ${actual.length} 个字段 / ${enums.length} 处枚举 全对得上`
-    )
-  }
-  return ok
-}
+/* 契约防漂移那套检查 2026-10-11 删了 —— 输出从「六字段 JSON」变成「一句话」，
+   没有骨架可以对照了；`judgeSchema` 只在下面拿来校一下夹具。 */
 
 /* ------------------------------------------------------------------ */
 /* ② 夹具（手写的行情与判断结果，跟真实 AI 输出无关）                    */
@@ -191,31 +129,13 @@ const snapshot: MarketSnapshot = {
       text: '【整段速览】共 72 根，+2.00%，振幅 3.00%'
     }
   ],
-  heat: {
-    fundingRate: 0.0001,
-    openInterest: 5000,
-    openInterestChangePct: 2.5,
-    quoteVolume24h: 1000000,
-    change24hPct: 3.2,
-    amplitude24hPct: 4.1,
-    longShortRatio: 1.8,
-    high24h: close * 1.02,
-    low24h: close * 0.98
-  },
+  sources: [{timeframe: '1h', from: 'db'}],
   candles: []
 }
 
-/** AI 只回这六个字段 */
+/** AI 只回一句话 */
 const judge: JudgeResult = {
-  tags: [
-    {name: '放量突破', probability: 70},
-    {name: '缩量横盘', probability: 30}
-  ],
-  reason: '第 2 小段开始放量，1h 回踩没破前一段低点，量能越走越强。',
-  outlook: '先回踩 1h 区间下沿附近，再往上试前面那个高点。',
-  probability: 65,
-  verdict: 'go',
-  recommendation: '现在别追，等回踩不破再进；跌破区间下沿就不看。'
+  line: '能做：现价附近可轻仓进，止损放前一个结构低点下方。'
 }
 
 /* ------------------------------------------------------------------ */
@@ -609,7 +529,7 @@ function checkWindows(): boolean {
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
-let failed = !checkContract()
+let failed = false
 if (!checkSanitize()) failed = true
 if (!checkDiff()) failed = true
 if (!checkCloseSweep()) failed = true
@@ -622,11 +542,6 @@ if (!checkWindows()) failed = true
 const parsed = judgeSchema.safeParse(judge)
 if (!parsed.success) {
   console.error('❌ 夹具过不了 zod 校验：', parsed.error.issues)
-  failed = true
-}
-
-if (judge.tags.length > 4) {
-  console.error(`❌ 标签超了 4 个：${judge.tags.join(' / ')}`)
   failed = true
 }
 

@@ -6,14 +6,18 @@ import {
   retryUnknownSymbol
 } from './ccxt-markets'
 import {coolingLeftMs, coolingMessage, noteRateLimit} from '../util/rate-cool'
-import {DEFAULT_CALIBERS, TF_MS, barsFor, planFor} from '../calibers'
-import {dailyCloses} from '../db/candle-store'
-import {describeSeries} from '../analysis/describe'
-import {ema42Of} from '../analysis/ema'
+import {DEFAULT_CALIBERS, TF_MS, barsFor} from '../calibers'
+import {
+  dailyCloses,
+  readRangeCandles,
+  readRecentCandles,
+  unifiedPerpSymbol
+} from '../db/candle-store'
+import {markInfoOf} from './mark-cache'
+import {ANALYSIS_BARS, barLines} from '../analysis/describe'
 import {
   Calibers,
   Candle,
-  MarketHeat,
   MarketSnapshot,
   MarketType,
   SeriesBlock,
@@ -203,7 +207,7 @@ export interface FetchOptions {
   timeframe: Timeframe
   /**
    * 主周期往前看多少天（= 图上那段有多长）。
-   * 其余周期拉多少天由 `calibers.others` 决定。
+   * 实际拉多少根 = `max(barsFor(这个天数), 2×100)` —— 只有主周期一个周期。
    */
   days: number
   marketType?: MarketType
@@ -217,7 +221,7 @@ export interface FetchOptions {
    * 那些接口查到的永远是「现在」，拿来当过去用就是偷看未来。
    */
   at?: number
-  /** 取数参数（各周期拉多少根）；不传就用默认值 */
+  /** 取数参数（根数上下限）；不传就用默认值 */
   calibers?: Calibers
 }
 
@@ -481,63 +485,121 @@ export async function fetchCandlesRange(
   return out
 }
 
-/** 拉取持仓量历史（用于算变化率；接口不可用时返回空数组） */
-async function fetchOpenInterestSeries(
-  exchange: any,
-  symbol: string
-): Promise<number[]> {
-  if (typeof exchange.fetchOpenInterestHistory !== 'function') return []
-  const rows = await exchange.fetchOpenInterestHistory(
-    symbol,
-    '1h',
-    undefined,
-    6
-  )
-  if (!Array.isArray(rows)) return []
-  return rows
-    .map((r: any) =>
-      Number(r?.openInterestAmount ?? r?.openInterestValue ?? r?.openInterest)
-    )
-    .filter((v: number) => Number.isFinite(v) && v > 0)
+/*
+ * ────────────────────────── 一个周期的 K 线从哪来 ──────────────────────────
+ *
+ * ★ 2026-10-11（用户：「读读我本地的不也可以吗？反正我库里有所有的数据」）：
+ *   分析改成**本地库优先**。底座（`kline-recorder`）常驻把 1m 滚成
+ *   15m / 1h / 4h / 1d 写进 `candles`，库里查一次是毫秒级、**0 上游权重**；
+ *   以前这里每个周期都要现拉一次币安（4~5 发 REST），既慢又吃限流。
+ *
+ * 口径跟 `data/kline-store.ts` 一致（图表走的是那条三层读）：
+ *   · 底座只覆盖 **binance 的 U 本位永续** —— 现货 / 币本位照旧走 REST；
+ *   · 库里只有**已收盘**的桶 ⇒ 正在走的那根由实时底座补上（`currentBar`）；
+ *   · 库里不够（新上市的币）/ 太旧（底座挂了·断流）⇒ 退回 REST。
+ *
+ * ⚠️ 不复用 `kline-store` 那份**内存缓存**：它的单份上限是 600~1200 根，
+ *    而分析一次要最多 1500 根（`calibers.maxBars`）—— 硬塞会把图表的缓存顶掉。
+ */
+
+/** 底座覆盖范围（跟 `kline-store.ts` 的 `inRecorderScope` 同一把口径） */
+function inDbScope(exchangeId: string, marketType: MarketType): boolean {
+  return exchangeId === 'binance' && marketType === 'swap'
 }
 
-/** 拉取多空持仓人数比（ccxt 无该接口时返回 null） */
-async function fetchLongShort(
-  exchange: any,
+/**
+ * 库里至少要有这么多根才认它 —— 低于这个数说明底座没订阅过这个币
+ * （新上市 / 非 swap），来回退 REST 纯浪费。跟 `kline-store.ts` 同一个值。
+ */
+const DB_MIN_BARS = 50
+
+/**
+ * 库里最后一根**已收盘**的桶如果比这还旧，就认为底座不健康（挂了 / 断流），
+ * 退回 REST。正常情况最后一根的收盘时刻离现在最多一个周期。
+ * 跟 `kline-store.ts` 的 `STALE_AFTER` 同一把尺子。
+ */
+const DB_STALE_AFTER = (tf: Timeframe): number => 2 * TF_MS[tf] + 5 * 60_000
+
+/**
+ * 取一个周期的 K 线：**先本地库，库外/太旧才退回交易所**。
+ *
+ * `at` 给了就是**回放**（测试 / 复盘）：只要那一刻之前**已收盘**的桶，
+ * 且不拼实时那根（拼了就是偷看未来）。
+ */
+async function seriesCandles(o: {
+  exchange: any
+  exchangeId: string
+  marketType: MarketType
+  /** ccxt 统一符号（`BTC/USDT:USDT`） */
   symbol: string
-): Promise<number | null> {
-  if (typeof exchange.fetchLongShortRatio !== 'function') return null
-  const r = await exchange.fetchLongShortRatio(symbol, '1h', undefined, 1)
-  const row = Array.isArray(r) ? r[r.length - 1] : r
-  return numOrNull(row?.longShortRatio ?? row?.longAccount)
-}
+  timeframe: Timeframe
+  bars: number
+  at: number | null
+  liveBar: ((tf: Timeframe) => Promise<Candle | null>) | null
+}): Promise<{candles: Candle[]; from: 'db' | 'rest'}> {
+  const step = TF_MS[o.timeframe]
 
-/** 币安 futures/data 基地址 */
-const FAPI_DATA_BASE = process.env.FAPI_BASE ?? 'https://fapi.binance.com'
+  if (inDbScope(o.exchangeId, o.marketType)) {
+    try {
+      /*
+       * ⚠️ 回放（`at`）要按**区间**读：`readRecentCandles` 读的是「最近 N 根」，
+       *    回放点在过去时那 N 根全落在 `at` 之后，筛完一根不剩（踩过：
+       *    「10 天前那一刻」整块退回了 REST，而库里其实一根不缺）。
+       */
+      const rows = o.at
+        ? await readRangeCandles(
+            o.timeframe,
+            unifiedPerpSymbol(o.symbol),
+            o.bars + 2,
+            o.at - (o.bars + 2) * step,
+            o.at,
+            {exchange: o.exchangeId, marketType: o.marketType}
+          )
+        : await readRecentCandles(
+            o.timeframe,
+            unifiedPerpSymbol(o.symbol),
+            o.bars,
+            {exchange: o.exchangeId, marketType: o.marketType}
+          )
+      const closed = o.at
+        ? rows.filter(c => c.timestamp + step <= o.at!).slice(-o.bars)
+        : rows
+      const last = closed[closed.length - 1]
+      // 「现在」这一刻：回放看的是 `at`，实时看的是真现在
+      const now = o.at ?? Date.now()
+      const fresh = last ? now - last.timestamp <= DB_STALE_AFTER(o.timeframe) : false
+      if (closed.length >= Math.min(o.bars, DB_MIN_BARS) && fresh) {
+        const out = closed
+        if (o.liveBar) {
+          const live = await o.liveBar(o.timeframe).catch(() => null)
+          if (live) {
+            if (!last || live.timestamp > last.timestamp) out.push(live)
+            else if (live.timestamp === last.timestamp) out[out.length - 1] = live
+          }
+        }
+        return {candles: out, from: 'db'}
+      }
+    } catch {
+      /* 库没起来 / 表还没建 → 直接走 REST */
+    }
+  }
 
-/** 直连币安公开接口取多空持仓人数比（ccxt 未提供时的兜底） */
-async function fetchBinanceLongShortRatio(
-  pair: string
-): Promise<number | null> {
-  const url =
-    `${FAPI_DATA_BASE}/futures/data/globalLongShortAccountRatio` +
-    `?symbol=${encodeURIComponent(pair)}&period=1h&limit=1`
-  const res = await fetch(url, {
-    headers: {'User-Agent': 'crypto-entry-advisor'}
-  })
-  if (!res.ok) return null
-  const arr = (await res.json()) as Array<Record<string, unknown>>
-  const row = Array.isArray(arr) ? arr[arr.length - 1] : null
-  return numOrNull(row?.longShortRatio)
+  const fromRest = o.at
+    ? await fetchCandlesAsOf(o.exchange, o.symbol, o.timeframe, o.at, o.bars)
+    : toCandles(
+        await withRetry<unknown[]>(`${o.timeframe} 取数`, () =>
+          o.exchange.fetchOHLCV(o.symbol, o.timeframe, undefined, o.bars)
+        )
+      )
+  return {candles: fromRest, from: 'rest'}
 }
 
 /**
  * 拉取某币的完整行情快照。
  *
- * 跟知识库收录时**同一套做法**：不算任何口径，把每个周期的 K 线
- * **切成小段描述**（`describeSeries`）直接交给 AI 自己读。
- *
- * 主周期用「图上那段有多长」的天数；其余周期按 `calibers.others` 的天数。
+ * ★ 2026-10-11：**只取主周期一个周期**（用户：「不要给了，只给当前周期的前 100 根数据」→「1. 不拉了」）。
+ *   以前这里是「四个周期各切成小段」，现在主周期拉 `max(图上根数, 2×100)` 根 ——
+ *   100 根发给 AI，前面同样长的一段只用来当「量比」的基准，别的周期一概不取。
  */
 export async function fetchSnapshot(
   opts: FetchOptions
@@ -550,187 +612,69 @@ export async function fetchSnapshot(
   /** 是不是「以过去某一刻为现在」的回放（测试 / 复盘） */
   const replayAt = typeof opts.at === 'number' && opts.at > 0 ? opts.at : null
 
-  const plan = planFor(opts.timeframe, cal)
-  const daysOf = (tf: Timeframe, days: number | null) => days ?? opts.days
+  /*
+   * 实时底座里「正在走的那根」的取法（`kline-recorder` 的 `currentBar`）。
+   *
+   * ⚠️ 用**动态 import**：`data/kline-recorder.ts` 自己也 `import` 本文件
+   *    （它要用 `fetchCandlesRange` 等），静态引进来就是一条循环依赖。
+   *    这里只在真要走本地库时才 import 一次，之后模块缓存命中，成本可忽略。
+   */
+  const liveBarOf: ((tf: Timeframe) => Promise<Candle | null>) | null = replayAt
+    ? null
+    : await (async () => {
+        try {
+          const rec = await import('./kline-recorder.js')
+          return (tf: Timeframe) => rec.currentBar(symbol, tf)
+        } catch {
+          return null
+        }
+      })()
 
-  let ticker: any = null
-  let fr: any = null
-  let oi: any = null
-  let oiSeries: number[] = []
-  let ls: number | null = null
-
-  /** 每个周期拉回来的 K 线 */
-  const raw: {timeframe: Timeframe; days: number; candles: Candle[]}[] = []
-
-  if (replayAt) {
-    // 回放：只拉截止那一刻**已收盘**的 K 线。
-    // 实时类接口（ticker / 资金费率 / 持仓量 / 多空比）一个都不调 ——
-    // 它们只会返回「现在」，混进过去的数据里就是偷看未来。
-    const got = await Promise.all(
-      plan.map(async p => ({
-        timeframe: p.timeframe,
-        days: daysOf(p.timeframe, p.days),
-        candles: await fetchCandlesAsOf(
-          exchange,
-          symbol,
-          p.timeframe,
-          replayAt,
-          barsFor(p.timeframe, daysOf(p.timeframe, p.days), cal)
-        )
-      }))
-    )
-    raw.push(...got)
-  } else {
-    const tickerP = exchange.fetchTicker(symbol)
-    const candlesP = Promise.all(
-      plan.map(async p => {
-        const days = daysOf(p.timeframe, p.days)
-        const bars = barsFor(p.timeframe, days, cal)
-        const rows = await withRetry<unknown[]>(`${p.timeframe} 取数`, () =>
-          exchange.fetchOHLCV(symbol, p.timeframe, undefined, bars)
-        )
-        return {timeframe: p.timeframe, days, candles: toCandles(rows)}
-      })
-    )
-
-    const [t, got, [f, o, s, l]] = await Promise.all([
-      tickerP,
-      candlesP,
-      Promise.all([
-        safeCall(() =>
-          exchange.has['fetchFundingRate']
-            ? exchange.fetchFundingRate(symbol)
-            : null
-        ),
-        safeCall(() =>
-          exchange.has['fetchOpenInterest']
-            ? exchange.fetchOpenInterest(symbol)
-            : null
-        ),
-        safeCall(() => fetchOpenInterestSeries(exchange, symbol)),
-        safeCall(() => fetchLongShort(exchange, symbol))
-      ])
-    ])
-    ticker = t
-    raw.push(...got)
-    fr = f
-    oi = o
-    oiSeries = Array.isArray(s) ? s : []
-    ls = l
-  }
-
-  /** 主周期那块（图上那个） */
-  const mainRaw = raw.find(r => r.timeframe === opts.timeframe) ?? raw[0]
-  const mainCandles = mainRaw?.candles ?? []
-  const lastClose = mainCandles[mainCandles.length - 1]?.close ?? NaN
-
-  // ---------- 市场热度 ----------
-  let fundingRate: number | null = null
-  let openInterest: number | null = null
-  let openInterestChangePct: number | null = null
-  let longShortRatio: number | null = null
-  let quoteVolume24h: number | null = null
-  let change24hPct: number | null = null
-  let amplitude24hPct: number | null = null
-  let high24h: number | null = null
-  let low24h: number | null = null
-  let price = NaN
-
-  if (replayAt) {
-    // 只有 K 线可查：现价 = 最后一根已收盘 K 线的收盘，
-    // 24h 高低 / 涨跌 / 振幅也从这段 K 线自己算出来
-    price = lastClose
-    const win = mainCandles.filter(c => c.timestamp >= replayAt - DAY_MS)
-    const w = win.length >= 2 ? win : mainCandles
-    if (w.length >= 2) {
-      let hi = -Infinity
-      let lo = Infinity
-      for (const c of w) {
-        if (c.high > hi) hi = c.high
-        if (c.low < lo) lo = c.low
-      }
-      if (Number.isFinite(hi) && Number.isFinite(lo) && lo > 0) {
-        high24h = hi
-        low24h = lo
-        amplitude24hPct = ((hi - lo) / lo) * 100
-      }
-      const first = w[0].open
-      const last = w[w.length - 1].close
-      if (Number.isFinite(first) && first > 0 && Number.isFinite(last)) {
-        change24hPct = ((last - first) / first) * 100
-      }
-    }
-  } else {
-    fundingRate = fr ? numOrNull(fr.fundingRate) : null
-    // 兜底顺序：持仓量接口 → 资金费率里带的 → 持仓量历史最后一期
-    openInterest = oi
-      ? numOrNull(
-          oi.openInterestAmount ?? oi.openInterestValue ?? oi.openInterest
-        )
-      : null
-    if (openInterest === null && fr)
-      openInterest = numOrNull(fr.openInterestAmount)
-    if (openInterest === null && oiSeries.length > 0)
-      openInterest = oiSeries[oiSeries.length - 1]
-
-    if (oiSeries.length >= 2) {
-      const first = oiSeries[0]
-      const last = oiSeries[oiSeries.length - 1]
-      if (first > 0) openInterestChangePct = ((last - first) / first) * 100
-    }
-
-    longShortRatio = ls
-    if (longShortRatio === null && opts.exchangeId === 'binance') {
-      try {
-        const m = exchange.market(symbol)
-        if (m && m.id) longShortRatio = await fetchBinanceLongShortRatio(m.id)
-      } catch {
-        /* 忽略 */
-      }
-    }
-
-    price = Number(ticker?.last ?? lastClose ?? NaN)
-    high24h = numOrNull(ticker?.high)
-    low24h = numOrNull(ticker?.low)
-    amplitude24hPct =
-      high24h !== null && low24h !== null && low24h > 0
-        ? ((high24h - low24h) / low24h) * 100
-        : null
-    change24hPct = numOrNull(ticker?.percentage)
-    quoteVolume24h = numOrNull(ticker?.quoteVolume ?? ticker?.baseVolume)
-  }
-
-  const heat: MarketHeat = {
-    fundingRate,
-    openInterest,
-    openInterestChangePct,
-    quoteVolume24h,
-    change24hPct,
-    amplitude24hPct,
-    longShortRatio,
-    high24h,
-    low24h
-  }
-
-  // ---------- 每个周期切成小段读结构 ----------
-  const blocks: SeriesBlock[] = raw.map(r => {
-    const {text, stats} = describeSeries(r.candles)
-    // EMA42 只给 15m / 1h（用户要求：看回调时才参考，平时不用提）
-    const ema42 =
-      r.timeframe === '15m' || r.timeframe === '1h'
-        ? (ema42Of(r.candles) ?? undefined)
-        : undefined
-    return {
-      timeframe: r.timeframe,
-      primary: r.timeframe === opts.timeframe,
-      days: r.days,
-      bars: stats.bars,
-      from: r.candles[0]?.timestamp ?? 0,
-      to: r.candles[r.candles.length - 1]?.timestamp ?? 0,
-      text,
-      ...(ema42 ? {ema42} : {})
-    }
+  // 至少 2×ANALYSIS_BARS：100 根发给 AI，前面同样长的一段用来当「量比」的基准
+  const days = opts.days
+  const bars = Math.max(barsFor(opts.timeframe, days, cal), ANALYSIS_BARS * 2)
+  const got = await seriesCandles({
+    exchange,
+    exchangeId: opts.exchangeId,
+    marketType,
+    symbol,
+    timeframe: opts.timeframe,
+    bars,
+    at: replayAt,
+    liveBar: liveBarOf
   })
+  const main = {timeframe: opts.timeframe, days, candles: got.candles}
+  const mainCandles = main.candles
+
+  /*
+   * 现价 = **最后一根 K 线的收盘**。
+   *
+   * 以前这里取的是 ticker（「24h 行情」那一发）—— 热度整块删掉之后不再有它，
+   * 于是价格跟 K 线同源：库/交易所那条链里最后一根（含正在走的那根）的收盘。
+   */
+  const price = mainCandles[mainCandles.length - 1]?.close ?? NaN
+
+  // ---------- 喂给 AI 的那一段：主周期最近 100 根逐根（开高低收 / 涨跌% / 量比） ----------
+  /*
+   * ★ 2026-10-11 用户：「不要给了，只给当前周期的前 100 根数据」→「全给数据吧」。
+   *
+   * 一根一行：**时间 / 开 / 高 / 低 / 收 / 涨跌% / 量比**（`describe.ts` 的 `barLines`）。
+   * 其余周期不再取、不再发；EMA42 也不再发（要让 AI 看均线就自己在图上加一条）。
+   */
+  const win = mainCandles.slice(-ANALYSIS_BARS)
+  const blocks: SeriesBlock[] = [
+    {
+      timeframe: main.timeframe,
+      primary: true,
+      days: main.days,
+      bars: win.length,
+      from: win[0]?.timestamp ?? 0,
+      to: win[win.length - 1]?.timestamp ?? 0,
+      text: barLines(mainCandles, ANALYSIS_BARS).join('\n')
+    }
+  ]
+
+  const sources = [{timeframe: main.timeframe, from: got.from}]
 
   return {
     symbol,
@@ -739,7 +683,7 @@ export async function fetchSnapshot(
     price,
     primary: opts.timeframe,
     blocks,
-    heat,
+    sources,
     candles: mainCandles
   }
 }
@@ -884,13 +828,25 @@ export async function fetchTickerInfo(opts: {
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
   const symbol = resolveSymbol(exchange, opts.symbol, marketType)
 
+  /*
+   * 资金费率 / 标记价 / 指数价：**先看 WS 那份缓存**（`{sym}@markPrice` 一条消息全带，
+   * 见 `./mark-cache`）—— 有新鲜的就省掉 `/fapi/v1/premiumIndex` 这一发。
+   * ⚠️ 只认 15 秒以内的：指数价一刻不停在动，旧值填进去不如不发。
+   * ⚠️ 首帧（从没看过这个币）时缓存大概率是空的 ⇒ 还是打一发，同时也把「结算周期」带回来
+   *    （那个只有 REST 有，WS 只给「下次收取时间」）。
+   */
+  const pairId = pairOf(exchange, symbol)
+  const cachedMark = pairId ? markInfoOf(pairId) : null
+  const lastFunding = lastFundingOf.get(pairId) ?? {}
   const [ticker, fr, oi, daily] = await Promise.all([
     withRetry<any>('头部 ticker', () => exchange.fetchTicker(symbol)),
-    safeCall<any>(() =>
-      exchange.has['fetchFundingRate']
-        ? exchange.fetchFundingRate(symbol)
-        : null
-    ),
+    cachedMark
+      ? null
+      : safeCall<any>(() =>
+          exchange.has['fetchFundingRate']
+            ? exchange.fetchFundingRate(symbol)
+            : null
+        ),
     safeCall<any>(() =>
       exchange.has['fetchOpenInterest']
         ? exchange.fetchOpenInterest(symbol)
@@ -938,6 +894,13 @@ export async function fetchTickerInfo(opts: {
     }
   }
 
+  /* 攒下来（下次走 WS 缓存时结算周期 / 费率就有值可填） */
+  rememberFunding(
+    pairId,
+    fr ? numOrNull(fr.fundingRate) : null,
+    fundingIntervalHours
+  )
+
   const openInterest = numOrNull(
     oi?.openInterestAmount ?? oi?.openInterestValue ?? oi?.openInterest
   )
@@ -958,18 +921,63 @@ export async function fetchTickerInfo(opts: {
     low24h: numOrNull(ticker?.low),
     volume24h: numOrNull(ticker?.baseVolume),
     quoteVolume24h: numOrNull(ticker?.quoteVolume),
-    // ticker 里就带标记 / 指数价（币安 premiumIndex 一并返回）
-    markPrice: numOrNull(ticker?.markPrice ?? fr?.markPrice),
-    indexPrice: numOrNull(ticker?.indexPrice ?? fr?.indexPrice),
-    fundingRate: fr ? numOrNull(fr.fundingRate) : null,
-    fundingIntervalHours,
-    nextFundingAt,
+    // 顺序：WS 缓存（最新）→ ticker 自带的标记/指数价（币安 premiumIndex 一并返回）
+    markPrice: cachedMark
+      ? cachedMark.markPrice
+      : numOrNull(ticker?.markPrice ?? fr?.markPrice),
+    indexPrice: cachedMark
+      ? (cachedMark.indexPrice ?? numOrNull(ticker?.indexPrice ?? fr?.indexPrice))
+      : numOrNull(ticker?.indexPrice ?? fr?.indexPrice),
+    fundingRate: cachedMark
+      ? (cachedMark.fundingRate ?? lastFunding.rate ?? null)
+      : fr
+        ? numOrNull(fr.fundingRate)
+        : (lastFunding.rate ?? null),
+    /*
+     * 结算周期 WS 不给（消息里只有「下次收取时间」）⇒ 记住上一次 REST 报的，
+     * 第一次看过之后就不用再为它打 premiumIndex 了。
+     */
+    fundingIntervalHours: fundingIntervalHours ?? lastFunding.intervalHours ?? null,
+    nextFundingAt: cachedMark?.nextFundingTime ?? nextFundingAt,
     openInterest,
     openInterestValue,
     changes,
     changeBases,
     updatedAt: Date.now()
   }
+}
+
+/** ccxt 统一符号 → 交易所原始交易对（`BTCUSDT`）；认不出来就是空串 */
+function pairOf(exchange: any, symbol: string): string {
+  try {
+    return String(exchange?.market?.(symbol)?.id ?? '').toUpperCase()
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 每个币「上次 REST 报的」资金费率与结算周期。
+ *
+ * 结算周期（8 小时那种）**只有 REST 的 premiumIndex 有**，WS 那条只给「下次收取时间」；
+ * 资金费率偶尔也可能在 WS 缓存过期的那一刻缺一下。所以把最近一次 REST 的结果记下来，
+ * 之后（哪怕走 WS）也能把这两个值填上，不必为了它专门再打一发。
+ */
+const lastFundingOf = new Map<string, {rate?: number | null; intervalHours?: number | null}>()
+const LAST_FUNDING_MAX = 600
+
+function rememberFunding(
+  pair: string,
+  rate: number | null,
+  intervalHours: number | null
+): void {
+  if (!pair) return
+  if (lastFundingOf.size > LAST_FUNDING_MAX) lastFundingOf.clear()
+  const prev = lastFundingOf.get(pair) ?? {}
+  lastFundingOf.set(pair, {
+    rate: rate ?? prev.rate ?? null,
+    intervalHours: intervalHours ?? prev.intervalHours ?? null
+  })
 }
 
 /** 合约行情列表的一行（列照着币安「合约行情」页来） */
@@ -1068,7 +1076,7 @@ export async function fetchMarketList(opts: {
   const tickers = await withRetry<any>('合约行情', () =>
     exchange.fetchTickers()
   )
-  const markets: Record<string, any> = exchange.markets ?? {}
+    const markets: Record<string, any> = exchange.markets ?? {}
 
   const rows: MarketRow[] = []
   for (const [sym, m] of Object.entries(markets)) {
@@ -1115,10 +1123,28 @@ export async function fetchMarketList(opts: {
  *
  * 返回 `{ 币安原始符号(大写) → 标记价 }`。
  */
-export async function fetchMarkPrices(opts?: {
+/**
+ * 币安 `/fapi/v1/premiumIndex` 的一行 —— **一次请求就是全市场**。
+ *
+ * 这四个值在同一条 WS 消息里也有（`{sym}@markPrice@1s` 的 `p` / `i` / `r` / `T`），
+ * 正常走那边；这里是**上游 WS 哑了之后的兜底**（见 `data/kline-stream.ts` 的标记价兜底）。
+ */
+export interface PremiumIndex {
+  /** 标记价格 `p` */
+  markPrice: number
+  /** 指数价格 `i` */
+  indexPrice: number | null
+  /** 当期资金费率 `r` */
+  fundingRate: number | null
+  /** 下次资金费用时间（毫秒）`T` */
+  nextFundingTime: number | null
+}
+
+/** 全市场标记价 / 指数价 / 资金费率（一次调用，`/fapi/v1/premiumIndex` 不带参数）。 */
+export async function fetchPremiumIndex(opts?: {
   exchangeId?: string
   apiBase?: string
-}): Promise<Map<string, number>> {
+}): Promise<Map<string, PremiumIndex>> {
   const exchange = await getExchange(
     opts?.exchangeId ?? 'binance',
     'swap',
@@ -1126,11 +1152,18 @@ export async function fetchMarkPrices(opts?: {
   )
   /* ccxt 的隐式方法：binance 上就是 `/fapi/v1/premiumIndex`（不带参数 = 全市场） */
   const list: any[] = (await exchange.fapiPublicGetPremiumIndex()) ?? []
-  const out = new Map<string, number>()
+  const out = new Map<string, PremiumIndex>()
   for (const r of list) {
     const sym = String(r?.symbol ?? '').toUpperCase()
     const mark = numOrNull(r?.markPrice)
-    if (sym && mark !== null) out.set(sym, mark)
+    if (!sym || mark === null) continue
+    const next = numOrNull(r?.nextFundingTime)
+    out.set(sym, {
+      markPrice: mark,
+      indexPrice: numOrNull(r?.indexPrice),
+      fundingRate: numOrNull(r?.lastFundingRate),
+      nextFundingTime: next !== null && next > 0 ? next : null
+    })
   }
   return out
 }

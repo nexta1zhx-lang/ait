@@ -31,43 +31,36 @@ export type TrendState = 'up' | 'down' | 'range'
 export type Grade = 'A' | 'A-W' | 'S' | 'V' | 'B' | 'unclear'
 
 /**
- * 取数参数 —— 分析时「各周期各拉多少根 K 线」，来自 `config/calibers.yaml`。
+ * 取数参数 —— 分析时「主周期拉多少根 K 线」，来自 `config/calibers.yaml`。
  *
- * ⚠️ 这里**没有任何口径公式**（不变量比、不找摆点、不算区间位置）——
- * 行情直接把 K 线切成小段交给 AI 自己读（跟知识库收录时同一套做法）。
+ * ★ 2026-10-11：**「其余周期」那张表删掉了**（用户：「不要给了，只给当前周期的前 100 根数据」→「1. 不拉了」）。
+ *   分析只取主周期一个周期，所以这里只剩两个夹子。
  */
 export interface Calibers {
-  /**
-   * 其余周期各拉多少天：主周期 → { 那个周期: 天数 }。
-   * 主周期自己不在表里 —— 它用「图上那段有多长」的天数。
-   */
-  others: Record<string, Partial<Record<Timeframe, number>>>
-  /** 根数下限（日线只给几天时兜底） */
+  /** 根数下限（图上只给几天时兜底） */
   minBars: number
   /** 根数上限（15m 别拉爆） */
   maxBars: number
 }
 
-/** 一个周期的行情块 —— 就是 `describeSeries` 切出来的那段文字 */
+/**
+ * 一个周期的行情块 —— **现在只有主周期这一个**，内容就是最近 100 根逐根文字。
+ *
+ * ★ 2026-10-11：用户「只给当前周期的前 100 根数据」→ 其余周期不再造块、不再发给 AI。
+ */
 export interface SeriesBlock {
   timeframe: Timeframe
   /** 是不是主周期（图上那个） */
   primary: boolean
   /** 这个块往前看了多少天 */
   days: number
-  /** 实际拉到的根数 */
+  /** **发给 AI 的根数**（= 最近 N 根，见 `ANALYSIS_BARS`） */
   bars: number
-  /** 第一根 / 最后一根的时间戳 */
+  /** 第一根 / 最后一根的时间戳（就是发出去那个窗口的头尾） */
   from: number
   to: number
-  /** 切段描述（整段速览 + 分几小段），直接喂给 AI */
+  /** 逐根文字：时间 / 收盘 / 涨跌% / 量比（`describe.ts` 的 `barLines`），直接喂给 AI */
   text: string
-  /**
-   * EMA42 —— **只有 15m / 1h 两块才有**。
-   * 用户 2026-10-03：「EMA42 不是必要看的，只在看回调时、看 15m 和 1h 才参考」。
-   * 4h / 1d 不给（主周期是 4h/1d 时快照里就完全没有均线这一节）。
-   */
-  ema42?: Ema42Info
 }
 
 /*
@@ -78,25 +71,13 @@ export interface SeriesBlock {
  * 的 `describeSeries`，跟知识库收录时同一个做法），所以它们没人用了。
  */
 
-/** 市场热度（来自交易所公开数据，与盘面情绪相关） */
-export interface MarketHeat {
-  /** 资金费率 */
-  fundingRate: number | null
-  /** 持仓量 */
-  openInterest: number | null
-  /** 持仓量变化 %（近几期） */
-  openInterestChangePct: number | null
-  /** 24h 成交额 */
-  quoteVolume24h: number | null
-  /** 24h 涨跌幅 % */
-  change24hPct: number | null
-  /** 24h 振幅 % = (high - low) / low * 100 */
-  amplitude24hPct: number | null
-  /** 多空持仓人数比 */
-  longShortRatio: number | null
-  high24h: number | null
-  low24h: number | null
-}
+/*
+ * 已删除（2026-10-11）：`MarketHeat`（资金费率 / 持仓量 / 多空比 / 24h 涨跌振幅成交额）。
+ *
+ * 用户：「热度不要，不需要」—— 分析不再看它，喂给 AI 的文本里也没有这一段，
+ * 页面上那块「市场热度」一并去掉（原来它是唯一还留着热度的地方）。
+ * 行情条 / 合约列表那套 24h 数据是另一条链（`fetchTickerInfo` + WS），不受影响。
+ */
 
 import type {Ema42Info} from './analysis/ema'
 
@@ -107,11 +88,15 @@ export interface MarketSnapshot {
   price: number
   /** 主周期（你在图上看的那个） */
   primary: Timeframe
-  /** 各周期的行情块（按周期从短到长），每块就是一段切段描述 */
+  /** 行情块 —— **只有主周期一个**（就是最近 100 根逐根那一段） */
   blocks: SeriesBlock[]
-  /** 市场热度 */
-  heat: MarketHeat
-  /** 主周期的 K 线 —— 给前端画图；后端只用它算 EMA42，不整段发给 AI */
+  /**
+   * 每个周期的 K 线是**从哪儿来的**：
+   * `db` = 底座写的本地库（0 上游权重），`rest` = 交易所现拉（库外 / 太旧时的兜底）。
+   * 只用来在「分析过程」里说明这次吃的是哪份数据，不参与判断。
+   */
+  sources: {timeframe: Timeframe; from: 'db' | 'rest'}[]
+  /** 主周期的 K 线（拉回来的全量，比发给 AI 的 100 根多 —— 量比的基准取自它多出来的那段） */
   candles: Candle[]
 }
 
@@ -136,10 +121,11 @@ export interface AppConfig {
   timeframes: Timeframe[]
   /**
    * 回溯多少天（前端那个「看最近 N 天」）。
-   * 各周期实际拉多少根 = 天数 ÷ 周期长度，再按 calibers 的上下限夹一下。
+   * 实际拉多少根 = max(天数 ÷ 周期长度, 200)（100 根发给 AI + 100 根当量比基准），
+   * 再按 calibers 的上下限夹一下。只有主周期一个周期。
    */
   lookbackDays: number
-  /** 口径参数（算公式用的数字），来自 `config/calibers.yaml` */
+  /** 取数参数（根数上下限），来自 `config/calibers.yaml` */
   calibers: Calibers
   /**
    * 分析 / 用量流水保留多少天（<= 0 = 不清理）。

@@ -3,7 +3,8 @@
  *
  *   1. K 线    `{sym}@kline_{tf}`      —— 按「币 + 周期」订阅，事件 `kline`
  *   2. 全市场行情 `!ticker@arr`          —— 一条流管所有币，事件 `ticker`（一批增量）
- *   3. 标记价   `{sym}@markPrice@1s`    —— 只订**有持仓的币**（2026-10-06 加），
+ *   3. 标记价   `{sym}@markPrice`        —— 只订**有持仓的币** + 「正看着的币」，
+ *                                          最近一条还缓存起来给 `/api/ticker` 首帧用，
  *                                          给「未实现盈亏逐笔重算」供数，见 `subscribeMarkPrice`
  *
  * 上游按币安文档那种「一条连接 + SUBSCRIBE 多条流」的用法：
@@ -41,10 +42,12 @@ import {WebSocket} from 'ws'
 import {wsAgent} from './exchange-account'
 import {
   fetchCandles,
-  fetchMarkPrices,
   fetchMarketList,
-  type MarketRow
+  fetchPremiumIndex,
+  type MarketRow,
+  type PremiumIndex
 } from './market'
+import {putMarkInfo} from './mark-cache'
 import {loadConfig} from '../config'
 import {Candle, Timeframe} from '../types'
 
@@ -217,13 +220,23 @@ function onUpstreamMessage(ev: {data: string | Buffer | ArrayBuffer | Buffer[]})
     handleTickerBatch(body)
     return
   }
-  /* 标记价（持仓的未实现盈亏靠它逐笔重算，见 `exchange-stream.ts`） */
+  /*
+   * 标记价。**一条消息带四样东西**（币安 `markPriceUpdate`）：
+   *   `p` 标记价（持仓的未实现盈亏逐笔重算，见 `exchange-stream.ts`）
+   *   `i` 指数价、`r` 当期资金费率、`T` 下次资金费用时间
+   *     —— 行情条那两个数（资金费率 + 倒计时）就用后两样，不再走 REST premiumIndex。
+   */
   if (body?.e === 'markPriceUpdate') {
     const raw = String(body.s ?? '')
-    const set = markListeners.get(`${raw.toLowerCase()}@markPrice@1s`)
     const mark = Number(body.p)
-    if (!set?.size || !Number.isFinite(mark) || mark <= 0) return
-    noteMarkTick(raw, mark)
+    if (!Number.isFinite(mark) || mark <= 0) return
+    const next = Number(body.T)
+    noteMarkTick(raw, {
+      markPrice: mark,
+      indexPrice: numOrNull(body.i),
+      fundingRate: numOrNull(body.r),
+      nextFundingTime: Number.isFinite(next) && next > 0 ? next : null
+    })
     return
   }
   if (body?.e !== 'kline' || !body.k) return
@@ -625,13 +638,15 @@ export function tickerStreamMode(): string {
   return tickerMode
 }
 
-/* ---------------- 标记价（`{sym}@markPrice@1s`） ---------------- */
+/* ---------------- 标记价（`{sym}@markPrice`） ---------------- */
 
 /**
  * 持仓的**未实现盈亏**要逐笔动，就必须逐笔拿到标记价（2026-10-06 改造 P4）。
  *
  * 复用**同一条上游连接**（`/market/ws`，见文件头）—— 不再多开一条 WS：
- *   · 只订**有持仓的那几个币**，一条 `{sym}@markPrice@1s` 秒级推一次；
+ *   · 只订**有持仓的币** + **正看着的币**（行情条那格），一条 `{sym}@markPrice`
+ *     **3 秒推一次**（币安默认档）—— 用户 2026-10-11：「不要 1s」「慢速即可」，
+ *     手机端那条 `@1s` 也不订了（消息量是这条的 3 倍，而浮盈/资金费率都不需要那么快）；
  *   · ⚠️ **别订 `!markPrice@arr@1s`**（全市场标记价）：一条消息把 ~500 个币全带上，
  *     每秒几十 KB，我们只用得上手里那几条，纯浪费带宽和解析。
  *
@@ -639,10 +654,49 @@ export function tickerStreamMode(): string {
  *   而上游 WS 一哑（本地实测会哑到 `open` 都触发不了）持仓的未实现盈亏就**一直不动**，
  *   只能等 5 分钟一次的账户快照 —— 用户原话「前端的仓位持仓盈利不是实时变动的吗」。
  */
-type MarkListener = (rawSymbol: string, markPrice: number) => void
+/** 币安推的字段全是字符串，认不出来就是 null */
+function numOrNull(v: unknown): number | null {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
 
-/** 流名（`btcusdt@markPrice@1s`）→ 监听者。⚠️ 币安流名全小写 */
-const markListeners = new Map<string, Set<MarkListener>>()
+/**
+ * 一条标记价事件 —— 就是 `/fapi/v1/premiumIndex` 那四个字段
+ * （WS 上 `markPriceUpdate` 一个不少地推给我们，见文件上面那段解析）。
+ */
+export type MarkInfo = PremiumIndex
+
+/** 订阅者拿到：哪个币（`BTCUSDT`）+ 四件套 */
+type MarkListener = (rawSymbol: string, info: MarkInfo) => void
+
+/** 一个币的标记价订阅者 */
+interface MarkSub {
+  listener: MarkListener
+}
+
+/**
+ * 「旁听」：不关心订了哪些币，凡是收到的标记价事件都过一遍。
+ *
+ * 服务器拿它把资金费率 / 指数价转给前端（SSE `/api/tickers/stream` 的 `mark` 事件）——
+ * 一条旁听就够所有客户端用，不必每个客户端各订一遍。
+ */
+const markObservers = new Set<MarkListener>()
+
+/** 旁听所有标记价事件（不管订阅集合里有没有它） */
+export function observeMarkPrice(listener: MarkListener): () => void {
+  markObservers.add(listener)
+  return () => {
+    markObservers.delete(listener)
+  }
+}
+
+/**
+ * 币（`BTCUSDT`）→ 这一条标记价流的所有订阅者。
+ *
+ * ⚠️ 最近收到的那条还会往 `data/mark-cache.ts` 里放一份（给 `/api/ticker` 的首帧用），
+ *    那份数据单独一个模块就是为了**不和 `market.ts` 形成循环依赖**。
+ */
+const markListeners = new Map<string, Set<MarkSub>>()
 
 /* ---------------- 标记价的 REST 兜底 ---------------- */
 
@@ -659,19 +713,31 @@ let markDegraded = false
 let markFallbackErr = false
 
 /** 收到一条标记价（WS 或兜底）→ 分发给监听者 */
-function noteMarkTick(rawSymbol: string, mark: number): void {
+function noteMarkTick(rawSymbol: string, info: MarkInfo): void {
   lastMarkAt = Date.now()
   if (markDegraded) {
     markDegraded = false
     console.log('[kline] 标记价上游恢复了')
   }
-  const set = markListeners.get(markStreamName(rawSymbol))
-  if (!set?.size) return
-  for (const fn of set) {
+  const raw = rawSymbol.toUpperCase()
+  /* 顺手留一份给 `/api/ticker` 首帧（见 `data/mark-cache.ts`） */
+  putMarkInfo(raw, info)
+  const set = markListeners.get(raw)
+  if (set?.size) {
+    for (const sub of set) {
+      try {
+        sub.listener(raw, info)
+      } catch {
+        /* 单个订阅者出错不能影响别人 */
+      }
+    }
+  }
+  /* 旁听者跟「订了哪些币」无关，所以别放在上面那个 `if` 里面 */
+  for (const fn of markObservers) {
     try {
-      fn(rawSymbol.toUpperCase(), mark)
+      fn(raw, info)
     } catch {
-      /* 单个订阅者出错不能影响别人 */
+      /* 同上 */
     }
   }
 }
@@ -697,7 +763,7 @@ async function markFallbackTick(): Promise<void> {
   if (Date.now() - lastMarkAt < MARK_IDLE_MS) return
   try {
     const t0 = Date.now()
-    const marks = await fetchMarkPrices()
+    const marks = await fetchPremiumIndex()
     if (!marks.size) {
       console.warn('[kline] 标记价兜底：REST 回来了但是空的')
       return
@@ -714,10 +780,9 @@ async function markFallbackTick(): Promise<void> {
      * ⚠️ 只喂**当前订阅着**的那些币：全市场是几百个，别把无关的也算一遍
      *    （一次全拿是为了省往返，不代表要全部处理）。
      */
-    for (const key of markListeners.keys()) {
-      const raw = key.split('@')[0]!.toUpperCase()
-      const mark = marks.get(raw)
-      if (mark) noteMarkTick(raw, mark)
+    for (const raw of markListeners.keys()) {
+      const info = marks.get(raw)
+      if (info) noteMarkTick(raw, info)
     }
   } catch (e) {
     /*
@@ -732,14 +797,26 @@ async function markFallbackTick(): Promise<void> {
   }
 }
 
-/** `BTCUSDT` → `btcusdt@markPrice@1s`（`BTC/USDT:USDT` 这种也能吃） */
+/**
+ * `BTCUSDT` → `btcusdt@markPrice`（`BTC/USDT:USDT` 这种也能吃）。
+ *
+ * ⚠️ 这条是币安的**默认档：每 3 秒推一次**。**不要用 `@1s` 那档**（用户 2026-10-11
+ *    明确否掉：「不要 1s」「慢速即可」）—— 消息量 3 倍，而浮盈 / 资金费率都不需要那么快。
+ */
 function markStreamName(rawSymbol: string): string {
   const base = String(rawSymbol)
     .trim()
     .toUpperCase()
     .replace(/[:/\-\s]/g, '')
     .toLowerCase()
-  return `${base}@markPrice@1s`
+  return `${base}@markPrice`
+}
+
+/** 这个币有人听 ⇒ 把它那条流加进 `wanted`（订阅由 `flushSubscriptions()` 发出去） */
+function syncMarkStream(raw: string): void {
+  if (!markListeners.get(raw)?.size) return
+  wanted.add(markStreamName(raw))
+  void ensureUpstream()
 }
 
 /**
@@ -753,37 +830,34 @@ export function subscribeMarkPrice(
   rawSymbol: string,
   listener: MarkListener
 ): () => void {
-  const key = markStreamName(rawSymbol)
-  /* 币种为空（或只有 `/` 这种）→ 别去订一条 `@markPrice@1s` 的野流 */
-  if (!/^[a-z0-9]+@/.test(key)) {
+  const raw = String(rawSymbol).trim().toUpperCase().replace(/[:/\-\s]/g, '')
+  /* 币种为空（或只有 `/` 这种）→ 别去订一条 `@markPrice` 的野流 */
+  if (!/^[A-Z0-9]+$/.test(raw)) {
     console.warn(`[kline] 标记价订阅：符号不合法（${rawSymbol}）`)
     return () => undefined
   }
+  const sub: MarkSub = {listener}
 
-  let set = markListeners.get(key)
+  let set = markListeners.get(raw)
   if (!set) {
     set = new Set()
-    markListeners.set(key, set)
+    markListeners.set(raw, set)
   }
-  const bucket = set
-  bucket.add(listener)
+  set.add(sub)
 
-  if (!wanted.has(key)) {
-    wanted.add(key)
-    void ensureUpstream()
-  }
+  syncMarkStream(raw)
   flushSubscriptions()
   /* 有标记价订阅者 ⇒ 把 REST 兜底也起上（上游哑了才真的会用它） */
   syncMarkFallback()
-  console.log(`[kline] 标记价 ${key} 订阅（上游一条连接共用）`)
+  console.log(`[kline] 标记价 ${markStreamName(raw)} 订阅（上游一条连接共用）`)
 
   return () => {
-    const cur = markListeners.get(key)
+    const cur = markListeners.get(raw)
     if (!cur) return
-    cur.delete(listener)
+    cur.delete(sub)
     if (cur.size) return
-    markListeners.delete(key)
-    wanted.delete(key)
+    markListeners.delete(raw)
+    wanted.delete(markStreamName(raw))
     flushSubscriptions()
     syncMarkFallback()
     if (!anyWantWs()) closeUpstream()

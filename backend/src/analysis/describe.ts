@@ -47,6 +47,67 @@ function mean(nums: number[]): number {
   return nums.reduce((s, x) => s + x, 0) / nums.length
 }
 
+/**
+ * **最近几根的逐根明细**（最新那根在最后）。
+ *
+ * ★ 2026-10-11 加：用户问「是不是我输入数据的问题」—— 是。
+ *   切段是「整段均分 5 段 + 每段抽 12 个收盘点」，于是主周期 1h（图上 30 天 = 720 根）
+ *   每 12 小时才 1 个点、15m 每 ~48 分钟才 1 个点 ⇒ **「当前这一刻是强是弱」在输入里根本
+ *   看不见**，模型只能从「这一段涨了多少」倒推，于是永远给「等回踩企稳」。
+ *   这一段把最后 `recent` 根原样列出来（开高低收 / 量 / 涨跌），
+ *   「该调不调」「不破前低」「极弱转强」这些判断才有依据。
+ *
+ * ⚠️ 只在**分析**那条链上传 `recent`（`data/market.ts`）；知识库收录 / 提炼
+ *    （`describeRally`）没传就是 0，输出逐字不变，别改坏那条链。
+ */
+export function tailLines(seg: Candle[], recent: number): string[] {
+  const n = Math.min(recent, seg.length)
+  if (n < 2) return []
+  const tail = seg.slice(-n)
+  const out = [`【最近 ${n} 根明细】（最新在最后）`]
+  for (const c of tail) {
+    const chg = c.open !== 0 ? (c.close / c.open - 1) * 100 : 0
+    out.push(
+      `- ${bj(c.timestamp)}  开 ${fmt(c.open)} 高 ${fmt(c.high)} 低 ${fmt(c.low)} 收 ${fmt(c.close)}` +
+        `  涨跌 ${chg >= 0 ? '+' : ''}${fmt(chg, 2)}%  量 ${fmt(c.volume, 0)}`
+    )
+  }
+  return out
+}
+
+/** 分析那条链给 AI 的根数（用户 2026-10-11：只给当前周期的前 100 根） */
+export const ANALYSIS_BARS = 100
+
+/**
+ * **分析那条链的输入**：主周期最近 `n` 根，一根一行 ——
+ * 时间 / 开 / 高 / 低 / 收 / 涨跌% / 量比。
+ *
+ * ★ 2026-10-11 用户：「AI 的数据变了吧？不要给了，只给当前周期的前 100 根数据。」
+ *   → 同一天又说「全给数据吧」：**开 / 高 / 低 / 收 都给**（影线、插针都看得到）。
+ *
+ * 两个口径（按用户点名的字段）：
+ *   · **涨跌%** = 这一根收盘 ÷ **上一根收盘** − 1（窗口第一根拿它自己的开盘当基准）。
+ *     不是「开 → 收」：收对收才看得出连续性和跳空（开高低本身就在行里）。
+ *   · **量比** = 这一根的量 ÷ **前面同样长度那一段**的均量（前面不够就用窗口自己的均量）。
+ *     基准取自窗口外面 ⇒ 「放量」是相对**前面那一段**说的，不是相对它自己。
+ */
+export function barLines(candles: Candle[], n = ANALYSIS_BARS): string[] {
+  const win = candles.slice(-Math.max(1, n))
+  if (!win.length) return ['（没有 K 线）']
+  const before = candles.slice(0, candles.length - win.length).slice(-win.length)
+  const base = mean((before.length ? before : win).map(c => c.volume)) || 1
+  const first = win[0]!
+  return win.map((c, i) => {
+    const prev = i === 0 ? {close: first.open} : win[i - 1]!
+    const chg = Number(((prev.close > 0 ? c.close / prev.close - 1 : 0) * 100).toFixed(2))
+    const pct = chg === 0 ? '0.00%' : `${chg > 0 ? '+' : ''}${chg.toFixed(2)}%`
+    return (
+      `${bj(c.timestamp)}  开 ${fmt(c.open)} 高 ${fmt(c.high)} 低 ${fmt(c.low)} ` +
+      `收 ${fmt(c.close)}  ${pct}  量比 ${(c.volume / base).toFixed(1)}x`
+    )
+  })
+}
+
 /** 段内结构：把段一分为二，比较前后半段的高低点 */
 export function segmentStructure(seg: Candle[]): string {
   if (seg.length < 6) return '样本不足'
@@ -218,7 +279,9 @@ export function seriesStats(candles: Candle[]): SeriesStats {
  */
 export function describeSeries(
   candles: Candle[],
-  parts = 5
+  parts = 5,
+  /** 末尾再列几根逐根明细（0 = 不要；只有分析那条链会传，见 `tailLines`） */
+  recent = 0
 ): {text: string; segments: SegmentReport[]; stats: SeriesStats} {
   if (!candles.length)
     return {
@@ -255,8 +318,9 @@ export function describeSeries(
     }`
   ].join('\n')
 
+  const tail = recent > 0 ? tailLines(candles, recent) : []
   return {
-    text: [head, ...segments.map(renderSegment)].join('\n\n'),
+    text: [head, ...segments.map(renderSegment), ...tail].join('\n\n'),
     segments,
     stats
   }

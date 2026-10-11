@@ -3,17 +3,14 @@ import fs from 'fs'
 import path from 'path'
 import {Command} from 'commander'
 import {loadConfig, ROOT_DIR} from './config'
-import {fullSystem, loadRules} from './rules'
+import {loadRules} from './rules'
 import {fetchSnapshot} from './data/market'
 import {buildContext} from './context/builder'
 import {judge} from './llm/client'
 import {oneLineCost} from './llm/pricing'
-import {listTags} from './db/knowledge'
-import {loadTagTemplates} from './db/tags'
 import {recordUsage} from './db/usage'
 import {defaultUserId} from './db/users'
 import {resolveUserLlm, saveUserLlm} from './db/llm-keys'
-import {saveAnalysis, saveRulesVersion} from './db/analyses'
 import {render} from './output/render'
 import {ask, askHidden, isInteractive} from './util/prompt'
 import {MarketType, Timeframe} from './types'
@@ -122,23 +119,10 @@ program
 
       log(`• 调用大模型 (${config.llm.model}) ...`)
 
-      // 可用的标签池：复用「标签模板 + 知识库里用过的标签」（跟网页同一条路径）
-      let tags: string[] = []
-      try {
-        const [templates, used] = await Promise.all([
-          loadTagTemplates(userId),
-          listTags(userId)
-        ])
-        tags = [...new Set([...templates, ...used.map(u => u.tag)])]
-      } catch {
-        /* 忽略 */
-      }
-
       const {result, meta} = await judge({
         snapshot,
         context,
         prompt: rules.system,
-        tags,
         config
       })
       // 记账：这次判断烧了多少 token、多少钱
@@ -153,38 +137,6 @@ program
         attempts: meta.attempts,
         latencyMs: meta.latencyMs
       })
-
-      // 存档：跟网页走同一张表，这样命令行做的分析也能在历史里看到
-      let analysisId: number | null = null
-      try {
-        await saveRulesVersion({
-          hash: rules.hash,
-          system: fullSystem(rules.system),
-          body: rules.body,
-          sources: rules.sources
-        })
-        analysisId = await saveAnalysis({
-          userId,
-          symbol: symbol.split('/')[0],
-          ccxtSymbol: snapshot.symbol,
-          exchange: config.exchange,
-          marketType: config.marketType,
-          timeframes: [timeframe],
-          chartTimeframe: '1h',
-          judge: result,
-          snapshot,
-          meta: {model: meta.model, via: 'cli', days},
-          model: meta.model,
-          rulesHash: rules.hash,
-          llmUsageId: billed?.id ?? null,
-          usage: meta.usage,
-          costUsd: billed?.costUsd ?? null,
-          latencyMs: meta.latencyMs,
-          attempts: meta.attempts
-        })
-      } catch (e) {
-        console.warn('[cli] 存档失败:', (e as Error).message)
-      }
 
       // 审计日志
       const logDir = path.join(ROOT_DIR, 'logs')

@@ -113,7 +113,7 @@ export function prefetchSymbol(base: string): void {
  * 主周期要看多少天 —— **不给用户填，就是图上那段**。
  *
  * 图上初次加载 `CHART_BARS` 根，换成天数交给后端（1h × 200 根 ≈ 8.33 天），
- * 后端再换回根数。其余周期看多少天由 `config/calibers.yaml` 决定。
+ * 后端再换回根数 —— **只有主周期这一个周期**（2026-10-11 起不再取其余周期）。
  *
  * ⚠️ 先往下取到 3 位小数：后端的 `barsFor` 是 `ceil(天 × 每天根数)`，
  * 不截断的话 5m 会因为浮点误差多算出 1 根（200.00000000000003 → 201）。
@@ -156,7 +156,7 @@ export const LEFT_TABS = [
   {value: 'market' as const, label: '合约行情'},
   {value: 'live' as const, label: '实时分析'},
   {value: 'test' as const, label: '测试'},
-  {value: 'records' as const, label: '预测历史'},
+  {value: 'history' as const, label: '预测历史'},
   {value: 'kb' as const, label: '知识库'},
   {value: 'add' as const, label: '添加案例'}
 ]

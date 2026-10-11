@@ -581,11 +581,6 @@ const baseActive = computed(() => rankBase.value.kind !== 'off')
  */
 const baseSince = computed(() => rankSinceMs(rankBase.value))
 
-/** 列头文案：时区日切 = 「今日涨跌」；任意时刻 = 「基准涨跌」 */
-const chgLabel = computed(() =>
-  rankBase.value.kind === 'tz' ? '今日涨跌' : '基准涨跌'
-)
-
 /**
  * 表里那份 `baseClose` 是**按哪个基准时刻**补的（没换基准时是 `null`）。
  *
@@ -763,8 +758,8 @@ const arrowOf = (v: number | null): string =>
     <!--
       ★ 2026-10-11 **「基准以来」那一行删了**（用户：「合约顶部时间基准横幅去掉」）——
       原来换了基准就在这里摆一行「今日涨跌 / UTC+8 00:00 日切 ✕」，让手机上也看得见口径。
-      现在这一格的**表头**就是口径本身（`baseActive ? chgLabel : '涨跌幅'` ⇒ 「今日涨跌」/
-      「基准涨跌」），横幅是重复的一行，还占掉列表高度。
+      表头固定写「涨跌幅」（用户 2026-10-11：「把那个改为『涨跌幅』三个字」）——
+      换了基准时刻也是这三个字，具体口径看「配置 → 基准时间」里那颗当前选中的按钮。
       ⚠️ 换回默认 24h 的入口在「配置 → 基准时间」那颗 `24h`（`SettingsSheet.vue`），
         别以为删了横幅就没法回去了。
     -->
@@ -847,9 +842,7 @@ const arrowOf = (v: number | null): string =>
               <th class="r">最新价</th>
               <th class="r sortable" :class="{on: sortKey === 'change'}">
                 <span class="scell">
-                  <span class="s-label" @click="sortBy('change')">{{
-                    baseActive ? chgLabel : '涨跌幅'
-                  }}</span>
+                  <span class="s-label" @click="sortBy('change')">涨跌幅</span>
                   <span class="sarr">
                     <button
                       type="button"

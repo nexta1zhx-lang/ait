@@ -624,16 +624,16 @@ export async function seedAdminLlmFromEnv(): Promise<boolean> {
 export interface AdminUserRow extends User {
   /** 他自己的大模型密钥（管理员要能查看，明文也在里面） */
   llmKeys: LlmKey[]
-  /** 有多少条分析 / 知识库 */
-  stats: {analyses: number; knowledge: number}
+  /** 有多少条知识库 / 预测历史 */
+  stats: {knowledge: number; analyses: number}
 }
 
 /** 管理员用：所有人 + 各自的密钥 + 数据条数 */
 export async function listUsersForAdmin(): Promise<AdminUserRow[]> {
-  const rows = await query<UserRaw & {analyses: string; knowledge: string}>(
+  const rows = await query<UserRaw & {knowledge: string; analyses: string}>(
     `SELECT u.id, u.username, u.is_admin, u.created_at,
-            (SELECT count(*) FROM analyses  a WHERE a.user_id = u.id)::text AS analyses,
-            (SELECT count(*) FROM knowledge k WHERE k.user_id = u.id)::text AS knowledge
+            (SELECT count(*) FROM knowledge k WHERE k.user_id = u.id)::text AS knowledge,
+            (SELECT count(*) FROM analyses a WHERE a.user_id = u.id)::text AS analyses
        FROM users u
       ORDER BY u.id`
   )
@@ -677,7 +677,7 @@ export async function listUsersForAdmin(): Promise<AdminUserRow[]> {
   return rows.map(r => ({
     ...mapUser(r),
     llmKeys: byUser.get(Number(r.id)) ?? [],
-    stats: {analyses: Number(r.analyses), knowledge: Number(r.knowledge)}
+    stats: {knowledge: Number(r.knowledge), analyses: Number(r.analyses)}
   }))
 }
 

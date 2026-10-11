@@ -1043,188 +1043,6 @@ button.danger {
   color: var(--bad);
 }
 
-/* ==================== 结论三段：推荐 / 走势 / 理由 ====================
-   以前三段共用一套「左蓝条 + 同样字号」的样式，糊成一整段看不出主次。
-   现在按重要度给三套（推荐最大、走势带概率、理由默认收起）。
-   实时分析页和历史详情共用这套类名，两处要一起改。
-
-   ⚠️ 2026-10-03 用户要求「取消左侧边框线」：
-   那条 `border-left` 色条全删了，身份改由**整圈细描边 + 标题色 / 徽标色**带
-   —— 三块照样分得出来，但左边不再是三条竖着的彩线。
-
-   ⚠️ 2026-10-04 用户又说「**不要背景框和背景**，纯文字太单调懒得看」：
-   底色 + 描边一起去掉，改成**小节标签 + 一条细线分隔**；
-   同时上面补三块图（概率条 / 形状条 / 价格位置尺），见下面的 `.prob` `.shape` `.lv`。 */
-.concl {
-  margin-top: 6px;
-  padding: 10px 0 0;
-  border: 0;
-  background: none;
-  border-top: 1px solid var(--border);
-}
-
-/*
- * 结论文字里的关键字：加粗 + 变色（用户 2026-10-03：「能否在关键字加粗颜色变化」）。
- *
- * ⚠️ 紧接着用户又说「颜色有太多啦啦」：**只留两色** ——
- *   · `.kw-key`（蓝）：模型自己用 `**…**` 标的重点
- *   · `.kw-warn`（琥珀）：风险 / 纪律词（止损 / 观望 / 别碰…）
- * 生成逻辑在 `format.ts` 的 `richText()`（模板里用 `v-html`）。
- * 涨 / 跌 / 结构词不上色 —— 推荐那三行本来就有绿 / 红标签，不重复。
- */
-.concl .kw {
-  font-weight: var(--fw-bold);
-}
-.concl .kw-key {
-  color: var(--blue);
-}
-.concl .kw-warn {
-  color: var(--warn);
-}
-
-.concl p {
-  margin: 6px 0 0;
-  font-size: 13.5px;
-  line-height: 1.75;
-  color: #cdd9e5;
-  white-space: pre-wrap;
-}
-
-.concl-h {
-  font-size: 13px;
-  font-weight: var(--fw-bold);
-}
-
-.concl-sub {
-  margin-left: 6px;
-  font-size: 11.5px;
-  color: var(--muted);
-}
-
-.concl-pct {
-  margin-left: 6px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: var(--fw-bold);
-}
-
-/* ① 推荐：最重要的一块（三行动作各自配色，标题绿） */
-.concl.rec {
-  border-color: color-mix(in srgb, var(--ok) 38%, transparent);
-}
-.concl.rec .concl-h {
-  font-size: 14px;
-  color: var(--ok);
-}
-.concl.rec p {
-  font-size: 14px;
-  color: var(--text);
-}
-
-/*
- * 推荐拆成「现在 / 开单 / 别碰」三行：一行一个动作。
- *
- * ⚠️ 2026-10-03 用户：「推荐的背景块色也去掉，采用别的方式区分」——
- * 原来三行各铺一条淡底色块（.rec-row.now/.do/.dont 的 background）**全删**，
- * 区分改由两样更克制的东西承担：
- *   ① 行首那颗**实心彩色胶囊**（蓝 / 绿 / 红）—— 身份全靠它，一眼一行一个动作
- *   ② 行与行之间一条**细分隔线** —— 只有线、没有块，不再是一堆色块堆在一起
- * 没有前缀的老记录走 .rec-plain，跟以前一样是一整段。
- */
-.rec-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  margin-top: 7px;
-}
-.rec-row + .rec-row,
-.rec-row + .rec-plain,
-.rec-plain + .rec-row {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-}
-/*
- * ⚠️ 2026-10-03 用户：「现在 开单 别碰改为矢量图标 会动的」——
- * 原来那颗**实心彩色胶囊**（文字写在胶囊里）拆开了：
- *   · 图标：`RecIcon.vue`（蓝=呼吸光点 / 绿=上冲箭头 / 红=摇头禁止符，都带微动效）
- *   · 文字：跟着图标走，颜色改成对应色调（不再是白字压在实色块上）
- * 现在整行只有「一个小图标 + 两个字 + 正文」，没有底色、没有描边。
- * ⚠️ `align-self: flex-start` + `margin-top` 是让图标和**正文第一行**对齐
- *   （正文 line-height 1.7×13.5 ≈ 23px，居中会偏高一点）。
- */
-.rec-k {
-  flex: 0 0 auto;
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 48px;
-  margin-top: 3px;
-  font-size: 11.5px;
-  font-weight: var(--fw-bold);
-  white-space: nowrap;
-  color: var(--muted);
-}
-.rec-row.now .rec-k {
-  color: var(--blue);
-}
-.rec-row.do .rec-k {
-  color: var(--ok);
-}
-.rec-row.dont .rec-k {
-  color: var(--bad);
-}
-.rec-v {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 13.5px;
-  line-height: 1.7;
-  color: var(--text);
-}
-
-/* ② 走势 */
-.concl.out {
-  border-color: var(--accent-line);
-}
-.concl.out .concl-h {
-  color: var(--blue);
-}
-.concl.out .concl-pct {
-  background: var(--blue);
-  color: var(--accent-ink);
-}
-
-/* ③ 理由：默认收起（最轻的一块） */
-.concl.why {
-  background: transparent;
-}
-.concl.why > summary {
-  display: flex;
-  align-items: center;
-  cursor: pointer;
-  list-style: none;
-}
-.concl.why > summary::-webkit-details-marker {
-  display: none;
-}
-.concl.why > summary::before {
-  content: '▸';
-  margin-right: 6px;
-  font-size: 11px;
-  color: var(--muted);
-}
-.concl.why[open] > summary::before {
-  content: '▾';
-}
-.concl.why .concl-h {
-  color: var(--muted);
-}
-.concl.why p {
-  color: #b9c4d0;
-}
-
 /* 两个百分号的含义（走势概率 / 标签概率） */
 
 /* 统计小格 */
@@ -1279,30 +1097,6 @@ button.danger {
   color: var(--muted);
 }
 
-/* 标签行：AI 从「标签模板 + 知识库用过的标签」里挑出来的形状标签 */
-.tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-/* ==================== 结论区的图示 ====================
-   用户 2026-10-04：「不要背景框和背景，纯文字太单调懒得看，能否**图示预测**」。
-   于是：外面不再套卡片，里面用三块图说话 ——
-     ① `.prob`  走势概率：一条长条
-     ② `.shape` 形状：每个标签一条概率条
-     ③ `.lv`    价格位置：上沿 / 现价 / 下沿 一把尺子
-   文字（推荐 / 走势 / 理由）留着，但只用小节标签 + 细线分隔。 */
-
-/* 小节标签：淡、小、字距拉开一点，起分隔作用又不抢眼 */
-.sec-label {
-  font-size: 11px;
-  color: var(--muted);
-  letter-spacing: 0.06em;
-  margin-bottom: 6px;
-}
-
 /* 结果区整块不要卡片底（用户：「不要背景框和背景」） */
 .result-card,
 .panel.flush {
@@ -1313,199 +1107,145 @@ button.danger {
   padding-right: 0;
 }
 
-/* ① 走势概率 */
-.prob {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.prob-top {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-/* 那个百分数：整块里最大的字 —— 一眼就是它 */
-.prob-num {
-  font-family: var(--mono);
-  font-size: 30px;
-  font-weight: var(--fw-bold);
-  line-height: 1;
-  letter-spacing: -1px;
-  color: var(--text);
+/*
+ * 结论卡里**那一整段 AI 原文**（2026-10-11 晚）。
+ *
+ * 背景：提示词的输出格式放开之后，模型改成写「小标题 + 分点 + 加粗」，
+ * 而这里原来是把整段当纯文本贴出来（`white-space: pre-wrap`）⇒ 页面上能直接看到
+ * `#` `**` `-` 这些符号。现在由 `markdown.ts` 渲染成 HTML，这一节**只做排版**：
+ * 标题重一档、列表给缩进、段间距拉开 —— 不加底色、不加边框。
+ *
+ * ⚠️ 用户 2026-10-03/04 明确说过：「取消左侧边框线」「不要背景框和背景」，
+ *    所以这里**只碰字号 / 行距 / 间距 / 颜色**，别再往上加框。
+ */
+.answer-body {
+  /*
+   * ★ 2026-10-12 演化过程（同一处，用户来回试了三轮语气）：
+   *   金融报表风 → 「数字太多我迷糊」→ 大白话风 → 「换一个语气」→ 老手短句风（行距收到 1.7）
+   *   → 「故事式」→ 现在按**讲故事**的密度：**1.78**，段落之间留 11px。
+   *   一句话：**短句风要紧、故事风要顺** —— 语气换了，这里就跟着换。
+   */
+  font-size: 15.5px;
+  line-height: 1.78;
+  /*
+   * ★ 2026-10-11 晚（用户：「正文颜色弱一点」）：正文**故意不比标题亮**。
+   *   `--text` 只留给标题和 `**加粗**`，正文用「最亮 72% + 次要色 28%」调出来的一档灰白。
+   * ★ 用户 2026-10-12：「适合金融行业」—— 数字**等宽对齐**（两行价格的小数点能对上）。
+   */
+  color: color-mix(in srgb, var(--text) 72%, var(--muted));
   font-variant-numeric: tabular-nums;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
-.prob-num i {
-  font-size: 15px;
-  font-style: normal;
-  font-weight: var(--fw-mid);
-  margin-left: 1px;
+.answer-body > *:first-child {
+  margin-top: 0;
+}
+.answer-body > *:last-child {
+  margin-bottom: 0;
+}
+
+/*
+ * 标题层级：**标题就是比正文更大更亮**（用户 2026-10-11 晚：
+ * 「标题黑灰色，正文却白色」—— 之前把 `###` 那档设成了 `--muted`（灰），层级整个反了）。
+ *
+ * ⚠️ 所以这里**不给标题用灰色**：两级标题都是 `--text`（最亮那档），
+ *    靠**字号 + 字重 + 上边距**分主次，不靠变暗。
+ */
+.answer-body h3 {
+  margin: 20px 0 8px;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+.answer-body h4 {
+  margin: 18px 0 7px;
+  font-size: 15.5px;
+  font-weight: 650;
+  line-height: 1.5;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+
+.answer-body p {
+  margin: 0 0 11px;
+}
+
+/*
+ * 最后一段 = 「进场 / 止损 / 目标」那一行（大白话风格里唯一的数字）。
+ * 上面留一道空隙分开，**颜色给最亮那档**（正文是灰白）⇒ 一眼就知道该看哪三个数。
+ */
+.answer-body > p:last-child {
+  margin-top: 16px;
+  color: var(--text);
+}
+
+.answer-body ul,
+.answer-body ol {
+  margin: 0 0 12px;
+  padding-left: 20px;
+}
+.answer-body li {
+  margin-bottom: 5px;
+}
+.answer-body li::marker {
   color: var(--muted);
 }
 
-.prob-num.go {
+.answer-body strong {
+  font-weight: 650;
+  color: var(--text);
+}
+
+.answer-body code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--accent);
+}
+
+.answer-body hr {
+  margin: 16px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/*
+ * 卡片颜色 = 它到底说能做 / 不能做 / 还在等。
+ *
+ * ⚠️ `verdictKind()` 是**按开头那几个词粗判**的展示用分类（判错只是颜色不对，
+ *    不参与任何判断）；`v-wait` 是兜底。
+ * ⚠️ 只给**第一个块**（通常是「先一句话总结」那一行）上色 ——
+ *    给整段上色会把一大篇理由全染红，太吵；列表开头那种更不染。
+ */
+.result-card.v-go .answer-body > h3:first-child,
+.result-card.v-go .answer-body > p:first-child {
   color: var(--ok);
 }
-.prob-num.wait {
+.result-card.v-no .answer-body > h3:first-child,
+.result-card.v-no .answer-body > p:first-child {
+  color: var(--bad);
+}
+.result-card.v-wait .answer-body > h3:first-child,
+.result-card.v-wait .answer-body > p:first-child {
   color: var(--warn);
 }
-.prob-num.no {
-  color: var(--bad);
-}
 
-.prob-cap {
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.prob-top .pill {
-  margin-left: auto;
-}
-
-.prob-track {
-  display: block;
-  height: 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 16%, var(--panel));
-  overflow: hidden;
-}
-
-.prob-track > i {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--muted);
-  transition: width 0.5s cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-
-.prob-track > i.go {
-  background: var(--ok);
-}
-.prob-track > i.wait {
-  background: var(--warn);
-}
-.prob-track > i.no {
-  background: var(--bad);
-}
-
-/* ② ③ 两块图的共同外壳 */
-.viz {
-  margin-top: 14px;
-}
-
-.shape {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 38px;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-}
-
-.shape-name {
-  font-size: 13px;
+/*
+ * 结论就一句话那个年代留下的类（2026-10-11）—— 现在只在「模型没给结论」时用。
+ * 不用背景框、不加色条（用户 2026-10-03/04：「取消左侧边框线」「不要背景框和背景」）。
+ */
+.verdict-line {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.7;
   color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.shape-track {
-  display: block;
-  height: 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 14%, var(--panel));
-  overflow: hidden;
-}
-
-.shape-track > i {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--blue) 75%, transparent);
-  transition: width 0.5s cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-
-.shape-pct {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ③ 价格位置：左边一根竖尺，右边三行数 */
-.lv {
-  display: grid;
-  grid-template-columns: 10px minmax(0, 1fr);
-  gap: 12px;
-}
-
-.lv-rail {
-  position: relative;
-  border-radius: 999px;
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--muted) 26%, transparent),
-    color-mix(in srgb, var(--muted) 8%, transparent)
-  );
-}
-
-.lv-dot {
-  position: absolute;
-  left: 50%;
-  width: 12px;
-  height: 12px;
-  margin: -6px 0 0 -6px;
-  border-radius: 50%;
-  background: var(--blue);
-  box-shadow: 0 0 0 3px var(--panel);
-  transition: top 0.5s cubic-bezier(0.22, 0.61, 0.36, 1);
-}
-
-.lv-rows {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 6px;
-}
-
-.lv-row {
-  display: grid;
-  grid-template-columns: 52px minmax(0, 1fr) auto;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.lv-row .k {
-  font-style: normal;
-  color: var(--muted);
-}
-
-.lv-row .v {
-  font-family: var(--mono);
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-
-.lv-row .d {
-  font-style: normal;
-  font-family: var(--mono);
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 上沿偏红、下沿偏绿（跟“涨跌”无关，只是上下两头的区分） */
-.lv-row.hi .v {
-  color: var(--bad);
-}
-.lv-row.lo .v {
-  color: var(--ok);
-}
-.lv-row.now .v {
-  font-weight: var(--fw-bold);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ==================== 周期标识 ==================== */
@@ -1619,38 +1359,7 @@ button.danger {
   }
 }
 
-/* 热度 / 键值列表 */
-.heat-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 4px 0;
-  border-bottom: 1px dashed var(--border);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
 
-.heat-row:last-child {
-  border-bottom: 0;
-}
-
-.heat-row .k {
-  color: var(--muted);
-  flex: none;
-}
-
-.heat-row .v {
-  font-weight: var(--fw-mid);
-  text-align: right;
-  word-break: break-word;
-}
-
-.heat-row .v.ok {
-  color: var(--ok);
-}
-.heat-row .v.bad {
-  color: var(--bad);
-}
 
 /* ==================== 表格 ==================== */
 .table {
@@ -2938,34 +2647,6 @@ body.fixed-viewport .split {
   }
 }
 
-/*
- * 标签：**一排两个，永远不折行**。
- * ⚠️ 光写 `display: flex` 不够 —— 全局 `.tags` 是 `flex-wrap: wrap`，
- * 这里必须显式 nowrap，否则栏一窄就又折成两行。
- * 真挤不下时让 tag 自己缩窄 + 尾巴省略号，也好过顶到下一行。
- */
-.hist .tags {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 4px;
-  margin-top: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.hist .tags .tag {
-  flex: 0 1 auto;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  /* 给点底色：跟左边那条结论色条呼应（用户：「加点配色」） */
-  background: var(--panel-2);
-  border-color: transparent;
-  /* 比别处的 tag 紧一点：一行摆两个，省下这 6px 就都容得下 */
-  padding: 2px 6px;
-}
-
 .hist .out {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3092,12 +2773,6 @@ body.fixed-viewport .split {
 
 .side .panel h2 {
   font-size: 13px;
-}
-
-.heat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 4px 16px;
 }
 
 .checklist.big > li {
@@ -6383,18 +6058,6 @@ button.badge:disabled {
   text-overflow: ellipsis;
 }
 
-/* 表格里那排标签 chip 不用再要顶部间距（它在单元格里） */
-.table .tags {
-  margin-top: 0;
-}
-
-/* 「+1」那种折叠计数 */
-.tag.more {
-  color: var(--muted);
-  border-style: dashed;
-  cursor: help;
-}
-
 /* ==================================================================
    手机 / 窄屏（≤900px）
    ------------------------------------------------------------------
@@ -7011,6 +6674,7 @@ button.badge:disabled {
   .split.m-market .mkt-table .c-chg {
     width: 88px;
   }
+
   /*
    * ⚠️ 首格左内边距必须**两边一起调**（表头 th + 表身 td），而且选择器要写得比
    * 下面那条 `padding: 11px 8px`（特异性 0,4,1）更具体 —— 上面那条
@@ -7319,8 +6983,6 @@ button.badge:disabled {
   .stack-legend {
     gap: 10px;
   }
-
-  /* ---- 预测历史：饼图铺成网格（列表换卡片写在 HistoryView 里）---- */
 }
 
 /* ==================== ★★ 暖色皮肤（2026-10-10） ==================== */
@@ -8012,7 +7674,6 @@ button.badge:disabled {
 .table .r,
 .stat .v,
 .card .v,
-.heat-row .v,
 .chart-info,
 .tf-chip,
 .hist .t,
@@ -8039,16 +7700,6 @@ button.badge:disabled {
  */
 .split.mkt-page {
   grid-template-columns: minmax(0, 1fr);
-}
-
-/*
- * 「预测历史」那半的外壳用 `display: contents` **化掉自己**：
- * 这样里面的 `.filter-bar` / `.hist-split` 依旧是 `.hist` 的直接子项，
- * 布局（含 `body.fixed-viewport` 那套「整体不滚、两列各自滚」）一点不变。
- * ⚠️ 切到「知识库」时 `v-show` 写的是行内 `display:none`，会盖住这条 —— 正是想要的。
- */
-.pane-records {
-  display: contents;
 }
 
 /* 「知识库」那半：一块整面板（窄屏整页滚、宽屏自己滚） */

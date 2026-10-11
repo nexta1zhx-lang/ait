@@ -9,7 +9,7 @@
  *   · ★ 用户 2026-10-10：「去掉 1 级菜单里的复盘」+「把预测历史和知识库挪到开单分析里，
  *     原有的历史分析去掉」+「账户统计不是放在底下的，是在『我的』里面，
  *     交易所账户后面」——
- *     原来那格「复盘」取消：预测历史 / 知识库 → 开单分析（`/analyze?t=records|kb`），
+ *     原来那格「复盘」取消：预测历史 / 知识库 → 开单分析（`/analyze?t=history|kb`），
  *     **账户统计搬进来当第二格**（紧跟交易所账户，底栏不加格）。
  * 旧版那几段（预测历史 / 知识库 / 模型配置）见 git 历史。
  *
@@ -24,6 +24,7 @@ import PaneShell from '../comps/PaneShell.vue'
 import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
 import ProfileView from './ProfileView.vue'
 import AdminView from './AdminView.vue'
+import PromptsView from './PromptsView.vue'
 import {user} from '../session'
 
 /*
@@ -34,7 +35,7 @@ const AccountStatsView = defineAsyncComponent(
   () => import('./AccountStatsView.vue')
 )
 
-type Pane = 'exchange' | 'stats' | 'profile' | 'admin'
+type Pane = 'exchange' | 'stats' | 'profile' | 'prompts' | 'admin'
 
 /** 「管理」里那两半 */
 export type AdminTab = 'users' | 'server'
@@ -50,6 +51,8 @@ const PANES: {value: Pane; label: string}[] = [
   {value: 'exchange', label: '交易所账户'},
   {value: 'stats', label: '账户统计'},
   {value: 'profile', label: '个人信息'},
+  // 2026-10-11：用户要「自己定义提示词」→ 提示词正文回到数据库、这一页可编辑
+  {value: 'prompts', label: 'AI 提示词'},
   // 只有管理员看得到。里面还有二级 tab：用户管理 / 服务器
   {value: 'admin', label: '管理'}
 ]
@@ -70,7 +73,8 @@ function readPane(v: unknown): Pane {
   //    别渲染出空白。
   if (v === 'llm' || v === 'usage') return 'profile'
   if (v === 'replay') return 'stats'
-  if (v === 'stats' || v === 'profile' || v === 'admin') return v
+  if (v === 'stats' || v === 'profile' || v === 'prompts' || v === 'admin')
+    return v
   return 'exchange'
 }
 
@@ -246,6 +250,12 @@ function setAdminTab(v: AdminTab): void {
       :tab="adminTab"
       @update:tab="setAdminTab"
     />
+    <!--
+      AI 提示词：切走即卸载（它没有轮询 / 订阅，重挂很便宜）。
+      ⚠️ 必须是**独立的 `v-if`**，跟在 AdminView 那个 `v-else-if` 后面 ——
+         原因跟上面 `ProfileView` 那段一样（别接进那条链子里）。
+    -->
+    <PromptsView v-if="pageAlive && pane === 'prompts'" />
   </PaneShell>
 </template>
 

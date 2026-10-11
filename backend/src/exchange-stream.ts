@@ -97,8 +97,9 @@ function r8(x: number): number {
 /**
  * 标记价合并窗口（毫秒）。
  *
- * 订了几个币就有几路 `@markPrice@1s`（每个币 1 秒 1 条），一条一条推给前端太吵；
- * 攒 `MARK_BATCH_MS` 一起重算推一次 —— 界面上 1 秒跳一次足够了。
+ * ⚠️ 上游那条流是**每 3 秒**推一次（`@markPrice`，见 `kline-stream.ts`），
+ *    所以这个窗口现在只在「几个币在同一批里一起到」时起作用 —— 攒一下一起重算，
+ *    一次推送把它们全带上，别一个币一条推。
  */
 const MARK_BATCH_MS = 1000
 
@@ -2403,7 +2404,7 @@ export class KeyStream {
       if (this.markStops.has(raw)) continue
       this.markStops.set(
         raw,
-        subscribeMarkPrice(raw, (_sym, mark) => this.onMark(raw, mark))
+        subscribeMarkPrice(raw, (_sym, info) => this.onMark(raw, info.markPrice))
       )
       added.push(raw)
     }

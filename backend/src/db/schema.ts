@@ -4,23 +4,21 @@
  *   users            用户（用户名 + scrypt 密码）
  *   sessions         登录会话（token）
  *   user_llm         每个用户自己的 DeepSeek 配置（空 = 用服务器 .env 那份）
- *   ai_docs          ⚠️ **已废弃（2026-10-04）**：原来放 AI 的提示词文档，
- *                    现在提示词写死在代码里（`llm/prompts.ts`），程序不再读写它。
- *                    表和数据都留着（没删），万一要退回数据库那套还能捞回来。
- *   ai_doc_versions  同上，一起废弃。
- *   rules_versions   每次分析**实际用的**那份提示词快照（按内容 hash 去重）
- *   analyses         每次分析的完整存档（输入 / 结论 / 计划 / 护栏 / 事后结果）
+ *   ai_docs          AI 的提示词文档（kind=predict 分析预测 / kind=extract 知识库提炼），
+ *                    「我的 → AI 提示词」里改，即改即生效（见 `db/prompts.ts`）。
+ *   ai_doc_versions  上面那份文档的历史版本（每次改存一条，可回滚）。
+ *   analyses         预测历史：每次分析存**那一句话** + 币种 / 时间 / 现价 / 成本
+ *                    （2026-10-11 重置后只写这几个字段，其余老列一律留空）
  *   knowledge        知识库 —— 我标过的案例 + AI 提炼的经验
  *   llm_usage        每次大模型调用的 token 与花费
  *   contract_store   币种表（合约清单整份一行，每天自动从币安刷）
  *
  * 分层原则：
- *   · 要**筛选 / 排序 / 统计**的 → 独立列（档位、结论、币种、价格、R 倍数…）
- *   · 只用来**回放详情**的 → JSONB（AI 完整输出 / 行情快照 / 护栏明细）
- *   · 会**重复的长文本** → 单独一张表按 hash 去重（规则全文 6.6K，不能每行一份）
+ *   · 要**筛选 / 排序 / 统计**的 → 独立列（币种、时间、结论…）
+ *   · 只用来**回放详情**的 → JSONB（快照 / 原始输出那一类）
  *
- * 提示词**全部存数据库**：`rules/` 目录、代码里的内置角色都已去掉。
- * 每次分析读「启用的文档」拼成 system prompt，并按 hash 存进 rules_versions。
+ * 提示词**全部存数据库**（`ai_docs`）：`rules/` 目录、代码里的内置角色都已去掉。
+ * 每次分析读「启用的那份文档」当 system prompt。
  */
 
 /**
@@ -218,21 +216,6 @@ CREATE TABLE IF NOT EXISTS ai_doc_versions (
 CREATE INDEX IF NOT EXISTS ai_doc_versions_idx
   ON ai_doc_versions (doc_id, saved_at DESC);
 
--- ---------------------------------------------------------------- 规则版本
--- 规则全文的版本快照。按内容 hash 去重，所以同一个版本只存一份。
-CREATE TABLE IF NOT EXISTS rules_versions (
-  -- rules.ts 算出来的内容 hash（前 12 位）
-  hash       TEXT        PRIMARY KEY,
-  -- 主提示词.md 的内容
-  system     TEXT        NOT NULL,
-  -- 其余规则文件拼起来的内容
-  body       TEXT        NOT NULL,
-  -- 参与了哪些文件
-  sources    TEXT[]      NOT NULL DEFAULT '{}',
-  chars      INTEGER     NOT NULL DEFAULT 0,
-  first_seen TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- ---------------------------------------------------------------- API 用量
 -- 每次调用大模型记一笔，用于统计 token 与花费。
 -- 价目快照存在 price 里，这样以后官方调价也不会篡改历史记录。
@@ -281,7 +264,7 @@ CREATE TABLE IF NOT EXISTS analyses (
   -- ────────── 结论：要能筛选 / 统计，所以提成列 ──────────
   -- A 顺势单 / A-W 顺势双底 / S 突破 / V 超跌极速V反 / B 不该做 / unclear 说不清
   grade         TEXT,
-  -- 现在存的就是 AI 那段 reason
+  -- 预测历史里那一句话（2026-10-11 起存这里）
   grade_reason  TEXT,
   -- go 可做 / wait 观望 / no_go 不可做
   verdict       TEXT,
@@ -324,7 +307,6 @@ CREATE TABLE IF NOT EXISTS analyses (
 
   -- ────────── 来源与成本 ──────────
   model         TEXT,
-  rules_hash    TEXT        REFERENCES rules_versions (hash) ON DELETE SET NULL,
   -- @deprecated 知识库经验不再注入提示词，新记录恒为 []
   knowledge_refs JSONB      NOT NULL DEFAULT '[]'::jsonb,
   -- 对应 llm_usage 里那一笔，方便对账
@@ -366,11 +348,6 @@ CREATE INDEX IF NOT EXISTS analyses_created_idx ON analyses (created_at DESC);
 CREATE INDEX IF NOT EXISTS analyses_symbol_idx  ON analyses (symbol, created_at DESC);
 CREATE INDEX IF NOT EXISTS analyses_grade_idx   ON analyses (grade, verdict);
 CREATE INDEX IF NOT EXISTS analyses_model_idx   ON analyses (model);
-CREATE INDEX IF NOT EXISTS analyses_rules_idx   ON analyses (rules_hash);
-
--- 分析记录也带标签了（跟知识库共用同一份标签池）
-ALTER TABLE analyses ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb;
-CREATE INDEX IF NOT EXISTS analyses_tags_idx ON analyses USING GIN (tags);
 
 -- ---------------------------------------------------------------- 知识库
 CREATE TABLE IF NOT EXISTS knowledge (
@@ -869,6 +846,15 @@ ALTER TABLE IF EXISTS analyses ALTER COLUMN guardrails DROP NOT NULL;
 
 -- 规则已经改成 ai_docs（多份文档 + 版本），中间那版单行表废弃
 DROP TABLE IF EXISTS rules;
+
+-- 提示词的版本快照改存 ai_doc_versions（2026-10-10）→ rules_versions 整块废弃。
+-- analyses.rules_hash 是指向它的外键，跟着一起下掉（没人再读这一列）。
+ALTER TABLE IF EXISTS analyses DROP CONSTRAINT IF EXISTS analyses_rules_hash_fkey;
+ALTER TABLE IF EXISTS analyses DROP COLUMN IF EXISTS rules_hash;
+DROP TABLE IF EXISTS rules_versions;
+
+-- 形状标签（档位 / 概率）那一套已经删了，analyses.tags 不再写入
+ALTER TABLE IF EXISTS analyses DROP COLUMN IF EXISTS tags;
 
 -- 知识库提炼的提示词也搬进了 ai_docs → kind 多一个 'extract'。
 -- 老库的 CHECK 只允许 role/rule，得先把它拆了重加（名字不定，按定义找）。

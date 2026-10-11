@@ -25,10 +25,11 @@ import MarginRateBadge from '../comps/MarginRateBadge.vue'
 import SegTabs from '../comps/SegTabs.vue'
 import CollectForm from '../comps/CollectForm.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
-import RecIcon from '../comps/RecIcon.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import HistoryView from './HistoryView.vue'
+import PredictHistory from '../comps/PredictHistory.vue'
+import AnswerBody from '../comps/AnswerBody.vue'
 import {
   ensurePins,
   isPinnedBase,
@@ -43,7 +44,8 @@ import {
 } from '../blacklist'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
-import {tagsOf, type Heat, type LevelSR, collectStream} from '../api'
+import {verdictKind} from '../markdown'
+import {collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
 import {useSwipeTabs} from '../swipe-tabs'
 import {
@@ -77,23 +79,12 @@ import {
 import {
   balanceBadge,
   contracts,
-  priceDigitsOf,
   refreshBalance,
   refreshConfig,
   refreshingBalance
 } from '../store'
 import {nowTick, stopTicker, watchTicker} from '../ticker'
-import {
-  VERDICT_TEXT,
-  bjShort,
-  bjTime,
-  fixed,
-  fmt,
-  price,
-  richText,
-  signedPct,
-  splitRec
-} from '../format'
+import {bjShort, bjTime} from '../format'
 
 // 结论、分析过程、报错都在 ../analyze 的模块作用域里，
 // 切到别的页面再回来不会丢。
@@ -552,138 +543,9 @@ function onPickPoint(at: number) {
 
 const judge = computed(() => result.value?.judge)
 
-/** AI 挑的标签（模板外的不做过滤，标出来给人看） */
-const tags = computed(() => tagsOf(result.value?.judge))
+/** 卡片顶线颜色：它说能做 / 不能做 / 还在等（只看开头那段，纯展示用） */
+const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
 
-/** 结论头那颗徽标 —— 不再判档，直接显示**走势概率**（= outlook 那条走法的概率） */
-const probText = computed(() =>
-  judge.value ? `走势概率 ${judge.value.probability}%` : '未判断'
-)
-const verdictInfo = computed(
-  () => VERDICT_TEXT[judge.value?.verdict ?? ''] ?? ['—', '']
-)
-
-/** 推荐做法拆成「现在 / 动手 / 别碰」几行（老记录没前缀就一段） */
-const recParts = computed(() => splitRec(judge.value?.recommendation))
-
-/**
- * 价格小数位 —— 跟行情条 / 图上一个口径（见 `store.priceDigitsOf`）。
- * ⚠️ 这里的价格原来跟别处一样用 `fmt()`，于是「现价 85,571」旁边站着图上
- *    右轴那枚「85,571.1」（用户 2026-10-06：「精度没统一」）。
- */
-const priceDigits = computed(() => priceDigitsOf(symbol.value, result.value?.price))
-
-/** 价格文案 */
-function pxText(v: unknown): string {
-  return price(v, priceDigits.value)
-}
-
-/*
- * 价格位置图（用户 2026-10-04：「纯文字太单调懒得看，能否图示预测」）。
- *
- * 图上的压力 / 支撑由 `KlineChart` 报上来（`@levels`）——
- * 那两个数 2026-10-04 起是**按图上可见窗口 + 摆动拐点**现算的（见 `../levels`），
- * 不再是固定的「4 小时」；拿不到就退回 24h 高低 ——
- * 总之要画出一道「上沿 / 现价 / 下沿」的尺子，让人一眼看出现价卡在哪。
- */
-const sr = ref<LevelSR | null>(null)
-
-const levelBox = computed<{
-  hi: number
-  lo: number
-  hiK: string
-  loK: string
-} | null>(() => {
-  const r = result.value
-  const p = r?.price
-  if (!r || !p) return null
-  /*
-   * ⚠️ **测试跑不能用车上的压力 / 支撑**：那是拿「现在」的 K 线算出来的，
-   * 而这里的价格是**那一刻**的 —— 两把尺子对不上。
-   * 实测踩过：测试点现价 83,302，图上 4H 却给 84,708 ~ 84,928，现价被甩在盒子外面。
-   * 那一刻的 24h 高低是**随快照一起取回来的**，跟价格同一个时点，只有它靠得住。
-   */
-  if (!r.testMode) {
-    const hi = sr.value?.resistance
-    const lo = sr.value?.support
-    if (hi && lo && hi > lo) return {hi, lo, hiK: '压力', loK: '支撑'}
-  }
-  const h = r.heat?.high24h
-  const l = r.heat?.low24h
-  if (h && l && h > l) return {hi: h, lo: l, hiK: '24h高', loK: '24h低'}
-  return null
-})
-
-/** 三行：上沿 / 现价 / 下沿，带上离现价多远（%） */
-const levels = computed(() => {
-  const b = levelBox.value
-  const p = result.value?.price
-  if (!b || !p) return []
-  const off = (v: number) =>
-    `${v >= p ? '+' : ''}${(((v - p) / p) * 100).toFixed(2)}%`
-  return [
-    {k: b.hiK, v: pxText(b.hi), d: off(b.hi), tone: 'hi'},
-    {k: '现价', v: pxText(p), d: '—', tone: 'now'},
-    {k: b.loK, v: pxText(b.lo), d: off(b.lo), tone: 'lo'}
-  ]
-})
-
-/** 现价在「上沿 → 下沿」这条尺子上的位置（0% = 贴上沿，100% = 贴下沿） */
-const lvPos = computed<number | null>(() => {
-  const b = levelBox.value
-  const p = result.value?.price
-  if (!b || !p) return null
-  return Math.min(100, Math.max(0, ((b.hi - p) / (b.hi - b.lo)) * 100))
-})
-
-const heatRows = computed(() => {
-  const h: Heat | undefined = result.value?.heat
-  if (!h) return []
-  const num = (v: number | null | undefined) =>
-    v === null || v === undefined || !Number.isFinite(Number(v))
-      ? null
-      : Number(v)
-  const pctText = (v: number | null, digits = 2) =>
-    v === null ? '—' : signedPct(v, digits)
-  const rows: {k: string; v: string; cls?: string}[] = []
-  const ch = num(h.change24hPct)
-  rows.push({
-    k: '24h 涨跌',
-    v: pctText(ch),
-    cls: ch === null ? '' : ch >= 0 ? 'ok' : 'bad'
-  })
-  rows.push({
-    k: '24h 振幅',
-    v: num(h.amplitude24hPct) === null ? '—' : fixed(h.amplitude24hPct, 2) + '%'
-  })
-  rows.push({k: '24h 高 / 低', v: `${pxText(h.high24h)} / ${pxText(h.low24h)}`})
-  rows.push({
-    k: '24h 成交额',
-    v: num(h.quoteVolume24h) === null ? '—' : fmt(h.quoteVolume24h, 0)
-  })
-  rows.push({
-    k: '资金费率',
-    v:
-      num(h.fundingRate) === null
-        ? '—'
-        : (Number(h.fundingRate) * 100).toFixed(4) + '%'
-  })
-  rows.push({
-    k: '持仓量',
-    v: num(h.openInterest) === null ? '—' : fmt(h.openInterest, 0)
-  })
-  const oiCh = num(h.openInterestChangePct)
-  rows.push({
-    k: '持仓量变化',
-    v: pctText(oiCh),
-    cls: oiCh === null ? '' : oiCh >= 0 ? 'ok' : 'bad'
-  })
-  rows.push({
-    k: '多空人数比',
-    v: num(h.longShortRatio) === null ? '—' : fixed(h.longShortRatio, 2)
-  })
-  return rows
-})
 </script>
 
 <template>
@@ -857,8 +719,8 @@ const heatRows = computed(() => {
               :open="showSteps"
               :hint="
                 testMode
-                  ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 取可用的标签 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
-                  : '点「AI 分析」后，这里会逐步写出：读分析预测提示词 → 取可用的标签 → 拉行情 → 拼上下文 → 调模型 → 存档。'
+                  ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
+                  : '点「AI 分析」后，这里会逐步写出：读分析预测提示词 → 拉行情 → 拼上下文 → 调模型 → 记账存档。'
               "
               @update:open="showSteps = $event"
             />
@@ -871,122 +733,38 @@ const heatRows = computed(() => {
                 · 去掉「各周期行情」（发给 AI 的原文）那一大块
                 · 去掉下面那 6 项统计（当前价 / 24h 涨跌 / 资金费率 / 拉了多少行情 /
                   提示词版本 / 可用标签）—— 价格上面行情条里就有，其余与判断无关
-                · **市场热度保留**（唯一要看的是它）
+                · **市场热度**（2026-10-11 也删了：用户「热度不要，不需要」——
+                  分析不取它、提示词里没有它，页面上也就没得显示）
               -->
-              <section class="panel flush result-card">
-                <!-- ① 走势概率：一条长条，比一个数字好看也好比 -->
-                <div class="prob">
-                  <div class="prob-top">
-                    <span class="prob-num" :class="verdictInfo[1]">
-                      {{ judge?.probability ?? '—' }}<i>%</i>
-                    </span>
-                    <span class="prob-cap">走势概率</span>
-                    <span class="pill" :class="verdictInfo[1]">{{
-                      verdictInfo[0]
-                    }}</span>
-                  </div>
-                  <span class="prob-track">
-                    <i
-                      :class="verdictInfo[1]"
-                      :style="{width: (judge?.probability ?? 0) + '%'}"
-                    />
-                  </span>
-                </div>
-
-                <!-- ② 形状：每个标签一条概率条（比 chips 直观） -->
-                <div v-if="tags.length" class="viz">
-                  <div class="sec-label">形状 · 有多像</div>
-                  <div v-for="t in tags" :key="t.name" class="shape">
-                    <span class="shape-name">{{ t.name }}</span>
-                    <span class="shape-track">
-                      <i :style="{width: t.probability + '%'}" />
-                    </span>
-                    <span class="shape-pct">{{ t.probability }}%</span>
-                  </div>
-                </div>
-
-                <!-- ③ 价格位置：上沿 / 现价 / 下沿 一把尺子 -->
-                <div v-if="levels.length" class="viz">
-                  <div class="sec-label">价格位置</div>
-                  <div class="lv">
-                    <span class="lv-rail">
-                      <b class="lv-dot" :style="{top: (lvPos ?? 0) + '%'}" />
-                    </span>
-                    <span class="lv-rows">
-                      <span
-                        v-for="r in levels"
-                        :key="r.k"
-                        class="lv-row"
-                        :class="r.tone"
-                      >
-                        <em class="k">{{ r.k }}</em>
-                        <b class="v">{{ r.v }}</b>
-                        <i class="d">{{ r.d }}</i>
-                      </span>
-                    </span>
-                  </div>
-                </div>
-                <!-- ① 推荐：最该照做的（绿，字最大）—— AI 按「现在/开单/别碰」三行给 -->
-                <section v-if="recParts.length" class="concl rec">
-                  <span class="concl-h">推荐</span>
-                  <span class="concl-sub">最该照做的</span>
-                  <template v-for="(p, i) in recParts" :key="i">
-                    <div v-if="p.k" class="rec-row" :class="p.tone">
-                      <span class="rec-k">
-                        <!-- 矢量图标（会动）：现在=呼吸光点 / 开单=上冲箭头 / 别碰=摇头禁止符 -->
-                        <RecIcon :tone="p.tone" />
-                        <span>{{ p.k }}</span>
-                      </span>
-                      <!-- richText：关键字加粗 + 上色（见 format.ts） -->
-                      <span class="rec-v" v-html="richText(p.v)" />
-                    </div>
-                    <p v-else class="rec-plain" v-html="richText(p.v)" />
-                  </template>
-                </section>
-
-                <!-- ② 走势：最可能这么走（蓝，带概率） -->
-                <section v-if="judge?.outlook" class="concl out">
-                  <span class="concl-h">走势</span>
-                  <span class="concl-sub">最可能这么走</span>
-                  <span v-if="judge.probability" class="concl-pct">
-                    {{ judge.probability }}%
-                  </span>
-                  <p v-html="richText(judge.outlook)" />
-                </section>
-
-                <!-- ③ 理由：道理讲给想深挖的人听（灰，默认收起） -->
-                <details v-if="judge?.reason" class="concl why">
-                  <summary>
-                    <span class="concl-h">理由</span>
-                    <span class="concl-sub">为什么这么看（点开）</span>
-                  </summary>
-                  <p v-html="richText(judge.reason)" />
-                </details>
+              <section class="panel flush result-card" :class="`v-${verdict}`">
+                <!--
+                  ★ 2026-10-11 晚：提示词放开了输出格式 ⇒ 模型改成写小标题 + 分点 + 加粗。
+                  结论卡片原来是把整段当**纯文本**贴出来的（`white-space: pre-wrap`），
+                  于是页面上能直接看到 `#` `**` `-`。现在交给 `AnswerBody` 渲染成 HTML，
+                  并按「能做 / 不能做 / 等」给卡片一条同色的顶线（`v-go` / `v-no` / `v-wait`）。
+                -->
+                <AnswerBody v-if="judge?.line" :text="judge.line" />
+                <p v-else class="verdict-line">（模型没给结论）</p>
               </section>
 
-              <!-- 市场热度：**用户明确要保留的一块**（二级 tab 和「各周期行情」都去掉了） -->
-              <section class="panel flush">
-                <h2>市场热度 <span class="tag">交易所数据</span></h2>
-                <div class="heat-grid">
-                  <div v-for="r in heatRows" :key="r.k" class="heat-row">
-                    <span class="k">{{ r.k }}</span>
-                    <span class="v" :class="r.cls">{{ r.v }}</span>
-                  </div>
-                </div>
-              </section>
             </template>
           </div>
         </template>
 
-        <!-- ② 预测历史 / 知识库：2026-10-10 从「我的 → 复盘」挪进来，替掉原来的「历史分析」 -->
-        <div
-          v-else-if="leftTab === 'records' || leftTab === 'kb'"
-          class="scroll-body"
-        >
-          <HistoryView :pane="leftTab === 'kb' ? 'kb' : 'records'" />
+        <!-- ② 预测历史：每次分析留下的那一句话（币种 + 时间段能筛） -->
+        <div v-else-if="leftTab === 'history'" class="scroll-body">
+          <PredictHistory />
         </div>
 
-        <!-- ③ 添加案例：币种/周期跟右侧，时间段只认「图上拖的那一段」
+        <!-- ③ 知识库：2026-10-10 从「我的 → 复盘」挪进来，替掉原来的「历史分析」 -->
+        <div
+          v-else-if="leftTab === 'kb'"
+          class="scroll-body"
+        >
+          <HistoryView />
+        </div>
+
+        <!-- ④ 添加案例：币种/周期跟右侧，时间段只认「图上拖的那一段」
              （不再跟 K 线日历选的那个时间绑在一起） -->
         <div v-else-if="leftTab === 'add'" class="scroll-body">
           <CollectForm
@@ -1020,7 +798,6 @@ const heatRows = computed(() => {
           @update:pick-point="setPointPicking"
           @select="onPickRange"
           @point="onPickPoint"
-          @levels="sr = $event"
           @clear:select="clearChartRange"
           @error="onChartError"
           @note="showToast"
