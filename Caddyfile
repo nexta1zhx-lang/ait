@@ -32,7 +32,6 @@
 
 bitcoooin.cn {
 	encode gzip zstd
-
 	# ---------------------------------------------------------------- 下载
 	# APK / 安装包这类静态文件不走应用，Caddy 直接发文件。
 	# 目录由 compose 挂进来：宿主机 ./downloads → 容器 /srv/dl
@@ -43,6 +42,19 @@ bitcoooin.cn {
 	handle_path /dl/* {
 		root * /srv/dl
 		file_server
+	}
+
+	# ---------------------------------------------------------------- 订阅（2026-10-12）
+	# 订阅服务 /opt/sub_server.py **只监听 docker0 网关 172.17.0.1**，公网直连 2096
+	# 已经不可达（旧版监听 0.0.0.0，被扫描器找到后连密钥一起端走了）。对外统一走
+	# 这里，TLS 由本 Caddy 终止，复用 bitcoooin.cn 已有的证书。
+	#
+	# ⚠️ 鉴权**故意不写在这里**：BasicAuth 由订阅进程自己校验（凭据存 PBKDF2 哈希，
+	#    在 /opt/subscription/users.json）。这样加/删用户只需要跑 `xray-user add <name>`，
+	#    不用改这个文件、不用 reload Caddy。
+	# ⚠️ 必须是 handle_path：/sub/clash → 订阅进程收到 /clash（同上面 /dl/* 的道理）。
+	handle_path /sub/* {
+		reverse_proxy host.docker.internal:2096
 	}
 
 	# ---------------------------------------------------------------- 其余全部给应用
@@ -90,3 +102,89 @@ bitcoooin.cn {
 # logs.bitcoooin.cn {
 # 	reverse_proxy dozzle:8080
 # }
+
+
+
+
+# ================================================================
+# 自定义站点块（OpenList / RustDesk WSS）
+# ⚠️ Caddyfile 是「服务器为准」：release.sh 已加 --exclude 排除它，
+#    发布不会覆盖本文件。改完执行 sudo docker restart ca-caddy 生效。
+# ================================================================
+
+pan.bitcoooin.cn {
+	encode gzip zstd
+
+	# 扫描器探测（wp-* / .php / .git 这类）直接 403，别喂给应用
+	import scanner-guard
+
+	reverse_proxy host.docker.internal:5244 {
+		transport http {
+			read_timeout 1h
+			write_timeout 1h
+		}
+		flush_interval -1
+	}
+
+	log {
+		output stdout
+	}
+}
+
+# ---------------------------------------------------------------- RustDesk Web 客户端 WSS
+# 让浏览器里的 https://rustdesk.com/web 通过 WSS 连到本服务器。
+#
+# ⚠️ 代理目标不是 127.0.0.1:21118，而是 host 网络里的独立网关 21120。
+#   原因：本 Caddy 跑在 docker bridge 网络，其 Go 反代连宿主机 host-network 服务
+#   （hbbs/hbbr）时 WebSocket Upgrade 握手会失败（502 / 日志 msg=EOF）。
+#   实测同配置换成 host 网络即返回 101。网关配置见 /opt/rustdesk-gw/Caddyfile。
+rustdesk.bitcoooin.cn {
+	# CORS：网页客户端 rustdesk.com 是跨域访问，必须回显，否则手机浏览器静默失败
+	@cors header Origin https://rustdesk.com
+	header @cors {
+		Access-Control-Allow-Origin "https://rustdesk.com"
+		Access-Control-Allow-Methods "OPTIONS,GET,POST"
+		Access-Control-Allow-Headers "Origin, Content-Type, Accept, Authorization, Sec-WebSocket-Key, Sec-WebSocket-Version"
+		Access-Control-Allow-Credentials "true"
+	}
+
+	@preflight method OPTIONS
+	@ws {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+
+	# 连通性诊断页（手机排查用）
+	route /diag* {
+		redir /diag /diag/ 308
+	}
+	route /diag/* {
+		rewrite * /diag.html
+		root * /srv/dl
+		file_server
+	}
+
+	# 全部用 route（handle 会被 Caddy 按路径长度重排，导致兜底块抢先匹配）
+	route /ws/* {
+		handle @preflight {
+			respond 204
+		}
+		handle @ws {
+			reverse_proxy host.docker.internal:21120
+		}
+		handle {
+			header Content-Type "text/plain; charset=utf-8"
+			respond "426 Upgrade Required" 426
+		}
+	}
+
+	route {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "RustDesk WSS endpoint OK
+
+网页客户端: https://rustdesk.com/web
+ID 服务器: rustdesk.bitcoooin.cn
+Key: lLClWpEgqVs6D2uZhy+JEUZ2j7HGzFFGDoC+OOzKrR8=
+" 200
+	}
+}
