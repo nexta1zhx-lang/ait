@@ -197,13 +197,48 @@ export const leftTab = ref<LeftTab>(
  */
 export const CHART_TAB = {value: 'chart' as const, label: 'K 线'}
 
+/**
+ * 从别的页「跳过来看图」时，地址栏该带什么 query。
+ *
+ * ★ 2026-10-13 用户：「点击跳转到 k 显示 tab 要自动切换为 k 线」——
+ *   点持仓卡 / 合约行情里的一行，人想看的是**图**，可窄屏的图在「K 线」那一格，
+ *   光跳 `/analyze` 会停在上一格（多半是「预测结果」），还得自己再点一下。
+ *
+ * ⚠️ 只有窄屏才带 `t=chart`：桌面端图常驻右栏、`chart` 压根不是合法 tab，
+ *    带了反而把左栏（合约行情）弄空。
+ */
+export function chartQuery(): Record<string, string> {
+  return typeof window !== 'undefined' && window.innerWidth <= MOBILE_MAX
+    ? {t: CHART_TAB.value}
+    : {}
+}
+
 /*
  * 2026-10-03：二级 tab（AI 结论 / 市场与周期）已按用户要求整块去掉 ——
  * 结论和「市场热度」现在直铺下来，不再切。所以 `LIVE_TABS` / `liveTab` 两个导出都删了。
  */
 
-/** 分析过程：跑的时候展开，出结论后收成一行，点一下还能展开 */
-export const showSteps = ref(true)
+/**
+ * 分析过程：跑的时候展开，出结论后收成一行，点一下还能展开。
+ *
+ * ★ 2026-10-13 用户：「预测结果 分析过程默认放在一个按钮图标里，可以打开缩进去」
+ *   ⇒ 初值改 `false`（一进来只有一颗小按钮，不再是占掉半屏的面板）；
+ *   `run()` 里照旧置 `true`（跑的时候得看得见进度），`onDone` 照旧置 `false`（跑完自动收起来）。
+ *
+ * ⚠️ 这个开关**只管过程**（`StepsPanel`）。结论卡有自己的一颗 `showResult` ——
+ *    用户同一天先要「过程在结果出来后折叠 + 分析完成后不收起」，接着又要
+ *    「结论也可收起」，两块就彻底分开了，别再合成一个变量。
+ */
+export const showSteps = ref(false)
+
+/**
+ * 分析结论：出结果就摊开（用户 2026-10-13：「分析完成后不收起」），想腾地方自己收。
+ *
+ * ★ 同一天用户又补一句「结论也可收起」⇒ 结论卡自己带一颗折叠按钮，
+ *   收起后只剩一行「分析结论 + 判定那句话」（见 `AnalyzeView` 的 `.result-toggle`）。
+ *   初值 `true`：没有结论时这张卡压根不渲染，一有结论就是展开的。
+ */
+export const showResult = ref(true)
 
 /* ---------------- 跑一次分析 ---------------- */
 
@@ -316,8 +351,9 @@ export function run(): void {
         // 后端给的 steps 是完整终态，直接覆盖，免得漏掉最后几步的耗时
         if (r.steps?.length) steps.value = r.steps
         result.value = r
-        // 结论出来了就把过程让开位置，需要看就点那一行展开
+        // 结论出来了就把过程让开位置，需要看就点那一行展开；结论本身摊开
         showSteps.value = false
+        showResult.value = true
         stopRun()
         void refreshConfig()
       },

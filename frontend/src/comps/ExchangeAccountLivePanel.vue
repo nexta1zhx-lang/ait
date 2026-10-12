@@ -20,7 +20,7 @@ import ReduceSheet from './ReduceSheet.vue'
 import TpSlSheet from './TpSlSheet.vue'
 import OrderEditSheet from './OrderEditSheet.vue'
 import type {PositionRef} from './ExchangeAccountBoard.vue'
-import {pickSymbol, prefetchSymbol} from '../analyze'
+import {chartQuery, pickSymbol, prefetchSymbol} from '../analyze'
 import {bindLastPrices, lastPrices} from '../last-price'
 import {
   closeSideOf,
@@ -926,7 +926,8 @@ function openChart(base: string): void {
   if (!base) return
   prefetchSymbol(base)
   pickSymbol(base)
-  void router.push('/analyze')
+  // 窄屏顺手把左栏切到「K 线」那一格（`chartQuery()` 在宽屏返回空对象）
+  void router.push({path: '/analyze', query: chartQuery()})
 }
 
 /* ---------------- 止盈 / 止损（持仓卡片上那颗按钮。

@@ -15,7 +15,7 @@ defineOptions({name: 'ContractsView'})
 import {onActivated, onDeactivated, ref} from 'vue'
 import {useRouter} from 'vue-router'
 import MarketPanel from '../comps/MarketPanel.vue'
-import {pickSymbol, prefetchSymbol, symbol} from '../analyze'
+import {chartQuery, pickSymbol, prefetchSymbol, symbol} from '../analyze'
 import {useScrollMemory} from '../scroll'
 
 const router = useRouter()
@@ -52,7 +52,8 @@ function onPickMarket(base: string): void {
   // 先发出去：跳到 /analyze 画图时直接命中（服务端是内存/本地库，很快）
   prefetchSymbol(base)
   pickSymbol(base)
-  void router.push('/analyze')
+  // 窄屏顺手把左栏切到「K 线」那一格（`chartQuery()` 在宽屏返回空对象）
+  void router.push({path: '/analyze', query: chartQuery()})
 }
 </script>
 

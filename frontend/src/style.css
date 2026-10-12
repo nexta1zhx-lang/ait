@@ -1092,8 +1092,12 @@ button.danger {
   color: var(--muted);
 }
 
-/* 结果区整块不要卡片底（用户：「不要背景框和背景」） */
-.result-card,
+/*
+ * 「不要卡片底」这条**只留给 `.panel.flush`** 了。
+ * ⚠️ 原来 `.result-card` 也在这里（依据是用户 2026-10-03 的「不要背景框和背景」），
+ *    但 2026-10-13 用户改口要框 ⇒ 这行改成只管 `.panel.flush`，
+ *    免得 `.result-card` 的框在两处规则里打架（见下面 [结论卡] 那一段）。
+ */
 .panel.flush {
   background: none;
   border: 0;
@@ -1216,27 +1220,129 @@ button.danger {
  *    不参与任何判断）；`v-wait` 是兜底。
  * ⚠️ 只给**第一个块**（通常是「先一句话总结」那一行）上色 ——
  *    给整段上色会把一大篇理由全染红，太吵；列表开头那种更不染。
+ * ⚠️ `h4` 必须带上：模型那句判定写成 `### BTC 1h｜不能做`，而 `renderMarkdown` 把
+ *    标题**统一降一级**输出（`###` → `h4`），只写 `h3` 的话这条规则根本匹配不上
+ *    —— 底色撤成中性色之后，判定色就全靠这里了，漏了 h4 就等于没色。
  */
 .result-card.v-go .answer-body > h3:first-child,
+.result-card.v-go .answer-body > h4:first-child,
 .result-card.v-go .answer-body > p:first-child {
   color: var(--ok);
 }
 .result-card.v-no .answer-body > h3:first-child,
+.result-card.v-no .answer-body > h4:first-child,
 .result-card.v-no .answer-body > p:first-child {
   color: var(--bad);
 }
 .result-card.v-wait .answer-body > h3:first-child,
+.result-card.v-wait .answer-body > h4:first-child,
 .result-card.v-wait .answer-body > p:first-child {
   color: var(--warn);
 }
 
 /*
+ * 结论卡（2026-10-13）。
+ *
+ * ⚠️ 沿革别搞反了：
+ *   · 2026-10-03/04 用户要「取消左侧边框线」「不要背景框和背景」⇒ 这一块是 `.panel.flush`（无框无底色）。
+ *   · 2026-10-13 白天用户改口：「分析结论加个背景框和样式」。
+ *   · 2026-10-13 晚用户又收窄：「样式加个背景块颜色即可，其余用 md 解析」——
+ *     ⇒ **只留一块背景色**：不加边框、不加左侧色条、不叠渐变；
+ *       里面的字全部交给 markdown（`AnswerBody` → `renderMarkdown`）那套排版。
+ *   · 接着用户又嫌三色底太花：「背景色用一种简约」⇒ 判定色**从底色里撤掉**，
+ *     绿/红/黄只留在「第一个块的字色」上（上面那三条规则），底色只剩 `--panel-2` 一种。
+ * ⚠️ 别用 `color-mix()` —— 安卓 System WebView 算不出来。
+ * ⚠️ `showResult`（`analyze.ts`）收起时整卡只剩头上一行：底色仍在，所以它看着
+ *    跟「分析过程」那颗药丸是同一族的（见 [结论卡折叠头]）。
+ */
+.result-card {
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+}
+
+/*
+ * [结论卡折叠头] 卡头上那颗按钮（用户 2026-10-13：「结论也可收起」）。
+ *
+ * 收起态 = 一行：「分析结论」+ 判定那句话（`markdownToPlain` 抹平的）+ ▾；
+ * 展开态 = 同一行 + 右边「收起 ▴」，md 正文在下面（`v-show` 留着 DOM）。
+ * ⚠️ 那颗「收起 ▴」要贴右：`margin-left: auto` 在 `.rt-sum` 缺席时得顶上，
+ *    所以两处都写了（`.rt-sum` 也有 auto）——flex 里后者会自然靠右。
+ */
+.result-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.rt-label {
+  flex: none;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.rt-sum {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rt-chev {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 正文（收起时 `v-show` 把它 display:none 掉，所以外面不用再管间距） */
+.result-body {
+  margin-top: 8px;
+}
+
+/*
+ * 结论卡里的 md 正文：**比全局那套小一档**。
+ *
+ * ★ 2026-10-13 用户：「解析的字体放小」—— 全局 `.answer-body` 是 15.5px / 行高 1.78
+ *   （那档是给「复盘」「知识库」那种整页阅读定的），结论卡只有一小块地方，
+ *   15.5 显得太胖。
+ *   14px → 用户 2026-10-13 又追一句「再小一点」⇒ 定在 **13px**，
+ *   标题跟着缩（h3 14.5 / h4 14），行距 / 颜色 / 段间距全部沿用全局那套
+ *   —— 只改字号，别在这里重排。
+ * ⚠️ 标题**别再往 13 压**：`renderMarkdown` 把 `###` 输出成 `h4`（结论第一行就是它），
+ *    压到跟正文同号，层级就只剩颜色和字重了。
+ * ⚠️ 只挂 `.result-card` 下面：别动全局 `.answer-body`，别的页面（复盘、知识库）不跟着变。
+ */
+.result-card .answer-body {
+  font-size: 13px;
+}
+
+.result-card .answer-body h3 {
+  font-size: 14.5px;
+}
+
+.result-card .answer-body h4 {
+  font-size: 14px;
+}
+
+/*
  * 结论就一句话那个年代留下的类（2026-10-11）—— 现在只在「模型没给结论」时用。
- * 不用背景框、不加色条（用户 2026-10-03/04：「取消左侧边框线」「不要背景框和背景」）。
  */
 .verdict-line {
   margin: 0;
-  font-size: 16px;
+  font-size: 13px;
   line-height: 1.7;
   color: var(--text);
   white-space: pre-wrap;
@@ -2488,6 +2594,21 @@ body.fixed-viewport .split {
  */
 .scroll-body > * {
   flex: 0 0 auto;
+}
+
+/*
+ * [分析块] 「分析过程 + 分析结论」那一坨（`AnalyzeView` 的预测结果 / 测试格）。
+ *
+ * ★ 2026-10-13 用户把这两颗的脾气分开定死：
+ *   · 「过程在结果出来后折叠」⇒ 分析过程归 `showSteps`（跑完自动收成一颗按钮）；
+ *   · 「分析完成后不收起」⇒ 结论卡只认 `result`，**不跟 `showSteps` 走**。
+ *   两块同住一个容器只是为了并排的间距（`gap`）与窄屏那 16px 左右留白
+ *   （见窄屏那一节的 `.ana-block`）；桌面的面板自己带 16px 内边距，再补就重了。
+ */
+.ana-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* 右侧 K 线铺满整栏高度 */
@@ -6371,6 +6492,54 @@ button.badge:disabled {
   .split .scroll-body {
     min-height: 0;
     overflow: visible;
+  }
+  /*
+   * ⚠️ 2026-10-13（用户：「卡片右侧间距不对」）：`.scroll-body` 上面那条
+   *    `padding-right: 12px; margin-right: -12px` 是给**宽屏**的常驻滚动条留的距离
+   *    （2026-10-04 用户要的「滚动条和内容区保持距离」）。
+   *    可窄屏用的是叠层滚动条 —— 它不占宽度，那 12px 就白留在右边：
+   *    左边距 14px、右边距 26px，整块卡片**看着往左偏**。
+   *    这里在窄屏把它还回去，两边都 14px。
+   */
+  .split .scroll-body {
+    padding-right: 0;
+    margin-right: 0;
+  }
+  /*
+   * 左栏这条滚动条**不画**（跟 `.split.m-chart` 那一格一个做法）。
+   *
+   * ⚠️ 关键不是「好不好看」，是**它占 11px 布局宽度**：
+   *    全站那条 `* { scrollbar-width: thin }` 让 Chrome 用 UA 自带的细条
+   *    （macOS 实测 offsetWidth 490 / clientWidth 479 ⇒ 吃掉 11px，
+   *     `::-webkit-scrollbar { width: 5px }` 那条在 Chrome 121+ 被 `scrollbar-width` 顶掉了）。
+   *    于是内容区比容器窄 11px ⇒ 左边距 14px、右边距 25px，整页看着往左偏
+   *    （用户 2026-10-13：「该页面右侧间距过大」）。
+   *    不画之后两边都是 14px。
+   *
+   * ⚠️ 只画在**这一栏**：弹层 / toast 在 `.split` 外面，照旧有「滚动时才出现」那条细杠；
+   *    滚动行为（滚轮 / 触摸 / 惯性）一点都不受影响，只是不画那条杠。
+   */
+  .split .scroll-body {
+    scrollbar-width: none;
+  }
+  .split .scroll-body::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+  /*
+   * 「分析过程 + 结论」那一块的左右留白（配 `.ana-block`，见 [分析块] 那一节）。
+   * 窄屏的 `.panel` 是**没有框**的（见 `.split .panel` 那条），所以要靠外面这层
+   * 把那 16px 补出来，才能跟下面的预测历史卡片（30..477）对齐。
+   */
+  .ana-block {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  /* 展开态那块面板自己还带 16px 内边距 —— 会再缩一层，抵消掉 */
+  .ana-block .steps-panel.panel {
+    padding-left: 0;
+    padding-right: 0;
   }
   /*
    * K 线自己一个 tab 时，就是这一屏的主角：**通栏**（把页面左右留白一起吃掉，

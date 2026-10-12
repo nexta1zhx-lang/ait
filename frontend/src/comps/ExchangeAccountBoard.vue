@@ -52,6 +52,8 @@ import {orderKind, pairOf, tpSlOf, typeText, type OrderEditTarget, type TpSlTarg
 import SegTabs from './SegTabs.vue'
 import SymbolCombo from './SymbolCombo.vue'
 import SettingsSheet from './SettingsSheet.vue'
+import ShareSheet from './ShareSheet.vue'
+import {shareText, type ShareCardData} from '../share-card'
 
 /**
  * 曲线用 echarts（~580KB），**单独一个 chunk 异步载**：
@@ -1071,6 +1073,75 @@ function onBodyScroll(): void {
  */
 const openCycle = ref<ExchangePositionCycle | null>(null)
 
+/**
+ * 正在分享的那条持仓（2026-10-13）。
+ *
+ * 非 null 就弹 `ShareSheet`（卡片预览 + 系统分享面板）。
+ * ⚠️ 存的是**整条持仓对象**，不是 id —— 分享的是"此刻看到的那份数据"，
+ *    跟列表随后的刷新无关（弹层里那张图在打开那一刻就画好了）。
+ */
+const sharePos = ref<FuturesPosition | null>(null)
+
+/**
+ * 给分享弹层拼数据（`masked` = 隐去金额）。
+ *
+ * ⚠️ 货币 / 小数位 / 打码全在**这里**决定：`money()` 跟着用户的 ¥/$ 开关走，
+ *    canvas 那边只管画（`share-card.ts` 里没有任何格式化逻辑）。
+ */
+function shareBuild(masked: boolean): {
+  data: ShareCardData
+  text: string
+  filename: string
+} {
+  const p = sharePos.value
+  if (!p) throw new Error('没有选中持仓')
+  const base = baseOf(p.symbol)
+  const short = p.side === 'short'
+  const up = p.unrealizedPnl >= 0
+  const pctText =
+    p.percentage === null
+      ? null
+      : `${up ? '+' : '−'}${fixed(Math.abs(p.percentage), 2)}%`
+  const realized = realizedOf(p)
+
+  const data: ShareCardData = {
+    base,
+    side: short ? 'short' : 'long',
+    leverage: p.leverage,
+    tone: up ? 'up' : 'down',
+    // 打码时不报金额，只留百分比（百分比能说明做得怎么样，金额会暴露仓位大小）
+    hero: masked ? pctText ?? '—' : signedMoney(p.unrealizedPnl),
+    // 不打码：百分比**并排**跟在金额后面（跟 App 列表 `−$42.12 −50.02%` 一个读法）
+    heroSub: masked ? null : pctText,
+    heroNote: masked ? '金额已隐藏' : null,
+    cells: [
+      {k: '开仓价', v: fmt(p.entryPrice)},
+      {k: '当前价', v: lastOf(p) === null ? '—' : fmt(lastOf(p)!)},
+      {k: '仓位价值', v: masked ? '—' : money(p.notional)},
+      {k: '数量', v: `${qty(p.amount)} ${base}`},
+      {
+        k: '距强平',
+        v: liqGap(p) === null ? '—' : `${liqGap(p)!.toFixed(1)}%`
+      },
+      realized === null
+        ? {k: '杠杆', v: `${p.leverage}x`}
+        : {k: '已实现盈利', v: masked ? '—' : signedMoney(realized)}
+    ],
+    note: p.keyName
+  }
+
+  // 文件名按北京时间，别带空格和冒号（各家系统对文件名都不客气）
+  const t = new Date(Date.now() + 8 * 3600 * 1000)
+  const z = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${t.getUTCFullYear()}${z(t.getUTCMonth() + 1)}${z(t.getUTCDate())}-${z(t.getUTCHours())}${z(t.getUTCMinutes())}`
+
+  return {
+    data,
+    text: shareText(data),
+    filename: `${base}-${short ? 'short' : 'long'}-${stamp}.png`
+  }
+}
+
 
 function cycleKey(c: ExchangePositionCycle): string {
   return `${c.keyName ?? ''}|${c.symbol}|${c.side}|${c.openAt}`
@@ -1704,6 +1775,26 @@ const RANGES = [
                     </em>
                   </span>
                 </span>
+                <!--
+                  「分享这条持仓」（2026-10-13）：开底部弹层 → 画一张持仓卡 → 弹系统分享面板。
+                  ⚠️ 这一整行 `.p-h` 是「点去 K 线」的，所以必须 `.stop`，否则分享的同时还会跳走。
+                  ⚠️ 内联 SVG 一定要给尺寸（`width/height`）—— 光靠 `viewBox` 会被 flex 撑爆。
+                -->
+                <button
+                  type="button"
+                  class="sh-btn"
+                  title="分享这条持仓（生成卡片图）"
+                  aria-label="分享这条持仓"
+                  @click.stop="sharePos = p"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="18" cy="5" r="3" />
+                    <circle cx="6" cy="12" r="3" />
+                    <circle cx="18" cy="19" r="3" />
+                    <line x1="8.6" y1="10.7" x2="15.4" y2="6.3" />
+                    <line x1="8.6" y1="13.3" x2="15.4" y2="17.7" />
+                  </svg>
+                </button>
               </div>
               <!--
                 四格 × 1 行，**格内标签在上、数值在下**（用户 2026-10-07：
@@ -2394,6 +2485,15 @@ const RANGES = [
     -->
     <!-- 这一页的「配置」（那颗按钮在账户切换行最右侧）；跟 K 线页是**同一个**弹层 -->
     <SettingsSheet :open="cfgOpen" @close="cfgOpen = false" />
+    <!--
+      分享持仓（2026-10-13）：`build` 是回掉 —— 弹层里那个「隐去金额」开关一拨，
+      它就重新拼一份数据重画预览（货币 / 小数位 / 打码都在 `shareBuild` 里定）。
+    -->
+    <ShareSheet
+      :open="sharePos !== null"
+      :build="shareBuild"
+      @close="sharePos = null"
+    />
   </div>
 </template>
 
@@ -2930,27 +3030,27 @@ const RANGES = [
 .cycles {
   display: flex;
   flex-direction: column;
-  /* 每段一张小卡（见下），卡与卡之间留缝 —— 原来是靠 `.cyc + .cyc` 的分割线分 */
-  gap: 8px;
+  /* 段间靠分割线分（见下），不留空档 */
+  gap: 0;
 }
 /*
- * 仓位历史一段（开仓 → 全平）—— **一段一张小卡**，跟持仓那条同款。
- * ⚠️ 2026-10-13 用户：「每一个卡片加点背景色」。原来是「透明底 + 上边一条分割线」。
+ * 仓位历史一段（开仓 → 全平）——**透明底 + 上边一条分割线**（不是卡）。
  *
- * ⚠️ 渐变**别退回成「小格子」那套**（`radial at 12% 0%` + `145deg`）：那套是给
- *    118px 宽的六格小卡配的，径向高光只铺到 62%，铺在 365px 宽的卡上就是
- *    **右边一片死黑**（用户 2026-10-13：「有点黑了右侧」）。现在这套是照着本页
- *    `.hero` 的手法来的：左冷灰 + 右暖金两团高光，两端都比原来亮一档。
+ * ⚠️ 2026-10-13：当天先按「每一个卡片加点背景色」做成小卡，看完实物后用户
+ *    「三个 tab 都不要了」⇒ 恢复原样（连渐变一起撤，那一版是为了解决宽卡右侧
+ *    发黑才换的 `.hero` 那套）。
  */
 .cycles .cyc {
-  padding: 9px 11px;
-  border: 1px solid rgba(48, 39, 29, 0.72);
-  border-radius: 11px;
-  background:
-    radial-gradient(ellipse at 90% 2%, rgba(255, 193, 107, 0.07), transparent 52%),
-    radial-gradient(ellipse at 10% 0%, rgba(120, 136, 163, 0.08), transparent 66%),
-    linear-gradient(115deg, rgb(23, 24, 26), rgb(27, 22, 18));
+  /* 左右不缩进：跟资金动向 / 成交历史那两份列表的左右边界对齐 */
+  padding: 10px 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   cursor: pointer;
+}
+/* 分割线画在**后一段**的头顶（第一段上面不画，上面是列表的标题行） */
+.cycles .cyc + .cyc {
+  border-top: 1px solid var(--line, rgba(128, 128, 128, 0.18));
 }
 /*
  * ⚠️ **不给悬浮态**（用户 2026-10-07：「不需要 hover 效果」）——
@@ -3189,29 +3289,21 @@ const RANGES = [
   flex-direction: column;
   gap: 0;
 }
-/* 持仓每条是一张小卡（见下面 `.poss li`），卡与卡之间要留缝 */
-.poss {
-  gap: 8px;
-}
 /*
- * 持仓一条——**一条一张小卡**。
+ * 持仓一条——**透明底 + 一条线**，不是卡。
  *
- * ⚠️ 2026-10-13 用户：「每一个卡片加点背景色」。原来是「透明底 + 一条线」，
- *    上面那层大面板撤掉之后就成了裸奔的一行文字，所以给每条补上跟
- *    「合约 · 仓位」那六格同款的卡（极淡渐变 + 暖描边 + 11px 圆角）。
- * ⚠️ 成交 / 资金动向那两份**仍然是一条线**（用户的原话：「不需要边框，只要能区分
- *    就行」—— 一屏几十条画框太吵），别顺手改成一样的。
+ * ⚠️ 2026-10-13：当天先按「每一个卡片加点背景色」把三条列表（持仓 / 挂单 /
+ *    仓位历史）都做成了小卡，看完实物后用户「三个 tab 都不要了」⇒ 三处一起
+ *    恢复成「透明底 + 一条线」。别再加回来。
  * ⚠️ 别再加左侧色条。
  */
 .poss li {
-  padding: 11px 13px;
-  border: 1px solid rgba(48, 39, 29, 0.72);
-  border-radius: 11px;
-  /* 渐变说明见下面 `.cycles .cyc` 那段（三处共用同一套，改一起改） */
-  background:
-    radial-gradient(ellipse at 90% 2%, rgba(255, 193, 107, 0.07), transparent 52%),
-    radial-gradient(ellipse at 10% 0%, rgba(120, 136, 163, 0.08), transparent 66%),
-    linear-gradient(115deg, rgb(23, 24, 26), rgb(27, 22, 18));
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.18));
+}
+/* 最后一条不画（整份列表不拖尾巴线，跟另外两份列表一致） */
+.poss li:last-child {
+  border-bottom: 0;
 }
 /*
  * 标题行：**整行可点**（去这个币的 K 线）⇒ 手型光标；**不给悬停态**（见下）。
@@ -3222,6 +3314,36 @@ const RANGES = [
   gap: 8px;
   flex-wrap: wrap;
   cursor: pointer;
+}
+/*
+ * 标题行最右那颗「分享」图标按钮（2026-10-13）。
+ *
+ * ⚠️ **不要框**（用户 2026-10-13：「按钮不要加框」）—— 只有图标本身。
+ *    但 `width/height` 的**点击热区要留着**（26px，手指点得中）。
+ *    ⚠️ 因为没框没底，`.p-h` 整行的 `cursor: pointer` 会盖过它 —— 图标颜色压暗一档，
+ *       至少看得出"这里还有个东西"，别跟 PnL 抢注意力。
+ *    ⚠️ SVG 必须显式给 `width/height` —— 只写 `viewBox` 会被 flex 撑成大块。
+ */
+.p-h .sh-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.p-h .sh-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
 }
 /*
  * ⚠️ **只留键盘焦点**，不给悬浮态（用户 2026-10-07：「不需要 hover 效果」）——
@@ -3457,39 +3579,27 @@ const RANGES = [
 /*
  * 挂单那一组的一行是**两行**（见 `.o-t` / `.o-kv`），所以这一组要覆盖掉上面的单行 flex。
  * ⚠️ 只覆盖 `.grps` 里的 —— `.rows li` 本体还被「资产明细」那三个列表用着（单行 flex）。
- * ⚠️ `border` 也在这儿整条盖（0,2,1 同权重，靠**写在后面**赢）：`.rows:not(.trades) li`
- *    的 `border-top` 那条线要撤掉，改成整张卡的描边。⚠️ 写前面会被它盖回去 ⇒ 上下一堆双线。
- * ⚠️ 单与单之间不再画线（2026-10-13 起每单一张小卡，见下），组与组靠 `.grps .grp`
- *    的上下留白分开。
+ * ⚠️ 线也在这儿盖：`.rows:not(.trades) li` 的 `border-top` 跟这条**同权重**（都是 0,2,1），
+ *    只能靠**写在后面**赢（写在前面会被它盖回去 ⇒ 上下一堆双线）。
+ * ⚠️ 线**按币种分组**，不按单：一单一条已撤，
+ *    只在每组最后一单下面留一条。
+ *
+ * ⚠️ 2026-10-13：当天先按「每一个卡片加点背景色」把三条列表做成了小卡，
+ *    看完实物后用户「三个 tab 都不要了」⇒ 恢复成「透明底 + 每组末尾一条线」。
  */
 .grps .rows li {
   display: block;
-  padding: 9px 11px;
+  padding: 8px 0;
   cursor: pointer;
-  border: 1px solid rgba(48, 39, 29, 0.72);
-  border-radius: 11px;
-  /* 渐变说明见 `.cycles .cyc` 那段（三处共用同一套，改一起改） */
-  background:
-    radial-gradient(ellipse at 90% 2%, rgba(255, 193, 107, 0.07), transparent 52%),
-    radial-gradient(ellipse at 10% 0%, rgba(120, 136, 163, 0.08), transparent 66%),
-    linear-gradient(115deg, rgb(23, 24, 26), rgb(27, 22, 18));
+  border-top: 0;
+  border-bottom: 0;
 }
-/*
- * 挂单每单一张小卡（见上），卡与卡之间留缝 —— 原来是「每组最后一单底下一条线」分。
- * `.rows` 本体没有 display，得在这里显式开 flex，`gap` 才生效。
- */
-.grps .rows {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.grps .grp .rows li:last-child {
+  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.16));
 }
-/*
- * ⚠️ 第一单的**上边描边**要单独补回来：`.rows:not(.trades) li:first-child`
- *    （0,3,1）把 `border-top` 清零了，比上面那条 `.grps .rows li`（0,2,1）**权重高**，
- *    不补的话每组第一张卡看着像缺了一条边。同权重 + 写在后面才压得住。
- */
-.grps .rows li:first-child {
-  border-top: 1px solid rgba(48, 39, 29, 0.72);
+/* 整份列表的最后一组不画（不拖一条尾巴线） */
+.grps .grp:last-child .rows li:last-child {
+  border-bottom: 0;
 }
 /*
  * 点得动的那一行：**只有键盘焦点**给一点点底（用户 2026-10-07：「不需要 hover 效果」，

@@ -45,7 +45,7 @@ import {
 } from '../blacklist'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
-import {verdictKind} from '../markdown'
+import {markdownToPlain, verdictKind} from '../markdown'
 import {collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
 import {useSwipeTabs} from '../swipe-tabs'
@@ -69,6 +69,7 @@ import {
   result,
   run,
   setPointPicking,
+  showResult,
   showSteps,
   steps,
   symbol,
@@ -551,8 +552,17 @@ function onPickPoint(at: number) {
 
 const judge = computed(() => result.value?.judge)
 
-/** 卡片顶线颜色：它说能做 / 不能做 / 还在等（只看开头那段，纯展示用） */
+/** 判定：它说能做 / 不能做 / 还在等（只看开头那段，纯展示用）—— 给第一个块上色 */
 const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
+
+/**
+ * 结论那一行（收起态露在按钮上）。
+ *
+ * ★ 2026-10-13 用户：「结论也可收起」—— 收起来总得能看见「到底做不做」，
+ *   所以把 md 抹成一行纯文字（`markdownToPlain`，与「预测历史」同一套），
+ *   它开头就是模型写的那句判定（「BTC 1h｜不能做 …」）。
+ */
+const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
 
 </script>
 
@@ -727,21 +737,34 @@ const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
               >
             </div>
 
-            <StepsPanel
-              :steps="steps"
-              :done="!!result"
-              :running="loading"
-              :open="showSteps"
-              :hint="
-                testMode
-                  ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
-                  : '点「AI 分析」后，这里会逐步写出：读分析预测提示词 → 拉行情 → 拼上下文 → 调模型 → 记账存档。'
-              "
-              @update:open="showSteps = $event"
-            />
+            <!--
+              分析过程（可折叠）+ 分析结论（**不折叠**）。
+              ★ 2026-10-13 用户定死了这两颗的脾气：
+                · 「过程在结果出来后折叠」⇒ 面板归 `showSteps` 管：开跑时展开看进度
+                  （`analyze.ts` 的 `run()` 置 true），出结果自动收成一颗按钮（`onDone` 置 false）；
+                · 「分析完成后不收起」⇒ 结论卡**只认 `result`**，不跟 `showSteps` 走 ——
+                  过程收起来之后，结论照样摊在下面（折叠的是过程，不是答案）。
+              ★ 同一天还要求「分析结论加个背景块颜色即可，其余用 md 解析」——
+                底色在 `.result-card`（style.css），判定色靠 `v-go` / `v-no` / `v-wait`。
+            -->
+            <div class="ana-block">
+              <StepsPanel
+                :steps="steps"
+                :done="!!result"
+                :running="loading"
+                :open="showSteps"
+                :hint="
+                  testMode
+                    ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
+                    : '点「AI 分析」后，这里会逐步写出：读分析预测提示词 → 拉行情 → 拼上下文 → 调模型 → 记账存档。'
+                "
+                @update:open="showSteps = $event"
+              />
 
-            <template v-if="result">
               <!--
+                ★ 2026-10-13 用户：「结论也可收起」⇒ 卡的头上多一颗折叠按钮（与「分析过程」
+                  那颗同一副脾气）：收起后只剩一行「分析结论 + 判定那句话」，点一下摊开。
+                  默认展开（`showResult` 初值 true，`onDone` 里也会置回 true）。
                 ★ 2026-10-03 精简（用户要求）：
                 · 去掉「已存档 #N → 去复盘」那个链接
                 · 去掉二级 tab 栏（原来「结论 / 市场与周期」两格）→ 结论和热度直接铺下来
@@ -751,18 +774,34 @@ const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
                 · **市场热度**（2026-10-11 也删了：用户「热度不要，不需要」——
                   分析不取它、提示词里没有它，页面上也就没得显示）
               -->
-              <section class="panel flush result-card" :class="`v-${verdict}`">
+              <section
+                v-if="result"
+                class="result-card"
+                :class="`v-${verdict}`"
+              >
+                <button
+                  type="button"
+                  class="result-toggle"
+                  :aria-expanded="showResult"
+                  @click="showResult = !showResult"
+                >
+                  <span class="rt-label">分析结论</span>
+                  <span v-if="!showResult" class="rt-sum">{{ summary }}</span>
+                  <span class="rt-chev">{{ showResult ? '收起 ▴' : '▾' }}</span>
+                </button>
+
                 <!--
                   ★ 2026-10-11 晚：提示词放开了输出格式 ⇒ 模型改成写小标题 + 分点 + 加粗。
                   结论卡片原来是把整段当**纯文本**贴出来的（`white-space: pre-wrap`），
-                  于是页面上能直接看到 `#` `**` `-`。现在交给 `AnswerBody` 渲染成 HTML，
-                  并按「能做 / 不能做 / 等」给卡片一条同色的顶线（`v-go` / `v-no` / `v-wait`）。
+                  于是页面上能直接看到 `#` `**` `-`。现在交给 `AnswerBody` 渲染成 HTML。
+                  ⚠️ 收起用 `v-show`（不是 `v-if`）：md 渲染一次就够，来回折别重渲染。
                 -->
-                <AnswerBody v-if="judge?.line" :text="judge.line" />
-                <p v-else class="verdict-line">（模型没给结论）</p>
+                <div v-show="showResult" class="result-body">
+                  <AnswerBody v-if="judge?.line" :text="judge.line" />
+                  <p v-else class="verdict-line">（模型没给结论）</p>
+                </div>
               </section>
-
-            </template>
+            </div>
 
             <!--
               预测历史（原「预测历史」那一格）：每次分析留下的那一句话。
