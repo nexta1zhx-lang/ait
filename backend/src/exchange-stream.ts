@@ -256,18 +256,30 @@ const ALGO_GONE = new Set([
 /** 多久检查一次「哑了没」 */
 const WS_HEALTH_MS = 30 * 1000
 /**
- * 重连补成交：最多盯几个交易对（每个一次 `fetchMyTrades`，权重 5）。
+ * 一轮补成交最多盯几个交易对（每个一到几次 `fetchMyTrades`，权重 5）。
  *
  * 为什么**必须**有上限：币安的 `/fapi/v1/userTrades` **必须带 symbol**，没有
  * 「一次拉全部」的口子（`openOrders` / `openAlgoOrders` 那种 `noSymbol: 40` 的便利它没有）
  * ⇒ 成本随「最近交易过的币」**线性涨**，一个玩过 200 个币的账户每次重连能扫 200 发。
  *
- * 8 是 M2（`8dd9e40`，2026-10-05）定下的**保守值**，之后没动过 —— 它不是算出来的：
- * 一轮 ≤8 币 × ≤4 页 × 权重 5 = ≤160 权重，对着 2400/分钟 的额度可以忽略，
- * 所以当初取「够用就行」，没有更精确的依据。
- * ⚠️ 它的**代价**（超出的币这一轮不补）与放开时的注意点见 `symbolsToBackfill()`。
+ * ★ 2026-10-13 从 **8 抬到 24**：用户报「订单回补有问题，还是有会没补上的」——
+ *   8 是 M2（`8dd9e40`，2026-10-05）拍的**保守值**（注释里当时就写了"不是算出来的"），
+ *   而"账本里有、成交表里没有"的币超过 8 个时，排在后面的**这一轮压根不查**，
+ *   排序又是"最近缺的优先"⇒ 老的那批会一直轮不到（饿死）。
+ *
+ *   算一下 24 的代价：24 币 × ≤4 页 × 权重 5 = **≤480 权重**，而额度是
+ *   **2400/分钟**、一轮之间还隔着 4 小时（空转档 8 小时）—— 完全可以忽略。
+ *   ⚠️ 别再往上抬到"全量"：那等于每次重连扫一遍历史，收益递减、还挡着别的接口。
  */
-const BACKFILL_MAX_SYMBOLS = 8
+const BACKFILL_MAX_SYMBOLS = 24
+/**
+ * 「账本里有、成交表里没有」那一类**单独**给的名额。
+ *
+ * ⚠️ 这一类的优先级最高（是真缺东西），而且**必须**能一轮一轮往前推进：
+ * 清单按「最老那笔缺的时间」升序取（见 `symbolsToBackfill()`），
+ * 所以即便积压超过名额，下一轮也一定接着最老的往下补 —— 不会饿死。
+ */
+const BACKFILL_MISSING_MAX = BACKFILL_MAX_SYMBOLS
 /** 重连补成交：单页条数 / 最多翻几页（翻满就记日志，不无限翻） */
 const BACKFILL_PAGE = 500
 const BACKFILL_MAX_PAGES = 4
@@ -893,7 +905,7 @@ export class KeyStream {
   private async backfillFills(sinceOverride?: number): Promise<void> {
     let added = 0
     try {
-      const jobs = await this.symbolsToBackfill()
+      const {jobs, truncated} = await this.symbolsToBackfill()
       if (!jobs.length) return
       const fromLedger = await this.lastFillTs()
       /*
@@ -916,17 +928,25 @@ export class KeyStream {
         // 限速：userTrades 权重 5，合约总权重 2400/分钟 —— 慢一点无所谓
         await sleep(250)
       }
+      const tail = truncated
+        ? `；候选还有更多（名额 ${BACKFILL_MAX_SYMBOLS}）⇒ 下一轮接着查`
+        : ''
       if (added) {
         console.log(
-          `${this.tag} REST 补成交 ${added} 笔（查了 ${jobs.length} 个币：${jobs.map(j => j.symbol).join('、')}）`
+          `${this.tag} REST 补成交 ${added} 笔（查了 ${jobs.length} 个币：${jobs.map(j => j.symbol).join('、')}）${tail}`
         )
         emit(this.row.id, {type: 'backfill', added})
         /* 补回来的成交同样可能改变持仓集合（离线期间开的仓就在这里被发现） */
         this.resyncAfterFill()
       } else {
-        /* 查了、但确实没有新成交也要留一行 —— 不然「没查」和「查了没漏」在日志里长得一样 */
+        /*
+         * 查了、但确实没有新成交也要留一行 —— 不然「没查」和「查了没漏」在日志里长得一样。
+         * ⚠️ 被名额截断时**不能**再说"没有遗漏"（2026-10-13 用户就是看着这行以为没漏：
+         *    日志里恒定 8 个币，其实那正是名额上限）。
+         */
         console.log(
-          `${this.tag} 补成交：查了 ${jobs.length} 个币（${jobs.map(j => j.symbol).join('、')}），没有遗漏`
+          `${this.tag} 补成交：查了 ${jobs.length} 个币（${jobs.map(j => j.symbol).join('、')}）` +
+            `${truncated ? '，这一轮先查这些' + tail : '，没有遗漏'}`
         )
       }
     } catch (e) {
@@ -989,7 +1009,19 @@ export class KeyStream {
         // 下一页从最后一笔之后开始（重叠的那笔靠唯一键去重）
         cursor = lastTs + 1
       }
-      if (pages >= BACKFILL_MAX_PAGES) break
+      if (pages >= BACKFILL_MAX_PAGES) {
+        /*
+         * ⚠️ 翻满就得**说出来**（常量那行注释一直写着"翻满就记日志"，代码里其实没有）。
+         *    而且这里有个**会永久漏**的形状：起点固定从最老那笔缺的算，翻满 4 页就停 ⇒
+         *    每轮都只覆盖最老的那 2000 笔，再往后的**永远轮不到**。
+         *    记一行日志是为了"下次还有人报漏单时"能一眼看出是撞了这个上限。
+         */
+        console.warn(
+          `${this.tag} ${raw}：这一轮翻满 ${BACKFILL_MAX_PAGES} 页（≤${BACKFILL_MAX_PAGES * BACKFILL_PAGE} 笔）就先停，` +
+            `更晚的成交下一轮再拉 —— 若持续出现说明该把 BACKFILL_MAX_PAGES 抬一点`
+        )
+        break
+      }
     }
     return added
   }
@@ -1048,10 +1080,20 @@ export class KeyStream {
    *
    * 一轮的代价：≤8 币 × ≤4 页 × 权重 5。
    */
-  private async symbolsToBackfill(): Promise<{symbol: string; from?: number}[]> {
+  private async symbolsToBackfill(): Promise<{
+    jobs: {symbol: string; from?: number}[]
+    /** 候选比名额多（这一轮查不完）—— 用来把日志写实，别再说"没有遗漏" */
+    truncated: boolean
+  }> {
     const jobs = new Map<string, {symbol: string; from?: number}>()
 
     /* ① 账本里有、成交明细里没有的币 —— 用 `trade_id` 精确定位（不是比 max(ts)） */
+    /*
+     * ⚠️ 排序用 **`min(i.ts)` 升序（最老的优先）**，不是 `max(i.ts) DESC`：
+     *    积压超过名额时，"最近的优先"会让老的那批**永远轮不到**；
+     *    按最老那笔排，每补完一个币它就掉出清单，下一轮继续往下推 —— 一定收敛。
+     *    多要一条（`+1`）只为判断"是不是还有积压"，用来打一行日志。
+     */
     const missing = await query<{symbol: string; from_ts: string; n: string}>(
       `SELECT i.symbol,
               min(i.ts) FILTER (WHERE i.ts > now() - $3::interval) AS from_ts,
@@ -1062,9 +1104,9 @@ export class KeyStream {
           AND i.symbol IS NOT NULL AND i.symbol <> ''
           AND i.ts > now() - $3::interval
         GROUP BY i.symbol
-        ORDER BY max(i.ts) DESC
+        ORDER BY min(i.ts) ASC
         LIMIT $2`,
-      [this.row.id, BACKFILL_MAX_SYMBOLS, `${BACKFILL_LOOKBACK_MS} milliseconds`]
+      [this.row.id, BACKFILL_MISSING_MAX + 1, `${BACKFILL_LOOKBACK_MS} milliseconds`]
     )
     for (const r of missing) {
       /*
@@ -1082,6 +1124,14 @@ export class KeyStream {
       console.log(
         `${this.tag} 发现 ${missing.length} 个币的成交明细缺失（账本里有）：` +
           missing.map(m => `${m.symbol}(${m.n} 笔)`).join('、')
+      )
+    }
+    /* 这道名单比名额还长 ⇒ 明确说一声"下一轮接着补"，别让人以为漏了就完了 */
+    const overflow = Math.max(0, missing.length - BACKFILL_MISSING_MAX)
+    if (overflow > 0) {
+      console.warn(
+        `${this.tag} 缺失的币比这一轮的名额（${BACKFILL_MISSING_MAX}）还多 ${overflow} 个 —— ` +
+          `这一轮先补最老的 ${BACKFILL_MISSING_MAX} 个，下一轮接着补（按最老优先，不会漏）`
       )
     }
 
@@ -1106,7 +1156,8 @@ export class KeyStream {
         if (r.symbol && !jobs.has(r.symbol)) jobs.set(r.symbol, {symbol: r.symbol})
       }
     }
-    return [...jobs.values()].slice(0, BACKFILL_MAX_SYMBOLS)
+    const all = [...jobs.values()]
+    return {jobs: all.slice(0, BACKFILL_MAX_SYMBOLS), truncated: all.length > BACKFILL_MAX_SYMBOLS}
   }
 
   /** 账本里最后一笔成交的时间（往回多要 5 分钟，防边界漏单） */
