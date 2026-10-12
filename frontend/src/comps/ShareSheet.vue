@@ -95,12 +95,17 @@ const chartNote = ref('')
 const SHARE_TF = '15m'
 const SHARE_BARS = 96
 
-/** 把这一层取到的小图 / 图表样式并进外层给的那份数据里 */
+/**
+ * 把这一层取到的小图组装进外层给的那份数据里。
+ *
+ * ⚠️ `chart` 这一整块**由这一层生成**（外层只交 `chartSymbol`）：K 线是这儿异步取的，
+ *    让两层各写一半必然对不上。没 symbol / 没取到 / 用户选「不带」都走 `style:'none'`。
+ */
 function buildData(): {data: ShareCardData; text: string; filename: string} {
   const out = props.build(masked.value)
-  if (out.data.chart) {
-    out.data.chart.style = chartStyle.value
-    if (series.value?.length) out.data.chart.candles = series.value
+  out.data.chart = {
+    style: out.data.chartSymbol && series.value?.length ? chartStyle.value : 'none',
+    candles: series.value ?? undefined
   }
   return out
 }

@@ -35,27 +35,17 @@ export interface ShareCardCell {
  * ⚠️ `candles` 缺席（没取到行情 / 用户选「不带图」）时：整块不画 ——
  *    点位也跟着没有（它们画在图上）。
  */
-export interface ShareCardLevel {
-  /** 已格式化的价格，例如 `0.12077` */
-  price: string
-  /** 这个价格是什么：`开仓` / `止盈` / `现价` */
-  tag: string
-}
+/* ⚠️ 2026-10-13 用户最后一句：「价格标注都去掉」⇒ 图上那两个点位（虚线 + 三角 +
+   价格 + `买入` / `卖出` 小字）连同 `ShareCardLevel` 一起删掉了，小图现在是
+   **纯行情图**：只有线（或 K 线）。价格信息在卡片下半部分的格子里已经有
+   （开仓价 / 当前价），图上再标一遍是多余的。
+   要恢复那版：`git log` 里 `App 原生分享 / 保存 / 复制 + 持仓海报分时缩略图与买卖点位`
+   这一笔之前的 `drawLevel()` / `triangle()` 就是（`ShareCardLevel` 的结构也在那儿）。 */
 export interface ShareCardChart {
   /** 价格序列：分时用 `close`，K 线用 OHLC */
   candles?: Candle[]
   /** 怎么画：`line` 分时、`candle` K 线、`none` 不画（用户可切） */
   style: 'line' | 'candle' | 'none'
-  /** 现价（已格式化）——画在分时线末端那个点旁边；没有就不画 */
-  last?: string | null
-  /**
-   * 「买入」那一头：多头 = 开仓价、空头 = 止盈价。画在图的**左半边**（绿色 ▲）
-   */
-  buy?: ShareCardLevel | null
-  /**
-   * 「卖出」那一头：多头 = 止盈价、空头 = 开仓价。画在图的**右半边**（金色 ▼）
-   */
-  sell?: ShareCardLevel | null
 }
 
 export interface ShareCardData {
@@ -238,31 +228,6 @@ function bjParts(d: Date): {date: string; time: string} {
 
 /* ---------------- 小图（分时 / K 线） + 买卖点位行 ---------------- */
 
-/** 实心三角（买/卖的「简单图标」）——自己画，别去引图标字体 */
-function triangle(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  size: number,
-  up: boolean,
-  color: string
-): void {
-  const r = size / 2
-  ctx.beginPath()
-  if (up) {
-    ctx.moveTo(cx, cy - r)
-    ctx.lineTo(cx + r, cy + r)
-    ctx.lineTo(cx - r, cy + r)
-  } else {
-    ctx.moveTo(cx, cy + r)
-    ctx.lineTo(cx + r, cy - r)
-    ctx.lineTo(cx - r, cy - r)
-  }
-  ctx.closePath()
-  ctx.fillStyle = color
-  ctx.fill()
-}
-
 /**
  * 分时线 / K 线小图。
  *
@@ -355,102 +320,8 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
     ctx.fill()
   }
   ctx.restore()
-
-  // 现价贴在末端那个点**左边**（贴右上角会跟卖出点位打架）
-  const endClose = list[list.length - 1].close
-  const endY = py(endClose)
-  if (chart.last) {
-    font(ctx, SZ.label, 600)
-    ctx.fillStyle = C.muted
-    ctx.textAlign = 'right'
-    ctx.fillText(chart.last, x + w - 34, endY + 10)
-    ctx.textAlign = 'left'
-  }
-
-  /*
-   * 两个点位：先各自换算、夹进图里，再**保证它们至少隔开 `SEP`**——
-   * 一个亏损中的多头（开仓价、止盈都在今天这段行情**上方**）最常出现，
-   * 两条虚线会叠成一条、看着像只有一个点位。价格高的那个排上面。
-   */
-  const EDGE = 30
-  const SEP = 46
-  const num = (v: string) => Number(v.replace(/,/g, ''))
-  const clampY = (v: number) => Math.min(Math.max(v, y + EDGE), y + h - EDGE)
-  const pBuy = chart.buy ? num(chart.buy.price) : null
-  const pSell = chart.sell ? num(chart.sell.price) : null
-  let yBuy = pBuy === null || !Number.isFinite(pBuy) ? null : clampY(py(pBuy))
-  let ySell = pSell === null || !Number.isFinite(pSell) ? null : clampY(py(pSell))
-
-  if (yBuy !== null && ySell !== null && Math.abs(yBuy - ySell) < SEP) {
-    const shift = (SEP - Math.abs(yBuy - ySell)) / 2
-    const yHi = clampY(Math.min(yBuy, ySell) - shift)
-    const yLo = clampY(Math.max(yBuy, ySell) + shift)
-    if (pBuy! >= pSell!) {
-      yBuy = yHi
-      ySell = yLo
-    } else {
-      ySell = yHi
-      yBuy = yLo
-    }
-  }
-
-  const alone = yBuy === null || ySell === null
-  if (yBuy !== null) drawLevel(ctx, x, w, yBuy, chart.buy!, C.ok, true, 'left', alone)
-  if (ySell !== null) drawLevel(ctx, x, w, ySell, chart.sell!, C.gold, false, 'right', alone)
 }
 
-/**
- * 图上的一个点位：一条虚线 + 一个实心三角 + 价格数字。
- *
- * ⚠️ `yRaw` 是**真实换算出来的位置**，可能落在图外（止盈常离行情好几倍）——
- *    这里把它**夹在图的上下边界内**（`LEVEL_EDGE`），不然线画到图外面去。
- *    价格数字是真的，位置只保证"在这张图的这一侧"。
- * ⚠️ 买入画左半边、卖出画右半边：两条线各占一半，不会叠在一起。
- * ⚠️ 用户 2026-10-13：「买入卖出直接显示在图上不要标注」——所以这里**只有图标 + 价格**，
- *    不再写「买入 / 卖出」四个字（左下绿上三角、右上金下三角已经说清楚了）。
- */
-function drawLevel(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  w: number,
-  y: number,
-  level: ShareCardLevel,
-  color: string,
-  up: boolean,
-  side: 'left' | 'right',
-  /** 图上**只有这一个**点位时，虚线铺满整幅（不然只画半截，看着像没画完） */
-  alone = false
-): void {
-  const cx = x + w / 2
-
-  ctx.save()
-  ctx.strokeStyle = color
-  ctx.globalAlpha = 0.55
-  ctx.lineWidth = 2
-  ctx.setLineDash([9, 9])
-  ctx.beginPath()
-  ctx.moveTo(side === 'left' || alone ? x + 14 : cx + 6, y)
-  ctx.lineTo(side === 'right' || alone ? x + w - 14 : cx - 6, y)
-  ctx.stroke()
-  ctx.setLineDash([])
-  ctx.globalAlpha = 1
-
-  const ix = side === 'left' ? x + 40 : x + w - 40
-  triangle(ctx, ix, y, 24, up, color)
-  const tx = side === 'left' ? ix + 22 : ix - 22
-  ctx.textAlign = side === 'left' ? 'left' : 'right'
-  font(ctx, SZ.label, 700)
-  ctx.fillStyle = color
-  ctx.fillText(level.price, tx, y + 11)
-  // 小字跟在价格**外侧**（左边那组跟在价格右边、右边那组跟在价格左边）……
-  // 其实两边都跟在价格后面就够读：左组往右排，右组往左排，各占自己那半边
-  const wPrice = ctx.measureText(level.price).width
-  font(ctx, SZ.levelTag, 400)
-  ctx.globalAlpha = 0.72
-  ctx.fillText(level.tag, side === 'left' ? tx + wPrice + 10 : tx - wPrice - 10, y + 11)
-  ctx.globalAlpha = 1
-  ctx.restore()
-}
 
 /**
  * 画一张持仓卡。

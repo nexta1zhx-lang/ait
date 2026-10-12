@@ -1105,52 +1105,14 @@ function shareBuild(masked: boolean): {
   const realized = realizedOf(p)
 
   /*
-   * 海报上那张小图 + 图里那两个点位（一路改过来的，方向别搞反）：
-   *   ① 用户：「加入缩略图」「类似分时图，可选择」⇒ 小图（分时 / K 线 / 不带）；
-   *   ② 「连线那种加入简单的图标买入点位和卖出点位」⇒ 加了一行「买入 → 卖出」标注；
-   *   ③ 「买入卖出直接显示在图上不要标注」⇒ 点位挪进图里（虚线 + 三角 + 价格），标注行删掉；
-   *   ④ 「都不要，只要买入卖出**已经发生的**」⇒ **不再拿止盈价 / 现价当"卖出点位"**
-   *      （那两笔都还没成交），改成从**这一轮仓位的实际成交**里取：
-   *        · 买入均价 = `cycle.entryPrice`（取不到才退回持仓快照的 `entryPrice`）；
-   *        · 卖出均价 = `cycle.exitPrice`（**平掉那部分的均价**）—— 没减过仓就没有这一头。
+   * 海报上那张小图（用户：「加入缩略图」「类似分时图，可选择」）。
    *
-   * ⚠️ 买卖按**仓位方向**翻译，别写死「买入=开仓价」：
-   *    · 多头：买入 = 开仓均价、卖出 = 减仓均价；
-   *    · 空头：卖出 = 开仓均价、买入 = 减仓均价（空头"先卖后买回"）。
-   * ⚠️ 周期（`openCycles`）按 symbol + 方向 + Key 名对上，口径跟 `realizedOf`
-   *    （持仓卡上「已实现盈利」）**完全一致** —— 别另写一套匹配。
-   * ⚠️ 小图的 K 线**不在这里取**（这层是同步的）：只交出 `chartSymbol`，
-   *    由弹层 `loadCandles` 取回来塞进 `chart.candles`（见 `ShareSheet.vue`）。
+   * ⚠️ 这层**只交出 symbol**：K 线是弹层 `loadCandles` 异步取回来塞进
+   *    `chart.candles` 的（这层是同步的，取不了）。
+   * ⚠️ 2026-10-13 最后一句「价格标注都去掉」——图上那两个点位（实际成交的买入 /
+   *    卖出均价）连同"现价"都删了，所以这里**不再算**开仓均价 / 减仓均价
+   *    （`openCycles` 那套匹配留着是给 `realizedOf` 用的）。
    */
-  const entry = Number(p.entryPrice ?? 0)
-  const lastNum = lastOf(p)
-  const cycle =
-    openCycles.value.find(
-      c =>
-        pairOf(c.symbol) === pairOf(p.raw ?? p.symbol) &&
-        c.side === p.side &&
-        (!p.keyName || !c.keyName || c.keyName === p.keyName)
-    ) ?? null
-  const openAvg = cycle?.entryPrice && cycle.entryPrice > 0 ? cycle.entryPrice : entry
-  const closeAvg = cycle?.exitPrice && cycle.exitPrice > 0 ? cycle.exitPrice : null
-  const chart: ShareCardChart | undefined =
-    openAvg > 0
-      ? {
-          style: 'line',
-          last: lastNum === null ? null : fmt(lastNum),
-          buy: short
-            ? closeAvg
-              ? {price: fmt(closeAvg), tag: '买入'}
-              : null
-            : {price: fmt(openAvg), tag: '买入'},
-          sell: short
-            ? {price: fmt(openAvg), tag: '卖出'}
-            : closeAvg
-              ? {price: fmt(closeAvg), tag: '卖出'}
-              : null
-        }
-      : undefined
-
   const data: ShareCardData = {
     base,
     side: short ? 'short' : 'long',
@@ -1174,7 +1136,7 @@ function shareBuild(masked: boolean): {
         ? {k: '杠杆', v: `${p.leverage}x`}
         : {k: '已实现盈利', v: masked ? '—' : signedMoney(realized)}
     ],
-    chart,
+    // ⚠️ 小图整块由弹层组装（它才有 K 线），这里只交 symbol
     chartSymbol: p.symbol,
     note: p.keyName
   }
