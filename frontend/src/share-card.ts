@@ -36,21 +36,26 @@ export interface ShareCardCell {
  *    点位也跟着没有（它们画在图上）。
  */
 /**
- * 图上的一个点位：价格 + 一个小字（`买入` / `卖出`）。
+ * 图上要标的一个**成交点**。
  *
- * ⚠️ 这一块 2026-10-13 来回改了四轮，别再自己发挥：
- *    「连线那种加入简单的图标买入点位和卖出点位」→ 图上点位（虚线 + 三角 + 价格）；
- *    「买入卖出直接显示在图上不要标注」→ 把单独的标注行删掉，只留图上；
- *    「价格标注都去掉」→ 整块删掉；
- *    「买入点要加上放在线下面一点」→ **就回来这一条**（买入），
- *      且比它自己的价位**再低一档**画（`BUY_DROP`，贴着价位会压在分时线上）。
- *    ⇒ 现在的口径：**有几头画几头**（持仓多半只有买入；仓位历史两头都有）。
+ * ★ 2026-10-13 这一处改了五轮，最后定成「**就是一个点**」（用户：「画点位还是不对，
+ *   我现在只需要那个点，价格买入字样可以去掉」）：
+ *     「连线那种加入简单的图标买入点位和卖出点位」→ 图上的横线 + 三角 + 价格；
+ *     「买入卖出直接显示在图上不要标注」→ 删掉单独那行标注；
+ *     「价格标注都去掉」→ 整块删掉；
+ *     「买入点要加上放在线下面一点」→ 请回买入那一条；
+ *     ⇒ 现在：**按成交那一刻的时间 + 价格打一个圆点**（不画横线、不写价格、
+ *       不写「买入 / 卖出」四个字）。为什么之前"位置不对"：横线只表达了价格，
+ *       没表达"什么时候成交的"，看着就像标错了地方。
+ *
+ * ⚠️ `at` 是 ISO 字符串（后端账本给的 `openAt` / `closeAt`），
+ *    画的时候按它在 K 线时间轴上的位置放 x。
  */
-export interface ShareCardLevel {
-  /** 已格式化的价格，例如 `0.12077` */
-  price: string
-  /** 这个价格是什么：`买入` / `卖出` */
-  tag: string
+export interface ShareCardMark {
+  at: string
+  price: number
+  /** `buy` 绿点、`sell` 金点 —— 颜色是唯一的标识（没有文字） */
+  kind: 'buy' | 'sell'
 }
 export interface ShareCardChart {
   /** 价格序列：分时用 `close`，K 线用 OHLC */
@@ -58,12 +63,16 @@ export interface ShareCardChart {
   /** 怎么画：`line` 分时、`candle` K 线、`none` 不画（用户可切） */
   style: 'line' | 'candle' | 'none'
   /**
-   * 「买入」那一头：多头 = 开仓均价、空头 = 减仓均价 ⇒ 画在图的**左半边**（绿 ▲）。
-   * 没有就不画（持仓还没减过仓时只有这一头，仓位历史两头都有）。
+   * 已经成交过的买入 / 卖出（图上画成圆点）。
+   * 持仓多半只有「买入」一个（还没减过仓）；仓位历史两个都有。
    */
-  buy?: ShareCardLevel | null
-  /** 「卖出」那一头：多头 = 减仓均价、空头 = 开仓均价 —— 画在图的**右半边**（金 ▼） */
-  sell?: ShareCardLevel | null
+  marks?: ShareCardMark[] | null
+  /**
+   * 这段持仓持续了多久（秒）—— 弹层拿它决定**用哪个周期、取多少根**，
+   * 好让成交那一刻落在时间轴**里面**（不然点会跑到图外面去）。
+   * `null` / 缺省 = 按一天算。
+   */
+  spanSec?: number | null
 }
 
 export interface ShareCardData {
@@ -250,78 +259,6 @@ function bjParts(d: Date): {date: string; time: string} {
 
 /* ---------------- 小图（分时 / K 线） + 买卖点位行 ---------------- */
 
-/** 实心三角（买 / 卖的「简单图标」）——自己画，别去引图标字体 */
-function triangle(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  size: number,
-  up: boolean,
-  color: string
-): void {
-  const r = size / 2
-  ctx.beginPath()
-  if (up) {
-    ctx.moveTo(cx, cy - r)
-    ctx.lineTo(cx + r, cy + r)
-    ctx.lineTo(cx - r, cy + r)
-  } else {
-    ctx.moveTo(cx, cy + r)
-    ctx.lineTo(cx + r, cy - r)
-    ctx.lineTo(cx - r, cy - r)
-  }
-  ctx.closePath()
-  ctx.fillStyle = color
-  ctx.fill()
-}
-
-/**
- * 图上的一个点位：一条虚线 + 一个实心三角 + 价格 + 一个小字。
- *
- * ⚠️ 传进来的 `y` 是**已经夹进图内**的位置（换算 / 夹边界 / 两个点位拉开，
- *    都在 `drawMiniChart` 里算完）—— 这里只管画。
- * ⚠️ 买入画左半边、卖出画右半边（两条各占一半，不会叠）；只有一头时虚线铺满整幅。
- */
-function drawLevel(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  w: number,
-  y: number,
-  level: ShareCardLevel,
-  color: string,
-  up: boolean,
-  side: 'left' | 'right',
-  alone = false
-): void {
-  const cx = x + w / 2
-  ctx.save()
-  ctx.strokeStyle = color
-  ctx.globalAlpha = 0.55
-  ctx.lineWidth = 2
-  ctx.setLineDash([9, 9])
-  ctx.beginPath()
-  ctx.moveTo(side === 'left' || alone ? x + 14 : cx + 6, y)
-  ctx.lineTo(side === 'right' || alone ? x + w - 14 : cx - 6, y)
-  ctx.stroke()
-  ctx.setLineDash([])
-  ctx.globalAlpha = 1
-
-  const ix = side === 'left' ? x + 40 : x + w - 40
-  triangle(ctx, ix, y, 24, up, color)
-  const tx = side === 'left' ? ix + 22 : ix - 22
-  ctx.textAlign = side === 'left' ? 'left' : 'right'
-  font(ctx, SZ.label, 700)
-  ctx.fillStyle = color
-  ctx.fillText(level.price, tx, y + 11)
-  // 小字跟在价格**外侧**（左组往右排、右组往左排），这样两头各自占住自己那半边
-  const wPrice = ctx.measureText(level.price).width
-  font(ctx, SZ.levelTag, 400)
-  ctx.globalAlpha = 0.72
-  ctx.fillText(level.tag, side === 'left' ? tx + wPrice + 10 : tx - wPrice - 10, y + 11)
-  ctx.globalAlpha = 1
-  ctx.restore()
-}
-
 /**
  * 分时线 / K 线小图。
  *
@@ -347,7 +284,7 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
    * ⚠️ 价格范围 = **这段行情的高低点 ∪ 两个点位**（2026-10-13 用户：「买点卖点的位置
    *    还是不对」）。
    *
-   *    早前只按行情算范围，点位落在范围外时被**夹到图的上下边界**上画 ——
+   *    早前只按行情算范围，成交点落在范围外时被**夹到图的上下边界**上画 ——
    *    数字是真的，位置却是假的，看着就是"标的不是那个地方"。
    *    现在把点位并进范围：图上每一个点的 y 都对得上它的价格。
    *    代价：点位离行情很远时（比如亏了 60%，开仓价在行情上方一大截）分时线会被
@@ -362,11 +299,10 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
     lo = Math.min(lo, c.low > 0 ? c.low : c.close)
     hi = Math.max(hi, c.high > 0 ? c.high : c.close)
   }
-  for (const lv of [chart.buy, chart.sell]) {
-    const p = lv ? Number(lv.price.replace(/,/g, '')) : NaN
-    if (Number.isFinite(p) && p > 0) {
-      lo = Math.min(lo, p)
-      hi = Math.max(hi, p)
+  for (const m of chart.marks ?? []) {
+    if (Number.isFinite(m.price) && m.price > 0) {
+      lo = Math.min(lo, m.price)
+      hi = Math.max(hi, m.price)
     }
   }
   if (!(hi > lo)) hi = lo + Math.max(1e-9, Math.abs(lo) * 0.001)
@@ -435,36 +371,36 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
   }
   ctx.restore()
   /*
-   * 两个点位：**就画在它们自己的价格位置上**（换算用的是同一个 `py`，范围里已经
-   * 包含了这两个价 —— 见上面那段）。不夹边界、不为了好看挪位置。
+   * 已经成交的那几个点：**按时间 + 价格**打一个小圆点（用户：「我现在只需要那个点，
+   * 价格买入字样可以去掉」）。没有横线、没有价格数字、没有「买入 / 卖出」四个字 ——
+   * 绿点 = 买入、金点 = 卖出，颜色就是唯一的标识。
    *
-   * ⚠️ 只有一种情况允许挪：两个价**几乎一样**（比如开仓 0.02161 / 平仓 0.0217，
-   *    差 0.4%），两条虚线 + 两组文字会叠在一起 ⇒ 那时才按 `SEP` 拉开最小间隔。
-   *    这种情况很显眼（两个数字本来就是一个价），拉开比叠着强。
+   * ⚠️ x 用**这一笔成交的时间**（`mark.at`）在 K 线时间轴上插值 ——
+   *    这是"位置不对"的真正原因：横线只表达了价格，没表达"什么时候成交的"。
+   *    ⚠️ 所以时间轴必须覆盖住持仓那一段，见 `ShareSheet.vue` 的 `pickSpan()`
+   *    （按持仓时长选周期 / 根数，否则点会跑到图外面）。
+   * ⚠️ 外面留一圈底色描边，深色图上才看得清（尤其点正好压在分时线上时）。
    */
-  const num = (v: string) => Number(v.replace(/,/g, ''))
-  const SEP = 34
-  const pBuy = chart.buy ? num(chart.buy.price) : null
-  const pSell = chart.sell ? num(chart.sell.price) : null
-  let yBuy = pBuy === null || !Number.isFinite(pBuy) ? null : py(pBuy)
-  let ySell = pSell === null || !Number.isFinite(pSell) ? null : py(pSell)
-
-  if (yBuy !== null && ySell !== null && Math.abs(yBuy - ySell) < SEP) {
-    const shift = (SEP - Math.abs(yBuy - ySell)) / 2
-    const yHi = Math.min(yBuy, ySell) - shift
-    const yLo = Math.max(yBuy, ySell) + shift
-    if (pBuy! >= pSell!) {
-      yBuy = yHi
-      ySell = yLo
-    } else {
-      ySell = yHi
-      yBuy = yLo
-    }
+  const t0 = list[0].timestamp
+  const tN = list[list.length - 1].timestamp
+  const span = tN - t0
+  for (const m of chart.marks ?? []) {
+    const t = Date.parse(m.at)
+    if (!Number.isFinite(t) || !Number.isFinite(m.price) || m.price <= 0) continue
+    const k = span > 0 ? (t - t0) / span : 0
+    /* 时间落在窗口外（比如刚开仓、K 线还没收到那一根）就贴着边画，别丢点 */
+    const mx = x + Math.min(Math.max(k, 0), 1) * w
+    const my = Math.min(Math.max(py(m.price), y + 20), y + h - 20)
+    const color = m.kind === 'sell' ? C.gold : C.ok
+    ctx.beginPath()
+    ctx.arc(mx, my, 13, 0, Math.PI * 2)
+    ctx.fillStyle = C.bg
+    ctx.fill()
+    ctx.beginPath()
+    ctx.arc(mx, my, 9, 0, Math.PI * 2)
+    ctx.fillStyle = color
+    ctx.fill()
   }
-
-  const alone = yBuy === null || ySell === null
-  if (yBuy !== null) drawLevel(ctx, x, w, yBuy, chart.buy!, C.ok, true, 'left', alone)
-  if (ySell !== null) drawLevel(ctx, x, w, ySell, chart.sell!, C.gold, false, 'right', alone)
 }
 
 /**
@@ -473,7 +409,7 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
  * 版面从上到下：落款行 → 币种 + 方向/杠杆 → 主角盈亏 → 分隔线 → 2×3 数据格 → 域名。
  *
  * ★ 2026-10-13 用户：「加入缩略图」「类似分时图，可选择」⇒ 在主角盈亏和分隔线之间
- *   插了一张**小图**（买卖点位画在图里，见 `drawMiniChart` / `drawLevel`，刻度在 `Y` 里）。
+ *   插了一张**小图**（成交点画在图里，见 `drawMiniChart` / `ShareCardMark`，刻度在 `Y` 里）。
  */
 export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
   const cvs = document.createElement('canvas')

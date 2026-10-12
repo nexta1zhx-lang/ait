@@ -53,7 +53,12 @@ import SegTabs from './SegTabs.vue'
 import SymbolCombo from './SymbolCombo.vue'
 import SettingsSheet from './SettingsSheet.vue'
 import ShareSheet from './ShareSheet.vue'
-import {shareText, type ShareCardChart, type ShareCardData} from '../share-card'
+import {
+  shareText,
+  type ShareCardChart,
+  type ShareCardData,
+  type ShareCardMark
+} from '../share-card'
 
 /**
  * 曲线用 echarts（~580KB），**单独一个 chunk 异步载**：
@@ -402,31 +407,49 @@ function openCycleOf(p: FuturesPosition): ExchangePositionCycle | null {
 }
 
 /**
- * 海报小图里那两个点位：**实际成交过**的买入 / 卖出均价。
+ * 海报小图里那几个**已经成交**的点（按成交时刻 + 价格打点）。
  *
- * ★ 用户一路收窄到这个口径：「连线那种加入简单的图标买入点位和卖出点位」→
- *   「买入卖出直接显示在图上不要标注」→「价格标注都去掉」→ **「买入点要加上
- *   放在线下面一点」**。最终＝只标**已经发生**的成交，不再拿止盈价 / 现价凑数
- *   （那两笔还没成交），买入那一条在图上再往下挪一点（见 `share-card.ts` 的 `BUY_DROP`）。
+ * ★ 用户一路改到这个口径：「加入缩略图」→「连线那种加入简单的图标买入点位和卖出
+ *   点位」→「买入卖出直接显示在图上不要标注」→「价格标注都去掉」→「买入点要加上
+ *   放在线下面一点」→ **「画点位还是不对，我现在只需要那个点，价格买入字样可以
+ *   去掉」**。最终＝**一个圆点**，位置 = 那一刻的价格 + 那一刻的时间。
  *
- * ⚠️ 方向要翻译：多头「买入 = 开仓均价、卖出 = 减仓均价」；空头反过来
- *    （先卖后买回）。哪一头是 `null` 就不画那一头 —— 持仓没减过仓时只有"买入"。
+ * ⚠️ 方向要翻译：多头「开仓 = 买、减仓 = 卖」；空头反过来（先卖后买回）。
+ *    哪一头没成交过就不画那个点（持仓还没减过仓时只有开仓那一个点）。
+ * ⚠️ 时间用的是**账本里的成交时间**（`openAt` / 最后一笔减仓的时间 / `closeAt`），
+ *    所以时间轴必须覆盖住这一段 —— 交给弹层按 `spanSec` 选周期
+ *    （见 `ShareSheet.vue` 的 `pickSpan`）。
  */
-function shareChart(
-  symbol: string,
-  side: 'long' | 'short',
-  entry: number | null,
-  exit: number | null
-): ShareCardChart {
-  const e = entry !== null && entry > 0 ? entry : null
-  const x = exit !== null && exit > 0 ? exit : null
-  const buy = side === 'short' ? x : e
-  const sell = side === 'short' ? e : x
-  return {
-    style: 'line',
-    buy: buy === null ? null : {price: fmt(buy), tag: '买入'},
-    sell: sell === null ? null : {price: fmt(sell), tag: '卖出'}
+function shareChart(input: {
+  symbol: string
+  side: 'long' | 'short'
+  entryAt: string | null
+  entryPrice: number | null
+  exitAt: string | null
+  exitPrice: number | null
+  /** 持仓时长（秒）—— 弹层按它决定画多长的一段 */
+  spanSec: number | null
+}): ShareCardChart {
+  const buy: ShareCardMark['kind'] = input.side === 'short' ? 'sell' : 'buy'
+  const sell: ShareCardMark['kind'] = input.side === 'short' ? 'buy' : 'sell'
+  const marks: ShareCardMark[] = []
+  if (input.entryAt && input.entryPrice && input.entryPrice > 0) {
+    marks.push({at: input.entryAt, price: input.entryPrice, kind: buy})
   }
+  if (input.exitAt && input.exitPrice && input.exitPrice > 0) {
+    marks.push({at: input.exitAt, price: input.exitPrice, kind: sell})
+  }
+  return {style: 'line', marks, spanSec: input.spanSec}
+}
+
+/**
+ * 这一段里**最后一笔减仓**的时间（部分平仓时用它当"卖在那时候发生"）。
+ * ⚠️ 逐笔都带时间（`orders` 是成交账本原文），所以这里不用额外查库。
+ */
+function lastReduceAt(c: ExchangePositionCycle | null): string | null {
+  if (!c) return null
+  const reduces = c.orders.filter(o => o.reduce)
+  return reduces.length ? reduces[reduces.length - 1].time : null
 }
 
 /** 文件名里的北京时间戳（`20261013-0145`），持仓 / 仓位历史共用 */
@@ -1204,7 +1227,15 @@ function cycleBuild(masked: boolean): {
       {k: '持仓时间', v: holdText(c.holdSec)},
       {k: '手续费', v: masked ? '—' : money(c.fee)}
     ],
-    chart: shareChart(c.symbol, c.side, c.entryPrice, c.exitPrice),
+    chart: shareChart({
+      symbol: c.symbol,
+      side: c.side,
+      entryAt: c.openAt,
+      entryPrice: c.entryPrice,
+      exitAt: c.closeAt,
+      exitPrice: c.exitPrice,
+      spanSec: c.holdSec
+    }),
     chartSymbol: c.symbol,
     note: c.keyName
   }
@@ -1275,12 +1306,16 @@ function shareBuild(masked: boolean): {
      * ⚠️ K 线**不在这儿取**（这层是同步的）：只交 `chartSymbol`，由弹层
      *    `loadCandles` 取回来塞进 `chart.candles`。
      */
-    chart: shareChart(
-      p.symbol,
-      short ? 'short' : 'long',
-      openCyc?.entryPrice ?? (entry > 0 ? entry : null),
-      openCyc?.exitPrice ?? null
-    ),
+    chart: shareChart({
+      symbol: p.symbol,
+      side: short ? 'short' : 'long',
+      entryAt: openCyc?.openAt ?? null,
+      entryPrice: openCyc?.entryPrice ?? (entry > 0 ? entry : null),
+      /* 没平过仓就没有"卖"那个点（`exitPrice` 也只有减过仓才有） */
+      exitAt: openCyc?.closeAt ?? lastReduceAt(openCyc),
+      exitPrice: openCyc?.exitPrice ?? null,
+      spanSec: openCyc?.holdSec ?? null
+    }),
     chartSymbol: p.symbol,
     note: p.keyName
   }

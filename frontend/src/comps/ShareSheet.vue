@@ -100,9 +100,25 @@ const series = ref<Candle[] | null>(null)
 /** 取行情时那句提示（小字，画在选项右边） */
 const chartNote = ref('')
 
-/** 15 分钟 × 96 ≈ 一天 —— 「分时图」要的就是"今天怎么走的" */
-const SHARE_TF = '15m'
-const SHARE_BARS = 96
+/**
+ * 时间轴取多长 —— **按持仓时长自动定**（用户 2026-10-13：「周期能根据持仓时间自动取」）。
+ *
+ * ★ 为什么必须跟着持仓走：图上那几个点要按**成交时刻**摆 x（见 `share-card.ts` 的
+ *   `ShareCardMark`），时间轴不覆盖持仓那一段，点就会跑到图外面去。
+ *
+ * 口径：让画的这根 K 线**盖住整段持仓**，倍数 ~1.2 倍，根数控制在 150~180
+ * （太少看不出走势，太多又糊成一条）。持仓一小时就用 1 分钟、拿了三周就用 4 小时。
+ * ⚠️ 根数上限跟 `candles.ts` / 分析那边不共用（那边是画整张图的），别乱改。
+ */
+function pickSpan(spanSec: number | null | undefined): {tf: string; bars: number} {
+  const h = Math.max(0, (spanSec ?? 24 * 3600) / 3600)
+  if (h <= 3) return {tf: '1m', bars: 180}
+  if (h <= 12) return {tf: '5m', bars: 150}
+  if (h <= 36) return {tf: '15m', bars: 150}
+  if (h <= 24 * 6) return {tf: '1h', bars: 150}
+  if (h <= 24 * 30) return {tf: '4h', bars: 180}
+  return {tf: '1d', bars: 180}
+}
 
 /**
  * 把这一层取到的小图组装进外层给的那份数据里。
@@ -112,15 +128,14 @@ const SHARE_BARS = 96
  */
 function buildData(): {data: ShareCardData; text: string; filename: string} {
   const out = props.build(masked.value)
-  const seed = out.data.chart
+  /*
+   * ⚠️ 用 `...seed` 展开，别重新拼一个对象：外层给的字段（`marks` 成交点、`spanSec`
+   *    持仓时长）漏一个就会出问题 —— 早前就是这句把点位整个吃掉，图上一直不出现。
+   */
   out.data.chart = {
+    ...out.data.chart,
     style: out.data.chartSymbol && series.value?.length ? chartStyle.value : 'none',
-    candles: series.value ?? undefined,
-    // ⚠️ 点位（买入 / 卖出）是**外层**算好的，这里必须原样带过去 ——
-    //    早前这句直接换掉整个 `chart` 对象，把两个点位吃了（图上一直不出现，
-    //    查了半天才发现是被这一层覆盖掉的）。
-    buy: seed?.buy ?? null,
-    sell: seed?.sell ?? null
+    candles: series.value ?? undefined
   }
   return out
 }
@@ -153,8 +168,9 @@ watch(
       return
     }
     chartNote.value = '取行情…'
+    const {tf, bars} = pickSpan(props.build(masked.value).data.chart?.spanSec)
     try {
-      const r = await loadCandles(sym, SHARE_TF, SHARE_BARS)
+      const r = await loadCandles(sym, tf, bars)
       series.value = r.payload.candles?.length ? r.payload.candles : null
       if (!series.value) {
         chartStyle.value = 'none'
