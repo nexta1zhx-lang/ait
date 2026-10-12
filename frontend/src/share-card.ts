@@ -31,28 +31,50 @@ export interface ShareCardCell {
  *    点位线**夹在图的上下边界内**画（超出的那一点点从图标/颜色上看不出来，
  *    但价格数字是**真的**，不会骗人）。
  * ⚠️ 只有数字认不出来（用户 2026-10-13 看到金色的 `0.12077` 问「这是什么」）⇒
- *    每个点位除了价格还带一个**小字**（`开仓` / `止盈` / `现价`），颜色跟点位一致。
+ *    每个点位除了价格还带一个**小字**（`买入` / `卖出`），颜色跟点位一致。
  * ⚠️ `candles` 缺席（没取到行情 / 用户选「不带图」）时：整块不画 ——
  *    点位也跟着没有（它们画在图上）。
  */
-/* ⚠️ 2026-10-13 用户最后一句：「价格标注都去掉」⇒ 图上那两个点位（虚线 + 三角 +
-   价格 + `买入` / `卖出` 小字）连同 `ShareCardLevel` 一起删掉了，小图现在是
-   **纯行情图**：只有线（或 K 线）。价格信息在卡片下半部分的格子里已经有
-   （开仓价 / 当前价），图上再标一遍是多余的。
-   要恢复那版：`git log` 里 `App 原生分享 / 保存 / 复制 + 持仓海报分时缩略图与买卖点位`
-   这一笔之前的 `drawLevel()` / `triangle()` 就是（`ShareCardLevel` 的结构也在那儿）。 */
+/**
+ * 图上的一个点位：价格 + 一个小字（`买入` / `卖出`）。
+ *
+ * ⚠️ 这一块 2026-10-13 来回改了四轮，别再自己发挥：
+ *    「连线那种加入简单的图标买入点位和卖出点位」→ 图上点位（虚线 + 三角 + 价格）；
+ *    「买入卖出直接显示在图上不要标注」→ 把单独的标注行删掉，只留图上；
+ *    「价格标注都去掉」→ 整块删掉；
+ *    「买入点要加上放在线下面一点」→ **就回来这一条**（买入），
+ *      且比它自己的价位**再低一档**画（`BUY_DROP`，贴着价位会压在分时线上）。
+ *    ⇒ 现在的口径：**有几头画几头**（持仓多半只有买入；仓位历史两头都有）。
+ */
+export interface ShareCardLevel {
+  /** 已格式化的价格，例如 `0.12077` */
+  price: string
+  /** 这个价格是什么：`买入` / `卖出` */
+  tag: string
+}
 export interface ShareCardChart {
   /** 价格序列：分时用 `close`，K 线用 OHLC */
   candles?: Candle[]
   /** 怎么画：`line` 分时、`candle` K 线、`none` 不画（用户可切） */
   style: 'line' | 'candle' | 'none'
+  /**
+   * 「买入」那一头：多头 = 开仓均价、空头 = 减仓均价 ⇒ 画在图的**左半边**（绿 ▲）。
+   * 没有就不画（持仓还没减过仓时只有这一头，仓位历史两头都有）。
+   */
+  buy?: ShareCardLevel | null
+  /** 「卖出」那一头：多头 = 减仓均价、空头 = 开仓均价 —— 画在图的**右半边**（金 ▼） */
+  sell?: ShareCardLevel | null
 }
 
 export interface ShareCardData {
   /** 币种简写（已经去掉 /USDT），如 `MEGA` */
   base: string
   side: 'long' | 'short'
-  leverage: number
+  /**
+   * 杠杆倍数；`null` = 不知道 / 不适用（**仓位历史**那条路就没有这个字段，
+   * 账本里不存）⇒ 药丸那一行少画一颗，别写个假的 `1x`。
+   */
+  leverage: number | null
   /** 盈亏方向 —— 决定主色（`up` 绿 / `down` 红） */
   tone: 'up' | 'down'
   /** 主角那个大字。不打码 = `−$42.76`；打码 = `−50.96%` */
@@ -228,6 +250,78 @@ function bjParts(d: Date): {date: string; time: string} {
 
 /* ---------------- 小图（分时 / K 线） + 买卖点位行 ---------------- */
 
+/** 实心三角（买 / 卖的「简单图标」）——自己画，别去引图标字体 */
+function triangle(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  size: number,
+  up: boolean,
+  color: string
+): void {
+  const r = size / 2
+  ctx.beginPath()
+  if (up) {
+    ctx.moveTo(cx, cy - r)
+    ctx.lineTo(cx + r, cy + r)
+    ctx.lineTo(cx - r, cy + r)
+  } else {
+    ctx.moveTo(cx, cy + r)
+    ctx.lineTo(cx + r, cy - r)
+    ctx.lineTo(cx - r, cy - r)
+  }
+  ctx.closePath()
+  ctx.fillStyle = color
+  ctx.fill()
+}
+
+/**
+ * 图上的一个点位：一条虚线 + 一个实心三角 + 价格 + 一个小字。
+ *
+ * ⚠️ 传进来的 `y` 是**已经夹进图内**的位置（换算 / 夹边界 / 两个点位拉开，
+ *    都在 `drawMiniChart` 里算完）—— 这里只管画。
+ * ⚠️ 买入画左半边、卖出画右半边（两条各占一半，不会叠）；只有一头时虚线铺满整幅。
+ */
+function drawLevel(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  w: number,
+  y: number,
+  level: ShareCardLevel,
+  color: string,
+  up: boolean,
+  side: 'left' | 'right',
+  alone = false
+): void {
+  const cx = x + w / 2
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.globalAlpha = 0.55
+  ctx.lineWidth = 2
+  ctx.setLineDash([9, 9])
+  ctx.beginPath()
+  ctx.moveTo(side === 'left' || alone ? x + 14 : cx + 6, y)
+  ctx.lineTo(side === 'right' || alone ? x + w - 14 : cx - 6, y)
+  ctx.stroke()
+  ctx.setLineDash([])
+  ctx.globalAlpha = 1
+
+  const ix = side === 'left' ? x + 40 : x + w - 40
+  triangle(ctx, ix, y, 24, up, color)
+  const tx = side === 'left' ? ix + 22 : ix - 22
+  ctx.textAlign = side === 'left' ? 'left' : 'right'
+  font(ctx, SZ.label, 700)
+  ctx.fillStyle = color
+  ctx.fillText(level.price, tx, y + 11)
+  // 小字跟在价格**外侧**（左组往右排、右组往左排），这样两头各自占住自己那半边
+  const wPrice = ctx.measureText(level.price).width
+  font(ctx, SZ.levelTag, 400)
+  ctx.globalAlpha = 0.72
+  ctx.fillText(level.tag, side === 'left' ? tx + wPrice + 10 : tx - wPrice - 10, y + 11)
+  ctx.globalAlpha = 1
+  ctx.restore()
+}
+
 /**
  * 分时线 / K 线小图。
  *
@@ -320,17 +414,48 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
     ctx.fill()
   }
   ctx.restore()
-}
+  /*
+   * 两个点位：换算 → 夹进图内 → 保证彼此隔开 `SEP`。
+   * ⚠️ **买入那一条再往下挪 `BUY_DROP`**（用户：「买入点要加上放在线下面一点」）：
+   *    它跟开仓价几乎重合在分时线上，贴着自己的价位画会看不清。
+   * ⚠️ 价格高的那个排上面（同一个币的两个均价谁高谁低看多空，不写死）。
+   */
+  const EDGE = 30
+  const SEP = 46
+  const BUY_DROP = 18
+  const num = (v: string) => Number(v.replace(/,/g, ''))
+  const clampY = (v: number) => Math.min(Math.max(v, y + EDGE), y + h - EDGE)
+  const pBuy = chart.buy ? num(chart.buy.price) : null
+  const pSell = chart.sell ? num(chart.sell.price) : null
+  let yBuy =
+    pBuy === null || !Number.isFinite(pBuy) ? null : clampY(py(pBuy) + BUY_DROP)
+  let ySell = pSell === null || !Number.isFinite(pSell) ? null : clampY(py(pSell))
 
+  if (yBuy !== null && ySell !== null && Math.abs(yBuy - ySell) < SEP) {
+    const shift = (SEP - Math.abs(yBuy - ySell)) / 2
+    const yHi = clampY(Math.min(yBuy, ySell) - shift)
+    const yLo = clampY(Math.max(yBuy, ySell) + shift)
+    if (pBuy! >= pSell!) {
+      yBuy = yHi
+      ySell = yLo
+    } else {
+      ySell = yHi
+      yBuy = yLo
+    }
+  }
+
+  const alone = yBuy === null || ySell === null
+  if (yBuy !== null) drawLevel(ctx, x, w, yBuy, chart.buy!, C.ok, true, 'left', alone)
+  if (ySell !== null) drawLevel(ctx, x, w, ySell, chart.sell!, C.gold, false, 'right', alone)
+}
 
 /**
  * 画一张持仓卡。
  *
  * 版面从上到下：落款行 → 币种 + 方向/杠杆 → 主角盈亏 → 分隔线 → 2×3 数据格 → 域名。
  *
- * ★ 2026-10-13 用户：「加入缩略图」「类似分时图，可选择」「连线那种加入简单的图标
- *   买入点位和卖出点位」⇒ 在主角盈亏和分隔线之间插了**小图 + 买卖点位行**
- *   （见 `drawMiniChart` / `drawPlanRow`，刻度在 `Y` 里）。
+ * ★ 2026-10-13 用户：「加入缩略图」「类似分时图，可选择」⇒ 在主角盈亏和分隔线之间
+ *   插了一张**小图**（买卖点位画在图里，见 `drawMiniChart` / `drawLevel`，刻度在 `Y` 里）。
  */
 export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
   const cvs = document.createElement('canvas')
@@ -394,7 +519,10 @@ export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
   const sideColor = data.side === 'short' ? C.bad : C.ok
   const sideBg = data.side === 'short' ? 'rgba(255, 116, 128, 0.14)' : 'rgba(114, 214, 160, 0.14)'
   px += pill(ctx, px, Y.pill, sideText, sideColor, sideBg, SZ.pill) + 14
-  pill(ctx, px, Y.pill, `${data.leverage}x`, C.gold, 'rgba(255, 193, 107, 0.13)', SZ.pill)
+  // 仓位历史那一版没有杠杆（`null`）⇒ 这一颗不画
+  if (data.leverage !== null) {
+    pill(ctx, px, Y.pill, `${data.leverage}x`, C.gold, 'rgba(255, 193, 107, 0.13)', SZ.pill)
+  }
 
   /* ---------- 主角：盈亏（金额 + 百分比**并排**，同一基线） ---------- */
   ctx.textBaseline = 'alphabetic'
@@ -486,6 +614,7 @@ export function shareText(
   data: Pick<ShareCardData, 'base' | 'side' | 'leverage' | 'hero' | 'heroSub' | 'cells' | 'note'>
 ): string {
   const side = data.side === 'short' ? '空' : '多'
+  const lev = data.leverage === null ? '' : ` ${data.leverage}x`
   // ⚠️ 值为 `—` 的格子**不列**：打码之后「仓位价值 —」这种读起来像漏了一格，
   //    不如干脆不提（图里留着是占位，文字里没有对齐问题）
   const bits = data.cells
@@ -493,7 +622,7 @@ export function shareText(
     .slice(0, 4)
     .map(c => `${c.k} ${c.v}`)
   return [
-    `${data.base} ${side} ${data.leverage}x`,
+    `${data.base} ${side}${lev}`,
     // 盈亏跟百分比**同一行**，跟图里一个读法（打码时只有百分比）
     [data.hero, data.heroSub].filter(Boolean).join(' '),
     bits.join(' · '),

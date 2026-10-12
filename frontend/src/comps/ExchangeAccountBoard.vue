@@ -383,6 +383,59 @@ function realizedOf(p: FuturesPosition): number | null {
   return null
 }
 
+/**
+ * 这一条持仓**当前那一轮**仓位（还没平完的那段）。
+ *
+ * ⚠️ 口径与 `realizedOf`（卡片上「已实现盈利」）**完全一致**：symbol + 方向 + Key 名。
+ *    海报上的买卖点位也从它取（实际成交均价），所以两边不能各写一套匹配。
+ */
+function openCycleOf(p: FuturesPosition): ExchangePositionCycle | null {
+  const pair = pairOf(p.raw ?? p.symbol)
+  return (
+    openCycles.value.find(
+      c =>
+        pairOf(c.symbol) === pair &&
+        c.side === p.side &&
+        (!p.keyName || !c.keyName || c.keyName === p.keyName)
+    ) ?? null
+  )
+}
+
+/**
+ * 海报小图里那两个点位：**实际成交过**的买入 / 卖出均价。
+ *
+ * ★ 用户一路收窄到这个口径：「连线那种加入简单的图标买入点位和卖出点位」→
+ *   「买入卖出直接显示在图上不要标注」→「价格标注都去掉」→ **「买入点要加上
+ *   放在线下面一点」**。最终＝只标**已经发生**的成交，不再拿止盈价 / 现价凑数
+ *   （那两笔还没成交），买入那一条在图上再往下挪一点（见 `share-card.ts` 的 `BUY_DROP`）。
+ *
+ * ⚠️ 方向要翻译：多头「买入 = 开仓均价、卖出 = 减仓均价」；空头反过来
+ *    （先卖后买回）。哪一头是 `null` 就不画那一头 —— 持仓没减过仓时只有"买入"。
+ */
+function shareChart(
+  symbol: string,
+  side: 'long' | 'short',
+  entry: number | null,
+  exit: number | null
+): ShareCardChart {
+  const e = entry !== null && entry > 0 ? entry : null
+  const x = exit !== null && exit > 0 ? exit : null
+  const buy = side === 'short' ? x : e
+  const sell = side === 'short' ? e : x
+  return {
+    style: 'line',
+    buy: buy === null ? null : {price: fmt(buy), tag: '买入'},
+    sell: sell === null ? null : {price: fmt(sell), tag: '卖出'}
+  }
+}
+
+/** 文件名里的北京时间戳（`20261013-0145`），持仓 / 仓位历史共用 */
+function shareStamp(): string {
+  const t = new Date(Date.now() + 8 * 3600 * 1000)
+  const z = (n: number) => String(n).padStart(2, '0')
+  return `${t.getUTCFullYear()}${z(t.getUTCMonth() + 1)}${z(t.getUTCDate())}-${z(t.getUTCHours())}${z(t.getUTCMinutes())}`
+}
+
 /** 只有一个方向时（比如全是多仓），条子别画成 0% —— 那一段独占整条 */
 const longPct = computed(() =>
   lsTotal.value > 0
@@ -1083,6 +1136,79 @@ const openCycle = ref<ExchangePositionCycle | null>(null)
 const sharePos = ref<FuturesPosition | null>(null)
 
 /**
+ * 正在分享的那段**已平仓位**（2026-10-13 用户：「历史仓位也要加分享功能」）。
+ *
+ * 跟 `sharePos` 一个套路：非 null 就弹同一个 `ShareSheet`，只是喂进去的数据不同。
+ */
+const shareCycle = ref<ExchangePositionCycle | null>(null)
+
+/** 关掉分享弹层（持仓 / 仓位历史两个入口共用） */
+function onShareClose(): void {
+  sharePos.value = null
+  shareCycle.value = null
+}
+
+/**
+ * 给「仓位历史」那一段拼海报数据。
+ *
+ * ⚠️ 跟持仓那张卡的差别：
+ *   · 没有杠杆（账本里没有这个字段）⇒ 不画那颗 `Nx` 药丸；
+ *   · 主角还是**净盈亏**；旁边那行小字给的是**价格涨跌**（`价格 +2.3%`）——
+ *     没有保证金就算不出收益率，标成"价格"至少不会误导；
+ *   · 打码时主角只剩那个价格涨跌（跟持仓那张卡一样：至少还能看出做得怎么样）；
+ *   · 两个点位**都有**（开仓 / 平仓都成交过了）—— 这正是"已经发生的买入卖出"。
+ */
+function cycleBuild(masked: boolean): {
+  data: ShareCardData
+  text: string
+  filename: string
+} {
+  const c = shareCycle.value
+  if (!c) throw new Error('没有选中仓位')
+  const base = baseOf(c.symbol)
+  const short = c.side === 'short'
+  const up = c.net >= 0
+  const movePct =
+    c.entryPrice && c.exitPrice
+      ? ((c.exitPrice - c.entryPrice) / c.entryPrice) * 100 * (short ? -1 : 1)
+      : null
+  const moveText =
+    movePct === null
+      ? null
+      : `价格 ${movePct >= 0 ? '+' : '−'}${fixed(Math.abs(movePct), 2)}%`
+
+  const data: ShareCardData = {
+    base,
+    side: short ? 'short' : 'long',
+    leverage: null,
+    tone: up ? 'up' : 'down',
+    hero: masked ? moveText ?? '—' : signedMoney(c.net),
+    heroSub: masked ? null : moveText,
+    heroNote: masked ? '金额已隐藏' : null,
+    cells: [
+      {k: '开仓均价', v: c.entryPrice === null ? '—' : fmt(c.entryPrice)},
+      {k: '平仓均价', v: c.exitPrice === null ? '—' : fmt(c.exitPrice)},
+      {
+        k: '持仓价值',
+        v: masked || c.entryPrice === null ? '—' : money(c.qty * c.entryPrice)
+      },
+      {k: '数量', v: `${qty(c.qty)} ${base}`},
+      {k: '持仓时间', v: holdText(c.holdSec)},
+      {k: '手续费', v: masked ? '—' : money(c.fee)}
+    ],
+    chart: shareChart(c.symbol, c.side, c.entryPrice, c.exitPrice),
+    chartSymbol: c.symbol,
+    note: c.keyName
+  }
+
+  return {
+    data,
+    text: shareText(data),
+    filename: `${base}-${short ? 'short' : 'long'}-closed-${shareStamp()}.png`
+  }
+}
+
+/**
  * 给分享弹层拼数据（`masked` = 隐去金额）。
  *
  * ⚠️ 货币 / 小数位 / 打码全在**这里**决定：`money()` 跟着用户的 ¥/$ 开关走，
@@ -1105,14 +1231,12 @@ function shareBuild(masked: boolean): {
   const realized = realizedOf(p)
 
   /*
-   * 海报上那张小图（用户：「加入缩略图」「类似分时图，可选择」）。
-   *
-   * ⚠️ 这层**只交出 symbol**：K 线是弹层 `loadCandles` 异步取回来塞进
-   *    `chart.candles` 的（这层是同步的，取不了）。
-   * ⚠️ 2026-10-13 最后一句「价格标注都去掉」——图上那两个点位（实际成交的买入 /
-   *    卖出均价）连同"现价"都删了，所以这里**不再算**开仓均价 / 减仓均价
-   *    （`openCycles` 那套匹配留着是给 `realizedOf` 用的）。
+   * 海报上那张小图 + 图上的两个点位（用户：「加入缩略图」「类似分时图，可选择」
+   * 「买入点要加上放在线下面一点」）——点位由 `shareChart()` 拼，见那个函数的注释。
    */
+  const entry = Number(p.entryPrice ?? 0)
+  const openCyc = openCycleOf(p)
+
   const data: ShareCardData = {
     base,
     side: short ? 'short' : 'long',
@@ -1136,20 +1260,28 @@ function shareBuild(masked: boolean): {
         ? {k: '杠杆', v: `${p.leverage}x`}
         : {k: '已实现盈利', v: masked ? '—' : signedMoney(realized)}
     ],
-    // ⚠️ 小图整块由弹层组装（它才有 K 线），这里只交 symbol
+    /*
+     * 图上的买卖点位 = **实际成交过**的均价（用户：「只要买入卖出已经发生的」「买入点
+     * 要加上放在线下面一点」）：持仓多半只有"买入"这一头（还没减过仓），
+     * 仓位历史两头都有。
+     * ⚠️ K 线**不在这儿取**（这层是同步的）：只交 `chartSymbol`，由弹层
+     *    `loadCandles` 取回来塞进 `chart.candles`。
+     */
+    chart: shareChart(
+      p.symbol,
+      short ? 'short' : 'long',
+      openCyc?.entryPrice ?? (entry > 0 ? entry : null),
+      openCyc?.exitPrice ?? null
+    ),
     chartSymbol: p.symbol,
     note: p.keyName
   }
 
   // 文件名按北京时间，别带空格和冒号（各家系统对文件名都不客气）
-  const t = new Date(Date.now() + 8 * 3600 * 1000)
-  const z = (n: number) => String(n).padStart(2, '0')
-  const stamp = `${t.getUTCFullYear()}${z(t.getUTCMonth() + 1)}${z(t.getUTCDate())}-${z(t.getUTCHours())}${z(t.getUTCMinutes())}`
-
   return {
     data,
     text: shareText(data),
-    filename: `${base}-${short ? 'short' : 'long'}-${stamp}.png`
+    filename: `${base}-${short ? 'short' : 'long'}-${shareStamp()}.png`
   }
 }
 
@@ -2148,6 +2280,26 @@ const RANGES = [
                 <span class="pnl cyc-net" :class="tone(c.net)">{{
                   signedMoney(c.net)
                 }}</span>
+                <!--
+                  「分享这段仓位」（2026-10-13 用户：「历史仓位也要加分享功能」）——
+                  跟持仓那颗同一副样子、同一个弹层；整张卡是「点开成交明细」，
+                  所以必须 `.stop`。
+                -->
+                <button
+                  type="button"
+                  class="sh-btn"
+                  title="分享这段仓位（生成卡片图）"
+                  aria-label="分享这段仓位"
+                  @click.stop="shareCycle = c"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="18" cy="5" r="3" />
+                    <circle cx="6" cy="12" r="3" />
+                    <circle cx="18" cy="19" r="3" />
+                    <line x1="8.6" y1="10.7" x2="15.4" y2="6.3" />
+                    <line x1="8.6" y1="13.3" x2="15.4" y2="17.7" />
+                  </svg>
+                </button>
               </div>
               <!-- 事实网格：3 列 × 2 行（标签在上、值在下）——比原来 8 个「标签+值」挤成一排好认 -->
               <div class="cyc-grid">
@@ -2501,9 +2653,10 @@ const RANGES = [
       它就重新拼一份数据重画预览（货币 / 小数位 / 打码都在 `shareBuild` 里定）。
     -->
     <ShareSheet
-      :open="sharePos !== null"
-      :build="shareBuild"
-      @close="sharePos = null"
+      :open="sharePos !== null || shareCycle !== null"
+      :title="shareCycle ? '分享这段仓位' : '分享这条持仓'"
+      :build="shareCycle ? cycleBuild : shareBuild"
+      @close="onShareClose"
     />
   </div>
 </template>
@@ -3335,7 +3488,8 @@ const RANGES = [
  *       至少看得出"这里还有个东西"，别跟 PnL 抢注意力。
  *    ⚠️ SVG 必须显式给 `width/height` —— 只写 `viewBox` 会被 flex 撑成大块。
  */
-.p-h .sh-btn {
+.p-h .sh-btn,
+.cyc-h .sh-btn {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -3348,7 +3502,8 @@ const RANGES = [
   color: var(--muted);
   cursor: pointer;
 }
-.p-h .sh-btn svg {
+.p-h .sh-btn svg,
+.cyc-h .sh-btn svg {
   width: 14px;
   height: 14px;
   fill: none;

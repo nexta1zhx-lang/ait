@@ -41,6 +41,11 @@ const props = defineProps<{
   /** 弹层开着吗 */
   open: boolean
   /**
+   * 弹层标题 —— 持仓是「分享这条持仓」、仓位历史是「分享这段仓位」。
+   * ⚠️ 标题和 `aria-label` 都用它：两处各写一份迟早不一致（读屏念的和看到的不一样）。
+   */
+  title?: string
+  /**
    * 给「是否打码」画出一份数据。
    *
    * ⚠️ 做成**回掉**而不是数据：货币（¥/$）、小数位、打码后的文案都由外层拼
@@ -103,9 +108,15 @@ const SHARE_BARS = 96
  */
 function buildData(): {data: ShareCardData; text: string; filename: string} {
   const out = props.build(masked.value)
+  const seed = out.data.chart
   out.data.chart = {
     style: out.data.chartSymbol && series.value?.length ? chartStyle.value : 'none',
-    candles: series.value ?? undefined
+    candles: series.value ?? undefined,
+    // ⚠️ 点位（买入 / 卖出）是**外层**算好的，这里必须原样带过去 ——
+    //    早前这句直接换掉整个 `chart` 对象，把两个点位吃了（图上一直不出现，
+    //    查了半天才发现是被这一层覆盖掉的）。
+    buy: seed?.buy ?? null,
+    sell: seed?.sell ?? null
   }
   return out
 }
@@ -319,10 +330,10 @@ async function save(): Promise<void> {
       v-if="props.open"
       class="sheet warm-skin share-sheet"
       role="dialog"
-      aria-label="分享持仓"
+      :aria-label="props.title ?? '分享持仓'"
     >
       <header class="sheet-head">
-        <b>分享这条持仓</b>
+        <b>{{ props.title ?? '分享持仓' }}</b>
         <button type="button" class="sheet-x" title="关闭" @click="emit('close')">✕</button>
       </header>
 
