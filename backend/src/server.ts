@@ -1074,6 +1074,34 @@ async function handleCandles(
    * 「当前那根」由底座内存现取（`currentBar()`），所以图表上的最后一根永远是活的。
    * 带 from/to 的历史区间、以及超大 limit 照旧直接打交易所（很少发生）。
    */
+  /*
+   * 库内那一段（ranged 才走）。⚠️ **空数组要当成"未命中"** —— 见下面那段说明。
+   */
+  const fromDb = ranged
+    ? await getRangeCandles({
+        exchangeId: config.exchange,
+        symbol,
+        timeframe,
+        limit,
+        /*
+         * ⚠️ 这里必须跟下面 REST 那条用**同一对数**：
+         *    库内的那段走库（毫秒级、0 权重），库外的这一段才打交易所。
+         *    两端口径（`rangeFrom`/`rangeTo` 与 maxCandles）必须一模一样，
+         *    否则「库内 + 库外」拼起来会缺一段或重一段。
+         */
+        from: rangeFrom,
+        to: rangeTo,
+        marketType: config.marketType
+      })
+    : null
+
+  /*
+   * ⚠️⚠️ `getRangeCandles()` 只按「库的首尾覆不覆盖这个区间」判断，**不看中间有没有洞**：
+   *    落在洞里时它返回的是**空数组**（不是 `null`），而 `??` 把空数组当"有值"
+   *    ⇒ 打交易所那一层永远走不到 ⇒ 接口回 `candles: []`。
+   *    2026-10-13 实测：IO 那笔仓位正好开平在 1m 的洞上，分享海报显示「没取到行情」。
+   *    所以这里**空数组一律当未命中**，掉到 REST 那层去补（行情是公开数据，只花 IP 权重）。
+   */
   const candles =
     !ranged && limit <= STORE_MAX_LIMIT
       ? await getLatestCandles({
@@ -1084,21 +1112,7 @@ async function handleCandles(
           marketType: config.marketType,
           apiBase: config.apiBase
         })
-      : (await getRangeCandles({
-          exchangeId: config.exchange,
-          symbol,
-          timeframe,
-          limit,
-          /*
-           * ⚠️ 这里必须跟下面 REST 那条用**同一对数**：
-           *    库内的那段走库（毫秒级、0 权重），库外的这一段才打交易所。
-           *    两端口径（`rangeFrom`/`rangeTo` 与 maxCandles）必须一模一样，
-           *    否则「库内 + 库外」拼起来会缺一段或重一段。
-           */
-          from: rangeFrom,
-          to: rangeTo,
-          marketType: config.marketType
-        })) ??
+      : (fromDb && fromDb.length ? fromDb : null) ??
         (await candlesCache(cacheKey, () =>
           ranged || limit > 1000
             ? fetchCandlesRange({
