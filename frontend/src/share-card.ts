@@ -262,9 +262,13 @@ function bjParts(d: Date): {date: string; time: string} {
 /**
  * 成交点的箭头（用户 2026-10-13：「要换个箭头形状的」）。
  *
- * 买 = 向上的箭头、卖 = 向下的箭头，**尖端正好落在那一刻的价格上**，
+ * 买 = 向上的箭头、卖 = 向下的箭头，**尖端指着那一刻的价格**，
  * 箭身往价格"外侧"伸（买的那支从下面顶上来、卖的那支从上面压下来）——
  * 跟行情软件里那种买卖标记一个读法。
+ *
+ * ⚠️ `y` 传的是**箭头的锚点**，调用方要替它留出让开价格线的间隙
+ *    （用户 2026-10-13：「开单箭头跑到线上了，应该放线下面一点，卖单放线上面一点」）
+ *    —— 见 `drawMiniChart` 里那个 `air`。
  */
 function arrow(
   ctx: CanvasRenderingContext2D,
@@ -423,6 +427,20 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
   const t0 = list[0].timestamp
   const tN = list[list.length - 1].timestamp
   const span = tN - t0
+  /*
+   * 折线在某个 x 处的 y（线性插值）—— 箭头要**贴着线**放，见下面那段 ⚠️。
+   * ⚠️ 用 `list[].close`：分时就是它，K 线档拿收盘价当那条"线"也够用。
+   */
+  const lineYAt = (px: number): number | null => {
+    if (list.length < 2) return null
+    const step = w / (list.length - 1)
+    const fi = (px - x) / step
+    const i0 = Math.max(0, Math.min(list.length - 2, Math.floor(fi)))
+    const f = Math.max(0, Math.min(1, fi - i0))
+    const y0 = py(list[i0].close)
+    const y1 = py(list[i0 + 1].close)
+    return y0 + (y1 - y0) * f
+  }
   for (const m of chart.marks ?? []) {
     const t = Date.parse(m.at)
     if (!Number.isFinite(t) || !Number.isFinite(m.price) || m.price <= 0) continue
@@ -431,9 +449,23 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
        时间轴按成交时间取过（见 `ShareSheet.vue` 的 `windowOf`），
        历史仓位更是**锚在开平那一刻**，不是"从此刻往回数"。 */
     const mx = x + Math.min(Math.max(k, 0), 1) * (w - 40) + 20
-    const my = Math.min(Math.max(py(m.price), y + 34), y + h - 34)
+    /*
+     * ★ 箭头要**压在线的外侧**（用户 2026-10-13：「开单箭头跑到线上了，应该放线下面
+     *   一点，卖单放线上面一点」→ 改完又说「买的不对」）。
+     *
+     *   ⚠️ 只按**价格**往外挪是不够的：成交均价（尤其开仓均价是好几笔的均价）
+     *      常常跟那一刻的行情价差着一点 —— IO 那条仓位就是这样，买入价 0.18031
+     *      高于当时的线，往"自己的价格下面"挪完**仍然落在线上方**，看着还是不对。
+     *      所以取「价格」和「线」里**更靠外**的那个当锚点：买点一定在线下方、
+     *      卖点一定在线上方；价格离得远时（比如浮亏很大的老仓）位置仍然是真价格。
+     */
+    const sell = m.kind === 'sell'
+    const air = 11
+    const lineY = lineYAt(mx)
+    const anchor = lineY === null ? py(m.price) : sell ? Math.min(py(m.price), lineY) : Math.max(py(m.price), lineY)
+    const my = Math.min(Math.max(anchor + (sell ? -air : air), y + 34), y + h - 34)
     /* ⚠️ 买绿、**卖红**（用户 2026-10-13：「买绿 卖红」）——原来是买绿卖金 */
-    arrow(ctx, mx, my, 15, m.kind !== 'sell', m.kind === 'sell' ? C.bad : C.ok)
+    arrow(ctx, mx, my, 15, !sell, sell ? C.bad : C.ok)
   }
 }
 

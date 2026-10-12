@@ -162,6 +162,12 @@ function pickSpan(windowMs: number): {tf: string; bars: number} {
   return {tf, bars: Math.ceil(windowMs / ms) + 2}
 }
 
+/** 从 `tf` 起、往**粗**的周期排一份链（取不到时退档用；最粗到 1d） */
+function tfChain(tf: string): string[] {
+  const i = TF_MS.findIndex(([t]) => t === tf)
+  return TF_MS.slice(i < 0 ? 0 : i).map(([t]) => t)
+}
+
 /**
  * 把这一层取到的小图组装进外层给的那份数据里。
  *
@@ -211,10 +217,24 @@ watch(
     }
     chartNote.value = '取行情…'
     const win = windowOf(props.build(masked.value).data.chart)
-    const {tf, bars} = pickSpan(win.to - win.from)
+    const {tf} = pickSpan(win.to - win.from)
     try {
-      const r = await loadCandles(sym, tf, bars, {from: win.from, to: win.to})
-      series.value = r.payload.candles?.length ? r.payload.candles : null
+      /*
+       * ⚠️ 细周期在这个窗口里**可能正好缺分钟**（采集器那阵子没录到，历史洞；
+       *    而账户自己的成交时刻又常落在这种洞上）—— 取不到就**往粗的周期退一档**再试，
+       *    别直接说「没取到行情」。
+       *    2026-10-13 用户报「io 为什么查不到行情」就是这条：IO 那笔仓位开平在
+       *    10-12 07:07~08:07（北京），那一刻的 1m 库里是空的，而 15m / 1h 都有。
+       */
+      for (const t of tfChain(tf)) {
+        const ms = TF_MS.find(([x]) => x === t)?.[1] ?? 60_000
+        const bars = Math.min(400, Math.ceil((win.to - win.from) / ms) + 2)
+        const r = await loadCandles(sym, t, bars, {from: win.from, to: win.to})
+        if (r.payload.candles?.length) {
+          series.value = r.payload.candles
+          break
+        }
+      }
       if (!series.value) {
         chartStyle.value = 'none'
         chartNote.value = '这个币没取到行情，海报不带图'
