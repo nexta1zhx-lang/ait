@@ -987,8 +987,13 @@ async function handleCandles(
   const config = loadConfig({marketType: market})
 
   // 日期区间（毫秒）。只决定「画哪一段」，不影响分析用的数据。
-  const fromReq = Number(q.get('from')) || 0
-  const toReq = Number(q.get('to')) || 0
+  /*
+   * ⚠️ 一律 `Math.round` 成**整数毫秒**：币安的 `startTime` 只认整数，
+   *    传小数会被判 `starttime ... malformed`（2026-10-13 前端算内边距带出了
+   *    `…469.32` 这种值，打回来就是 500）。区间是"哪一毫秒"没意义，抹掉小数最省事。
+   */
+  const fromReq = Math.round(Number(q.get('from')) || 0)
+  const toReq = Math.round(Number(q.get('to')) || 0)
   const ranged = fromReq > 0 && toReq > fromReq
 
   // 要比交易所单次上限（1000~1500）还多的时候走分页接口按区间翻。

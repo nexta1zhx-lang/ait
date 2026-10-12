@@ -119,17 +119,23 @@ function windowOf(chart: ShareCardData['chart']): {from: number; to: number} {
     .map(m => Date.parse(m.at))
     .filter(t => Number.isFinite(t))
     .sort((a, b) => a - b)
+  /*
+   * ⚠️★ 返回的必须是**整数毫秒**（`Math.round`）。2026-10-13 踩过：
+   *    12% 内边距算出来是小数（`1791766915469.32`），后端原样透给币安，
+   *    那边直接判 `starttime ... malformed` ⇒ 500 ⇒ 海报显示「没取到行情」。
+   *    区间接口只认整数（币安自己的 `startTime` 就是毫秒整数）。
+   */
   if (!times.length) {
-    const to = now
-    return {from: to - sec * 1000 * 1.2, to}
+    const to = Math.round(now)
+    return {from: to - Math.round(sec * 1000 * 1.2), to}
   }
   const a = times[0]
   const b = times[times.length - 1]
   const to = times.length > 1 ? b : now
   /* 至少覆盖整段持仓（账本时间偶尔比 K 线起点还早，别让窗口比持仓还窄） */
   const spanMs = Math.max(to - a, sec * 1000)
-  const pad = spanMs * 0.12
-  return {from: a - pad, to: to + pad}
+  const pad = Math.round(spanMs * 0.12)
+  return {from: Math.round(a - pad), to: Math.round(to + pad)}
 }
 
 /** 一个周期多久（毫秒）—— 挑周期时用 */
