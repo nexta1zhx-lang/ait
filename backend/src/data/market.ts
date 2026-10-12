@@ -318,6 +318,22 @@ function resolveSymbol(
   for (const c of candidates) {
     if (exchange.markets && exchange.markets[c]) return c
   }
+  /*
+   * ★ 按**交易所原始 id** 查（2026-10-13 补，用户报「当前持仓获取不到行情了」）。
+   *
+   * 账本 / 持仓里存的是交易所的 id（`MEGAUSDT`、`1000BONKUSDT`），而 ccxt 的
+   * `exchange.markets` 是按**统一符号**索引的（`MEGA/USDT:USDT`）。上面那两个
+   * candidate 都救不回来：
+   *   · `markets['MEGAUSDT']` ✗（那是 id，不在这个索引里）；
+   *   · `normalizeSymbol('MEGAUSDT','swap')` = `MEGAUSDT/USDT:USDT` ✗
+   *     —— 它本来就是给**基础币**（`BTC`）用的，喂整串 id 会多切出一截；
+   *   · 下面那个"去掉分隔符再比"的模糊匹配也匹配不上
+   *     （`MEGAUSDT` vs `MEGA/USDT:USDT` 去掉分隔符是 `MEGAUSDTUSDT`）。
+   * 所以直接查 ccxt 的 id 索引（`markets_by_id`，值可能是数组）。
+   */
+  const byId = exchange.markets_by_id?.[upper]
+  const hit = Array.isArray(byId) ? byId[0] : byId
+  if (hit?.symbol) return String(hit.symbol)
   // 模糊匹配：去掉分隔符后比较，兼容 BTCUSDT / BTC/USDT / btc-usdt
   const compact = upper.replace(/[:/\-_\s]/g, '')
   const keys: string[] = Object.keys(exchange.markets ?? {})
@@ -332,6 +348,34 @@ function resolveSymbol(
         ? `相近的有：${similar.join(', ')}`
         : '请检查符号是否正确。')
   )
+}
+
+/**
+ * 解析符号：**认不出来就重刷一次 markets 再试**。
+ *
+ * ★ 2026-10-13 用户：「当前持仓获取不到行情了」——那笔是**刚上架**的币（MEGAUSDT），
+ *   库里那份 markets 是上架之前的快照，ccxt 认不出这个符号。
+ *   ⚠️ 这一步发生在**任何 ccxt 调用之前**，所以 `retryUnknownSymbol()` 那套
+ *     `catch(unknownSymbol) → 重刷 → 重试` 的包装兜不住它（那套包的是 fetchOHLCV 等方法）。
+ *     凡是"先解析、再请求"的入口都得走这个helper，别再自己 `resolveSymbol`。
+ *   ⚠️ `reloadMarkets` 自带 inflight 去重（短时间内多次并发只打一次上游），
+ *     所以这里不必再加锁。
+ */
+async function resolveWithReload(
+  exchange: any,
+  raw: string,
+  marketType: MarketType,
+  marketsKey: string
+): Promise<string> {
+  try {
+    return resolveSymbol(exchange, raw, marketType)
+  } catch (e) {
+    console.warn(
+      `[exch] 认不出符号 ${raw} ⇒ 重刷 markets 再试（${(e as Error).message.slice(0, 70)}）`
+    )
+    await reloadMarkets(exchange, marketsKey)
+    return resolveSymbol(exchange, raw, marketType)
+  }
 }
 
 /** 已加载市场的交易所实例缓存，避免每次请求重复 loadMarkets */
@@ -415,23 +459,8 @@ export async function fetchCandles(
 ): Promise<Candle[]> {
   const marketType = opts.marketType ?? 'swap'
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
-  /*
-   * ⚠️ 解析符号这一步**在发请求之前**，所以 `retryUnknownSymbol` 那套（"认不出符号就
-   *    重刷 markets 再试"）兜不住它 —— 2026-10-13 用户报「当前持仓获取不到行情」就是
-   *    卡在这儿：刚上架的币不在库里那份 markets 快照里。
-   *    这里显式重刷一次再解析（重刷有 inflight 去重，短时间内多次也只打一次）。
-   */
   const mk = marketsKeyOf(opts.exchangeId, marketType, opts.apiBase || 'live')
-  let symbol: string
-  try {
-    symbol = resolveSymbol(exchange, opts.symbol, marketType)
-  } catch (e) {
-    console.warn(
-      `[candles] 区间取数认不出 ${opts.symbol} ⇒ 重刷 markets 再试（${(e as Error).message.slice(0, 60)}）`
-    )
-    await reloadMarkets(exchange, mk)
-    symbol = resolveSymbol(exchange, opts.symbol, marketType)
-  }
+  const symbol = await resolveWithReload(exchange, opts.symbol, marketType, mk)
   const rows = await withRetry<unknown[]>(`${opts.timeframe} 图表取数`, () =>
     exchange.fetchOHLCV(symbol, opts.timeframe, opts.since, opts.limit)
   )
@@ -463,7 +492,8 @@ export async function fetchCandlesRange(
   const step = TF_MS[opts.timeframe]
   const maxCandles = opts.maxCandles ?? 3000
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
-  const symbol = resolveSymbol(exchange, opts.symbol, marketType)
+  const mk = marketsKeyOf(opts.exchangeId, marketType, opts.apiBase || 'live')
+  const symbol = await resolveWithReload(exchange, opts.symbol, marketType, mk)
 
   const out: Candle[] = []
   const seen = new Set<number>()
