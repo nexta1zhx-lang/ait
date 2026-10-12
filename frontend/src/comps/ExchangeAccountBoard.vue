@@ -1533,7 +1533,11 @@ const RANGES = [
           下排 = 仓位的事（仓位总额 / 多头 / 空头）
         ⚠️ 钱包余额那一格去掉了 —— 它在上面「币种占比」的图例里就是「USDT 合约」那一行。
       -->
-      <section class="panel">
+      <!--
+        ⚠️ 这一段外层面板不要底色/描边（`sec`，理由见 `<style>` 里的 `.sec`）；
+           六格本身仍是小卡（`.grid3 > div`）。
+      -->
+      <section class="sec">
         <div class="pn-h">
           <h2>合约 · 仓位</h2>
           <!-- 总杠杆（用户 2026-10-05：「仓位统计显示总杠杆倍数」） -->
@@ -1577,7 +1581,11 @@ const RANGES = [
             ><b class="down">{{ money(shortNotional) }}</b>
           </div>
         </div>
-        <div v-if="lsTotal > 0" class="ls-bar">
+        <div
+          v-if="lsTotal > 0"
+          class="ls-bar"
+          :class="{solo: longNotional <= 0 || shortNotional <= 0}"
+        >
           <i class="l" :style="{width: longPct + '%'}" />
           <i class="s" :style="{width: 100 - longPct + '%'}" />
         </div>
@@ -1603,7 +1611,7 @@ const RANGES = [
       -->
       <div ref="bodyEl" class="tabs-body" @scroll.passive="onBodyScroll">
         <!-- 持仓 -->
-        <section v-show="tab === 'pos'" class="panel">
+        <section v-show="tab === 'pos'" class="sec">
           <!--
             顶栏（用户 2026-10-07：「持仓……顶部加排序条件 右侧加一键平仓 需二次弹窗确认」）——
             左边排序条件（自己排的四颗按钮，值存 `posSort`），右边「一键平仓」。
@@ -1821,7 +1829,7 @@ const RANGES = [
         </section>
 
         <!-- 挂单 -->
-        <section v-show="tab === 'ord'" class="panel">
+        <section v-show="tab === 'ord'" class="sec">
           <!--
             挂单的筛选（用户 2026-10-07：「挂单顶部也加过滤条件，右侧加全部撤仓」+「需二次确认」）：
               · 左边 = 币种下拉（跟账本三格同一套，默认「全部」）
@@ -1941,7 +1949,7 @@ const RANGES = [
         **开仓 → 全平算一笔**，「盈利」是这一整段赚的；减仓不单独算一笔，
         但点开详情能逐笔看到每次减仓锁了多少。
       -->
-        <section v-show="tab === 'inc'" class="panel">
+        <section v-show="tab === 'inc'" class="sec">
           <div class="pn-h">
             <!--
               左侧：**币种筛选**（用户 2026-10-07：「左侧去掉文字标题，改为币种搜索可下拉默认全部」）
@@ -2003,7 +2011,22 @@ const RANGES = [
               @keydown.space.prevent="openCycle = c"
             >
               <div class="cyc-h">
-                <span class="sym">{{ baseOf(c.symbol) }}</span>
+                <!--
+                  ⚠️ 币种名**单独可点** = 去「开单分析」看这个币的 K 线（用户 2026-10-13：
+                  「仓位历史点击币种名称跳转k线」）。整张卡仍然是「点开成交明细弹层」，
+                  所以这里必须 `.stop`，否则点一下会同时弹层 + 跳走。
+                  ⚠️ `role="button"` + 键盘事件跟「持仓」那条标题行同一套写法。
+                -->
+                <span
+                  class="sym kline"
+                  role="button"
+                  tabindex="0"
+                  :title="`看 ${baseOf(c.symbol)} 的 K 线（去「开单分析」）`"
+                  @click.stop="emit('openChart', baseOf(c.symbol))"
+                  @keydown.enter.prevent.stop="emit('openChart', baseOf(c.symbol))"
+                  @keydown.space.prevent.stop="emit('openChart', baseOf(c.symbol))"
+                  >{{ baseOf(c.symbol) }}</span
+                >
                 <span class="dim tiny">/USDT</span>
                 <span
                   class="side"
@@ -2165,7 +2188,7 @@ const RANGES = [
         </section>
 
         <!-- 成交（后端账本：WS 实时落 + 断线后 REST 补） -->
-        <section v-show="tab === 'trades'" class="panel">
+        <section v-show="tab === 'trades'" class="sec">
           <div class="pn-h">
             <SymbolCombo
               plain
@@ -2275,7 +2298,7 @@ const RANGES = [
           ⚠️ 金额按**各自资产**记（USDT / BNB / USDC 混着），**不折算**成 USDT —
             换汇只会让这些小数更糊。
         -->
-        <section v-show="tab === 'flow'" class="panel">
+        <section v-show="tab === 'flow'" class="sec">
           <div class="pn-h">
             <SymbolCombo
               plain
@@ -2634,6 +2657,18 @@ const RANGES = [
   overflow: hidden;
   background: var(--panel-2);
 }
+/*
+ * 只剩一边时把那 2px 间隔去掉。
+ *
+ * 用户 2026-10-12：「柱状条右边不是圆角」—— 空头为 0 时 `.s` 宽度是 0，
+ * 但 `gap: 2px` 照样占着位置，于是绿条右边先留 2px 深色缺口、再才轮到圆角
+ * （实测：容器 396 宽，绿条只铺到 394，右边就差那 2px），看着像被切平了。
+ * 这个间隔本来是给「绿 | 红」之间留缝的，只有一边时它没有意义 ——
+ * 去掉之后整条就是一个完整胶囊，两端都是圆的（圆角靠上面那句 `overflow: hidden` 裁出来）。
+ */
+.ls-bar.solo {
+  gap: 0;
+}
 .ls-bar i {
   display: block;
   height: 100%;
@@ -2895,20 +2930,27 @@ const RANGES = [
 .cycles {
   display: flex;
   flex-direction: column;
-  /* 段间靠分割线分（见下），不留空档 */
-  gap: 0;
+  /* 每段一张小卡（见下），卡与卡之间留缝 —— 原来是靠 `.cyc + .cyc` 的分割线分 */
+  gap: 8px;
 }
+/*
+ * 仓位历史一段（开仓 → 全平）—— **一段一张小卡**，跟持仓那条同款。
+ * ⚠️ 2026-10-13 用户：「每一个卡片加点背景色」。原来是「透明底 + 上边一条分割线」。
+ *
+ * ⚠️ 渐变**别退回成「小格子」那套**（`radial at 12% 0%` + `145deg`）：那套是给
+ *    118px 宽的六格小卡配的，径向高光只铺到 62%，铺在 365px 宽的卡上就是
+ *    **右边一片死黑**（用户 2026-10-13：「有点黑了右侧」）。现在这套是照着本页
+ *    `.hero` 的手法来的：左冷灰 + 右暖金两团高光，两端都比原来亮一档。
+ */
 .cycles .cyc {
-  /* 左右不缩进：跟资金动向 / 成交历史那两份列表的左右边界对齐 */
-  padding: 10px 0;
-  background: transparent;
-  border: 0;
-  border-radius: 0;
+  padding: 9px 11px;
+  border: 1px solid rgba(48, 39, 29, 0.72);
+  border-radius: 11px;
+  background:
+    radial-gradient(ellipse at 90% 2%, rgba(255, 193, 107, 0.07), transparent 52%),
+    radial-gradient(ellipse at 10% 0%, rgba(120, 136, 163, 0.08), transparent 66%),
+    linear-gradient(115deg, rgb(23, 24, 26), rgb(27, 22, 18));
   cursor: pointer;
-}
-/* 分割线画在**后一段**的头顶（第一段上面不画，上面是列表的标题行） */
-.cycles .cyc + .cyc {
-  border-top: 1px solid var(--line, rgba(128, 128, 128, 0.18));
 }
 /*
  * ⚠️ **不给悬浮态**（用户 2026-10-07：「不需要 hover 效果」）——
@@ -2935,6 +2977,25 @@ const RANGES = [
 .cyc-h .sym {
   font-size: 14px;
   font-weight: var(--fw-mid, 600);
+}
+/*
+ * 仓位历史里**点币种名 = 去「开单分析」看这个币的 K 线**
+ * （用户 2026-10-13：「仓位历史点击币种名称跳转k线」）。
+ *
+ * 整张卡还是「点开成交明细弹层」，所以币种名是**卡片里的第二件事**：
+ * 手型光标 + `title` 提示 + 键盘可达（见模板里那串 `role` / `tabindex` / `.stop`）。
+ *
+ * ⚠️ 跟 `.p-h` 一样**只留键盘焦点、不给悬浮态**：安卓 WebView 会把 `:hover`
+ *    粘住，点一下那一小块一直亮着，看着像「选中」。
+ */
+.cyc-h .sym.kline {
+  cursor: pointer;
+}
+.cyc-h .sym.kline:focus-visible {
+  text-decoration: underline;
+  outline: 1px solid var(--accent-line, var(--border));
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 /*
  * 这一笔的净盈亏（卡右上角，弹层里也是主角）。
@@ -3128,19 +3189,29 @@ const RANGES = [
   flex-direction: column;
   gap: 0;
 }
+/* 持仓每条是一张小卡（见下面 `.poss li`），卡与卡之间要留缝 */
+.poss {
+  gap: 8px;
+}
 /*
- * 持仓一条——
- * 底 / 描边 / 圆角全撤，跟仓位历史 / 成交 / 挂单统一成**透明底 + 一条线**；
- * 左右也不再缩进，两端贴面板内边。
+ * 持仓一条——**一条一张小卡**。
+ *
+ * ⚠️ 2026-10-13 用户：「每一个卡片加点背景色」。原来是「透明底 + 一条线」，
+ *    上面那层大面板撤掉之后就成了裸奔的一行文字，所以给每条补上跟
+ *    「合约 · 仓位」那六格同款的卡（极淡渐变 + 暖描边 + 11px 圆角）。
+ * ⚠️ 成交 / 资金动向那两份**仍然是一条线**（用户的原话：「不需要边框，只要能区分
+ *    就行」—— 一屏几十条画框太吵），别顺手改成一样的。
  * ⚠️ 别再加左侧色条。
  */
 .poss li {
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.18));
-}
-/* 最后一条不画（整份列表不拖尾巴线，跟另外三份列表一致） */
-.poss li:last-child {
-  border-bottom: 0;
+  padding: 11px 13px;
+  border: 1px solid rgba(48, 39, 29, 0.72);
+  border-radius: 11px;
+  /* 渐变说明见下面 `.cycles .cyc` 那段（三处共用同一套，改一起改） */
+  background:
+    radial-gradient(ellipse at 90% 2%, rgba(255, 193, 107, 0.07), transparent 52%),
+    radial-gradient(ellipse at 10% 0%, rgba(120, 136, 163, 0.08), transparent 66%),
+    linear-gradient(115deg, rgb(23, 24, 26), rgb(27, 22, 18));
 }
 /*
  * 标题行：**整行可点**（去这个币的 K 线）⇒ 手型光标；**不给悬停态**（见下）。
@@ -3386,24 +3457,39 @@ const RANGES = [
 /*
  * 挂单那一组的一行是**两行**（见 `.o-t` / `.o-kv`），所以这一组要覆盖掉上面的单行 flex。
  * ⚠️ 只覆盖 `.grps` 里的 —— `.rows li` 本体还被「资产明细」那三个列表用着（单行 flex）。
- * ⚠️ 线也在这儿盖：`.rows:not(.trades) li` 的 `border-top` 跟这条**同权重**（都是 0,2,1），
- *    只能靠**写在后面**赢（写在前面会被它盖回去 ⇒ 上下一堆双线）。
- * ⚠️ 线**按币种分组**，不按单：一单一条已撤，
- *    只在每组最后一单下面留一条。
+ * ⚠️ `border` 也在这儿整条盖（0,2,1 同权重，靠**写在后面**赢）：`.rows:not(.trades) li`
+ *    的 `border-top` 那条线要撤掉，改成整张卡的描边。⚠️ 写前面会被它盖回去 ⇒ 上下一堆双线。
+ * ⚠️ 单与单之间不再画线（2026-10-13 起每单一张小卡，见下），组与组靠 `.grps .grp`
+ *    的上下留白分开。
  */
 .grps .rows li {
   display: block;
-  padding: 8px 0;
+  padding: 9px 11px;
   cursor: pointer;
-  border-top: 0;
-  border-bottom: 0;
+  border: 1px solid rgba(48, 39, 29, 0.72);
+  border-radius: 11px;
+  /* 渐变说明见 `.cycles .cyc` 那段（三处共用同一套，改一起改） */
+  background:
+    radial-gradient(ellipse at 90% 2%, rgba(255, 193, 107, 0.07), transparent 52%),
+    radial-gradient(ellipse at 10% 0%, rgba(120, 136, 163, 0.08), transparent 66%),
+    linear-gradient(115deg, rgb(23, 24, 26), rgb(27, 22, 18));
 }
-.grps .grp .rows li:last-child {
-  border-bottom: 1px solid var(--line, rgba(128, 128, 128, 0.16));
+/*
+ * 挂单每单一张小卡（见上），卡与卡之间留缝 —— 原来是「每组最后一单底下一条线」分。
+ * `.rows` 本体没有 display，得在这里显式开 flex，`gap` 才生效。
+ */
+.grps .rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-/* 整份列表的最后一组不画（不拖一条尾巴线） */
-.grps .grp:last-child .rows li:last-child {
-  border-bottom: 0;
+/*
+ * ⚠️ 第一单的**上边描边**要单独补回来：`.rows:not(.trades) li:first-child`
+ *    （0,3,1）把 `border-top` 清零了，比上面那条 `.grps .rows li`（0,2,1）**权重高**，
+ *    不补的话每组第一张卡看着像缺了一条边。同权重 + 写在后面才压得住。
+ */
+.grps .rows li:first-child {
+  border-top: 1px solid rgba(48, 39, 29, 0.72);
 }
 /*
  * 点得动的那一行：**只有键盘焦点**给一点点底（用户 2026-10-07：「不需要 hover 效果」，
@@ -4034,6 +4120,10 @@ const RANGES = [
 
 /* ---------------- ③ 合约·仓位：六格改成六张小卡 ---------------- */
 /*
+ * ⚠️ 这一段外面**不再套面板**（模板上是 `class="sec"`，不带全局 `.panel`）——
+ *    六格已经是小卡了，外面再套一层就是「卡里的卡」，整体发重。
+ *    ⚠️ 这条对所有宽度都生效（用户 2026-10-12：「都要改，只不过 PC 端先不看效果」）。
+/*
  * 原来是「一条分隔线 + 六格文字」（像一张表）；账户统计那边是**一格一张小卡**
  * （`.metric-card`：11px 圆角 + 暖描边 + 极淡的冷灰/暖棕渐变）。照它的做，
  * 上排「账户的钱」+ 下排「仓位的事」就是 3×2 的小卡阵列。
@@ -4067,14 +4157,55 @@ const RANGES = [
   font-weight: var(--fw-mid);
 }
 
+/*
+ * 「页面上的一段」——**不要外层面板壳**（原本挂 `.panel` 的地方换成它）。
+ *
+ * 用户 2026-10-12：「交易所账户不需要卡片背景色，直接显示标题加卡片或者信息，
+ * 参考账户统计」+「底下的也不要大背景色」。
+ * 账户统计那边「交易分析」就是这个样子：标题直接落在页面上、下面 3×2 张
+ * `.metric-card`，没有外面那层大面板。这里原本是全局 `.panel`
+ * （`background: var(--panel)` + 描边 + 16px 内边距），里面又摆着小卡 /
+ * 一条线的列表 ⇒ 「卡里的卡」，整体发重。
+ *
+ * 用它的地方：③「合约 · 仓位」那一段 + ④ 下面五个 tab 的内容区
+ * （持仓 / 挂单 / 仓位历史 / 成交历史 / 资金动向）。
+ *
+ * ⚠️ 下面三行是**故意写的**：万一以后有人又给它套上壳子，这三行会立刻抹平，别删。
+ * ⚠️ 别在这里补左右内边距 —— 不补，标题 / 卡片 / 列表线的左边缘才跟上面那张
+ *    hero 卡片的外沿（以及 tab 胶囊）对齐。
+ * ⚠️ `.panel.hero`（净资产那张）**仍然保留**底色：它是这一页的主角卡，不是「一段」。
+ */
+.sec {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
 /* ---------------- 段标题 ---------------- */
 /*
- * 段标题跟账户统计同一个层级：**标题 13px / 600 保持亮色**，右边那截副标题压到 10px
+ * 段标题跟账户统计同一个层级：**标题 13px / 600**，右边那截副标题压到 10px
  * 并压暗（`.dim.tiny` 原来是 11.5px，跟标题只差 0.5px，两截糊成一行灰字）。
  */
 .pn-h h2 {
   font-size: 13px;
   font-weight: 600;
+}
+/*
+ * 「合约 · 仓位」这个**页面上**的段标题改成**灰**（`--muted`），跟账户统计的
+ * `.sec-title`（「交易分析」）同一个颜色。
+ *
+ * 用户 2026-10-12：「标题颜色修改」—— 实测原本两边不一样：
+ *   账户统计 交易分析 = rgb(170, 163, 152)（灰）
+ *   这里     合约·仓位 = rgb(240, 241, 243)（亮白）
+ * 同一个层级却一亮一暗，所以按账户统计那套统一成灰。
+ *
+ * ⚠️ 只改 `.sec` 里面这一个 —— **卡片里的**标题（「挂单」「仓位历史」「成交历史」
+ *    「资金动向」那几处 `.pn-h`）仍然保持亮色：账户统计里卡片内的标题
+ *    （比如图表卡里的 "Cumulative ROI"）也是亮色，页面上亮、卡片里也亮才是乱。
+ */
+.sec .pn-h h2 {
+  color: var(--muted);
 }
 .pn-h .tiny {
   font-size: 10px;
