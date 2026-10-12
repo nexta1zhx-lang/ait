@@ -204,11 +204,16 @@ export async function upsertFill(
    *    （只在 NULL 上补，不动已有值），几次之后杠杆就齐了。
    *   ⚠️ 别把上面改成 `DO UPDATE`：`isNew` 靠"插入成功"判断，
    *      改成 DO UPDATE 会让每一轮对账都报"有成交"，`noteActivity()` 一直触发。
+   *   ⚠️ 只补**刚成交的**（15 分钟内）：快照里那个杠杆是**现在**的，不是当时那一刻的。
+   *      不设这个时间窗的话，REST 会把 7 天内的老成交再送一遍 ——
+   *      于是"一个还在持仓的币"的老仓也会被填上**当前**杠杆，那是错的（用户调的杠杆
+   *      只影响之后的仓）。老的、拿不准的一律留 NULL，前端不显示。
    */
   if (!isNew && lev !== null) {
     await query(
       `UPDATE exchange_fills SET leverage = $3
-        WHERE key_id = $1 AND trade_id = $2 AND leverage IS NULL`,
+        WHERE key_id = $1 AND trade_id = $2 AND leverage IS NULL
+          AND ts > now() - interval '15 minutes'`,
       [keyId, f.tradeId, lev]
     )
   }
