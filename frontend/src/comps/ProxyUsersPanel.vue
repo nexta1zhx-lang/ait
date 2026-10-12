@@ -14,6 +14,7 @@
 import {computed, onMounted, ref} from 'vue'
 import {bjTime} from '../format'
 import {askConfirm} from '../confirm'
+import {copyText} from '../clipboard'
 import {showToast} from '../toast'
 import {
   createProxyUser,
@@ -62,24 +63,14 @@ const drift = computed(
 )
 
 async function copy(text: string, label: string): Promise<void> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-    } else {
-      // WebView / 非安全上下文里没有 clipboard API，退回到老办法
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      ta.remove()
-    }
-    showToast(`${label}已复制`)
-  } catch {
-    showToast('复制失败，长按手动选中吧', 'bad')
-  }
+  /*
+   * ⚠️ 复制这件事**收在 `clipboard.ts` 一处**（2026-10-13）：这一页原来自己写了一份
+   *    「有 clipboard API 就用新的，没有才退老的」—— 装机版 App 的 WebView 里
+   *    那个 API **在、但会 reject**，于是永远走不到退路，用户报「代理订阅的复制
+   *    在 app 里不生效」。现在交给 `copyText()`：新的失败就退老的，还返回成没成。
+   */
+  if (await copyText(text)) showToast(`${label}已复制`)
+  else showToast('复制失败，长按手动选中吧', 'bad')
 }
 
 async function load(): Promise<void> {

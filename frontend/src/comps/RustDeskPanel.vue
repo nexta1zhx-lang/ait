@@ -19,6 +19,7 @@
  */
 import {computed, onBeforeUnmount, onMounted, ref} from 'vue'
 import {bjTime, bjTimeSec} from '../format'
+import {copyText} from '../clipboard'
 import {showToast} from '../toast'
 import {
   fetchRustDesk,
@@ -98,24 +99,10 @@ const avatarOf = (d: RustDeskDevice): string =>
   d.note.trim() ? d.note.trim().slice(0, 1).toUpperCase() : d.id.slice(0, 1)
 
 async function copy(text: string, label: string): Promise<void> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-    } else {
-      // WebView / 非安全上下文里没有 clipboard API，退回到老办法
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.opacity = '0'
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      ta.remove()
-    }
-    showToast(`${label}已复制`)
-  } catch {
-    showToast('复制失败，长按手动选中吧', 'bad')
-  }
+  // 复制统一收在 `clipboard.ts`（同 ProxyUsersPanel 那条注释：App 的 WebView 里
+  // `navigator.clipboard` 会 reject，老的退路才是能用的那条）
+  if (await copyText(text)) showToast(`${label}已复制`)
+  else showToast('复制失败，长按手动选中吧', 'bad')
 }
 
 async function load(): Promise<void> {
