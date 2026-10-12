@@ -10,9 +10,52 @@
  *
  * ⚠️ 别用 `ctx.roundRect`：安卓 System WebView 上老版本没有，自己画（见 `rr`）。
  */
+import type {Candle} from './api'
+
 export interface ShareCardCell {
   k: string
   v: string
+}
+
+/**
+ * 海报里那张小图 + 买卖点位（2026-10-13 用户：「加入缩略图」「类似分时图，可选择」
+ * 「连线那种加入简单的图标 买入点位和卖出点位」）。
+ *
+ * ★ 2026-10-13 用户看了第一版后改口：「买入卖出直接显示在图上不要标注」——
+ *   ⇒ 第 2 版把两个点位**画进小图里**（各自一条虚线 + 一个三角图标 + 价格），
+ *     下面那行「买入 …→… 卖出」的标注连同中间的百分比**整行删掉**。
+ *
+ * ⚠️ 点位可能离这段行情很远（实测那条多单：开仓 0.04831、止盈 0.12077，而当天
+ *    就在 0.045~0.050 之间晃）——**不能**为了放它俩把 y 轴拉长，否则分时线会被
+ *    压成贴底的一条直线。所以：y 轴只按**这段行情自己**的高低点算，
+ *    点位线**夹在图的上下边界内**画（超出的那一点点从图标/颜色上看不出来，
+ *    但价格数字是**真的**，不会骗人）。
+ * ⚠️ 只有数字认不出来（用户 2026-10-13 看到金色的 `0.12077` 问「这是什么」）⇒
+ *    每个点位除了价格还带一个**小字**（`开仓` / `止盈` / `现价`），颜色跟点位一致。
+ * ⚠️ `candles` 缺席（没取到行情 / 用户选「不带图」）时：整块不画 ——
+ *    点位也跟着没有（它们画在图上）。
+ */
+export interface ShareCardLevel {
+  /** 已格式化的价格，例如 `0.12077` */
+  price: string
+  /** 这个价格是什么：`开仓` / `止盈` / `现价` */
+  tag: string
+}
+export interface ShareCardChart {
+  /** 价格序列：分时用 `close`，K 线用 OHLC */
+  candles?: Candle[]
+  /** 怎么画：`line` 分时、`candle` K 线、`none` 不画（用户可切） */
+  style: 'line' | 'candle' | 'none'
+  /** 现价（已格式化）——画在分时线末端那个点旁边；没有就不画 */
+  last?: string | null
+  /**
+   * 「买入」那一头：多头 = 开仓价、空头 = 止盈价。画在图的**左半边**（绿色 ▲）
+   */
+  buy?: ShareCardLevel | null
+  /**
+   * 「卖出」那一头：多头 = 止盈价、空头 = 开仓价。画在图的**右半边**（金色 ▼）
+   */
+  sell?: ShareCardLevel | null
 }
 
 export interface ShareCardData {
@@ -35,6 +78,10 @@ export interface ShareCardData {
   /** 主角下面那行小灰字（打码时写「金额已隐藏」）；没有就不占位 */
   heroNote?: string | null
   cells: ShareCardCell[]
+  /** 小图 + 买卖点位（见 `ShareCardChart`）；整块可选 */
+  chart?: ShareCardChart
+  /** 取小图行情用的 symbol（`MEGAUSDT`）—— 弹层拿它去 `loadCandles` */
+  chartSymbol?: string
   /** 落款前面那截（例如账户名）；空则只画域名 */
   note?: string
   /** 右上角的时间；默认取当前时间（北京时间） */
@@ -61,11 +108,17 @@ export const CARD_H = 1920
  *   420  币种基线
  *   770  主角行基线（**金额 + 百分比并排**，同一基线）
  *   858  主角下面那行小灰字（只有打码时才有）
- *   990  分隔线
- *  1100  第一行标签基线
- *   178  行高 → 三行标签基线 1100 / 1278 / 1456，值基线 +52（1152 / 1330 / 1508）
- *  1680  页脚分隔线（最后一行值基线 1508 + 描述符 ≈1520，留 160px）
- *  1770  页脚文字基线（下方还有 150px 到底边）
+ *   900  小图区顶端（高 240 → 到 1140；买卖点位画在**图里**，见 `drawMiniChart`）
+ *  1210  分隔线
+ *  1280  第一行标签基线
+ *   160  行高 → 三行标签基线 1280 / 1440 / 1600，值基线 +52（1332 / 1492 / 1652）
+ *  1720  页脚分隔线（最后一行值基线 1652，留 68px）
+ *  1810  页脚文字基线（下方还有 110px 到底边）
+ *
+ * ⚠️ 2026-10-13 加小图那一段时**整块往下挪了**（原 990/1100/178/1680/1770）：
+ *    多出来的空间从上面挤 —— 行高 178 → 160、分隔线 990 → 1210。
+ *    后来点位从"单独一行"挪进图里，那一行的 130px 就并给了小图（180 → 240）。
+ *    再要加东西，先照这张表往下重算一遍。
  *
  * ⚠️ **别再让最后一行撞页脚线**：早前一版（4:5 那张）值基线 1226 而线画在 1218，
  *    「4.4% / −$0.57」直接压在线上（用户看出来的"比例不对"就是这个）。
@@ -88,11 +141,13 @@ const Y = {
   symbol: 420,
   hero: 770,
   heroNote: 858,
-  divider: 990,
-  cells: 1100,
-  rowH: 178,
-  footLine: 1680,
-  foot: 1770
+  chartTop: 900,
+  chartH: 240,
+  divider: 1210,
+  cells: 1280,
+  rowH: 160,
+  footLine: 1720,
+  foot: 1810
 }
 const SZ = {
   logo: 46,
@@ -104,6 +159,8 @@ const SZ = {
   heroSub: 62,
   heroNote: 42,
   label: 30,
+  /** 点位上那个小字（`开仓` / `止盈`）——比价格小一档，别再大 */
+  levelTag: 26,
   value: 46,
   foot: 32,
   footNote: 27
@@ -178,10 +235,231 @@ function bjParts(d: Date): {date: string; time: string} {
   }
 }
 
+
+/* ---------------- 小图（分时 / K 线） + 买卖点位行 ---------------- */
+
+/** 实心三角（买/卖的「简单图标」）——自己画，别去引图标字体 */
+function triangle(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  size: number,
+  up: boolean,
+  color: string
+): void {
+  const r = size / 2
+  ctx.beginPath()
+  if (up) {
+    ctx.moveTo(cx, cy - r)
+    ctx.lineTo(cx + r, cy + r)
+    ctx.lineTo(cx - r, cy + r)
+  } else {
+    ctx.moveTo(cx, cy + r)
+    ctx.lineTo(cx + r, cy - r)
+    ctx.lineTo(cx - r, cy - r)
+  }
+  ctx.closePath()
+  ctx.fillStyle = color
+  ctx.fill()
+}
+
+/**
+ * 分时线 / K 线小图。
+ *
+ * ⚠️ 价格**自己归一化**（这段行情自己的高低点），所以跟卡片上那些点位数字
+ *    没有比例关系 —— 只表示"这段时间是怎么走过来的"。
+ * ⚠️ K 线一根根画、分时一条折线：同一个函数里分叉，别复制两份（版面常量共用）。
+ */
+function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, tone: string): void {
+  const list = (chart.candles ?? []).filter(c => Number.isFinite(c.close))
+  if (chart.style === 'none' || list.length < 2) return
+
+  const x = PAD
+  const w = CARD_W - PAD * 2
+  const y = Y.chartTop
+  const h = Y.chartH
+
+  /*
+   * ⚠️ 这里**不要**给图加底色（2026-10-13 用户：「不要背景色」）——
+   *    早前有一层 `rgba(255,255,255,0.03)` 的圆角底，看着多出一块灰板子。
+   *    现在只有线本身（分时那条折线 + 面积渐变本身是"线的一部分"，保留）。
+   */
+  let lo = Infinity
+  let hi = -Infinity
+  for (const c of list) {
+    lo = Math.min(lo, c.low > 0 ? c.low : c.close)
+    hi = Math.max(hi, c.high > 0 ? c.high : c.close)
+  }
+  if (!(hi > lo)) hi = lo + Math.max(1e-9, Math.abs(lo) * 0.001)
+  const air = (hi - lo) * 0.12
+  lo -= air
+  hi += air
+  const py = (p: number) => y + h - ((p - lo) / (hi - lo)) * h
+
+  ctx.save()
+  rr(ctx, x, y, w, h, 18)
+  ctx.clip()
+
+  if (chart.style === 'candle') {
+    const slot = w / list.length
+    const bw = Math.max(1.5, slot * 0.62)
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i]
+      const cx = x + slot * (i + 0.5)
+      const up = c.close >= c.open
+      ctx.strokeStyle = up ? C.ok : C.bad
+      ctx.fillStyle = up ? C.ok : C.bad
+      ctx.lineWidth = Math.max(1, slot * 0.12)
+      ctx.beginPath()
+      ctx.moveTo(cx, py(c.high > 0 ? c.high : c.close))
+      ctx.lineTo(cx, py(c.low > 0 ? c.low : c.close))
+      ctx.stroke()
+      const top = py(Math.max(c.open, c.close))
+      const bot = py(Math.min(c.open, c.close))
+      ctx.fillRect(cx - bw / 2, top, bw, Math.max(1.5, bot - top))
+    }
+  } else {
+    const step = w / (list.length - 1)
+    const at = (i: number) => ({x: x + step * i, y: py(list[i].close)})
+
+    const g = ctx.createLinearGradient(0, y, 0, y + h)
+    g.addColorStop(0, `${tone}2e`)
+    g.addColorStop(1, `${tone}00`)
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.moveTo(x, y + h)
+    for (let i = 0; i < list.length; i++) {
+      const p = at(i)
+      ctx.lineTo(p.x, p.y)
+    }
+    ctx.lineTo(x + w, y + h)
+    ctx.closePath()
+    ctx.fill()
+
+    ctx.strokeStyle = tone
+    ctx.lineWidth = 3
+    ctx.lineJoin = 'round'
+    ctx.beginPath()
+    for (let i = 0; i < list.length; i++) {
+      const p = at(i)
+      if (i === 0) ctx.moveTo(p.x, p.y)
+      else ctx.lineTo(p.x, p.y)
+    }
+    ctx.stroke()
+
+    // 末端画个点：一眼看出"现在在哪"
+    const end = at(list.length - 1)
+    ctx.beginPath()
+    ctx.arc(end.x - 4, end.y, 7, 0, Math.PI * 2)
+    ctx.fillStyle = tone
+    ctx.fill()
+  }
+  ctx.restore()
+
+  // 现价贴在末端那个点**左边**（贴右上角会跟卖出点位打架）
+  const endClose = list[list.length - 1].close
+  const endY = py(endClose)
+  if (chart.last) {
+    font(ctx, SZ.label, 600)
+    ctx.fillStyle = C.muted
+    ctx.textAlign = 'right'
+    ctx.fillText(chart.last, x + w - 34, endY + 10)
+    ctx.textAlign = 'left'
+  }
+
+  /*
+   * 两个点位：先各自换算、夹进图里，再**保证它们至少隔开 `SEP`**——
+   * 一个亏损中的多头（开仓价、止盈都在今天这段行情**上方**）最常出现，
+   * 两条虚线会叠成一条、看着像只有一个点位。价格高的那个排上面。
+   */
+  const EDGE = 30
+  const SEP = 46
+  const num = (v: string) => Number(v.replace(/,/g, ''))
+  const clampY = (v: number) => Math.min(Math.max(v, y + EDGE), y + h - EDGE)
+  const pBuy = chart.buy ? num(chart.buy.price) : null
+  const pSell = chart.sell ? num(chart.sell.price) : null
+  let yBuy = pBuy === null || !Number.isFinite(pBuy) ? null : clampY(py(pBuy))
+  let ySell = pSell === null || !Number.isFinite(pSell) ? null : clampY(py(pSell))
+
+  if (yBuy !== null && ySell !== null && Math.abs(yBuy - ySell) < SEP) {
+    const shift = (SEP - Math.abs(yBuy - ySell)) / 2
+    const yHi = clampY(Math.min(yBuy, ySell) - shift)
+    const yLo = clampY(Math.max(yBuy, ySell) + shift)
+    if (pBuy! >= pSell!) {
+      yBuy = yHi
+      ySell = yLo
+    } else {
+      ySell = yHi
+      yBuy = yLo
+    }
+  }
+
+  const alone = yBuy === null || ySell === null
+  if (yBuy !== null) drawLevel(ctx, x, w, yBuy, chart.buy!, C.ok, true, 'left', alone)
+  if (ySell !== null) drawLevel(ctx, x, w, ySell, chart.sell!, C.gold, false, 'right', alone)
+}
+
+/**
+ * 图上的一个点位：一条虚线 + 一个实心三角 + 价格数字。
+ *
+ * ⚠️ `yRaw` 是**真实换算出来的位置**，可能落在图外（止盈常离行情好几倍）——
+ *    这里把它**夹在图的上下边界内**（`LEVEL_EDGE`），不然线画到图外面去。
+ *    价格数字是真的，位置只保证"在这张图的这一侧"。
+ * ⚠️ 买入画左半边、卖出画右半边：两条线各占一半，不会叠在一起。
+ * ⚠️ 用户 2026-10-13：「买入卖出直接显示在图上不要标注」——所以这里**只有图标 + 价格**，
+ *    不再写「买入 / 卖出」四个字（左下绿上三角、右上金下三角已经说清楚了）。
+ */
+function drawLevel(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  w: number,
+  y: number,
+  level: ShareCardLevel,
+  color: string,
+  up: boolean,
+  side: 'left' | 'right',
+  /** 图上**只有这一个**点位时，虚线铺满整幅（不然只画半截，看着像没画完） */
+  alone = false
+): void {
+  const cx = x + w / 2
+
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.globalAlpha = 0.55
+  ctx.lineWidth = 2
+  ctx.setLineDash([9, 9])
+  ctx.beginPath()
+  ctx.moveTo(side === 'left' || alone ? x + 14 : cx + 6, y)
+  ctx.lineTo(side === 'right' || alone ? x + w - 14 : cx - 6, y)
+  ctx.stroke()
+  ctx.setLineDash([])
+  ctx.globalAlpha = 1
+
+  const ix = side === 'left' ? x + 40 : x + w - 40
+  triangle(ctx, ix, y, 24, up, color)
+  const tx = side === 'left' ? ix + 22 : ix - 22
+  ctx.textAlign = side === 'left' ? 'left' : 'right'
+  font(ctx, SZ.label, 700)
+  ctx.fillStyle = color
+  ctx.fillText(level.price, tx, y + 11)
+  // 小字跟在价格**外侧**（左边那组跟在价格右边、右边那组跟在价格左边）……
+  // 其实两边都跟在价格后面就够读：左组往右排，右组往左排，各占自己那半边
+  const wPrice = ctx.measureText(level.price).width
+  font(ctx, SZ.levelTag, 400)
+  ctx.globalAlpha = 0.72
+  ctx.fillText(level.tag, side === 'left' ? tx + wPrice + 10 : tx - wPrice - 10, y + 11)
+  ctx.globalAlpha = 1
+  ctx.restore()
+}
+
 /**
  * 画一张持仓卡。
  *
  * 版面从上到下：落款行 → 币种 + 方向/杠杆 → 主角盈亏 → 分隔线 → 2×3 数据格 → 域名。
+ *
+ * ★ 2026-10-13 用户：「加入缩略图」「类似分时图，可选择」「连线那种加入简单的图标
+ *   买入点位和卖出点位」⇒ 在主角盈亏和分隔线之间插了**小图 + 买卖点位行**
+ *   （见 `drawMiniChart` / `drawPlanRow`，刻度在 `Y` 里）。
  */
 export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
   const cvs = document.createElement('canvas')
@@ -279,6 +557,13 @@ export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
     font(ctx, SZ.heroNote, 400)
     ctx.fillStyle = C.muted
     ctx.fillText(data.heroNote, PAD, Y.heroNote)
+  }
+
+  /* ---------- 小图（买卖点位画在图里；没有 `chart` 就整块跳过） ---------- */
+  if (data.chart) {
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
+    drawMiniChart(ctx, data.chart, tone)
   }
 
   /* ---------- 分隔线 ---------- */

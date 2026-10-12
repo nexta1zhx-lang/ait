@@ -25,6 +25,9 @@
  *    也是异步的，所以这个函数**是 async 的**：调用方 `await` 之后再弹提示。
  */
 
+import {nativeCopyText} from './native-share'
+import {isNativeShell} from './platform'
+
 /**
  * 复制一段文本。
  *
@@ -32,6 +35,13 @@
  *          **别**只说「已复制」（用户会以为进了剪贴板）。
  */
 export async function copyText(text: string): Promise<boolean> {
+  /*
+   * ⓪ **原生壳里先问原生剪贴板**（2026-10-13 加的）：`@capacitor/clipboard` 是真
+   *    写系统剪贴板，比 WebView 里那两条（一个会拒、一个是废弃 API）都稳。
+   *    ⚠️ 只在原生壳里试：web 上白白多绕一圈异步；
+   *    ⚠️ 老 APK 没这个插件 ⇒ `nativeCopyText` 返回 false，往下走老路。
+   */
+  if (isNativeShell() && (await nativeCopyText(text))) return true
   if (await tryClipboardApi(text)) return true
   return legacyCopy(text)
 }
