@@ -260,6 +260,45 @@ function bjParts(d: Date): {date: string; time: string} {
 /* ---------------- 小图（分时 / K 线） + 买卖点位行 ---------------- */
 
 /**
+ * 成交点的箭头（用户 2026-10-13：「要换个箭头形状的」）。
+ *
+ * 买 = 向上的箭头、卖 = 向下的箭头，**尖端正好落在那一刻的价格上**，
+ * 箭身往价格"外侧"伸（买的那支从下面顶上来、卖的那支从上面压下来）——
+ * 跟行情软件里那种买卖标记一个读法。
+ */
+function arrow(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  up: boolean,
+  color: string
+): void {
+  const h = size
+  const w = size * 1.15
+  const stem = size * 0.95
+  const dir = up ? 1 : -1
+  ctx.save()
+  ctx.fillStyle = color
+  ctx.strokeStyle = color
+  ctx.lineWidth = Math.max(2, size * 0.3)
+  ctx.lineCap = 'round'
+  /* 杆：从三角底边再往外伸一截 */
+  ctx.beginPath()
+  ctx.moveTo(x, y + dir * h * 0.5)
+  ctx.lineTo(x, y + dir * (h * 0.5 + stem))
+  ctx.stroke()
+  /* 头：尖端在 (x, y) */
+  ctx.beginPath()
+  ctx.moveTo(x, y)
+  ctx.lineTo(x + w / 2, y + dir * h)
+  ctx.lineTo(x - w / 2, y + dir * h)
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+/**
  * 分时线 / K 线小图。
  *
  * ⚠️ 价格**自己归一化**（这段行情自己的高低点），所以跟卡片上那些点位数字
@@ -362,12 +401,12 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
     }
     ctx.stroke()
 
-    // 末端画个点：一眼看出"现在在哪"
-    const end = at(list.length - 1)
-    ctx.beginPath()
-    ctx.arc(end.x - 4, end.y, 7, 0, Math.PI * 2)
-    ctx.fillStyle = tone
-    ctx.fill()
+    /*
+     * ⚠️ 原来这里在末端画一个点（"现在在哪"）—— 2026-10-13 去掉了：
+     *    用户看到图上两个成交点（绿 / 金），最右边又冒出一个**红点**，
+     *    分不清哪个才是"成交"（「怎么我看最右又有个小红点」）。
+     *    线的末端本来就到头了，不需要再点一个。
+     */
   }
   ctx.restore()
   /*
@@ -388,18 +427,12 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
     const t = Date.parse(m.at)
     if (!Number.isFinite(t) || !Number.isFinite(m.price) || m.price <= 0) continue
     const k = span > 0 ? (t - t0) / span : 0
-    /* 时间落在窗口外（比如刚开仓、K 线还没收到那一根）就贴着边画，别丢点 */
-    const mx = x + Math.min(Math.max(k, 0), 1) * w
-    const my = Math.min(Math.max(py(m.price), y + 20), y + h - 20)
-    const color = m.kind === 'sell' ? C.gold : C.ok
-    ctx.beginPath()
-    ctx.arc(mx, my, 13, 0, Math.PI * 2)
-    ctx.fillStyle = C.bg
-    ctx.fill()
-    ctx.beginPath()
-    ctx.arc(mx, my, 9, 0, Math.PI * 2)
-    ctx.fillStyle = color
-    ctx.fill()
+    /* ⚠️ 时间落在窗口外就贴着边画（别把点丢了）——正常情况不该发生：
+       时间轴按成交时间取过（见 `ShareSheet.vue` 的 `windowOf`），
+       历史仓位更是**锚在开平那一刻**，不是"从此刻往回数"。 */
+    const mx = x + Math.min(Math.max(k, 0), 1) * (w - 40) + 20
+    const my = Math.min(Math.max(py(m.price), y + 34), y + h - 34)
+    arrow(ctx, mx, my, 15, m.kind !== 'sell', m.kind === 'sell' ? C.gold : C.ok)
   }
 }
 

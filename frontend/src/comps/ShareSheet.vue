@@ -101,23 +101,59 @@ const series = ref<Candle[] | null>(null)
 const chartNote = ref('')
 
 /**
- * 时间轴取多长 —— **按持仓时长自动定**（用户 2026-10-13：「周期能根据持仓时间自动取」）。
+ * 小图要画**哪一段**（毫秒区间）—— 锚在**这笔交易自己**身上，不是"从此刻往回数"。
  *
- * ★ 为什么必须跟着持仓走：图上那几个点要按**成交时刻**摆 x（见 `share-card.ts` 的
- *   `ShareCardMark`），时间轴不覆盖持仓那一段，点就会跑到图外面去。
- *
- * 口径：让画的这根 K 线**盖住整段持仓**，倍数 ~1.2 倍，根数控制在 150~180
- * （太少看不出走势，太多又糊成一条）。持仓一小时就用 1 分钟、拿了三周就用 4 小时。
- * ⚠️ 根数上限跟 `candles.ts` / 分析那边不共用（那边是画整张图的），别乱改。
+ * ★ 用户 2026-10-13：「周期能根据持仓时间自动取」+「历史持仓不太对」——
+ *   前一句说的是周期，后一句的根因是**窗口锚点**：历史仓位可能两三天前就平了，
+ *   锚在 `now` 上时开平那两点全落在窗口**左边之外**，被贴着左边界画成一竖排
+ *   （截图里那两颗就是这样）。所以：
+ *     · 首尾两个成交时间（`marks[].at`）就是窗口：`from = 开仓 − 12%`、`to = 平仓 + 12%`；
+ *     · **只有开仓那一个点**（还在持仓）⇒ 一路画到现在；
+ *     · 一个点都没有 ⇒ 退回「现在往回 spanSec 那段」。
+ * ⚠️ 区间单位是**毫秒**（`/api/candles` 的 `from` / `to`，见 `server.ts`）。
  */
-function pickSpan(spanSec: number | null | undefined): {tf: string; bars: number} {
-  const h = Math.max(0, (spanSec ?? 24 * 3600) / 3600)
-  if (h <= 3) return {tf: '1m', bars: 180}
-  if (h <= 12) return {tf: '5m', bars: 150}
-  if (h <= 36) return {tf: '15m', bars: 150}
-  if (h <= 24 * 6) return {tf: '1h', bars: 150}
-  if (h <= 24 * 30) return {tf: '4h', bars: 180}
-  return {tf: '1d', bars: 180}
+function windowOf(chart: ShareCardData['chart']): {from: number; to: number} {
+  const sec = chart?.spanSec ?? 24 * 3600
+  const now = Date.now()
+  const times = (chart?.marks ?? [])
+    .map(m => Date.parse(m.at))
+    .filter(t => Number.isFinite(t))
+    .sort((a, b) => a - b)
+  if (!times.length) {
+    const to = now
+    return {from: to - sec * 1000 * 1.2, to}
+  }
+  const a = times[0]
+  const b = times[times.length - 1]
+  const to = times.length > 1 ? b : now
+  /* 至少覆盖整段持仓（账本时间偶尔比 K 线起点还早，别让窗口比持仓还窄） */
+  const spanMs = Math.max(to - a, sec * 1000)
+  const pad = spanMs * 0.12
+  return {from: a - pad, to: to + pad}
+}
+
+/** 一个周期多久（毫秒）—— 挑周期时用 */
+const TF_MS: [string, number][] = [
+  ['1m', 60_000],
+  ['5m', 300_000],
+  ['15m', 900_000],
+  ['1h', 3_600_000],
+  ['4h', 14_400_000],
+  ['1d', 86_400_000]
+]
+
+/**
+ * 这段窗口用**哪个周期、取几根**：挑第一个「根数 ≤ 200」的周期
+ * （太少看不出走势，太多糊成一条），都不够就用最粗那档。
+ * ⚠️ 根数上限跟 `candles.ts` / 分析那边不共用（那边画的是整张图），别乱改。
+ */
+function pickSpan(windowMs: number): {tf: string; bars: number} {
+  for (const [tf, ms] of TF_MS) {
+    const bars = Math.ceil(windowMs / ms) + 2
+    if (bars <= 200) return {tf, bars}
+  }
+  const [tf, ms] = TF_MS[TF_MS.length - 1]
+  return {tf, bars: Math.ceil(windowMs / ms) + 2}
 }
 
 /**
@@ -168,9 +204,10 @@ watch(
       return
     }
     chartNote.value = '取行情…'
-    const {tf, bars} = pickSpan(props.build(masked.value).data.chart?.spanSec)
+    const win = windowOf(props.build(masked.value).data.chart)
+    const {tf, bars} = pickSpan(win.to - win.from)
     try {
-      const r = await loadCandles(sym, tf, bars)
+      const r = await loadCandles(sym, tf, bars, {from: win.from, to: win.to})
       series.value = r.payload.candles?.length ? r.payload.candles : null
       if (!series.value) {
         chartStyle.value = 'none'
