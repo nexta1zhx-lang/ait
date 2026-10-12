@@ -113,7 +113,22 @@ function unknownSymbol(e: unknown): boolean {
  * 只包**带交易对**的那几个方法。
  */
 export function retryUnknownSymbol(ex: any, key: string): void {
-  for (const m of ['fetchOpenOrders', 'createOrder', 'editOrder', 'cancelOrder']) {
+  /*
+   * ⚠️ `fetchOHLCV` **必须在这个名单里**（2026-10-13 补的）。
+   *
+   * 用户报「当前持仓获取不到行情了」——那笔持仓是**刚上架**的币（MEGAUSDT），
+   * 而库里那份 markets 是上架之前的快照，ccxt 认不出这个符号：
+   *   · 走「最新 N 根」那条路没事（命中本地 K 线库，压根不问 markets）；
+   *   · 带 from/to 的区间路要**解析符号**才发得出去 ⇒ 直接报「找不到交易对」。
+   * 名单里原来只有下单/查挂单那四个，K 线漏了 ⇒ 补上（重刷后 ccxt 就能认出新币）。
+   */
+  for (const m of [
+    'fetchOHLCV',
+    'fetchOpenOrders',
+    'createOrder',
+    'editOrder',
+    'cancelOrder'
+  ]) {
     if (typeof ex[m] !== 'function') continue
     const raw = ex[m].bind(ex)
     ex[m] = (...args: unknown[]) =>

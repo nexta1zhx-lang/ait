@@ -54,7 +54,7 @@ export interface ShareCardCell {
 export interface ShareCardMark {
   at: string
   price: number
-  /** `buy` 绿点、`sell` 金点 —— 颜色是唯一的标识（没有文字） */
+  /** `buy` 绿箭头、`sell` 红箭头 —— 颜色是唯一的标识（图上不写文字） */
   kind: 'buy' | 'sell'
 }
 export interface ShareCardChart {
@@ -432,7 +432,8 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
        历史仓位更是**锚在开平那一刻**，不是"从此刻往回数"。 */
     const mx = x + Math.min(Math.max(k, 0), 1) * (w - 40) + 20
     const my = Math.min(Math.max(py(m.price), y + 34), y + h - 34)
-    arrow(ctx, mx, my, 15, m.kind !== 'sell', m.kind === 'sell' ? C.gold : C.ok)
+    /* ⚠️ 买绿、**卖红**（用户 2026-10-13：「买绿 卖红」）——原来是买绿卖金 */
+    arrow(ctx, mx, my, 15, m.kind !== 'sell', m.kind === 'sell' ? C.bad : C.ok)
   }
 }
 

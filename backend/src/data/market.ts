@@ -3,6 +3,7 @@ import {ccxtBaseOptions} from './exchange-account'
 import {
   attachMarkets,
   marketsKeyOf,
+  reloadMarkets,
   retryUnknownSymbol
 } from './ccxt-markets'
 import {coolingLeftMs, coolingMessage, noteRateLimit} from '../util/rate-cool'
@@ -414,7 +415,23 @@ export async function fetchCandles(
 ): Promise<Candle[]> {
   const marketType = opts.marketType ?? 'swap'
   const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
-  const symbol = resolveSymbol(exchange, opts.symbol, marketType)
+  /*
+   * ⚠️ 解析符号这一步**在发请求之前**，所以 `retryUnknownSymbol` 那套（"认不出符号就
+   *    重刷 markets 再试"）兜不住它 —— 2026-10-13 用户报「当前持仓获取不到行情」就是
+   *    卡在这儿：刚上架的币不在库里那份 markets 快照里。
+   *    这里显式重刷一次再解析（重刷有 inflight 去重，短时间内多次也只打一次）。
+   */
+  const mk = marketsKeyOf(opts.exchangeId, marketType, opts.apiBase || 'live')
+  let symbol: string
+  try {
+    symbol = resolveSymbol(exchange, opts.symbol, marketType)
+  } catch (e) {
+    console.warn(
+      `[candles] 区间取数认不出 ${opts.symbol} ⇒ 重刷 markets 再试（${(e as Error).message.slice(0, 60)}）`
+    )
+    await reloadMarkets(exchange, mk)
+    symbol = resolveSymbol(exchange, opts.symbol, marketType)
+  }
   const rows = await withRetry<unknown[]>(`${opts.timeframe} 图表取数`, () =>
     exchange.fetchOHLCV(symbol, opts.timeframe, opts.since, opts.limit)
   )
