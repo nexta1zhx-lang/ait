@@ -2315,7 +2315,7 @@ const RANGES = [
                 <span
                   v-if="c.partial"
                   class="ktag warn"
-                  title="账本里没有这一段的开仓记录（币安只给最近 7 天）"
+                  title="账本里没有这一段的开仓记录"
                 >
                   不完整
                 </span>

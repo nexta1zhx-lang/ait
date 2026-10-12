@@ -37,7 +37,6 @@ import {
 } from './data/exchange-overview'
 import {
   BINANCE_MAX_WINDOW_MS,
-  BINANCE_RETENTION_MS,
   INCOME_MAX_PAGES,
   fetchFuturesBalance,
   fetchIncomeHistoryAll,
@@ -173,15 +172,16 @@ const FORCED_MIN_MS = 3 * 1000
 /** 每次定期对账往前看多久（重叠靠 `unique(key_id, trade_id)` 去重） */
 const FILL_SAFETY_MS = 24 * 3600 * 1000
 /**
- * 账本（income）反查"缺哪些成交"时往前看多久。
+ * **补历史的窗口**（income 全量、成交反查、单币起点都按它）。
  *
- * ⚠️ 对齐**币安的数据地平线**（3 个月），不是 7 天 —— 2026-10-08 实测确认：
- *    7 天只是 `/fapi/v1/userTrades` 的**单次请求窗口上限**（超了回 `-4165`），
- *    而它的**数据保留 3 个月**、还能靠 7 天切窗 + 翻页取回来（见 `backfillSymbol`）。
- *    所以比 3 个月更老的缺口才算"取不回来"；把这些放进候选只会白占那 8 个名额
- *    （`BACKFILL_MAX_SYMBOLS`）并把后面的币饿死。
+ * ★ 2026-10-13 用户定：「只补最近 30 天的」—— 币安那边虽然保留 3 个月
+ *   （`data/exchange-trade.ts` 的 `BINANCE_RETENTION_MS`），但界面上用的就是 7 / 30 天两档，
+ *   更早的补进来也没处看，白花权重（实测全量 90 天：income 10089 条 + 成交 ~9000 笔）。
+ *   想放宽改这一个数就行。
  */
-const BACKFILL_LOOKBACK_MS = BINANCE_RETENTION_MS
+const LEDGER_BACKFILL_MS = 30 * 24 * 3600 * 1000
+/** 账本（income）反查"缺哪些成交"时往前看多久。 */
+const BACKFILL_LOOKBACK_MS = LEDGER_BACKFILL_MS
 /** 按某个币自己的起点回补时，再往前留一点重叠（跨时钟/边界，靠唯一键去重） */
 const FILL_OVERLAP_MS = 5 * 60 * 1000
 /** **空转档**（没持仓 + 没挂单 + 10 分钟没动静）：三条兜底按「正常档 ×2」再降一档 */
@@ -221,9 +221,17 @@ const HIBERNATE_MS = 2 * 60 * 60 * 1000
  * ⚠️ 原来这里叫 `INCOME_LOOKBACK_MS` = **固定往前 7 天**，而「币安只给 7 天」这个前提
  *    是**错的**（2026-10-08 实测：起点分别拉 7/30/90/120 天前返回同一批 222 条）。
  *    固定窗口的坏处很直接：停机超过 7 天，那段就**永远吃不到**（窗口滑走了）。
- *    现在按水位回溯，越界由币安保留期（3 个月）截断。
+ *    现在按水位回溯，越界由回补窗口（`LEDGER_BACKFILL_MS`，30 天）截断。
  */
 const INCOME_OVERLAP_MS = 5 * 60_000
+/**
+ * **全量补历史**（起流那一发，见 `reconcileIncome(true)`）时钱账本允许的页数上限。
+ *
+ * ⚠️ 必须比常规的 `INCOME_MAX_PAGES`（8）大：那段历史是**升序**翻页吃的，
+ *    8 页只够最老的那几千条，中间的空洞永远轮不到（实测修之前 key 9 缺 2022 条）。
+ *    30 天窗口下实测 key 9 是 2279 条（≈3 页），16 页留了 5 倍余量给更活跃的账户。
+ */
+const INCOME_FULL_MAX_PAGES = 16
 /**
  * 用户数据流多久**毫无动静**（数据帧和 ping 都没有）就当它哑了。
  * ⚠️ 必须大于币安的 ping 周期（3 分钟）；判断依据只能是 ping ——
@@ -280,13 +288,25 @@ const BACKFILL_MAX_SYMBOLS = 24
  * 所以即便积压超过名额，下一轮也一定接着最老的往下补 —— 不会饿死。
  */
 const BACKFILL_MISSING_MAX = BACKFILL_MAX_SYMBOLS
+/**
+ * **起流补历史**时「候选比名额多」最多连着多补几轮（每轮 `BACKFILL_MAX_SYMBOLS` 个币）。
+ * 一轮 ≤24 币 × ≤4 页 × 权重 5 = ≤480；隔 65 秒一轮 ⇒ 平均 ≤450 权重/分钟。
+ * 8 轮 ≈ 9 分钟、能覆盖 ≤192 个币 —— 够把一次性的历史缺口（实测 key 9 有 ~100 个币）补干净。
+ */
+const FILL_CATCHUP_ROUNDS = 8
+/**
+ * 两轮补成交之间的间隔。⚠️ 必须**跨过权重窗口**：本地限流是 1200/分钟（后台只给 70%）、
+ * 单次最多等 5 秒，连着打会直接抛「交易所请求太频繁」把整轮作废。65 秒稳进。
+ */
+const FILL_CATCHUP_GAP_MS = 65_000
 /** 重连补成交：单页条数 / 最多翻几页（翻满就记日志，不无限翻） */
 const BACKFILL_PAGE = 500
 const BACKFILL_MAX_PAGES = 4
 /**
  * 新绑的账户首次回补多久的成交。
- * ⚠️ 币安 `/fapi/v1/userTrades` **只给最近 7 天**（不传 startTime/endTime 时），
- *    所以别顶着 7 天边界写，留一小时的余量。
+ * ⚠️ 这只是**首轮的保守起点**（控制一次打出去的请求量），不是币安的数据边界：
+ *    币安 `/fapi/v1/userTrades` 的**单次请求窗口**上限是 7 天（超了回 `-4165`），
+ *    所以别顶着 7 天边界写，留一小时的余量（跨时钟/边界容易漏）。
  */
 const BACKFILL_FIRST_MS = 7 * 24 * 3600 * 1000 - 3600 * 1000
 
@@ -683,6 +703,8 @@ export class KeyStream {
   private lastOrdersReconcileAt = 0
   /** 库里现在挂着几条单（判断空转用，见 `isIdle`） */
   private openOrderCount = 0
+  /** 上一轮补成交**被名额截断**（候选还有更多）—— 起流那一发据此连着多补几轮 */
+  private fillBacklog = false
   /**
    * 最后一次**账户里真有动静**的时间 —— 空转 / 沉睡两档的判据就是它。
    *
@@ -712,7 +734,7 @@ export class KeyStream {
   /** activity 时钟有没有从库里种过一次（见 `seedActivity`） */
   private seededActivity = false
   /**
-   * 已经就「起点早于币安保留期」告警过的币（避免每隔几轮刷一遍同样的话）。
+   * 已经就「起点早于回补窗口」告警过的币（避免每隔几轮刷一遍同样的话）。
    * 见 `backfillSymbol` —— 超期的洞**不回补**，但要让人知道它是故意跳过的。
    */
   private warnedOld?: Set<string>
@@ -861,23 +883,44 @@ export class KeyStream {
   }
 
   /**
-   * 连上 / 重连之后的对账：**先补快照，再补成交**。
-   * ⚠️ 顺序不能反 —— 补成交要靠 `lastOverview` 里的持仓推交易对（可能刚开的仓，
-   *    一笔成交都还没记过），所以得先把快照取回来。
+   * 连上 / 重连之后的对账：**先补快照，再补钱账本，最后补成交**。
+   * ⚠️ 快照必须最先 —— 补成交要靠 `lastOverview` 里的持仓推交易对（可能刚开的仓，
+   *    一笔成交都还没记过）。
+   * ★ 钱账本放到**补成交之前**（2026-10-13）：补成交的币种清单第 ① 类正是
+   *   「账本里有、成交明细里没有」⇒ 得先把 income 拉新，才轮得到这一轮去补它。
+   *   反过来的话，起流这一轮补的清单是上一轮的 income，新发现的缺口要干等 4 小时
+   *   那一轮才轮到（用户看到的就是「还是会有没补上的」）。
    */
   private async reconcile(source: 'boot' | 'ws'): Promise<void> {
     await this.snapshot(source, WS_SNAPSHOT_GAP_SEC)
-    await this.backfillFills()
-    /* 刚才补过成交了 ⇒ 水位跟上，别让 30 分钟的 tick 再白打一遍（≤40 权重） */
-    this.lastFillReconcileAt = Date.now()
     /*
      * ★ 起流那一发**顺带把「盈亏」那本账也拉一次**。
      *   income 只有 30 权重、每个进程每套 key 一次；不拉的话新账户的「盈亏」tab 会空着，
      *   而它自己的兜底周期已经拉到 8 小时（资金费就是 8 小时结一次）。
+     *   ⚠️ 必须在 `backfillFills()` 之前 —— 见上面那段。
      */
     if (source === 'boot') {
-      await this.reconcileIncome()
+      await this.reconcileIncome(true)
       this.lastIncomeReconcileAt = Date.now()
+    }
+    await this.backfillFills()
+    /* 刚才补过成交了 ⇒ 水位跟上，别让 30 分钟的 tick 再白打一遍（≤40 权重） */
+    this.lastFillReconcileAt = Date.now()
+    /*
+     * ★ 起流这一发如果发现**候选比名额多**（`fillBacklog`），就连着再多补几轮 ——
+     *   一次性补历史留下的缺口（比如刚修完的钱账本空洞）就靠它收敛，不用干等 4 小时那一档。
+     *   ⚠️ 有上限：每轮 ≤`BACKFILL_MAX_SYMBOLS` × ≤4 页 × 权重 5，几轮加起来仍是分钟级。
+     */
+    if (source === 'boot') {
+      for (let i = 0; i < FILL_CATCHUP_ROUNDS && this.fillBacklog; i++) {
+        /*
+         * ⚠️ 必须**隔一个权重窗口**再来（`MAX_WAIT_MS` 只有 5 秒，连着打会被本地限流挡回
+         *    「交易所请求太频繁」⇒ 那一轮的币全白查）。一轮 ≤480 权重，隔 65 秒稳进 840/分钟。
+         */
+        await sleep(FILL_CATCHUP_GAP_MS)
+        await this.backfillFills()
+      }
+      this.lastFillReconcileAt = Date.now()
     }
     /*
      * 挂单也要对一次：断线那段 / 进程没起来那段的挂单变动是收不到的
@@ -890,9 +933,11 @@ export class KeyStream {
   /**
    * 用 REST **补断线期间漏掉的成交**（WS 断线期间的 `ORDER_TRADE_UPDATE` 是真丢了）。
    *
-   * 交易对从两处凑：① 账本里最近 30 天交易过的币；② 当前有持仓的币。上限 8 个。
+   * 交易对从**三处**凑（详见 `symbolsToBackfill()`）：① 账本里有、成交明细里没有的币
+   * （`trade_id` 精确反连接，优先级最高）；② 当前有持仓的币；③ 账本里最近有成交的币。
+   * 三拨人**共用** `BACKFILL_MAX_SYMBOLS`（现为 24）个名额。
    * 起点 = 账本里最后一笔成交的时间（**往回多要 5 分钟**防边界漏单，重复的交给
-   * `unique(key_id, trade_id)` 挡）；账本空的（新绑账户）就回补 7 天。
+   * `unique(key_id, trade_id)` 挡）；账本空的（新绑账户）就先回补 7 天（见 `BACKFILL_FIRST_MS`）。
    *
    * ⚠️ 起点取「**安全窗口**」和「账本最后一笔」里**更早**的那个：
    *    只看安全窗口的话新绑账户补不到 7 天历史，只看最后一笔又会**跳过错单**
@@ -906,6 +951,11 @@ export class KeyStream {
     let added = 0
     try {
       const {jobs, truncated} = await this.symbolsToBackfill()
+      /*
+       * ★ 这一轮被名额截断（候选还有更多）⇒ 记下来，让 `reconcileTick` **提前**再补一轮
+       *   （否则要干等 4 小时那一档）。一次性补历史（比如修完钱账本空洞之后）就靠它收敛。
+       */
+      this.fillBacklog = truncated
       if (!jobs.length) return
       const fromLedger = await this.lastFillTs()
       /*
@@ -965,9 +1015,6 @@ export class KeyStream {
    *     那句 `补 X 失败（跳过它继续）` 就是它。
    *     现在用 `planWindows()` 切成 ≤7 天的窗口逐段取（每段内部再翻页）。
    *
-   * ⚠️ 地平线 = `BINANCE_RETENTION_MS`（3 个月）：更早的**币安没有**，直接截断、
-   *    不发明知道空手而归的请求（用户 2026-10-08：「回补不上的就不回补」）。
-   *
    * ⚠️ 页数上限 `BACKFILL_MAX_PAGES` **按币算总量**（不是每个窗口各算）——
    *    否则窗口一多，一发（`weight 5`）就变成几十发，把预算吃光。
    *    吃不下的下一轮再来（水位会往前推，天然续跑）。
@@ -975,14 +1022,14 @@ export class KeyStream {
   private async backfillSymbol(raw: string, since: number): Promise<number> {
     const unified = this.ex?.market?.(raw)?.symbol ?? raw
     const now = Date.now()
-    const floor = now - BINANCE_RETENTION_MS
+    const floor = now - LEDGER_BACKFILL_MS
     const from = Math.max(since, floor)
     if (from > since) {
       this.warnedOld ??= new Set<string>()
       if (!this.warnedOld.has(raw)) {
         this.warnedOld.add(raw)
         console.log(
-          `${this.tag} ${raw}：要补的起点早于币安保留期（3 个月）⇒ 那一段不回补` +
+          `${this.tag} ${raw}：要补的起点早于回补窗口（${LEDGER_BACKFILL_MS / 86400000} 天）⇒ 那一段不回补` +
             `（${new Date(since).toISOString().slice(0, 16)} → ${new Date(from).toISOString().slice(0, 16)}）`
         )
       }
@@ -1089,6 +1136,11 @@ export class KeyStream {
 
     /* ① 账本里有、成交明细里没有的币 —— 用 `trade_id` 精确定位（不是比 max(ts)） */
     /*
+     * ⚠️ 只看**成交类**的 `incomeType`（`COMMISSION` / `REALIZED_PNL`）：
+     *    只有这两类带 `trade_id`（实测 key 9：COMMISSION 10080 行、REALIZED_PNL 4728 行，
+     *    全都有 `trade_id`；`FUNDING_FEE` / `TRANSFER` 等一律为空）。
+     *    写的更死一点（而不是只判 `trade_id <> ''`）是为了防以后冒出来的杂类
+     *    （`INSURANCE_CLEAR` 那种）带了个对不上成交的 `trade_id` ⇒ 变成永远补不上的假缺口。
      * ⚠️ 排序用 **`min(i.ts)` 升序（最老的优先）**，不是 `max(i.ts) DESC`：
      *    积压超过名额时，"最近的优先"会让老的那批**永远轮不到**；
      *    按最老那笔排，每补完一个币它就掉出清单，下一轮继续往下推 —— 一定收敛。
@@ -1100,7 +1152,8 @@ export class KeyStream {
               count(*)::text AS n
          FROM exchange_income i
          LEFT JOIN exchange_fills f ON f.key_id = i.key_id AND f.trade_id = i.trade_id
-        WHERE i.key_id = $1 AND i.trade_id <> '' AND f.trade_id IS NULL
+        WHERE i.key_id = $1 AND f.trade_id IS NULL
+          AND i.income_type IN ('COMMISSION', 'REALIZED_PNL')
           AND i.symbol IS NOT NULL AND i.symbol <> ''
           AND i.ts > now() - $3::interval
         GROUP BY i.symbol
@@ -1109,11 +1162,7 @@ export class KeyStream {
       [this.row.id, BACKFILL_MISSING_MAX + 1, `${BACKFILL_LOOKBACK_MS} milliseconds`]
     )
     for (const r of missing) {
-      /*
-       * 起点 = 这个币**最老那一笔缺的成交**（按币各给各的，见上面 ⚠️）。
-       * `FILTER` 只在这个窗口内找：比币安保留期（3 个月）更早的**取不回来**，
-       * 拿它当起点只会每轮白占一个名额（`BACKFILL_MAX_SYMBOLS` 只有 8 个）。
-       */
+      /* 起点 = 这个币**最老那一笔缺的成交**（按币各给各的，见上面 ⚠️）。 */
       jobs.set(r.symbol, {
         symbol: r.symbol,
         from: r.from_ts ? new Date(r.from_ts).getTime() : undefined
@@ -2134,7 +2183,9 @@ export class KeyStream {
    *
    * 两条线，节奏不同：
    *   · 成交（`fetchMyTrades`，权重 5/币）：`FILL_RECONCILE_MS` 一轮，往前看 24 小时；
-   *   · 钱账本（`/fapi/v1/income`，**权重 30**）：`INCOME_RECONCILE_MS` 一轮，回看 7 天。
+   *   · 钱账本（`/fapi/v1/income`，**权重 30**）：`INCOME_RECONCILE_MS` 一轮，
+   *     从**库里水位**往回 `INCOME_OVERLAP_MS` 起拉（不是固定回看 7 天），
+   *     越界由回补窗口（`LEDGER_BACKFILL_MS`，30 天）截断 —— 见 `reconcileIncome()`。
    *
    * 都靠唯一键幂等，重叠扫同一段不会重复记账。
    */
@@ -2163,7 +2214,12 @@ export class KeyStream {
        */
       if (tier === 'asleep') return
       const gaps = TIER_GAPS[tier]
-      if (now - this.lastFillReconcileAt >= gaps.fill) {
+      /*
+       * ⚠️ 上一轮补成交**被名额截断**（`fillBacklog`）⇒ 按 tick 的节拍接着补，
+       *    别干等 4 小时那一档。间隔 30 分钟 ≫ 权重窗口（一轮 ≤480 权重），不会跟别人抢。
+       */
+      const fillGap = this.fillBacklog ? RECON_TICK_MS : gaps.fill
+      if (now - this.lastFillReconcileAt >= fillGap) {
         this.lastFillReconcileAt = now
         await this.backfillFills(now - FILL_SAFETY_MS)
       }
@@ -2182,38 +2238,51 @@ export class KeyStream {
 
   /**
    * 拉交易所那本账（`/fapi/v1/income`）落库 —— **权威口径**，含资金费。
-   * 详见 `data/exchange-trade.ts` 的 `fetchIncomeHistoryAll`（翻页 + 币安保留期截断）。
+   * 详见 `data/exchange-trade.ts` 的 `fetchIncomeHistoryAll`（翻页 + 窗口截断）。
+   *
+   * ⚠️ `full = true`（**起流那一发**）要**从回补窗口地板整段重拉**，不能只接水位 ——
+   *    只接水位（`last - overlap`）的话，库里**比「最新一条」更老的空洞永远补不上**：
+   *    老版本用「固定往前 7 天」，留下的地板会把更早的历史永久挡在外面。
+   *    实测（2026-10-13，key 9）：库里 262 条 / 币安 30 天内 2279 条，**缺 2022 条**
+   *    （09-13 ~ 10-04 整段），连带那段时间的成交明细也发现不了。
    */
-  private async reconcileIncome(): Promise<void> {
+  private async reconcileIncome(full = false): Promise<void> {
     try {
       const now = Date.now()
       /*
        * 起点 = **库里的水位**（不是"现在往前固定 N 天"）。
        *
-       * 为什么改（2026-10-08）：原来固定往前看 `INCOME_LOOKBACK_MS`（7 天），
-       * 于是「停机超过 7 天」的那段**永远吃不到**（窗口滑走了）。而币安的数据其实留
-       * **3 个月**，且这个接口没有 7 天窗口限制 ⇒ 按水位来回溯才对。
-       * 水位缺失（新账户 / 清过库）就从**保留期**开始 —— 把能补的一次补全。
+       * 为什么按水位（2026-10-08）：原来固定往前看 `INCOME_LOOKBACK_MS`（7 天），
+       * 于是「停机超过 7 天」的那段**永远吃不到**（窗口滑走了）。
+       *
+       * ⚠️ 但**只接水位还不够**（2026-10-13 修）：水位只能**往前推**，
+       *    库里比「最新一条」**更老的空洞**永远补不上 —— 上面那个 7 天窗口留下的地板
+       *    会把更早的历史永久挡在外面（实测 key 9 缺 2022 条）。
+       *    所以起流那一发（`full`）从**回补窗口的地板整段重拉**，把空洞一次补掉；
+       *    之后每一轮再用水位增量接。两头都夹在 `LEDGER_BACKFILL_MS`（30 天）以内。
        */
+      const floor = now - LEDGER_BACKFILL_MS
       const last = await maxIncomeTs(this.row.id)
-      const from = last ? last - INCOME_OVERLAP_MS : now - BINANCE_RETENTION_MS
+      const from = full || !last ? floor : Math.max(last - INCOME_OVERLAP_MS, floor)
+      const maxPages = full ? INCOME_FULL_MAX_PAGES : INCOME_MAX_PAGES
       const {records: list, pages, clamped, hitPageCap} = await fetchIncomeHistoryAll(
         credsOf(this.row),
         {
           fromMs: from,
           toMs: now,
+          maxPages,
           /* `income` 一发 30 权重（比一般接口贵得多）⇒ 每页都过全局预算 */
           charge: () => chargeWeight(30, 'income')
         }
       )
       if (clamped) {
         console.log(
-          `${this.tag} 钱账本：起点早于币安保留期（3 个月）⇒ 更早的那段不回补`
+          `${this.tag} 钱账本：起点早于回补窗口（${LEDGER_BACKFILL_MS / 86400000} 天）⇒ 更早的那段不回补`
         )
       }
       if (hitPageCap) {
         console.warn(
-          `${this.tag} 钱账本：翻到页数上限（${INCOME_MAX_PAGES} 页）—— 更早的可能还没吃到，下一轮继续`
+          `${this.tag} 钱账本：翻到页数上限（${maxPages} 页）—— 更早的可能还没吃到，下一轮继续`
         )
       }
       if (!list.length) return

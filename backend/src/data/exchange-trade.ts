@@ -1013,30 +1013,6 @@ export async function listOpenOrders(
   return out
 }
 
-/* ------------------------------------------------------------------ */
-/* 币安的历史数据边界（2026-10-08 实测钉死，别再凭记忆写别的数）          */
-/* ------------------------------------------------------------------ */
-
-/*
- * 2026-10-08 用真 key 实测（走服务器出口）：
- *
- *   ① `/fapi/v1/userTrades`：**单次请求的时间窗不能超过 7 天**。
- *      实测传 20 天窗口 → `{"code":-4165,"msg":"Maximum time interval is 7 days."}`。
- *      而**数据本身保留约 3 个月**（7 天窗口在 8 / 30 / 80 / 100 天前都正常返回，
- *      只有 100 天前那发是空的 —— 那个账户本来就那么久没在这个币上成交）。
- *   ② `/fapi/v1/income`：**没有 7 天这一说**。起点分别拉 7 / 30 / 90 / 120 天前，
- *      返回的是**同一批 222 条** ⇒ 语义是「**从 startTime 起的前 `limit` 条**、升序」，
- *      所以它可以靠**翻页**一直往前吃。
- *
- * ⚠️⚠️ 所以仓库里原先那句「`userTrades` / `income` 都只给最近 7 天」是**错的**：
- *    7 天是 **userTrades 的单次请求窗口上限**，不是**数据地平线**。
- *    把它当地平线会同时犯两个错：
- *      ① 白白放弃 3 个月内**本来能补**的数据；
- *      ② 一旦水位超过 7 天，`fetchMyTrades(since)`（不带 `endTime` = 窗口到"现在"）
- *         会直接撞 `-4165` **报错**，而不是安静地少拿一点。
- */
-
-/** 币安合约**数据地平线**：成交明细与钱账本都只保留最近 3 个月（更早的**不存在**，不回补） */
 export const BINANCE_RETENTION_MS = 90 * 24 * 3600 * 1000
 /** `/fapi/v1/userTrades` 的**单次请求窗口**上限（实测超了回 `-4165`） */
 export const BINANCE_MAX_WINDOW_MS = 7 * 24 * 3600 * 1000
@@ -1124,9 +1100,8 @@ export function incomeDedupeKey(r: {
  * ⚠️ **权重 30**（币安文档），比一般接口贵得多 ⇒ 别按分钟轮询，见
  *    `exchange-stream.ts` 的对账节奏（接上时一次 + 每小时一次）。
  * ⚠️ 不给 `incomeType` 就是**全类型**（省调用次数）。
- * ⚠️ 币安这个接口一次最多 1000 条（`limit`），**没有 7 天窗口限制** ——
- *    语义是「从 `startTime` 起的前 `limit` 条、升序」，要更早的得**翻页**
- *    （见 `fetchIncomeHistoryAll`）。数据只保留 **3 个月**（`BINANCE_RETENTION_MS`）。
+ * ⚠️ 币安这个接口一次最多 1000 条（`limit`），要更早的得**翻页**
+ *    （见 `fetchIncomeHistoryAll`）。
  */
 export async function fetchIncomeHistory(
   c: ExchangeCredentials,
@@ -1189,14 +1164,12 @@ async function incomePage(
  * 为什么要有它（2026-10-08）：`/fapi/v1/income` 一次只给 1000 条，而它的语义是
  * **「从 `startTime` 起的前 `limit` 条、升序」** ⇒ 只发一发的话，「7 天内超过 1000 条」
  * 时**更早的那部分永远不会进库**（而且 §54 那条「靠 `income.trade_id` 反连接发现缺哪些成交」
- * 的路也会跟着瞎）。实测已确认它**没有 7 天窗口限制**，所以往前吃只能靠翻页。
+ * 的路也会跟着瞎）。所以往前吃只能靠翻页。
  *
- * ⚠️ 三点边界，都按币安的规矩来（用户 2026-10-08：「根据币安的历史要求来改，
- *    回补不上的就不回补」）：
- *   · 地平线 = `BINANCE_RETENTION_MS`（**3 个月**）—— 想更早**直接截断**，不发注定空手而归的请求
- *     （返回值里的 `clamped=true` 让调用方知道"要过、但币安没有"）。
+ * ⚠️ 两点边界，都按币安的规矩来：
  *   · 翻页游标 = 上一批**最后一条的 `ts + 1`**（升序，所以往后推就能继续吃）。
- *   · 页数上限 `INCOME_MAX_PAGES`（一发 **30 权重**）—— 撞到上限记 `hitPageCap`，别无限翻。
+ *   · 页数上限 `INCOME_MAX_PAGES`（一发 **30 权重**）—— 撞到上限记 `hitPageCap`，别无限翻
+ *     （全量补历史时用 `maxPages` 放大，见那个参数）。
  *
  * 幂等：`tranId` 是稳定键（`incomeDedupeKey`）+ 写库 `ON CONFLICT` ⇒ 重复翻同一段不会写重复行。
  */
@@ -1205,6 +1178,12 @@ export async function fetchIncomeHistoryAll(
   opts: {
     fromMs: number
     toMs?: number
+  /**
+   * 页数上限（默认 `INCOME_MAX_PAGES`）。
+   * ⚠️ **全量补历史**（带 `fromMs` = 保留期地板）时要放大，否则升序翻页只吃到
+   *    最老的那 8 页，**中间那段永远轮不到**（实测 key 9：缺 2022 条）。
+   */
+  maxPages?: number
     /**
      * 每一页发出去**之前**调一次（调用方拿它记权重 —— `income` 一发 **30 权重**，
      * 翻页后一次回补可能是好几发，不能绕过全局预算）。
@@ -1235,7 +1214,7 @@ export async function fetchIncomeHistoryAll(
   let pages = 0
   let hitPageCap = false
   while (cursor < to) {
-    if (pages >= INCOME_MAX_PAGES) {
+    if (pages >= (opts.maxPages ?? INCOME_MAX_PAGES)) {
       hitPageCap = true
       break
     }

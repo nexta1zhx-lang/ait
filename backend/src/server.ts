@@ -4135,8 +4135,8 @@ async function route(
    *     开平仓时间 / 持仓时间，点开能看每笔订单，减仓那几笔要有实现盈利」
    *
    * ⚠️ 数据来自**成交账本**（`exchange_fills`），不是 income 的分类汇总。
-   *    账本只有币安 `userTrades` 给的那 7 天，所以返回里带 `since`，
-   *    界面上要说明白「这段之前的历史没进来」。
+   *    账本覆盖**币安保留期**内的数据（约 3 个月；见 `BINANCE_RETENTION_MS`），
+   *    返回里带 `since`，界面上要说明白「这段之前的历史没进来」。
    */
   if (p === '/api/exchange/position-history' && method === 'GET') {
     const idRaw = num(url.searchParams.get('id'))
