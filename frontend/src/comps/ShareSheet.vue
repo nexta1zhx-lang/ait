@@ -86,9 +86,13 @@ const sheet = ref('')
  */
 type ChartStyle = 'line' | 'candle' | 'none'
 const chartStyle = ref<ChartStyle>('line')
+/*
+ * ⚠️ 只有「分时 / 不带」两项：2026-10-13 用户「不要 k 图」——
+ *    `candle` 那档撤掉了（画 K 线的那段代码留在 `share-card.ts` 里没删，
+ *    以后想加回来只需在这里补一项）。
+ */
 const CHART_OPTS: {value: ChartStyle; label: string; title?: string}[] = [
   {value: 'line', label: '分时', title: '最近一天的走势（折线）'},
-  {value: 'candle', label: 'K 线', title: '最近一天的 K 线'},
   {value: 'none', label: '不带', title: '海报上不放小图'}
 ]
 /** 小图那串价格（分时折线 / K 线都画它） */

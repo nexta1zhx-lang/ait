@@ -1172,10 +1172,14 @@ function cycleBuild(masked: boolean): {
     c.entryPrice && c.exitPrice
       ? ((c.exitPrice - c.entryPrice) / c.entryPrice) * 100 * (short ? -1 : 1)
       : null
+  /*
+   * ⚠️ 只写百分比，**别加「价格」二字**（2026-10-13 用户：「历史不要写加个二字」）——
+   *    主角旁边那行小字就是"这一段涨跌了多少"，跟持仓卡上那行收益率同一个读法。
+   */
   const moveText =
     movePct === null
       ? null
-      : `价格 ${movePct >= 0 ? '+' : '−'}${fixed(Math.abs(movePct), 2)}%`
+      : `${movePct >= 0 ? '+' : '−'}${fixed(Math.abs(movePct), 2)}%`
 
   const data: ShareCardData = {
     base,

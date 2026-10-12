@@ -343,11 +343,31 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
    *    早前有一层 `rgba(255,255,255,0.03)` 的圆角底，看着多出一块灰板子。
    *    现在只有线本身（分时那条折线 + 面积渐变本身是"线的一部分"，保留）。
    */
+  /*
+   * ⚠️ 价格范围 = **这段行情的高低点 ∪ 两个点位**（2026-10-13 用户：「买点卖点的位置
+   *    还是不对」）。
+   *
+   *    早前只按行情算范围，点位落在范围外时被**夹到图的上下边界**上画 ——
+   *    数字是真的，位置却是假的，看着就是"标的不是那个地方"。
+   *    现在把点位并进范围：图上每一个点的 y 都对得上它的价格。
+   *    代价：点位离行情很远时（比如亏了 60%，开仓价在行情上方一大截）分时线会被
+   *    压扁一些 —— 这是"位置正确"必须付的，用户要的是真位置。
+   *
+   * 用户也问过「选取的范围怎么定的」：时间 = 最近 24 小时（15 分钟 × 96 根，
+   * 见 `ShareSheet.vue` 的 `SHARE_TF` / `SHARE_BARS`），价格 = 上面这一句。
+   */
   let lo = Infinity
   let hi = -Infinity
   for (const c of list) {
     lo = Math.min(lo, c.low > 0 ? c.low : c.close)
     hi = Math.max(hi, c.high > 0 ? c.high : c.close)
+  }
+  for (const lv of [chart.buy, chart.sell]) {
+    const p = lv ? Number(lv.price.replace(/,/g, '')) : NaN
+    if (Number.isFinite(p) && p > 0) {
+      lo = Math.min(lo, p)
+      hi = Math.max(hi, p)
+    }
   }
   if (!(hi > lo)) hi = lo + Math.max(1e-9, Math.abs(lo) * 0.001)
   const air = (hi - lo) * 0.12
@@ -415,26 +435,24 @@ function drawMiniChart(ctx: CanvasRenderingContext2D, chart: ShareCardChart, ton
   }
   ctx.restore()
   /*
-   * 两个点位：换算 → 夹进图内 → 保证彼此隔开 `SEP`。
-   * ⚠️ **买入那一条再往下挪 `BUY_DROP`**（用户：「买入点要加上放在线下面一点」）：
-   *    它跟开仓价几乎重合在分时线上，贴着自己的价位画会看不清。
-   * ⚠️ 价格高的那个排上面（同一个币的两个均价谁高谁低看多空，不写死）。
+   * 两个点位：**就画在它们自己的价格位置上**（换算用的是同一个 `py`，范围里已经
+   * 包含了这两个价 —— 见上面那段）。不夹边界、不为了好看挪位置。
+   *
+   * ⚠️ 只有一种情况允许挪：两个价**几乎一样**（比如开仓 0.02161 / 平仓 0.0217，
+   *    差 0.4%），两条虚线 + 两组文字会叠在一起 ⇒ 那时才按 `SEP` 拉开最小间隔。
+   *    这种情况很显眼（两个数字本来就是一个价），拉开比叠着强。
    */
-  const EDGE = 30
-  const SEP = 46
-  const BUY_DROP = 18
   const num = (v: string) => Number(v.replace(/,/g, ''))
-  const clampY = (v: number) => Math.min(Math.max(v, y + EDGE), y + h - EDGE)
+  const SEP = 34
   const pBuy = chart.buy ? num(chart.buy.price) : null
   const pSell = chart.sell ? num(chart.sell.price) : null
-  let yBuy =
-    pBuy === null || !Number.isFinite(pBuy) ? null : clampY(py(pBuy) + BUY_DROP)
-  let ySell = pSell === null || !Number.isFinite(pSell) ? null : clampY(py(pSell))
+  let yBuy = pBuy === null || !Number.isFinite(pBuy) ? null : py(pBuy)
+  let ySell = pSell === null || !Number.isFinite(pSell) ? null : py(pSell)
 
   if (yBuy !== null && ySell !== null && Math.abs(yBuy - ySell) < SEP) {
     const shift = (SEP - Math.abs(yBuy - ySell)) / 2
-    const yHi = clampY(Math.min(yBuy, ySell) - shift)
-    const yLo = clampY(Math.max(yBuy, ySell) + shift)
+    const yHi = Math.min(yBuy, ySell) - shift
+    const yLo = Math.max(yBuy, ySell) + shift
     if (pBuy! >= pSell!) {
       yBuy = yHi
       ySell = yLo
