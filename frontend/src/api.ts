@@ -3215,6 +3215,24 @@ export interface DownloadRelease {
 export interface DownloadsResult {
   app: DownloadApp
   releases: DownloadRelease[]
+  /** 下载目录里**别的应用**的 APK（跟本 app 的历史版本分开列） */
+  apps: DownloadOtherApp[]
+}
+
+/** 别的应用（同一个下载目录里放的，比如梯子）—— 名字没在 `releases.json.apps` 登记的话按文件名猜 */
+export interface DownloadOtherApp {
+  file: string
+  url: string
+  name: string
+  version: string
+  desc: string
+  require: string
+  /** 字节数 */
+  size: number
+  mtime: number
+  /** 名字是按文件名猜出来的（界面上标一下，免得当成正式名字） */
+  guessed: boolean
+  md5: string | null
 }
 
 export const fetchDownloads = () => get<DownloadsResult>('/api/downloads')

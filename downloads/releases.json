@@ -195,5 +195,17 @@
       ],
       "deprecated": true
     }
+  ],
+  "apps": [
+    {
+      "file": "ClashMetaForAndroid-2.11.35-arm64.apk",
+      "name": "Clash Meta for Android",
+      "desc": "安卓上的 Clash Meta 客户端（跟本 App 无关，放这儿方便手机下载）。"
+    },
+    {
+      "file": "FlClash-0.8.99-arm64.apk",
+      "name": "FlClash",
+      "desc": "安卓上的 FlClash 客户端（跟本 App 无关，放这儿方便手机下载）。"
+    }
   ]
 }

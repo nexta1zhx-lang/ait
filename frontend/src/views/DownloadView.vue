@@ -34,6 +34,7 @@ onMounted(load)
 
 const app = computed(() => data.value?.app ?? {})
 const releases = computed(() => data.value?.releases ?? [])
+const apps = computed(() => data.value?.apps ?? [])
 const latest = computed(() => releases.value.find(r => r.latest) ?? null)
 const totalSize = computed(() =>
   releases.value.reduce((s, r) => s + (r.size || 0), 0)
@@ -154,6 +155,50 @@ const short = (md5: string | null) => (md5 ? md5.slice(0, 12) : '—')
           装新版本直接覆盖安装即可（同一个包名
           <code>{{ app.packageId || 'cn.bitcoooin.advisor' }}</code
           >，数据不会丢）。 想回退就下对应的旧版本号。
+        </p>
+      </section>
+
+      <!-- ④ 其它应用 —— 同一个下载目录里放的**别的**包（比如梯子），跟上面本 app 分开列 -->
+      <section v-if="apps.length" class="panel">
+        <h2>
+          其它应用
+          <span class="tag">{{ apps.length }} 个</span>
+        </h2>
+
+        <div class="dl-list">
+          <article v-for="a in apps" :key="a.file" class="dl-item">
+            <div class="dl-head">
+              <b class="dl-ver">{{ a.name }}</b>
+              <span v-if="a.version" class="pill">v{{ a.version }}</span>
+              <span v-if="a.guessed" class="pill" title="名字是按文件名猜的">
+                按文件名
+              </span>
+              <span class="dl-spacer"></span>
+              <span class="dim dl-date">{{ bjTime(a.mtime) }}</span>
+            </div>
+
+            <p v-if="a.desc" class="dl-desc">{{ a.desc }}</p>
+
+            <div class="dl-foot">
+              <span class="dim">{{ human(a.size) }}</span>
+              <span v-if="a.require" class="dim">{{ a.require }}</span>
+              <span class="dl-spacer"></span>
+              <a class="dl-mini" :href="downloadUrl(a.url)" :download="a.file">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 4v10" />
+                  <path d="M8 10.5 12 14.5 16 10.5" />
+                  <path d="M5 18.5h14" />
+                </svg>
+                下载
+              </a>
+            </div>
+          </article>
+        </div>
+
+        <p class="dim dl-note">
+          这些是放在同一个下载目录里的<b>其它</b>应用包（跟上面的 App 没关系）。 想给它们
+          起正式名字 / 写说明，在 <code>downloads/releases.json</code> 的
+          <code>apps</code> 里按文件名登记一条即可。
         </p>
       </section>
     </template>

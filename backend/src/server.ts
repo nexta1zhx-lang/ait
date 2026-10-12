@@ -453,12 +453,31 @@ interface ReleasesDoc {
     install?: string[]
   }
   releases?: ReleaseMeta[]
+  /**
+   * **别的应用**（同一个下载目录里的其它 APK，比如梯子）—— 想给它们起个好名字就登记在这。
+   * `file` 对上文件名即可，没登记的按文件名猜。
+   */
+  apps?: {file?: string; name?: string; desc?: string; require?: string}[]
 }
 
 /** `entry-advisor-0.1.0.apk` → `0.1.0` */
 function versionFromFile(file: string): string {
   const m = file.match(/(\d+(?:\.\d+)*)(?=\.apk$)/i)
   return m ? m[1] : file.replace(/\.apk$/i, '')
+}
+
+/**
+ * **别的应用**的包名 / 版本（`ClashMetaForAndroid-2.11.35-arm64.apk` →
+ * `ClashMetaForAndroid` + `2.11.35`）。纯粹是显示用 —— 猜不准也不影响下载，
+ * 想要准确的名字在 `releases.json` 的 `apps` 里登记。
+ */
+function appNameOf(file: string): {name: string; version: string} {
+  const base = file
+    .replace(/\.apk$/i, '')
+    .replace(/[-_](arm64[-_]?v8a|arm64|armv7a?|armeabi[-_]?v7a|universal|x86|x86_64)$/i, '')
+  const m = base.match(/^(.*?)[-_ ](v?\d+(?:\.\d+)*)$/)
+  if (m) return {name: m[1].replace(/[-_]+/g, ' ').trim(), version: m[2].replace(/^v/i, '')}
+  return {name: base.replace(/[-_]+/g, ' ').trim(), version: ''}
 }
 
 /** 版本号比较（数字段逐个比，`0.10.0` 要大于 `0.9.0`） */
@@ -493,7 +512,24 @@ function bjDate(ms: number): string {
   return new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
 }
 
-/** 列清单：`releases.json` 的介绍 + 磁盘上真实的文件信息（大小 / md5 / 时间） */
+/** 文件的大小 / 时间 / md5；清单里写了但文件不在（本地没打包）时返回 0 */
+function diskInfo(file: string): {size: number; mtime: number; md5: string | null} {
+  try {
+    const st = fs.statSync(file)
+    return {size: st.size, mtime: Math.round(st.mtimeMs), md5: fileMd5(file)}
+  } catch {
+    return {size: 0, mtime: 0, md5: null}
+  }
+}
+
+/**
+ * 列清单：`releases.json` 的介绍 + 磁盘上真实的文件信息（大小 / md5 / 时间）。
+ *
+ * 回两组：`releases`（**这个 app** 的包，`releases.json` 里登记过）和
+ * `apps`（下载目录里**别的应用**的 APK）—— 两类混在一张表里排会出事：
+ * 别的包文件名里的数字（`FlClash-0.8.99-arm64.apk` → 被当成版本 `64`）会排到最前，
+ * 把「最新版」那个按钮指到不相干的包上。
+ */
 function listDownloads() {
   let doc: ReleasesDoc = {}
   try {
@@ -511,26 +547,11 @@ function listDownloads() {
     /* 目录还不存在（没打过包） */
   }
 
-  const metas: ReleaseMeta[] = [...(doc.releases ?? [])]
-  for (const f of onDisk) {
-    if (!metas.some(m => m.file === f)) metas.push({file: f})
-  }
-
-  const releases = metas
+  const entries = doc.releases ?? []
+  const releases = entries
     .filter((m): m is ReleaseMeta & {file: string} => Boolean(m.file))
     .map(m => {
-      const file = path.join(DOWNLOAD_DIR, m.file)
-      let size = 0
-      let mtime = 0
-      let md5: string | null = null
-      try {
-        const st = fs.statSync(file)
-        size = st.size
-        mtime = Math.round(st.mtimeMs)
-        md5 = fileMd5(file)
-      } catch {
-        /* 清单里写了、文件不在（本地没打包时很常见）*/
-      }
+      const {size, mtime, md5} = diskInfo(path.join(DOWNLOAD_DIR, m.file))
       return {
         version: m.version ?? versionFromFile(m.file),
         file: m.file,
@@ -552,11 +573,37 @@ function listDownloads() {
 
   if (releases.length && !releases[0].deprecated) releases[0].latest = true
 
+  /* —— 其余 APK = **别的应用**（同一个目录里放的，比如梯子），单独一组 —— */
+  const declared = new Set(entries.map(m => m.file).filter(Boolean))
+  const apps = onDisk
+    .filter(f => !declared.has(f))
+    .map(f => {
+      const named = (doc.apps ?? []).find(a => a.file === f)
+      const guess = appNameOf(f)
+      const {size, mtime, md5} = diskInfo(path.join(DOWNLOAD_DIR, f))
+      return {
+        file: f,
+        url: `/dl/${encodeURIComponent(f)}`,
+        name: named?.name?.trim() || guess.name,
+        version: guess.version,
+        desc: named?.desc ?? '',
+        require: named?.require ?? '',
+        size,
+        mtime,
+        /** 从文件名猜出来的名字，界面上标一下「按文件名」 */
+        guessed: !named?.name,
+        md5
+      }
+    })
+    .filter(a => a.size > 0)
+    .sort((a, b) => b.mtime - a.mtime)
+
   // ⚠️ 只回清单，**不回 `DOWNLOAD_DIR` 这个绝对路径** ——
   //    接口是公开的，没必要把容器里的目录结构说出去。
   return {
     app: doc.app ?? {},
-    releases
+    releases,
+    apps
   }
 }
 

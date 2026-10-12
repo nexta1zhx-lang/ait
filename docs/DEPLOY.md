@@ -672,10 +672,16 @@ curl -s https://bitcoooin.cn/api/health        # rules.sources / systemChars 就
 
 所以**加一版新包只要两步**：`bash scripts/build-apk.sh`（自动把 APK 放进
 `downloads/`）→ 在 `downloads/releases.json` 里补一条 →
-`bash scripts/release.sh -y`。页面不用改代码。没登记的 APK 也会列出来，标「未登记」。
+`bash scripts/release.sh -y`。页面不用改代码。
 
 > `releases.json` 里的 `app` 段是整页的介绍文案（名称 / 包名 / 说明 / 安装步骤）；
-> `releases[]` 每条对应一个版本（`version` / `file` / `date` / `title` / `notes`）。
+> `releases[]` 每条对应**本 App** 的一个版本（`version` / `file` / `date` / `title` / `notes`）。
+>
+> ⚠️ 下载目录里**别的应用**的包（比如顺手放这儿的梯子）**不再混进「历史版本」**：
+> 混排会拿文件名里的数字当版本号（`FlClash-0.8.99-arm64.apk` → 版本被认成 `64`），
+> 排在第一位、把「最新版」那个按钮指到不相干的包上。现在它们单独列成页面上的
+> **「其它应用」**一组；想要正式名字 / 说明，就在 `releases.json` 的 `apps[]`
+> 里按文件名登记一条（不登记就按文件名猜，界面上会标「按文件名」）。
 
 ### `/dl/*` 文件分发
 
