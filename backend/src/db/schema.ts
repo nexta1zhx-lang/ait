@@ -818,6 +818,36 @@ CREATE TABLE IF NOT EXISTS symbols (
   PRIMARY KEY (exchange, market_type, pair)
 );
 CREATE INDEX IF NOT EXISTS symbols_status_idx ON symbols (exchange, market_type, status);
+
+-- ---------------------------------------------------------------- 代理订阅（梯子）用户
+-- 2026-10-12：「管理 → 代理订阅」那一页。每人一个独立 UUID + 一条带 BasicAuth 的
+-- 订阅地址；这里是**应用侧的权威副本**，改完整体下发给宿主机的 xrayd 服务
+-- （见 backend/src/proxy.ts 的 syncProxyUsers）。
+-- 密码**明文**存：和 user_llm_keys / user_exchange_keys 同一个口径（只有管理员读得到），
+-- 而且订阅地址要能反复复制给朋友 —— 只存哈希就再也显示不出来了。
+CREATE TABLE IF NOT EXISTS proxy_users (
+  id         BIGSERIAL   PRIMARY KEY,
+  name       TEXT        NOT NULL,
+  uuid       TEXT        NOT NULL,
+  password   TEXT        NOT NULL,
+  enabled    BOOLEAN     NOT NULL DEFAULT true,
+  note       TEXT        NOT NULL DEFAULT '',
+  synced_at  TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 名字不区分大小写地唯一（订阅地址里的用户名，重了 BasicAuth 会打架）
+CREATE UNIQUE INDEX IF NOT EXISTS proxy_users_name_idx ON proxy_users (lower(name));
+
+-- ---------------------------------------------------------------- 远程桌面（RustDesk）别名
+-- 2026-10-12：「管理 → 远程桌面」那一页。**只有别名这一样东西存在应用侧**。
+-- 设备清单的权威副本在宿主机 hbbs 的 db_v2.sqlite3 里（WAL 独占，应用只读不到），
+-- 所以这张表不是副本、只是一张备注表 —— 设备在服务端被删掉时我们**不删行**，
+-- 免得人家换台机器回来时标签没了。
+CREATE TABLE IF NOT EXISTS rustdesk_devices (
+  device_id  TEXT        PRIMARY KEY,
+  note       TEXT        NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
 
 /**

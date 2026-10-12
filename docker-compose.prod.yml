@@ -110,8 +110,12 @@ services:
     restart: unless-stopped
     ports:
       - '80:80'
-      - '443:443'
-      - '443:443/udp' # HTTP/3
+      # 2026-10-12：443 让给 xray（REALITY 挂在 443 才不容易被墙）。
+      # Caddy 的 TLS 只绑本机，由 xray 的 reality `dest` 回落过来 ——
+      # 于是「应用」和「梯子」共用 443：梯子客户端走 REALITY，普通浏览器被
+      # 原样转发到本 Caddy，看到的还是 bitcoooin.cn 的真实证书。
+      - '127.0.0.1:8444:443'
+      - '443:443/udp' # HTTP/3（UDP 443 不经 xray，直连 Caddy）
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # 下载目录（APK 等）—— 对应 Caddyfile 里的 /dl/* 路由

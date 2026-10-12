@@ -36,12 +36,16 @@ import {bjTime} from '../format'
 import {askConfirm} from '../confirm'
 import SegTabs from '../comps/SegTabs.vue'
 import ServerStatusView from './ServerStatusView.vue'
+import ProxyUsersPanel from '../comps/ProxyUsersPanel.vue'
+import RustDeskPanel from '../comps/RustDeskPanel.vue'
 
-type AdminTab = 'users' | 'server'
+type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk'
 
 const TABS: {value: AdminTab; label: string}[] = [
   {value: 'users', label: '用户管理'},
-  {value: 'server', label: '服务器'}
+  {value: 'server', label: '服务器'},
+  {value: 'proxy', label: '代理订阅'},
+  {value: 'rustdesk', label: '远程桌面'}
 ]
 
 const props = defineProps<{tab?: AdminTab}>()
@@ -190,6 +194,12 @@ onMounted(load)
 
     <!-- 服务器那半自己带面板和头部，不再套一层 -->
     <ServerStatusView v-if="props.tab === 'server'" />
+
+    <!-- 代理订阅（梯子）：同样自带面板 -->
+    <ProxyUsersPanel v-else-if="props.tab === 'proxy'" />
+
+    <!-- 远程桌面（RustDesk）：只读，同样自带面板 -->
+    <RustDeskPanel v-else-if="props.tab === 'rustdesk'" />
 
     <div v-else class="adm-users">
       <section class="panel">

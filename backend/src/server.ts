@@ -34,6 +34,24 @@ import {
   query
 } from './db/client'
 import {collectServerStatus, recentSamples, startSampling} from './system'
+import {
+  createProxyUser,
+  deleteProxyUser,
+  importProxyUsersFromAgent,
+  listProxyUsers,
+  NODE,
+  nodeUrl,
+  proxyHealth,
+  qrDataUrl,
+  rotateProxyPassword,
+  rotateProxyUuid,
+  setProxyUserEnabled,
+  setProxyUserNote,
+  subUrl,
+  syncProxyUsers,
+  type ProxyUser
+} from './proxy'
+import {rustDeskSnapshot, setRustDeskNote} from './rustdesk'
 import {pruneOldData} from './db/prune'
 import {
   CaseLabel,
@@ -5020,6 +5038,188 @@ async function route(
       }
     }
     return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /* ---- 管理员：代理订阅（梯子）用户管理（2026-10-12） ----
+   *
+   * 应用库是权威副本，每次改动都整体下发给宿主机的 xrayd 服务（见 ./proxy.ts）。
+   * 提交新用户 / 加子域名时只需要动这一个模块。
+   */
+  if (p === '/api/admin/proxy' || p.startsWith('/api/admin/proxy/')) {
+    if (!me.isAdmin) return sendJson(res, 403, {error: '需要管理员权限'})
+
+    /** 给前端的形状：订阅地址 / 节点链接都在服务端拼好，前端不用知道 REALITY 参数 */
+    const shape = (u: ProxyUser) => ({
+      id: u.id,
+      name: u.name,
+      note: u.note,
+      enabled: u.enabled,
+      uuid: u.uuid,
+      subUrl: subUrl(u),
+      nodeUrl: nodeUrl(u),
+      syncedAt: u.syncedAt,
+      createdAt: u.createdAt
+    })
+
+    if (p === '/api/admin/proxy' && method === 'GET') {
+      // 库里空着（第一次打开这一页）→ 先把宿主机上已有的用户收进来，
+      // 免得后面任何一次下发把他们整体抹掉。失败不影响列列表。
+      if ((await listProxyUsers()).length === 0) {
+        const added = await importProxyUsersFromAgent().catch(() => 0)
+        // 导入的是**新密码**，得立刻下发一次，页面上显示的订阅地址才马上能用
+        if (added > 0) await syncProxyUsers()
+      }
+      const users = await listProxyUsers()
+      return sendJson(res, 200, {
+        users: users.map(shape),
+        node: NODE,
+        health: await proxyHealth()
+      })
+    }
+
+    // 手动从宿主机导入（比如先用命令行加了人，再回到页面上管理）
+    if (p === '/api/admin/proxy/import' && method === 'POST') {
+      try {
+        const added = await importProxyUsersFromAgent()
+        const r = await syncProxyUsers()
+        return sendJson(res, 200, {
+          ok: r.ok,
+          added,
+          error: r.error,
+          users: (await listProxyUsers()).map(shape),
+          health: await proxyHealth()
+        })
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    // 新建
+    if (p === '/api/admin/proxy' && method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      try {
+        const created = await createProxyUser({
+          name: str(body.name),
+          note: str(body.note)
+        })
+        return sendJson(res, 201, {ok: true, user: shape(created)})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    // 手动重新下发（宿主机掉线过 / 状态对不上时点一下）
+    if (p === '/api/admin/proxy/sync' && method === 'POST') {
+      const r = await syncProxyUsers()
+      return sendJson(res, r.ok ? 200 : 502, {
+        ok: r.ok,
+        error: r.error,
+        users: r.users.map(shape),
+        health: await proxyHealth()
+      })
+    }
+
+    const m = p.match(
+      /^\/api\/admin\/proxy\/(\d+)(\/(enabled|password|uuid|qr))?$/
+    )
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+    const action = m[3]
+
+    // 二维码（订阅地址 / 单节点链接）—— 单独取，免得列表里塞一堆 base64
+    if (action === 'qr') {
+      if (method !== 'GET') return sendJson(res, 405, {error: 'Method Not Allowed'})
+      const u = (await listProxyUsers()).find(x => x.id === id)
+      if (!u) return sendJson(res, 404, {error: '用户不存在'})
+      const what = new URL(req.url ?? '/', 'http://x').searchParams.get('what')
+      const text = what === 'sub' ? subUrl(u) : nodeUrl(u)
+      return sendJson(res, 200, {
+        what: what === 'sub' ? 'sub' : 'node',
+        dataUrl: await qrDataUrl(text)
+      })
+    }
+
+    // 存备注（不碰宿主机）
+    if (!action && method === 'PATCH') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      const u = await setProxyUserNote(id, str(body.note))
+      return u ? sendJson(res, 200, {ok: true, user: shape(u)}) : sendJson(res, 404, {error: '用户不存在'})
+    }
+
+    // 删人：先把库里的行删掉，再整体下发（少了这个人，宿主机那边他立刻连不上）
+    if (!action && method === 'DELETE') {
+      try {
+        const ok = await deleteProxyUser(id)
+        if (!ok) return sendJson(res, 404, {error: '用户不存在'})
+        return sendJson(res, 200, {
+          ok: true,
+          users: (await listProxyUsers()).map(shape),
+          health: await proxyHealth()
+        })
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    if (method !== 'POST') return sendJson(res, 405, {error: 'Method Not Allowed'})
+
+    try {
+      // 停用 / 启用
+      if (action === 'enabled') {
+        const body = await readJsonBody(req).catch(() => null)
+        if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+        const u = await setProxyUserEnabled(id, body.enabled === true)
+        if (!u) return sendJson(res, 404, {error: '用户不存在'})
+        return sendJson(res, 200, {ok: true, user: shape(u), health: await proxyHealth()})
+      }
+
+      // 换订阅密码（订阅地址变了，客户端要重新拉一次）
+      if (action === 'password') {
+        const u = await rotateProxyPassword(id)
+        return u
+          ? sendJson(res, 200, {ok: true, user: shape(u)})
+          : sendJson(res, 404, {error: '用户不存在'})
+      }
+
+      // 换节点 UUID（旧节点链接立刻作废）
+      if (action === 'uuid') {
+        const u = await rotateProxyUuid(id)
+        return u
+          ? sendJson(res, 200, {ok: true, user: shape(u)})
+          : sendJson(res, 404, {error: '用户不存在'})
+      }
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+
+    return sendJson(res, 404, {error: 'Not Found'})
+  }
+
+  // 删人的 DELETE 已经并到上面那段 `/:id` 里了
+
+  /* ---- 管理员：远程桌面（RustDesk）—— 只读页面，唯一能改的是别名 ---- */
+  if (p === '/api/admin/rustdesk' || p.startsWith('/api/admin/rustdesk/')) {
+    if (!me.isAdmin) return sendJson(res, 403, {error: '需要管理员权限'})
+
+    // 一页要的全部数据：接入信息 + 设备清单 + 最近活动（宿主机 agent 读出来）
+    if (p === '/api/admin/rustdesk' && method === 'GET') {
+      return sendJson(res, 200, await rustDeskSnapshot())
+    }
+
+    // 存别名 —— 只动应用库，**不碰宿主机**（agent 是只读的）
+    const m = p.match(/^\/api\/admin\/rustdesk\/(\d{1,20})$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    if (method !== 'PATCH') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      await setRustDeskNote(m[1], str(body.note))
+      return sendJson(res, 200, {ok: true})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
   }
 
   /* ---- 管理员：账号管理（新建用户 / 改密码 / 查看各自的 DS 配置） ---- */

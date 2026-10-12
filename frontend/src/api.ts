@@ -185,6 +185,158 @@ export const setAdminUserPassword = (id: number, password: string) =>
 export const deleteAdminUser = (id: number) =>
   del<{ok: boolean}>(`/api/admin/users/${id}`)
 
+/* ---------------- 代理订阅（梯子）用户 ---------------- */
+
+/**
+ * 每人一个独立 UUID + 一条带 BasicAuth 的订阅地址。
+ * 订阅地址 / 节点链接都由后端拼好（前端不需要知道 REALITY 那些参数）。
+ */
+export interface ProxyUser {
+  id: number
+  name: string
+  note: string
+  enabled: boolean
+  uuid: string
+  /** 直接丢给 Clash 的「订阅」栏（用户名密码内嵌在 URL 里） */
+  subUrl: string
+  /** 单节点 vless:// 链接 */
+  nodeUrl: string
+  /** 上次成功下发到宿主机的时间；null = 还没成功过 */
+  syncedAt: string | null
+  createdAt: string
+}
+
+export interface ProxyNodeInfo {
+  server: string
+  port: number
+  sni: string
+  domain: string
+}
+
+export interface ProxyHealth {
+  ok: boolean
+  error?: string
+  xrayActive?: boolean
+  subActive?: boolean
+  inboundPort?: number
+  enabledUsers?: number
+}
+
+export const fetchProxyUsers = () =>
+  get<{users: ProxyUser[]; node: ProxyNodeInfo; health: ProxyHealth}>(
+    '/api/admin/proxy'
+  )
+
+export const createProxyUser = (body: {name: string; note?: string}) =>
+  post<{ok: boolean; user: ProxyUser}>('/api/admin/proxy', body)
+
+export const setProxyUserEnabled = (id: number, enabled: boolean) =>
+  post<{ok: boolean; user: ProxyUser; health: ProxyHealth}>(
+    `/api/admin/proxy/${id}/enabled`,
+    {enabled}
+  )
+
+export const setProxyUserNote = (id: number, note: string) =>
+  patchReq<{ok: boolean; user: ProxyUser}>(`/api/admin/proxy/${id}`, {note})
+
+/** 换订阅密码：订阅地址跟着变，客户端要重新拉一次 */
+export const rotateProxyPassword = (id: number) =>
+  post<{ok: boolean; user: ProxyUser}>(`/api/admin/proxy/${id}/password`, {})
+
+/** 换节点 UUID：旧节点链接立刻作废 */
+export const rotateProxyUuid = (id: number) =>
+  post<{ok: boolean; user: ProxyUser}>(`/api/admin/proxy/${id}/uuid`, {})
+
+export const deleteProxyUser = (id: number) =>
+  del<{ok: boolean; users: ProxyUser[]; health: ProxyHealth}>(
+    `/api/admin/proxy/${id}`
+  )
+
+/** 手动重新下发（宿主机掉线过、或状态对不上时点一下） */
+export const syncProxyUsers = () =>
+  post<{ok: boolean; error?: string; users: ProxyUser[]; health: ProxyHealth}>(
+    '/api/admin/proxy/sync',
+    {}
+  )
+
+/** 二维码：`what=sub` 是订阅地址，其余是单节点链接 */
+export const proxyQr = (id: number, what: 'sub' | 'node') =>
+  get<{what: 'sub' | 'node'; dataUrl: string}>(
+    `/api/admin/proxy/${id}/qr?what=${what}`
+  )
+
+/* ---------------- 远程桌面（RustDesk） ---------------- */
+
+export interface RustDeskDevice {
+  /** RustDesk 的设备 ID（客户端上显示的那串数字） */
+  id: string
+  /** 我们自己起的别名（存在应用库里，服务端没有这个概念） */
+  note: string
+  createdAt: string | null
+  ip: string | null
+  lastSeenAt: string | null
+  /** 最近 24 小时上线过几次 —— 比单纯的「在线/离线」诚实 */
+  events24h: number
+}
+
+export interface RustDeskEndpoint {
+  ip: string
+  port: number
+}
+
+export type RustDeskActivity =
+  | {kind: 'online'; at: string; deviceId: string; ip: string | null}
+  | {
+      kind: 'relay'
+      at: string
+      id: string
+      from: RustDeskEndpoint | null
+      to: RustDeskEndpoint | null
+      closedAt: string | null
+      seconds: number | null
+    }
+
+export interface RustDeskPort {
+  port: number
+  proto: string
+  what: string
+}
+
+export interface RustDeskServerInfo {
+  idServer: string
+  /** 客户端要填的那个 key */
+  key: string | null
+  webClient: string
+  diagUrl: string
+  ports: RustDeskPort[]
+  dbPath: string
+  /** 日志回看窗口（例如 `72h`）——「最后活动」最早只能追到这里 */
+  logSince: string
+}
+
+export interface RustDeskHealth {
+  ok: boolean
+  error?: string
+  hbbs?: boolean
+  hbbr?: boolean
+  peers?: number
+  sessions?: number
+}
+
+export interface RustDeskSnapshot {
+  /** 给新设备用的那一堆参数（agent 连不上时为 null） */
+  server: RustDeskServerInfo | null
+  devices: RustDeskDevice[]
+  activity: RustDeskActivity[]
+  health: RustDeskHealth
+}
+
+export const fetchRustDesk = () => get<RustDeskSnapshot>('/api/admin/rustdesk')
+
+/** 存别名 —— 只写应用库，不碰宿主机（那个 agent 是只读的） */
+export const setRustDeskNote = (id: string, note: string) =>
+  patchReq<{ok: boolean}>(`/api/admin/rustdesk/${id}`, {note})
+
 /* ---------------- 合约行情置顶（每个用户最多 5 个） ---------------- */
 
 /**

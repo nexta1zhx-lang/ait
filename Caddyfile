@@ -7,6 +7,29 @@
 #   ① DNS：bitcoooin.cn 的 A 记录 → 52.194.6.144（已确认配好）
 #   ② Lightsail 防火墙放行 80 / 443（控制台 → Networking → IPv4 Firewall）
 
+# ================================================================
+# 扫描器防护（2026-10-12）
+#
+# 现象：pan.bitcoooin.cn 一小时被打 1077 次，bitcoooin.cn 也被探
+#   /wp-login.php、/wp-json/batch/v1、/.git/config、//…/cache.php —— 随机 UA 的
+#   通用 CMS / 漏洞扫描，跟这两个站点实际用的技术栈毫无关系。
+#   应用是 SPA（未知路径也回 index.html 200），扫描器会因此一直回来，
+#   所以这里在 Caddy 层直接 403，不进应用。
+#
+# ⚠️ 只列**这两个站点不可能用到**的路径：动态脚本后缀 + wp-*/探针目录。
+#    应用自己的 /api/* /assets/* /fonts/* /dl/* /diag* 一律不碰。
+# ================================================================
+(scanner-guard) {
+	@scanner {
+		path *.php *.php5 *.php7 *.phtml *.asp *.aspx *.jsp *.cgi
+		path /wp-* /xmlrpc.php /wordpress/* /vendor/* /cgi-bin/* /setup.cgi
+		path /.git/* /.svn/* /.hg/* /.env /.env.* /.aws/* /.ssh/* /.kube/*
+		path /phpmyadmin* /pma* /adminer* /myadmin* /telescope/* /actuator/* /solr/*
+		path /h5/* /api/user/ismustmobile /api/init
+	}
+	respond @scanner 403
+}
+
 bitcoooin.cn {
 	encode gzip zstd
 
@@ -26,6 +49,11 @@ bitcoooin.cn {
 	# ⚠️ handle 之间是**互斥**的（按路径长度挑最匹配的那条），
 	# 所以这条兜底的必须是一个**不带头部**的 handle，不能再直接写 reverse_proxy。
 	handle {
+		# ⚠️ 必须写在兜底 handle **里面**：Caddy 会把 handle/handle_path 分成一组
+		#    提前求值（实测编译后是 handle 组在前、站点顶层的 respond 在后），
+		#    写在外面的话这条守卫轮不到执行（线上验证过：顶层的写法不生效）。
+		import scanner-guard
+
 		# 分析 / 提炼走 SSE（text/event-stream）。
 		# flush_interval -1 = 每个事件立刻写出去，否则「分析过程」会憋到跑完才显示。
 		reverse_proxy app:8787 {

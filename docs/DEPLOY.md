@@ -265,6 +265,154 @@ dev server --HTTP CONNECT--> 127.0.0.1:8888 --(ssh -L)--> 服务器 127.0.0.1:88
 
 ---
 
+## 代理订阅（梯子）与「管理 → 代理订阅」页（2026-10-12）
+
+服务器上除应用外还跑着一个**自用梯子**（VLESS + REALITY）。每个人一个独立 UUID、
+一条带 BasicAuth 的订阅地址；现在**在应用的「我的 → 管理 → 代理订阅」里点点鼠标就能
+加人 / 停用 / 换密码**，不用再 SSH 上去跑脚本。
+
+### 四块东西，各管一段
+
+```
+浏览器/Clash ──443/TCP──> xray (REALITY, 宿主机 systemd)
+                            │  认得 REALITY 握手 → 当代理用
+                            └─ 不认得（普通浏览器）→ 原样回落给 dest
+                                                     ↓
+                                          127.0.0.1:8444 ─> ca-caddy (容器)
+
+Clash 拉订阅 ──https://bitcoooin.cn/sub/clash──> xray ─回落─> caddy ─/sub/*─> 172.17.0.1:2096
+                                                                              (sub_server.py, BasicAuth)
+
+应用「代理订阅」页 ──容器内──> host.docker.internal:2097 (xrayd, 令牌鉴权)
+                                    └─ 写 users.json + 重建 xray clients + 重启 xray
+```
+
+| 位置 | 干什么 |
+|---|---|
+| `/usr/local/etc/xray/config.json` + `xray.service` | 梯子真身。**443**，REALITY，`dest=127.0.0.1:8444`（就是本机的 Caddy）、`serverNames=["bitcoooin.cn"]` —— 伪装目标就是你自己那个真网站，探测者看到的是一张真的 Let's Encrypt 证书 |
+| `/opt/sub_server.py` + `subscription.service` | 订阅服务。**只监听 docker0 网关 `172.17.0.1:2096`**，公网连不上；BasicAuth 凭据只在 `users.json` 里存 PBKDF2 哈希；`/clash` 发 Clash 配置、`/vless` 发单节点链接，其它路径一律 404（旧版 `GET /` 会把密钥回显出去，等于白送节点） |
+| `/opt/xrayd.py` + `xrayd.service` | **唯一动 xray 配置的地方**（root）。只监听 `172.17.0.1:2097` + `X-Admin-Token`（`/etc/xrayd-token`，root 600）。接口只有三个：`GET /health`、`GET /users`、`PUT /users`（**整体覆盖**，天然不漂移） |
+| `/usr/local/bin/xray-user` | 命令行前端，调上面的 xrayd。`list` / `add <名字> [密码]` / `del` / `passwd` / `link` / `sync` |
+
+**Caddy 那边**（`docker-compose.prod.yml`）：`443` 让给了 xray，所以 caddy 只留
+`'80:80'` + `'127.0.0.1:8444:443'` + `'443:443/udp'`（HTTP/3 走 UDP，不经 xray）。
+路由 `handle_path /sub/*` 写在**服务器上的** `/opt/crypto-advisor/Caddyfile`
+（这份是权威版本，`release.sh` 已排除它，仓库里那份不参与发布）。
+
+### 应用侧
+
+- 表 `proxy_users`（`backend/src/db/schema.ts`）是**权威副本**：名字 / uuid / 订阅密码 /
+  是否启用。密码明文存 —— 和 `user_llm_keys` 同一个口径（只有管理员读得到），
+  因为订阅地址要能**反复复制**给朋友，只存哈希就再也显示不出来了。
+- 每次改动都会把**整份列表**下发给 xrayd（`backend/src/proxy.ts`）。下发失败不会假装成功：
+  接口会明确告诉你「已存库、下发失败」，页面顶部也会出现不一致提示 + 「同步」按钮。
+- **第一次打开这一页会自动把宿主机上已有的用户导入进来（uuid 原样保留）**，
+  免得任何一次下发把现成的节点抹掉；导入后页面上的订阅地址立刻就能用。
+- 需要 `XRAYD_TOKEN`：服务器上 `/opt/crypto-advisor/.env` 里那一行（部署时生成，
+  和 `/etc/xrayd-token` 同一个值）。本地开发想看这一页，
+  先 `ssh -L 2097:172.17.0.1:2097 ubuntu@<服务器>`，再把 `XRAYD_ENDPOINT`
+  指到 `http://127.0.0.1:2097`。
+
+### 常用命令（服务器上）
+
+```bash
+sudo xray-user list                 # 现在有谁
+sudo xray-user add lisi             # 加人（打印他自己的订阅地址 + 节点链接）
+sudo xray-user del lisi             # 吊销（UUID 立刻失效）
+sudo xray-user passwd lisi          # 换订阅密码
+sudo xray-user sync                 # 把当前状态重新下发一遍（排障用）
+systemctl status xray xrayd subscription
+sudo tail -f /var/log/subscription.log   # 谁在什么时候拉了订阅
+```
+
+### ⚠️ 三件容易踩的
+
+1. **改端口 / SNI 要同时改四处**，否则页面上显示的地址和实际能连的对不上：
+   `xray-user`（文件头常量）、`sub_server.py`（`PORT_XRAY`/`SNI`）、`xray/config.json`
+   （`port` / `realitySettings`）、`backend/src/proxy.ts` 的 `NODE`。
+2. **443 现在由 xray 把着**：xray 挂了，普通浏览器也进不来应用（因为要靠它回落到 Caddy）。
+   这是「梯子不易被墙」换来的代价 —— 接受不了就把两者拆到不同 IP。
+3. **别在 Verge 运行时手改它的 profile 文件**：Clash Verge 有文件监听，读到半截会生成
+   空配置（`proxies: []`），表现为「一改就掉线」。要手改就先退出它。
+
+---
+
+## 远程桌面（RustDesk）与「管理 → 远程桌面」页（2026-10-12）
+
+自建的 RustDesk 中继：容器 `hbbs` / `hbbr`（`rustdesk/rustdesk-server:latest`），
+数据在 `/opt/rustdesk/`（`db_v2.sqlite3` + `id_ed25519(.pub)`），
+客户端填的 ID 服务器是 `rustdesk.bitcoooin.cn`（Caddy 上有同名站点块，
+WSS 经 `/opt/rustdesk-gw/Caddyfile` 转到 21120）。
+
+### 为什么要有 `rustdeskd` 这个 agent
+
+**OSS 版的 rustdesk-server 没有任何管理界面，也没有管理 API** —— 设备清单只躺在
+hbbs 的 `db_v2.sqlite3`（一张 `peer` 表：id / 首次注册 / 客户端上报的 ip），
+连接记录只在容器日志里。而那个库被 hbbs 以 WAL 独占、日志在 `/var/lib/docker` 下
+（root only），应用容器两样都碰不到。所以宿主机上放了一个**只读**的
+`rustdeskd`（`/opt/rustdeskd.py` + `/etc/systemd/system/rustdeskd.service`，
+root，只监听 `172.17.0.1:2098`，令牌 `/etc/rustdeskd-token`）：
+
+| 接口 | 给什么 |
+|---|---|
+| `GET /health` | hbbs / hbbr 在不在跑、几台设备、几条中继会话 |
+| `GET /server` | 接入信息：ID 服务器域名、key（实时读 `id_ed25519.pub`）、网页客户端、诊断页、端口 |
+| `GET /devices` | 设备清单 + 每台的「最后活动时间 / 最后来源 IP / 24h 上线次数」 |
+| `GET /activity` | 时间线：设备上线事件 + 中继会话（谁连了谁、持续多久） |
+
+⚠️ **它只读**：db 以 `mode=ro` 打开（hbbs 用 WAL 独占它，外部进程写会撞锁甚至弄坏库），
+其余全是读 pubkey 和容器日志。应用侧唯一能改的是**设备别名**，存在自己的 Postgres
+（表 `rustdesk_devices`）—— 改别名不碰宿主机。
+
+应用侧读它用 `RUSTDESKD_TOKEN`（在 `/opt/crypto-advisor/.env`，值就是
+`/etc/rustdeskd-token` 的内容），改动见 `backend/src/rustdesk.ts`。
+两个宿主 agent（xrayd / rustdeskd）的连接与报错姿势收在 `backend/src/host-agent.ts`。
+
+### 三件这一页故意**不做**的事（不是漏了）
+
+1. **没有「在线 / 离线」**：hbbs 的心跳状态只在内存里，日志里也没有下线事件，
+   判断不了。只有「最后活动时间」是真的 —— 界面上不许写成在线状态。
+2. **没有「封禁 / 踢掉设备」**：OSS 版没这个能力，官方 Pro 才有。
+3. **没有「服务端地址簿」**：同样是 Pro 的功能；OSS 客户端只把设备存在本机。
+
+这三样想要就得换 RustDesk Server Pro（收费，且现有设备要重配 key、会断一次）。
+
+### 数据从哪来、边界在哪
+
+- **设备上线**：`docker logs hbbs` 里的 `update_pk <设备ID> [地址]` 行
+  （客户端每次连上来都会上报一次公钥）。**最早只能追到 72 小时以内**
+  （`RUSTDESKD_LOG_SINCE`，默认 `72h`），再往前容器日志里就没有了 ——
+  所以「最后活动」这一列在长时间没重启 hbbs 的机器上是够用的，但别当成历史归档。
+- **中继会话**：`docker logs hbbr` 的 `New relay request <id> from <地址>` 配
+  `Relayrequest <id> from <地址> got paired`（两端就是这么配对的），
+  关闭时间取 `Relay of <地址> closed`。**只有走中继的会话才有记录** ——
+  直连不经服务端、日志里查不到，所以它是「有没有用过」而不是完整审计。
+- hbbs/hbbr 的日志是 json-file 驱动且**没配轮转**，长期不重建会一直涨
+  （现在两天 5KB / 20KB，量很小）。真嫌大就给这两个容器加
+  `--log-opt max-size=10m --log-opt max-file=3`。
+
+### 常用命令（服务器上）
+
+```bash
+systemctl status rustdeskd hbbs hbbr
+sudo journalctl -u rustdeskd -n 50          # agent 自己的日志
+sudo cat /etc/rustdeskd-token               # 应用侧 RUSTDESKD_TOKEN 取这个
+curl -s -H "X-Admin-Token: $(sudo cat /etc/rustdeskd-token)" \
+     http://172.17.0.1:2098/devices | python3 -m json.tool
+sudo docker logs --since 24h hbbs | grep -E "update_pk|IP change"
+```
+
+### ⚠️ 装 / 动这个 agent 时容易踩的
+
+1. **别给 `/opt/rustdesk` 加 systemd 的 `ReadOnlyPaths`**：sqlite 以 `mode=ro`
+   打开 WAL 库时还要能写 `-shm`（wal-index），挂成只读反而读不了。
+2. **`/etc/rustdeskd-token` 已存在时不要重新生成**：一覆盖，应用侧 `.env` 里那份
+   就失效，页面会显示「连不上 rustdeskd」。
+3. **改完 `.env` 里的 `RUSTDESKD_TOKEN` 要重建应用容器**（`docker compose up -d app`）——
+   `env_file` 只在容器创建时读一次。
+
+---
+
 ## 后续更新
 
 > ### 🛑 发布只能由用户**手工命令**（2026-10-07 用户明确要求）

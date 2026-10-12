@@ -37,8 +37,8 @@ const AccountStatsView = defineAsyncComponent(
 
 type Pane = 'exchange' | 'stats' | 'profile' | 'model' | 'admin'
 
-/** 「管理」里那两半 */
-export type AdminTab = 'users' | 'server'
+/** 「管理」里那四段：用户管理 / 服务器 / 代理订阅 / 远程桌面 */
+export type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk'
 
 /**
  * 一级 tab。用户 2026-10-06：「将交易所账户放到第一个」。
@@ -88,9 +88,9 @@ function readModelTab(v: unknown): ModelTab {
   return v === 'usage' || v === 'prompts' ? v : 'keys'
 }
 
-/** 管理页里当前看的是哪一半；只有 `?t=server` 才算服务器，其余都当用户管理 */
+/** 管理页里当前看的是哪一段；只有 `?t=server|proxy|rustdesk` 才算那几段，其余都当用户管理 */
 function readAdminTab(v: unknown): AdminTab {
-  return v === 'server' ? 'server' : 'users'
+  return v === 'server' || v === 'proxy' || v === 'rustdesk' ? v : 'users'
 }
 
 const pane = ref<Pane>(readPane(route.query.p))
@@ -210,10 +210,10 @@ function writeQuery(p: Pane, t: AdminTab, m: ModelTab = modelTab.value): void {
   q.p = p
   /*
    * 二级 tab 只在**非默认**那种情况下写进地址栏：
-   *   · 管理：只有「服务器」才写（`?t=users` 是多余的）；
+   *   · 管理：只有「服务器 / 代理订阅」才写（`?t=users` 是多余的）；
    *   · 模型配置：只有「用量统计 / AI 提示词」才写（默认是「密钥配置」）。
    */
-  if (p === 'admin' && t === 'server') q.t = 'server'
+  if (p === 'admin' && (t === 'server' || t === 'proxy')) q.t = t
   else if (p === 'model' && m !== 'keys') q.t = m
   else delete q.t
   void router.replace({query: q})
