@@ -579,6 +579,12 @@ CREATE TABLE IF NOT EXISTS exchange_fills (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (key_id, trade_id)
 );
+-- 2026-10-13：这一笔成交发生时的**杠杆**（用户：「不是有杠杆吗，开仓的时候没记录吗」）。
+-- ⚠️ 币安**成交明细里没有这一项**（userTrades / ORDER_TRADE_UPDATE 都没有），
+--    只能在落账本那一刻从**持仓快照**（positionRisk）按币种抄一份下来。
+--    所以：NULL = 当时没取到（老的几十段历史全是 NULL，补不回来）；
+--    前端拿到 NULL 就不显示杠杆，别编。
+ALTER TABLE exchange_fills ADD COLUMN IF NOT EXISTS leverage NUMERIC(24,8);
 CREATE INDEX IF NOT EXISTS exchange_fills_user_idx ON exchange_fills (user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, symbol, ts DESC);
 

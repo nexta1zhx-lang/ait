@@ -1184,7 +1184,11 @@ function cycleBuild(masked: boolean): {
   const data: ShareCardData = {
     base,
     side: short ? 'short' : 'long',
-    leverage: null,
+    /*
+     * 杠杆：后端 2026-10-13 起在落账本时从持仓快照抄一份（币安成交明细里没有这项），
+     * 所以**新开的**仓位有、老的几十段是 `null` ⇒ 那一档不画药丸（见 share-card.ts）。
+     */
+    leverage: c.leverage !== null && c.leverage > 0 ? c.leverage : null,
     tone: up ? 'up' : 'down',
     hero: masked ? moveText ?? '—' : signedMoney(c.net),
     heroSub: masked ? null : moveText,

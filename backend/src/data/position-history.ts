@@ -50,6 +50,14 @@ export interface PositionCycle {
   qty: number
   /** 累计平仓量（减仓之和）= 全平后等于 `qty` */
   closedQty: number
+  /**
+   * **开仓那一刻的杠杆**（`exchange_fills.leverage`，从持仓快照抄来的）。
+   *
+   * ⚠️ `null` = 没记录（2026-10-13 之前落的账本全都没有，补不回来）——
+   *    前端拿到 `null` 就别显示杠杆（海报上那颗 `Nx` 药丸不画），别编一个。
+   * ⚠️ 取的是**这一段的第一笔**的杠杆，不是最后修改过的：调杠杆只影响之后的仓。
+   */
+  leverage: number | null
   /** 已实现盈亏（**毛**：所有平仓那几笔的 `realized` 之和） */
   realized: number
   /** 这一段所有成交的手续费之和（正数） */
@@ -130,6 +138,7 @@ export function buildCycles(rows: FillLike[]): PositionCycle[] {
           fee: 0,
           openAt: f.ts,
           closeAt: null,
+          leverage: f.leverage ?? null,
           orders: []
         }
         if (partial) {
@@ -203,6 +212,8 @@ interface CycleBuild {
   fee: number
   openAt: string
   closeAt: string | null
+  /** 开仓那一笔的杠杆（见 `PositionCycle.leverage`） */
+  leverage: number | null
   orders: PositionOrder[]
 }
 
@@ -221,6 +232,7 @@ function finish(c: CycleBuild, closeAt: string | null): PositionCycle {
     exitPrice: exitPrice === null ? null : r8(exitPrice),
     qty: r8(c.qty),
     closedQty: r8(c.closedQty),
+    leverage: c.leverage,
     realized: r8(c.realized),
     fee: r8(c.fee),
     /* 资金费后面从钱账本单独归过来（见 `listPositionHistory`），这里先起 0；
@@ -245,6 +257,12 @@ interface FillLike {
   amount: number
   fee: number
   realized: number
+  /**
+   * 这一笔发生时的杠杆（`exchange_fills.leverage`）。
+   * ⚠️ `null` / 缺省 = 没记录（2026-10-13 之前的账本都没有）—— 一路传到
+   *    `PositionCycle.leverage`，前端拿 `null` 就不显示。
+   */
+  leverage?: number | null
   ts: string
 }
 
@@ -319,7 +337,7 @@ export async function listPositionHistory(
   range: HistoryRange = {}
 ): Promise<PositionHistoryResult> {
   const rows = await query<Record<string, unknown>>(
-    `SELECT trade_id, symbol, side, price, amount, fee, realized, ts
+    `SELECT trade_id, symbol, side, price, amount, fee, realized, leverage, ts
        FROM exchange_fills
       WHERE user_id = $1 AND key_id = $2
         AND ($3::text IS NULL OR upper(symbol) = upper($3::text))
@@ -334,6 +352,8 @@ export async function listPositionHistory(
     amount: num(r.amount),
     fee: num(r.fee),
     realized: num(r.realized),
+    /* 老账本这一列是 NULL ⇒ `num(null)` 是 0，这里要的是 NULL 而不是 0（0 会被当成"没有杠杆"） */
+    leverage: r.leverage === null || r.leverage === undefined ? null : num(r.leverage) || null,
     ts: r.ts ? new Date(String(r.ts)).toISOString() : ''
   }))
 

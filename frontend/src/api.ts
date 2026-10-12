@@ -1552,6 +1552,11 @@ export interface ExchangePositionCycle {
   exitPrice: number | null
   qty: number
   closedQty: number
+  /**
+   * **开仓那一刻的杠杆**（后端 2026-10-13 起从持仓快照抄进账本）。
+   * `null` = 没记录（更早的仓位补不回来）⇒ 海报上那颗 `Nx` 药丸不画，别编。
+   */
+  leverage: number | null
   /** 已实现（毛） */
   realized: number
   /** 手续费（正数） */

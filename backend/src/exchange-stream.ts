@@ -1124,6 +1124,25 @@ export class KeyStream {
    * ⚠️ `symbol` 一律存**交易所原始符号**（WS 事件里的 `s` 就是这种，如 `BTCUSDT`）——
    *    否则同一笔成交会以两种写法进库，前端按币分组时就散了。
    */
+  /**
+   * 这一笔成交对应的**杠杆**（用户 2026-10-13：「不是有杠杆吗，开仓的时候没记录吗」）。
+   *
+   * ⚠️ 币安**成交事件里没有杠杆**（`ORDER_TRADE_UPDATE` / `userTrades` 都没有），
+   *    唯一能抄的地方是**持仓快照**：`positionRisk` 里每个持仓都有 `leverage`。
+   *    这里就按币种从 `lastOverview`（最近一次完整快照）里找一份。
+   * ⚠️ 快照可能是几分钟前的，但杠杆极少变（用户自己调的），够用；
+   *    真取不到就存 `NULL` —— 前端拿到 NULL 就不显示，不编数。
+   */
+  private leverageOf(symbol: string): number | null {
+    const want = String(symbol ?? '').toUpperCase()
+    if (!want) return null
+    const row = this.lastOverview?.futures?.positions?.find(
+      p => String(p?.symbol ?? '').toUpperCase() === want
+    )
+    const lev = Number(row?.leverage ?? 0)
+    return Number.isFinite(lev) && lev > 0 ? lev : null
+  }
+
   private async saveTrade(t: any): Promise<boolean> {
     const symbol = String(
       t?.info?.symbol ?? this.ex?.market?.(t?.symbol)?.id ?? t?.symbol ?? ''
@@ -1140,6 +1159,7 @@ export class KeyStream {
       fee: Math.abs(Number(t?.fee?.cost ?? t?.info?.commission ?? 0)),
       feeCcy: String(t?.fee?.currency ?? t?.info?.commissionAsset ?? ''),
       realized: Number(t?.info?.realizedPnl ?? 0),
+      leverage: this.leverageOf(symbol),
       ts: new Date(Number(t?.timestamp ?? Date.now())),
       raw: t?.info ?? t
     }
@@ -1980,6 +2000,7 @@ export class KeyStream {
       fee: Math.abs(Number(o?.n ?? 0)),
       feeCcy: String(o?.N ?? ''),
       realized: Number(o?.rp ?? 0),
+      leverage: this.leverageOf(String(o?.s ?? '')),
       ts: new Date(Number(o?.T ?? Date.now())),
       raw: o
     }

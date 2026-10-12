@@ -150,6 +150,11 @@ export interface FillInput {
   feeCcy: string
   /** 这一笔的已实现盈亏（事件里的 `rp`） */
   realized: number
+  /**
+   * 这一笔发生时的**杠杆**（从持仓快照抄的，见 schema 里那条注释）。
+   * `null` = 当时没取到 —— 存 NULL，别写 0（0 会被当成"没有杠杆"）。
+   */
+  leverage?: number | null
   ts: Date
   raw: unknown
 }
@@ -164,11 +169,12 @@ export async function upsertFill(
   keyId: number,
   f: FillInput
 ): Promise<boolean> {
+  const lev = f.leverage !== null && f.leverage !== undefined && f.leverage > 0 ? f.leverage : null
   const rows = await query<{id: string}>(
     `INSERT INTO exchange_fills
        (user_id, key_id, order_id, trade_id, symbol, side, price, amount,
-        cost, fee, fee_ccy, realized, ts, raw)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+        cost, fee, fee_ccy, realized, leverage, ts, raw)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
      ON CONFLICT (key_id, trade_id) DO NOTHING
      RETURNING id`,
     [
@@ -184,11 +190,29 @@ export async function upsertFill(
       f.fee,
       f.feeCcy || null,
       f.realized,
+      lev,
       f.ts,
       JSON.stringify(f.raw ?? {})
     ]
   )
-  return rows.length > 0
+  const isNew = rows.length > 0
+  /*
+   * ⚠️ **补杠杆**：成交那一刻可能还没拿到持仓快照（刚起流 / 新开的币），
+   *    那一笔的 `leverage` 就是 NULL；而 `ON CONFLICT DO NOTHING` 之后
+   *    **再也不会重写这一行** —— 于是它永远缺杠杆。
+   *    REST 对账每 60 秒会把同一笔成交再送来一次，所以这里补一句 UPDATE
+   *    （只在 NULL 上补，不动已有值），几次之后杠杆就齐了。
+   *   ⚠️ 别把上面改成 `DO UPDATE`：`isNew` 靠"插入成功"判断，
+   *      改成 DO UPDATE 会让每一轮对账都报"有成交"，`noteActivity()` 一直触发。
+   */
+  if (!isNew && lev !== null) {
+    await query(
+      `UPDATE exchange_fills SET leverage = $3
+        WHERE key_id = $1 AND trade_id = $2 AND leverage IS NULL`,
+      [keyId, f.tradeId, lev]
+    )
+  }
+  return isNew
 }
 
 /** 成交 tab 用的一行（数值都转回 number —— pg 的 NUMERIC 出来是字符串） */
