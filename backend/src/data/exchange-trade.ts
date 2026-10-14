@@ -600,23 +600,30 @@ async function isDualSide(ex: any, cacheKey: number | string): Promise<boolean> 
 }
 
 /**
- * 下单前的两条硬上限（用户 2026-10-14 定，**当天改过一次口径**）：
+ * 开单的三条硬上限（用户 2026-10-14 定，**当天改过两次口径，以最后一次为准**）：
  *   · **单笔开单的名义金额 ≤ 5 × 账户权益**（权益 = 钱包余额 + 未实现盈亏）；
- *   · **账户总杠杆 ≤ 11 倍** = (Σ各币持仓名义价值 + 本单名义价值) ÷ 账户权益。
+ *   · **账户总杠杆 ≤ 11 倍** = (Σ各币持仓名义价值 + 本单名义价值) ÷ 账户权益；
+ *   · **单币杠杆 ≤ 10 倍**（`MAX_SYMBOL_LEVERAGE`）。
  *
  * ⚠️ 用户原话：「走个脚本将我交易所的所有币种的杠杆设置为 10 倍，**是开单的金额不能
- *    超出 5 倍**」—— 所以 5 倍管的是**金额**，不是杠杆；**杠杆本身不设上限**
- *    （统一 10x 由脚本设、面板跟随交易所显示）。
- *    早上按「单币杠杆 ≤5x」做过一版，当天就按这个口径撤掉了 —— 别再改回去。
+ *    超出 5 倍**」—— 所以 5 倍管的是**金额**，不是杠杆。当天早上曾按「单币杠杆 ≤5x」
+ *    做过一版、随后撤掉（用户：「是开单的金额不能超出 5 倍」），**别按 5x 理解**。
  *
- * 两条都是**硬上限**：下单接口里拦，绕开界面直接打接口也拦得住。
- * ⚠️ 前端 `OrderPanel.vue` 里那两个常量是**显示**用的，要和这里对齐。
+ * ⚠️ 杠杆上限是**第二版**加的：用户重构 K 线面板时明确「杠杆设置最大只能设 10 倍」，
+ *    所以 `setSymbolLeverage` 现在会拦 >10 的请求（脚本批量设 10x 正好在上限上）。
+ *
+ * 三条都是**硬上限**：下单 / 改杠杆接口里拦，绕开界面直接打接口也拦得住。
+ * ⚠️ 前端 `OrderPanel.vue` 里那几个常量是**显示**用的，要和这里对齐。
  */
 export const MAX_ORDER_EQUITY_RATIO = 5
 export const MAX_ACCOUNT_LEVERAGE = 11
+export const MAX_SYMBOL_LEVERAGE = 10
 
 /**
  * 调这个交易对的杠杆（`POST /fapi/v1/leverage`）。
+ *
+ * 超过 `MAX_SYMBOL_LEVERAGE`（10x）直接拦 —— 用户口径：「杠杆设置最大只能设 10 倍」。
+ * 面板只会给到 10，拦在这里是防绕开界面直接打接口。
  *
  * ⚠️ 有持仓 / 挂单时交易所不让改（会报错），原样把它的原因翻出来给用户。
  */
@@ -628,6 +635,10 @@ export async function setSymbolLeverage(
   assertTradable(c)
   if (!Number.isFinite(leverage) || leverage < 1)
     throw new Error('杠杆至少 1 倍')
+  if (leverage > MAX_SYMBOL_LEVERAGE)
+    throw new Error(
+      `杠杆最多 ${MAX_SYMBOL_LEVERAGE} 倍（你填的是 ${leverage} 倍）`
+    )
   const spec = await specFor(c, rawSymbol)
   const ex = createExchange(c)
 
@@ -774,6 +785,8 @@ export interface PlacedOrder extends OrderParams {
   orderId?: string
   /** 交易所回的状态（真单一般回 `NEW` / `FILLED`；测试单是空对象、没有这个字段） */
   status?: string
+  /** 数量被后端自动收口过才有（见 `placeOrder` 里的 `MAX_AUTO_SHRINK`） */
+  adjusted?: {from: number; to: number; reason: string}
 }
 
 /**
@@ -796,6 +809,97 @@ async function submitOrder(
     orderId: r?.orderId === undefined ? undefined : String(r.orderId),
     status: r?.status === undefined ? undefined : String(r.status)
   }
+}
+
+/**
+ * 「保证金差一点点」的开单收口（用户 2026-10-14：「开单优化如果 5 倍正好触发超出一点 u，
+ * 后端自动精度调整保证能够一次开单成功」）。
+ *
+ * 为什么会有「差一点」：面板那个 5 倍额度是拿**参考价 + 上一次读到的权益**算的，
+ * 真下单时价格已经动过、权益也变过，数量刚好顶格时就吃 -2019（`Margin is insufficient`），
+ * 用户看到的是「点了没开成，还得自己改小数」。
+ *
+ * 做法：只在这一种错误上，按**当前可用保证金 × 该币杠杆**重算一个真正开得动的数量，
+ * 向下取到步长，**同一张单只重试一次**（只改数量，别的一个字不动）。
+ *
+ * ⚠️ 四条边界，缺一不可：
+ *   · 只下调、**绝不放大**；
+ *   · 缩水超过 `MAX_AUTO_SHRINK`（5%）就**不缩了**，原样抛交易所的错 ——
+ *     悄悄把单子缩掉一大截比报错更糟（用户以为自己开满了 5 倍）；
+ *   · 缩完仍要满足交易所的**最小下单量 / 最小名义价值**，否则原样抛错；
+ *   · 只处理**开仓**：`reduceOnly` 的减仓单不走这里（减仓本来就不会缺保证金）。
+ *
+ * ⚠️ 下单是**写操作**，仓库规矩是写操作不自动重试。这里是**唯一例外**，而且是有意的：
+ *    重试的是同一张单、只下调数量、次数硬编码 1（见 `placeOrder`）。
+ */
+const MAX_AUTO_SHRINK = 0.05
+
+/** 保证金不足就是币安 -2019，别的错（精度 / 权限 / 标的）别往这儿接 */
+export function isMarginShort(e: unknown): boolean {
+  const err = e as {name?: string; message?: string} | undefined
+  const m = `${err?.name ?? ''} ${err?.message ?? String(e ?? '')}`
+  return (
+    /insufficientfunds|insufficient margin|margin is insufficient/i.test(m) ||
+    /-2019\b/.test(m)
+  )
+}
+
+/** 再留 0.5% 给手续费：交易所算的是「起始保证金 + 手续费」，顶格算出来还会被它拒第二次 */
+const FEE_SLACK = 0.995
+
+/**
+ * 收口的**判定**部分（纯函数 —— 没有网络、没有交易所，`_verify` 那类临时脚本直接打它）。
+ *
+ * 返回该下调到的数量；`null` = **不调**（算不出来 / 不用缩 / 缩太多 / 缩完不够最小单），
+ * 调用方拿到 `null` 就把交易所原来的错原样抛出去。
+ */
+export function autoShrinkQty(
+  current: number,
+  available: number,
+  leverage: number,
+  price: number,
+  stepSize: number,
+  minQty?: number,
+  minNotional?: number
+): number | null {
+  if (!(current > 0) || !(available > 0) || !(leverage >= 1) || !(price > 0))
+    return null
+  const qty = floorToStep((available * leverage * FEE_SLACK) / price, stepSize)
+  if (!(qty > 0)) return null
+  /* 只下调：算出来比原来还大（价格刚跌过）就说明这不是保证金的锅，别动 */
+  if (qty >= current) return null
+  if (qty < current * (1 - MAX_AUTO_SHRINK)) return null
+  if (minQty && qty < minQty) return null
+  if (minNotional && qty * price < minNotional) return null
+  return qty
+}
+
+/**
+ * 按「当前可用保证金」算这张单最多开多少（只为上面那个收口服务）。
+ * 返回 `null` = 不调（算不出来 / 缩太多 / 缩完不够最小单）—— 一律原样报错。
+ */
+async function shrinkToAffordable(
+  ex: any,
+  spec: SymbolSpec,
+  params: OrderParams
+): Promise<number | null> {
+  const [raw, balance] = await Promise.all([
+    readPositionRiskRow(ex, spec.symbol),
+    fetchFuturesBalance(ex)
+  ])
+  const row: any = Array.isArray(raw) ? (raw[0] ?? null) : raw
+  const lev = Math.floor(n(row?.leverage)) || 0
+  /* 限价单按委托价算保证金，市价单按标记价 —— 跟交易所的算法保持一致 */
+  const px = Number(params.price) > 0 ? Number(params.price) : n(row?.markPrice)
+  return autoShrinkQty(
+    params.quantity,
+    balance.available,
+    lev,
+    px,
+    spec.stepSize,
+    spec.minQty,
+    spec.minNotional
+  )
 }
 
 /**
@@ -869,8 +973,31 @@ export async function placeOrder(
   else if (input.reduceOnly) params.reduceOnly = true
 
   const test = input.test !== false
-  const placed = await submitOrder(ex, params, test)
-  return {...params, test, ...placed}
+  const originalQty = params.quantity
+  try {
+    const placed = await submitOrder(ex, params, test)
+    return {...params, test, ...placed}
+  } catch (e) {
+    /*
+     * 顶格差一点点（-2019）→ 按可用保证金重算数量，**只重试这一张单一次**。
+     * 别的错误、减仓单、缩太多的，一律原样抛（见 `MAX_AUTO_SHRINK` 上面的说明）。
+     */
+    if (input.reduceOnly || !isMarginShort(e)) throw e
+    const smaller = await shrinkToAffordable(ex, spec, params)
+    if (smaller === null) throw e
+    params.quantity = smaller
+    const placed = await submitOrder(ex, params, test)
+    return {
+      ...params,
+      test,
+      ...placed,
+      adjusted: {
+        from: originalQty,
+        to: smaller,
+        reason: '保证金差一点，已按可用保证金下调数量'
+      }
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */

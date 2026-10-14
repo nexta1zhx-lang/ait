@@ -2138,6 +2138,12 @@ export interface PlacedOrder extends OrderParams {
   test: boolean
   orderId?: string
   status?: string
+  /**
+   * 数量被后端**自动收口**过才有（用户 2026-10-14：顶格差一点保证金时
+   * 后端按可用保证金下调一次数量，保证一次开单成功）。
+   * 后端 `placeOrder` 的 `MAX_AUTO_SHRINK` 那段。
+   */
+  adjusted?: {from: number; to: number; reason: string}
 }
 
 /** 平仓单：比普通单多一个「平的是哪个方向」 */

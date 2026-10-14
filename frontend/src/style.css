@@ -4494,10 +4494,6 @@ body.fixed-viewport .split {
 }
 
 /*
- * 「可用 xxx USDT」——在价格那一行的最右（以前挂在顶栏的最右，见 `.ord-price-row`）。
- * 现在不属于 `.ord-head`，选择器去掉了那层限定。
- */
-/*
  * 价格行最右端那颗 MM 保证金率（2026-10-07 从币种行挪下来的，用户：
  * 「mm放在 下面最右侧和价格那一排」）—— 徽章本体在 `MarginRateBadge.vue`，
  * 这里只管**把它顶到行尾**（价格 + 涨跌都靠左）。
@@ -4507,26 +4503,6 @@ body.fixed-viewport .split {
 .tk-price .tk-mm {
   margin-left: auto;
 }
-.ord-avail {
-  font-size: 11px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.ord-avail b {
-  font-family: var(--mono);
-  color: var(--text);
-}
-
-/*
- * 合约里一分钱都没有：把「0」标红，并挂一句「先去划转」的 title
- *（用户 2026-10-05：「我怎么开仓位」—— 光一个 0 看不出下一步该干嘛）。
- */
-.ord-avail.empty b {
-  color: var(--bad);
-}
-
 .ord-field {
   display: flex;
   align-items: center;
@@ -4567,58 +4543,6 @@ body.fixed-viewport .split {
   font-style: normal;
   font-size: 10px;
   color: var(--muted);
-}
-
-/*
- * 价格那一行：左边「价格 + 市价开关 + 输入框（限价时多一颗现价）」，
- * 右边顶到行尾放「账户标签 + 可用余额」。
- *
- * 用户 2026-10-05：「价格那行输入价格太长了，缩短右侧放账户和余额可用，账户用标签的形式」
- * ⇒ 输入框改成**固定短宽**（130px），整行不再被它撑满；`.ord-right` 用
- *    `margin-left: auto` 顶到行尾。
- *
- * ⚠️ 高度要**钉死**：市价模式这一行只有输入框（27px），限价模式多一颗「现价」，
- *    而那颗 `.ghost.tiny` 自带 padding、比输入框高 4px —— 不钉的话整个下单区
- *    会跟着长高 4px（用户 2026-10-05：「下单区域高度固定」）。
- */
-.ord-price-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.ord-field.ord-price {
-  /* 行宽交给 `.ord-price-row`，自己只吃内容那么多 */
-  flex: 0 1 auto;
-  max-width: none;
-  margin-bottom: 0;
-}
-
-/* 价格输入框：以前 `flex: 1 1 auto` 会一路拉满，现在钉死一个短宽度 */
-.ord-field.ord-price input {
-  flex: 0 1 130px;
-  max-width: 130px;
-}
-
-.ord-field.ord-price input,
-.ord-field.ord-price .ord-fill {
-  height: 27px;
-}
-
-.ord-field.ord-price .ord-fill {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 10px;
-}
-
-/* 右侧那一组（账户标签 + 可用余额）：顶到行尾，且不许换行挤压 */
-.ord-right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  min-width: 0;
 }
 
 
@@ -4775,33 +4699,139 @@ body.fixed-viewport .split {
 }
 
 /*
- * 杆子底下那四格：仓位% / 保证金 / 数量 / 名义价值。
+ * 「开多大」那一块（2026-10-14 重做）：**替掉了原来的「仓位」滑动条，限价也没了**。
  *
- * ★ 固定两列 × 两行（用户 2026-10-05：「下单区域高度固定」）：
- *   数字用等宽 + `tabular-nums`，格子宽度按 `1fr` 平分 ⇒
- *   数值怎么变、有没有「—」，这一块的高度都一样，K 线图不会被挤上挤下。
+ * 版式：一张圆角卡片，右上角钉一枚 `5×` 小标（这一单按几倍权益算），
+ * 中间**一行大号数字** = 这一单的仓位价值（USDT）—— 开单时最该一眼看见的就是它；
+ * 底下那行小字说清「这数是哪来的」（够不到 5 倍时会明说是**最多能开**）。
+ *
+ * ⚠️ 高低不随数值变：大号数字固定 `line-height`、小字固定一行；
+ *    数字短了长了都不改高度（用户 2026-10-05：「下单区域高度固定」）。
+ */
+.ord-quota {
+  position: relative;
+  margin-bottom: 8px;
+  padding: 9px 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 10px);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--panel-2) 92%, #fff 8%),
+    var(--panel-2)
+  );
+}
+
+/* 「仓位价值」这个标签：小、灰、不抢戏 —— 真正的主角是下面那个数 */
+.ord-quota-lb {
+  display: block;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.ord-quota-tag {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 16px;
+  font-weight: var(--fw-mid);
+}
+
+.ord-quota-num {
+  display: block;
+  font-family: var(--mono);
+  font-size: 21px;
+  line-height: 1.3;
+  font-weight: var(--fw-bold);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ord-quota-num i {
+  margin-left: 5px;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.ord-quota-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.ord-quota-subtxt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ord-quota-sub b {
+  font-family: var(--mono);
+  color: var(--text);
+  font-weight: var(--fw-mid);
+}
+
+/*
+ * 「总杠杆 3.2x」——成交后的**预计账户总杠杆**（后端 11 倍那道闸的预演）。
+ * 顶到上限标黄（用户口径：超了会被拒单，提前看见比挨拒好）。
+ */
+.ord-levhint {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.ord-levhint.warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  color: var(--warn);
+}
+
+/*
+ * 底下三格：保证金 / 数量 / 可用。
+ * ★ 等宽三等分的小卡片（用户 2026-10-05：「下单区域高度固定」）：
+ *   数字等宽 + `tabular-nums`，格子按 `1fr` 平分 ⇒ 数值怎么变、
+ *   有没有「—」，这一块高度都一样，上面的 K 线不会被挤上挤下。
  */
 .ord-read {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
   margin-bottom: 8px;
 }
 
 .ord-read .ord-r {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: nowrap;
+  padding: 6px 8px;
+  border-radius: var(--r-sm, 10px);
+  background: var(--panel-2);
+  line-height: 1.45;
 }
 
 .ord-read .ord-r em {
-  flex: 0 0 auto;
   font-style: normal;
+  font-size: 10px;
   color: var(--muted);
 }
 
@@ -4809,10 +4839,30 @@ body.fixed-viewport .split {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
   font-weight: var(--fw-mid);
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
+
+/* 数字后面那截单位（USDT）—— 小一号、灰色，别跟数字抢（数字才是要看的） */
+.ord-read .ord-r b i {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/*
+ * 合约里一分钱都没有：把「0」标红（并挂一句「先去划转」的 title，见模板）。
+ *（用户 2026-10-05：「我怎么开仓位」—— 光一个 0 看不出下一步该干嘛。）
+ */
+.ord-read .ord-r b.empty {
+  color: var(--bad);
+}
+
 
 /*
  * 下单区的「身子」：开单 / 仓位两页**叠在同一个格子**里。
@@ -4844,10 +4894,37 @@ body.fixed-viewport .split {
 .ord-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
-  /* 行高也钉住：`做多/做空` 是大按钮，比 `刷新持仓` 那种 ghost 高 3px */
-  min-height: 35px;
+  /* 行高也钉住：`做多/做空` 是大按钮，比「加仓 50%」那种小胶囊高 3px */
+  min-height: 37px;
+}
+
+/*
+ * 「加仓 50% / 100%」两颗小胶囊（**有浮盈才出现**，用户 2026-10-14：
+ * 「如果还有盈利 还可以选择加仓 50% 或者 100%」）。
+ *
+ * ⚠️ 它们跟做多/做空**同一行**，所以自己做窄一点（`flex: 0 0 auto` + 小 padding）：
+ *    这一行要能同时塞下「加仓 50% + 加仓 100% + 做多 + 做空」而不换行 ——
+ *    换行就会把面板撑高、把上面的 K 线顶上去（「下单区域高度固定」）。
+ */
+.ord-add-b {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.ord-add-b:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+/* 「重试」那颗（读不到余额时才有）：跟加仓胶囊一样矮，别把这一行顶高 */
+.ord-retry {
+  flex: 0 0 auto;
+  height: 28px;
 }
 
 /*
@@ -4855,9 +4932,8 @@ body.fixed-viewport .split {
  *（用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」——
  *  去掉了原来「方向开关 + 一颗下单按钮」那套）。
  *
- * 宽度：等分（`flex: 1 1 0`）+ 上限 200px。
- *   · 窄屏（手机一整行 300 出头）两颗平分，手指好点，不会一排挤成两颗小方块；
- *   · 宽屏不让它们拉成两条 900px 的色带，撑到 200px 就停、整行仍然右对齐。
+ * 版式（2026-10-14 调）：**整行平分、铺满**（`flex: 1 1 0`，不再有 200px 上限）——
+ * 这样两只手都够得着，也是整个面板最重的一块，一眼能看出「按这儿就下单」。
  * 颜色用 `--ok-fill` / `--bad-fill`（实心块专用、已经压深到白字够读），
  * 别直接拿 `--ok` / `--bad` 铺底 —— 那两个是浅色，压白字看不清（见 `:root` 那段）。
  *
@@ -4867,12 +4943,14 @@ body.fixed-viewport .split {
  */
 .ord-submit {
   flex: 1 1 0;
-  min-width: 96px;
-  max-width: 200px;
-  padding: 8px 14px;
-  font-size: 13px;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: var(--r-sm, 10px);
+  font-size: 13.5px;
   font-weight: var(--fw-bold);
+  letter-spacing: 0.02em;
   white-space: nowrap;
+  transition: filter 0.12s ease;
 }
 
 .ord-submit.long {
@@ -4883,6 +4961,15 @@ body.fixed-viewport .split {
 .ord-submit.short {
   background: var(--bad-fill);
   color: #fff;
+}
+
+/* 悬停稍微提亮、按下沉 1px —— 大色块没反馈会显得「点不动」 */
+.ord-submit:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ord-submit:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 /*
@@ -5082,29 +5169,6 @@ body.fixed-viewport .split {
   margin: 0;
   font-size: 12px;
   color: var(--muted);
-}
-
-/*
- * 市价开关（价格那一行最左边）。
- * 高度跟同一行的输入框 / 「现价」对齐（27px），别把这一行撑高 ——
- * 下单区整体高度是钉死的（用户 2026-10-05：「下单区域高度固定」）。
- */
-.ord-market {
-  flex: 0 0 auto;
-  height: 27px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: var(--fw-bold);
-}
-
-.ord-market.on {
-  color: var(--blue);
-  border-color: var(--accent-line);
-  background: var(--blue-soft);
 }
 
 /* 顶栏那颗「一键平仓」：警示色，`margin-left: auto` 顶到**最右**（用户 2026-10-05） */

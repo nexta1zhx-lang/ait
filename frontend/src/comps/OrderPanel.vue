@@ -5,7 +5,7 @@
  * 用户原话：「在 k 线页面底部新增下单模块，多空 / 滑动条 / 余额 / 杠杆；
  * 下单模式就两种，默认市价和限价」。之后又定了几条样式：
  *   · **报错一律走提示（toast），不占内容区**（顶部中间、3.5 秒自动关）
- *   · 杠杆挪到顶部那一排当**小标签**，点开弹层选（默认 10x，最高 20x）
+ *   · 杠杆挪到顶部那一排当**小标签**，点开弹层选（默认 10x；2026-10-14 起**最高也只给到 10x**）
  *   · 仓位按 **USDT** 算 / 显示
  *   · 仓位滑动条**每 25% 一个节点**，带阻尼 + 过节点震一下
  *   · 做多做空**各一颗按钮**（按哪颗就是哪个方向）
@@ -30,15 +30,28 @@
  * ⚠️ 顶栏原来那枚常驻的红色「真单」章**已删**（用户 2026-10-07：「提示层真单的那种
  *    去掉，都是真单」+「那个章现在只是噪音」）—— 只有真·测试单那一档才留标记。
  *
+ * ★ 2026-10-14 第四版（用户：「k线页面，底下开单和仓位重构」+「取消限价，优化样式」）：
+ *   · **取消限价** —— 这个面板**只发市价单**（`type: 'market'`）。价格那一行
+ *     （市价开关 + 价格输入框 + 「现价」）整行删掉；算数量一律用**标记价**（`refPrice`），
+ *     它还会跟下单请求一起发给后端做「最小名义价值」体检（不发给交易所）。
+ *   · **不再有滑动条**：这一单固定按「**5 倍额度**」开 =
+ *     `min(5 × 账户权益, 可用保证金 × 杠杆)`（后端 `MAX_ORDER_EQUITY_RATIO` 同口径）。
+ *     够不到 5 倍时，算出来那个数天然就是**最多能开**的量，界面上如实说明。
+ *   · **浮盈加仓 50% / 100%**：有持仓且浮盈 > 0 才出现，保证金 = 浮盈 × pct%。
+ *   · 版式重做：额度那张卡片（大号「仓位价值」+ 右上 `5×` 标 + 「成交后总杠杆」预演）
+ *     + 三格小卡（保证金 / 数量 / 可用）+ 一整行「加仓 · 做多 · 做空」。
+ *   · 杠杆最高 **10x**（`LEV_UI_MAX`，后端 `MAX_SYMBOL_LEVERAGE` 硬拦）。
+ *
  * 余额 / 杠杆都是**绑定那套合约 Key** 的真实数据（`/api/exchange/trade`）：
  *   · 可用余额 → `fapi/v2/balance`
  *   · 当前杠杆 → `fapi/v2/positionRisk`（选了杠杆调 `fapi/v1/leverage` 真设上去）
  *     ⚠️ v1 那个 404 了、v3 在没持仓时回空数组，具体坑见 `data/exchange-trade.ts`
  *
- * 数量不是自己拍的：`数量 = 可用余额 × 仓位% × 杠杆 ÷ 价格`，再按这个合约的
- * 步长向下取整（精度是后端从交易所 exchangeInfo 里读来的）。
+ * 数量不是自己拍的：`数量 = 5 倍额度 ÷ 标记价`，再按这个合约的步长向下取整
+ *（精度是后端从交易所 exchangeInfo 里读来的）。
  * 真正的取整 / 最小量 / 最小名义价值校验都在后端再做一遍 —— 这儿只是让界面
- * 先显示成「将要发出去的那个数」。
+ * 先显示成「将要发出去的那个数」；顶格差一点保证金时后端还会**自动下调数量重试一次**
+ *（见 `placeOrder` 的 `MAX_AUTO_SHRINK`），那种情况会在提示里说明调了多少。
  */
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
@@ -147,13 +160,6 @@ const tab = ref<'open' | 'position'>('open')
 const TABS = [{value: 'open' as const}, {value: 'position' as const}]
 
 /**
- * 市价开关（开单页）：**开着 = 市价单**，左边价格框禁用不能改；
- * **关掉 = 可填价格**，那就是限价单。
- *
- * 用户 2026-10-05：「市价开启左侧价格不让调，关闭可以填价格就是开限价单」。
- */
-const marketOn = ref(true)
-/**
  * 方向：做多 / 做空。
  * 用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」—— 所以它不再是「开关状态」，
  * 只是「这颗按钮按下去时带的方向」，按下那一刻才写进来（见 `submit()`）。
@@ -161,11 +167,11 @@ const marketOn = ref(true)
 const side = ref<'long' | 'short'>('long')
 /** 正在提交的是哪一边 —— 只有那一颗显示「提交中…」，另一颗只是变灰 */
 const busySide = ref<'long' | 'short' | null>(null)
-/** 仓位：占可用余额的百分比（滑动条的值，已经过阻尼） */
-const pct = ref(0)
-/** 杠杆：用户 2026-10-05 定「默认 10 倍、最高 20 倍」 */
+/**
+ * 杠杆：**用户 2026-10-14 定「最大只能设 10 倍」**（之前是 2026-10-05 的「最高 20 倍」）。
+ * ⚠️ 真正拦的是后端 `MAX_SYMBOL_LEVERAGE`（设杠杆接口）—— 这里只管档位不给选超。
+ */
 const lev = ref(10)
-const priceInput = ref('')
 /** 杠杆选值弹层开着没 */
 const levOpen = ref(false)
 
@@ -241,8 +247,8 @@ const exchangeMaxLev = computed(() => {
  */
 /** 可选的杠杆档位 */
 const LEV_STEPS = [1, 2, 3, 5, 10, 15, 20]
-/** 面板自己最多给到 20x（用户 2026-10-05 定的档位表上限） */
-const LEV_UI_MAX = 20
+/** 面板自己最多给到 10x（用户 2026-10-14：「杠杆设置最大只能设 10 倍」） */
+const LEV_UI_MAX = 10
 /**
  * 面板初值 —— **只有读不到交易所当前杠杆时才会用到它**
  * （正常情况下跟交易所同步，见 `load()` 里那段；用户 2026-10-14 提的「没有同步」）。
@@ -264,10 +270,12 @@ const maxLev = computed(() => levOptions.value[levOptions.value.length - 1] ?? 1
 /**
  * 一个杠杆值落到哪个**可选档位**上（交易所上限更低时不硬撑 —— 冷门币可能只有 5x）。
  *
- * 用户 2026-10-14 定的口径：**跟交易所同步**、**杠杆本身不设上限**。所以：
+ * 用户 2026-10-14 定的口径：**跟交易所同步**、但**最高只给到 10x**（`LEV_UI_MAX`）。
+ * 所以：
  *   · 传进来读不到（0）→ 用 `DEFAULT_LEVERAGE`（或这币的交易所上限，取其小）
  *   · 传进来**不在档位里**（8x）→ 取不超过它的最大档（8x → 5x）
- *   · 交易所给的比档位上限还高（比如 20x 就是顶格）→ 正常落在 20x 上
+ *   · 交易所那边写着 20x（以前手工设过）→ 落到档位上限 10x，
+ *     下单前 `ensureLeverage()` 会把 10x 真写回交易所，界面显示和实际对得上
  */
 function fitLeverage(l: number): number {
   const opts = levOptions.value
@@ -288,57 +296,62 @@ const markRef = computed(() => {
   return Number(freshLivePrice.value ?? ticker.value?.last ?? 0) || 0
 })
 
-/** 现价：给限价单「一键用现价」那颗按钮用 */
-const lastRef = computed(
-  () => Number(freshLivePrice.value ?? ticker.value?.last ?? 0) || 0
-)
+/**
+ * 算数量用的参考价 —— 一律 **标记价**（2026-10-14 起这个面板**只有市价单**，
+ * 用户：「取消限价」）。
+ *
+ * 它还会跟着下单请求发给后端（`price` 那个字段）：后端拿它做「最小名义价值」
+ * 的体检，**不发给交易所**。所以拿不到标记价时面板会拦住不让下单
+ * （见 `blocker` 里那条「还没拿到价格」）。
+ */
+const refPrice = computed(() => markRef.value)
 
-const priceNum = computed(() => {
-  const v = Number(priceInput.value)
-  return Number.isFinite(v) && v > 0 ? v : 0
-})
-
-/** 算数量用的参考价：限价单（市价开关关掉）用自己的委托价，市价单用标记价 */
-const refPrice = computed(() =>
-  marketOn.value ? markRef.value : priceNum.value
-)
-
-/* ---------------- 仓位滑动条：25% 一个节点 + 阻尼 + 震动 ---------------- */
-
-/** 节点（%）——用户 2026-10-05：「每 25% 一个节点加点阻尼」 */
-const NODES = [0, 25, 50, 75, 100]
-/** 阻尼半径（个百分点）：离节点 9 个点以内开始被「吸」，越近吸得越紧 */
-const DAMP_RANGE = 9
-/** 吸的程度：0 = 不吸，1 = 硬贴上去。0.72 = 「明显有节点，但还能卡在两档之间」 */
-const DAMP_PULL = 0.72
-
-/** 离得最近的节点下标（判断「跨过节点了没」，用来震一下） */
-const nodeIndex = (v: number): number => Math.round(v / 25)
-
-function damp(raw: number): number {
-  const node = Math.min(100, Math.max(0, nodeIndex(raw) * 25))
-  const d = raw - node
-  const pull = Math.max(0, 1 - Math.abs(d) / DAMP_RANGE) * DAMP_PULL
-  return Math.min(100, Math.max(0, node + d * (1 - pull)))
-}
+/* ---------------- 这一单开多大：固定按「5 倍额度」算 ---------------- */
 
 /**
- * 滑动条：**自己接管**（不用 v-model）——
- * 拿到原始值先过阻尼，再把阻尼后的值写回 input（滑块跟着被「吸」过去），
- * 跨过 25% 节点时震一下。
+ * 账户权益（钱包余额 + 未实现盈亏）。
+ * 后端那条「单笔开单 ≤ 5 × 权益」用的就是这个口径，两边必须一致。
  */
-function onPctInput(e: Event): void {
-  const el = e.target as HTMLInputElement
-  const v = Math.round(damp(Number(el.value) || 0))
-  if (nodeIndex(v) !== nodeIndex(pct.value)) buzz()
-  pct.value = v
-  el.value = String(v)
-}
+const equity = computed(() => {
+  const b = info.value?.balance
+  return b ? Number(b.wallet ?? 0) + Number(b.unrealized ?? 0) : 0
+})
+
+/**
+ * 这一单的**目标名义价值**（USDT）= `min(5 × 权益, 可用保证金 × 杠杆)`。
+ *
+ *   · 前一项是用户定的额度（单笔最多 5 倍权益，后端 `MAX_ORDER_EQUITY_RATIO` 也拦）；
+ *   · 后一项是**开得动的上限** —— 保证金被别的仓位占着时，够不到 5 倍。
+ *
+ * 取小的那个 ⇒「不足 5 倍」时这里天然就是**能开的最大值**，不用另算一套。
+ */
+const targetNotional = computed(() =>
+  Math.max(
+    0,
+    Math.min(equity.value * ORDER_EQUITY_MAX, available.value * lev.value)
+  )
+)
+
+/** 5 倍额度本身（文案用） */
+const fiveNotional = computed(() => equity.value * ORDER_EQUITY_MAX)
+
+/** 够不到 5 倍吗（保证金被占着 / 余额不够）—— 界面上要如实说，别装满分 */
+const belowFive = computed(
+  () =>
+    ready.value &&
+    equity.value > 0 &&
+    available.value * lev.value < fiveNotional.value
+)
+
+/** 浮盈加仓的两档（用户 2026-10-14：「还有盈利可以选择加仓 50% 或者 100%」） */
+const ADD_STEPS = [50, 100]
+
+/** 当前持仓的**未实现盈利**（USDT）—— 加仓的钱从这里来 */
+const posProfit = computed(() =>
+  Math.max(0, Number(info.value?.position?.unrealized ?? 0))
+)
 
 /* ---------------- 数字 ---------------- */
-
-/** 这一单占用的保证金（USDT）—— 界面上「仓位」显示的就是它 */
-const margin = computed(() => available.value * (pct.value / 100))
 
 /** 按交易所步长**向下**取整（宁可小一点，也别超余额 / 超精度） */
 function floorTo(v: number, decimals: number): number {
@@ -349,12 +362,14 @@ function floorTo(v: number, decimals: number): number {
 
 const quantity = computed(() => {
   const p = refPrice.value
-  if (!(p > 0) || margin.value <= 0) return 0
-  return floorTo((margin.value * lev.value) / p, amountPrecision.value)
+  return p > 0 ? floorTo(targetNotional.value / p, amountPrecision.value) : 0
 })
 
 /** 名义价值（USDT） */
 const notional = computed(() => quantity.value * refPrice.value)
+
+/** 这一单要占用的保证金（USDT）= 名义 ÷ 杠杆 */
+const margin = computed(() => (lev.value > 0 ? notional.value / lev.value : 0))
 
 const quantityText = computed(() =>
   quantity.value > 0
@@ -362,8 +377,29 @@ const quantityText = computed(() =>
     : '—'
 )
 
-/** 「就差选个仓位」这一句是**中性提示**，不是报错 —— 只有它允许显示在内容区 */
-const PCT_HINT = '拖一下「仓位」滑动条选个大小'
+/**
+ * 浮盈加仓的数量：**保证金 = 浮盈 × pct%**，再受两道约束 —— 单笔不超过
+ * 5 × 权益、不超过可用保证金（跟正常开单同一个口径；账户总杠杆那条后端会再拦）。
+ */
+function addQuantity(pctOfProfit: number): number {
+  const addMargin = Math.min(
+    (posProfit.value * pctOfProfit) / 100,
+    available.value
+  )
+  const addNotional = Math.min(
+    addMargin * lev.value,
+    equity.value * ORDER_EQUITY_MAX
+  )
+  const p = refPrice.value
+  return p > 0 ? floorTo(addNotional / p, amountPrecision.value) : 0
+}
+
+/** 加仓按钮上那行小字（大约多少币） */
+function addHint(pctOfProfit: number): string {
+  const q = addQuantity(pctOfProfit)
+  if (!(q > 0)) return '浮盈不够开这一单'
+  return `约 ${q.toFixed(Math.min(12, amountPrecision.value))} ${base.value}`
+}
 
 /**
  * 现在不能下单的原因（空 = 能下）。
@@ -378,16 +414,16 @@ const blocker = computed(() => {
   /* 余额都没读到就别拿它算仓位 —— 把真正的原因（IP 白名单 / 网络）摆出来 */
   if (info.value.balanceError) return info.value.balanceError
   if (available.value <= 0) return '合约账户没有可用余额（先划转一点保证金）'
-  if (pct.value <= 0) return PCT_HINT
-  if (!marketOn.value && !(priceNum.value > 0)) return '限价单要先填价格'
+  /* 5 倍额度是按权益算的，权益读不到就没法算这一单开多大 */
+  if (equity.value <= 0) return '读不到账户权益（钱包 + 浮盈），先别开'
   if (!(refPrice.value > 0)) return '还没拿到价格，稍等一下'
   const minA = Number(info.value.minAmount ?? 0)
   if (minA && quantity.value < minA)
-    return `数量太小：这个合约最少要 ${minA} ${base.value}`
+    return `开不了：5 倍额度算出来的量比这个合约的最小下单量（${minA} ${base.value}）还小`
   const minC = Number(info.value.minCost ?? 0)
   if (notional.value > 0 && minC && notional.value < minC)
     return `名义价值不够：这一单约 ${notional.value.toFixed(2)} USDT，最少要 ${minC}`
-  if (quantity.value <= 0) return '数量太小，按这个合约的精度取整之后是 0'
+  if (quantity.value <= 0) return '5 倍额度算出来的量按精度取整之后是 0'
   return ''
 })
 
@@ -404,36 +440,60 @@ const notionalText = computed(() =>
   notional.value > 0 ? fmt(notional.value, 2) : '—'
 )
 
-/** 「仓位」那一格显示的数（用户 2026-10-05：按 USDT 算） */
-const marginText = computed(() =>
-  available.value > 0 ? fmt(margin.value, 2) : '—'
+/** 「保证金」那一格（这一单要占多少 USDT） */
+const marginText = computed(() => (margin.value > 0 ? fmt(margin.value, 2) : '—'))
+
+/** 「5 倍额度」那一格（文案用；0 位小数就够看） */
+const fiveText = computed(() =>
+  fiveNotional.value > 0 ? fmt(fiveNotional.value, 0) : '—'
+)
+
+/** 账户权益（钱包 + 浮盈）—— 5 倍额度就是拿它算的，文案里要报出这个底数 */
+const equityText = computed(() =>
+  equity.value > 0 ? fmt(equity.value, 0) : '—'
+)
+
+/**
+ * 账户里**所有持仓**的名义价值合计（跨交易对，取绝对值）。
+ * 后端那条「账户总杠杆 ≤ 11 倍」用的就是它当分子（`assertOrderLimits`）。
+ */
+const openNotional = computed(() =>
+  positionsRows.value.reduce(
+    (sum, p) => sum + Math.abs(Number(p.notional ?? 0) || 0),
+    0
+  )
+)
+
+/**
+ * 这一单成交后的**预计账户总杠杆** = (现有持仓名义 + 本单名义) ÷ 权益。
+ *
+ * 摆出来是为了**别等挨拦才知道**：后端 `MAX_ACCOUNT_LEVERAGE` 那道闸就是按这个数
+ * 判的，超了直接拒单（提示里也是这么写的）。这里是同一个口径的**预演**。
+ * 权益读不到就返回 0 ⇒ 模板里那枚小标不显示（不占高度）。
+ */
+const levAfter = computed(() =>
+  equity.value > 0 ? (openNotional.value + notional.value) / equity.value : 0
+)
+
+/** 预计总杠杆的文案；`0` = 读不到权益，不显示 */
+const levAfterText = computed(() => (levAfter.value > 0 ? `${levAfter.value.toFixed(1)}x` : ''))
+
+/** 会不会顶到、或顶穿那条 11 倍上限（顶到就标黄提醒） */
+const levAfterWarn = computed(() => levAfter.value >= ACCOUNT_LEV_MAX)
+
+/**
+ * 能加仓吗：有持仓 + **有浮盈** + 面板可用。
+ * 没盈利就**不给**加仓入口（用户 2026-10-14：「如果**还有盈利**还可以选择加仓」）；
+ * `blocker` 非空时也不给 —— 连单都开不了的时候加仓更没意义。
+ */
+const canAdd = computed(
+  () =>
+    !blocker.value &&
+    Number(info.value?.position?.amount ?? 0) > 0 &&
+    posProfit.value > 0
 )
 
 /* ---------------- 数据 ---------------- */
-
-/**
- * 限价预填：**标记价**。
- *
- * 用户 2026-10-05 说的「标的价」——三个候选里（现价 / 标记价 / 指数价）取标记价：
- * 期货挂单看它最稳（不会被一笔成交带偏）。要改成现价，把下面 `markRef` 换成
- * `lastRef` 就行（旁边那颗「现价」按钮本来就是给临时改用现价用的）。
- */
-function prefillPrice(): void {
-  const p = markRef.value
-  if (!(p > 0)) return
-  priceInput.value = p.toFixed(Math.min(12, pricePrecision.value))
-}
-
-function onPriceInput(e: Event): void {
-  priceInput.value = (e.target as HTMLInputElement).value
-}
-
-/** 「现价」那颗按钮：把限价换成最新成交价（想立刻成交就点它） */
-function useLast(): void {
-  const p = lastRef.value
-  if (!(p > 0)) return
-  priceInput.value = p.toFixed(Math.min(12, pricePrecision.value))
-}
 
 async function load(): Promise<void> {
   const sym = exSymbol.value
@@ -467,14 +527,13 @@ async function load(): Promise<void> {
      *
      * 以前这里按默认值来（2026-10-05 定的「默认 10 倍」），结果面板永远显示 10x ——
      * 你在币安手动设的值它不认，下单前还会把 10x 写回去顶掉。
-     * 现在：**交易所报多少就显示多少**（夹到可选档位，且不超过单币上限 5x），
+     * 现在：**交易所报多少就显示多少**（夹到可选档位，最高 10x），
      * 只有读不到（`leverage` 为空）才退回默认值。
      * 夹过之后 `levConfirmed=false`，下单前会真设一次 ⇒ 面板上写几倍就按几倍开。
      */
     const l = Math.floor(Number(r.leverage ?? 0))
     lev.value = l >= 1 ? fitLeverage(l) : fitLeverage(DEFAULT_LEVERAGE)
     levConfirmed.value = l === lev.value
-    if (!priceInput.value) prefillPrice()
     /* 读失败的原因（没配 Key / 现货 / IP 白名单 / 网络）也走提示，不占内容区 */
     if (!r.ready) say(r.reason || '现在下不了单')
     else if (r.balanceError) say(r.balanceError)
@@ -545,7 +604,13 @@ async function ensureLeverage(): Promise<boolean> {
  * 两颗按钮各管一边、不共享状态：按下去就以这个方向提交，
  * 不用先在别处把方向拨对（用户 2026-10-05 去掉那个切换开关）。
  */
-async function submit(dir: 'long' | 'short'): Promise<void> {
+async function submit(
+  dir: 'long' | 'short',
+  /** 不传 = 用面板算好的那一单（5 倍额度）；加仓会传自己的量 */
+  qtyOverride?: number,
+  /** 文案前缀（如「加仓 50%（浮盈）」），只进提示 */
+  note = ''
+): Promise<void> {
   if (busy.value || levBusy.value) return
   /*
    * 黑名单：这个币锁着就**不让开单**（用户 2026-10-10）。
@@ -574,9 +639,10 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
       {
         symbol: exSymbol.value,
         side: side.value,
-        type: marketOn.value ? 'market' : 'limit',
-        quantity: quantity.value,
-        // 市价单也带上参考价：后端拿它做「最小名义价值」的体检（不发给交易所）
+        /* 这个面板**只有市价单**（2026-10-14 用户：「取消限价」） */
+        type: 'market',
+        quantity: qtyOverride ?? quantity.value,
+        // 带上参考价：后端拿它做「最小名义价值」的体检（不发给交易所）
         price: refPrice.value
       },
       keyId.value,
@@ -585,13 +651,19 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
     if (r.ok && r.order) {
       const o = r.order
       const dir = o.side === 'BUY' ? '做多' : '做空'
-      const px = o.type === 'LIMIT' ? `限价 ${price(o.price, pricePrecision.value)}` : '市价'
-      const body = `${dir} ${o.quantity} ${base.value} · ${px}`
+      const body = `${dir} ${o.quantity} ${base.value} · 市价`
+      /*
+       * 顶格差一点保证金时后端会**自动下调数量**重试（见后端 `MAX_AUTO_SHRINK`）——
+       * 这事必须说出来：不然用户以为自己开满了 5 倍，实际少开了一点。
+       */
+      const adj = o.adjusted
+        ? ` · 数量已从 ${o.adjusted.from} 自动调到 ${o.adjusted.to}（${o.adjusted.reason}）`
+        : ''
       buzz(12)
       say(
         o.test
-          ? `测试单通过校验：${body}（没进撮合、没真开仓）`
-          : `已下单：${body}` +
+          ? `测试单通过校验：${note ? `${note} · ` : ''}${body}（没进撮合、没真开仓）${adj}`
+          : `已下单${note ? `（${note}）` : ''}：${body}${adj}` +
               (o.orderId ? ` · 单号 ${o.orderId}` : ''),
         'ok'
       )
@@ -606,6 +678,32 @@ async function submit(dir: 'long' | 'short'): Promise<void> {
     busy.value = false
     busySide.value = null
   }
+}
+
+/**
+ * 浮盈加仓：**方向和当前持仓一致**，数量按「浮盈 × pct%」算
+ * （用户 2026-10-14：「如果还有盈利 还可以选择加仓 50% 或者 100%」）。
+ *
+ * 没持仓 / 没浮盈时按钮根本不显示（`canAdd`），这里再挡一次 —— 按钮的
+ * `disabled` 只是视觉，键盘 / 手势有可能绕过去。
+ */
+async function submitAdd(pctOfProfit: number): Promise<void> {
+  const pos = info.value?.position
+  if (!pos || !(pos.amount > 0)) {
+    say('现在没有持仓，不能加仓')
+    return
+  }
+  if (!(posProfit.value > 0)) {
+    say('这个仓位还没有浮盈，不能加仓')
+    return
+  }
+  const q = addQuantity(pctOfProfit)
+  if (!(q > 0)) {
+    say('浮盈不够开这一单（按这个合约的精度取整之后是 0）')
+    return
+  }
+  /* 方向跟持仓一致（加多 / 加空），杠杆那套流程跟正常开单完全一样 */
+  await submit(pos.side, q, `加仓 ${pctOfProfit}%（用浮盈）`)
 }
 
 /* ---------------- 「仓位」那一格：列出所有持仓，**逐个**平仓 ---------------- */
@@ -964,8 +1062,6 @@ async function closeAll(): Promise<void> {
 watch(exSymbol, () => {
   seq++
   info.value = null
-  pct.value = 0
-  priceInput.value = ''
   void load()
 })
 
@@ -986,11 +1082,6 @@ watch(
 watch(tab, t => {
   syncPosTimer()
   if (t === 'position') void loadPositions()
-})
-
-/* 关掉「市价」= 要填价格开限价单：价格空着就先填上标记价 */
-watch(marketOn, on => {
-  if (!on && !(priceNum.value > 0)) prefillPrice()
 })
 
 /* ---------------- 窄屏：左右滑动切换「开单 / 仓位」 ---------------- */
@@ -1028,7 +1119,6 @@ watch(
     if (nv === ov) return
     seq++
     info.value = null
-    pct.value = 0
     /* 换了一套 Key ⇒ 持仓订阅要重绑（旧的先解掉，不然会串到上一个账户） */
     unbindPos?.()
     unbindPos = null
@@ -1076,14 +1166,15 @@ onMounted(async () => {
     <div class="ord-head">
       <!--
         两格：开单 / 仓位（用户 2026-10-05）。
-        原来是「市价 / 限价」，限价那格不要了 —— 市价降级成开单页里的一个开关
-        （见下面价格那一行的 `.ord-market`）。
+        原来是「市价 / 限价」那两格；限价后来降级成开单页里的一个开关，
+        2026-10-14 用户又说「取消限价」⇒ 这个面板现在**只发市价单**，「开单」这一格
+        就是「按 5 倍额度开、按哪颗按钮就是哪个方向」。
       -->
       <div class="seg ord-mode">
         <button
           type="button"
           :class="{active: tab === 'open'}"
-          title="开单：市价 / 限价下单"
+          title="开单：按 5 倍额度市价开仓"
           @click="tab = 'open'"
         >
           开单
@@ -1097,7 +1188,7 @@ onMounted(async () => {
           仓位
         </button>
       </div>
-      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-05：默认 10 倍、最高 20 倍）
+      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-14：默认 10 倍、**最高也是 10 倍**）
            ⚠️ **「仓位」那一格不显示它**（用户 2026-10-06：「仓位界面不要显示杠杆配置」）——
            那一格显示的东西按下面那颗「排序方式」的语义走。 -->
       <button
@@ -1179,134 +1270,86 @@ onMounted(async () => {
     <!-- ============ 开单 ============ -->
     <div class="ord-page" :class="{off: tab !== 'open'}">
       <!--
-        价格那一行：左边是「价格 + 市价开关 + 输入框（限价时多一颗现价）」，
-        **右边顶到行尾**放「账户标签 + 可用余额」
-        （用户 2026-10-05：「价格那行输入价格太长了，缩短右侧放账户和余额可用 账户用标签的形式」）。
-        ⚠️ 右边那两样**放在 `<label>` 外面**：label 里点哪儿都会去聚焦价格框，
-           放里面的话点一下账户标签就弹键盘。
+        开多大（2026-10-14 重构）：**既没有滑动条、也没有限价了**
+        （用户：「不再提供可拉滑动的开仓界面」+「取消限价」）——
+        这一单固定按「5 倍额度」开 = `min(5 × 账户权益, 可用保证金 × 杠杆)`；
+        保证金被别的仓位占着、够不到 5 倍时，那个数天然就是**最多能开**的量，
+        如实显示（下面那行小字会说清楚），不装满分。
+        · 右上 `5×` 那枚小标：这一单是按几倍权益算的；
+        · 中间那行**大号数字**：这一单的仓位价值（USDT）——最该一眼看见的数；
+        · 底下三格：保证金 / 数量 / 可用 —— 等宽小卡片，**高度不随数值变**
+          （用户 2026-10-05：「下单区域高度固定」，上面的 K 线不能被顶来顶去）。
       -->
-      <div class="ord-price-row">
-        <label class="ord-field ord-price">
-          <span>价格</span>
+      <div class="ord-quota">
+        <span class="ord-quota-lb">仓位价值</span>
+        <span class="ord-quota-tag">5×</span>
+        <b class="ord-quota-num"
+          >{{ notionalText }}<i>USDT</i></b
+        >
+        <span class="ord-quota-sub">
+          <span class="ord-quota-subtxt">
+            <template v-if="belowFive"
+              >保证金不够开满 5 倍 · 理想额度
+              <b>{{ fiveText }}</b> USDT</template
+            >
+            <template v-else
+              >单笔上限 = 5 × 账户权益（<b>{{ equityText }}</b> USDT）</template
+            >
+          </span>
           <!--
-            市价开关（用户 2026-10-05：「市价开启左侧价格不让调，关闭可以填价格就是开限价单」）：
-            开着 = 市价单，右边价格框禁用、改不了；关掉 = 可以填价格，填的就是限价单。
-            `.prevent` 是为了别让外层 `<label>` 把这次点击当成「去聚焦输入框」。
-          -->
-          <button
-            type="button"
-            class="ord-market"
-            :class="{on: marketOn}"
-            :aria-label="marketOn ? '市价' : '限价'"
-            :title="
-              marketOn
-                ? '市价：按对手价立刻成交（点一下关掉就能填价格开限价单）'
-                : '限价：挂在指定价格上等成交（点一下切回市价）'
-            "
-            @click.prevent="marketOn = !marketOn"
-          >
-            {{ marketOn ? '市价' : '限价' }}
-          </button>
-          <!--
-            市价模式下**不显示**那个参考价（留占位符「市价」）：
-            输入框是禁用的，里面却顶着一个数，看着像「这一单会按这个价成交」。
-            限价模式才把 `priceInput` 摆出来 —— 切回市价时值留着，切回来不用重填。
-          -->
-          <input
-            :value="marketOn ? '' : priceInput"
-            inputmode="decimal"
-            :disabled="marketOn"
-            :placeholder="marketOn ? '市价' : '限价'"
-            @input="onPriceInput"
-          />
-          <!--
-            「现价」只在限价模式露面。
-            ⚠️ 它以前挤在「价格 + 数量」并排那一格里，手机上根本放不下（用户 2026-10-05）
-            —— 现在「数量」挪到杆子下面了，这一行整行都是价格的，按钮自然有位置。
-          -->
-          <button
-            v-if="!marketOn"
-            type="button"
-            class="ghost tiny ord-fill"
-            title="用最新成交价填进去"
-            @click="useLast"
-          >
-            现价
-          </button>
-        </label>
-        <!-- 右侧一组：**可用余额**（`margin-left: auto` 顶到行尾）。
-             ⚠️ 账户名原来也在这儿（用户 2026-10-05：「价格那行…右侧放账户和余额」），
-             2026-10-07 挪到头行去了（那行 `开单/仓位` 两页都在）——用户：
-             「上面保留，下面去掉」。这里只剩余额。 -->
-        <span class="ord-right">
-          <!--
-            可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast）。
-            真读到 0 的时候**标红 + 带一句怎么办**（用户 2026-10-05：「我怎么开仓位」——
-            默认那套 Key 的钱在现货/资金钱包，合约里是 0，光看「可用 0 USDT」不知道下一步）。
+            成交后的**预计账户总杠杆**（后端那条 11 倍闸的预演，见 `levAfter`）——
+            顶到上限就标黄：与其点下去被后端拒，不如提前看见。
+            `levAfter` 是 0（权益读不到）时整颗不显示，行高不变。
           -->
           <span
-            class="ord-avail"
-            :class="{empty: ready && available <= 0}"
+            v-if="levAfterText"
+            class="ord-levhint"
+            :class="{warn: levAfterWarn}"
             :title="
-              ready && available <= 0
-                ? '合约账户没有可用余额 —— 先去「我的 → 交易所账户 → 划转」把 USDT 划到合约钱包，或在「配置 → 下单账户」换一套 Key'
-                : undefined
+              `这一单成交后：现有持仓名义 ${fmt(openNotional, 0)} + 本单 ${notionalText} = ` +
+              `${levAfter.toFixed(1)}x（上限 ${ACCOUNT_LEV_MAX}x，超了后端会拒单）`
             "
           >
-            可用 <b>{{ availableText }}</b> USDT
+            总杠杆 {{ levAfterText }}
           </span>
         </span>
       </div>
-      <!--
-        仓位：按 USDT 算（用户 2026-10-05）—— 每 25% 一个节点，带阻尼 + 震动
-
-        ⚠️ 这一行的类名**不能叫 `ord-pos`**：那是下面**持仓列表**（`<ul class="ord-pos">`）
-           的类，它带着 `flex: 1 1 0` + `min-height: 0` + `overflow-y: auto`
-           （列表要「吃掉剩余高度、自己在里面滚」）—— 套在滑轨这一行上会把
-           这一行压成 **0 高 + 自动裁剪**，滑轨整个看不见（用户 2026-10-05
-           报「滑轨的怎么没有了」就是这个）。现在叫 `ord-pct`。
-      -->
-      <label class="ord-field ord-slider ord-pct">
-        <span>仓位</span>
-        <!--
-          ⚠️ 刻度是**自己画的**（`.ord-ticks`），没用 `<datalist>` ——
-          datalist 的刻度在 Chrome 上画在轨道里、样式改不动，还不一定显示；
-          自己画才能跟「方形滑块」这套简约外观配套，位置也能算准（见 CSS）。
-        -->
-        <span class="ord-bar">
-          <input
-            :value="pct"
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            :disabled="!ready"
-            :style="{'--fill': pct + '%'}"
-            :title="`可用余额的 ${pct}%（每 25% 一个节点）`"
-            @input="onPctInput"
-          />
-          <span class="ord-ticks" aria-hidden="true">
-            <i v-for="n in NODES" :key="n" :style="{left: n + '%'}" />
-          </span>
-        </span>
-      </label>
 
       <!--
-        杆子底下的**开仓计算**（用户 2026-10-05：「杆子底部放百分比」「开多少 / 数量放底下」）：
-          仓位% · 保证金(USDT) · 数量(币) · 名义价值(USDT)
-        固定两列 × 两行 —— 高度**不随数值变**（用户：「下单区域高度固定」），
-        报错一律走顶部提示，所以这一块永远只放数字、不会撑高。
+        底下那三格（用户 2026-10-05：「开多少 / 数量放底下」）：
+        保证金(USDT) · 数量(币) · 可用(USDT)。
+        ⚠️ 报错**不放这儿**（用户：「报错不占用内容」）——真正的原因都在点下单时弹提示，
+           所以这一块永远只放数字、不会撑高。
+        ⚠️ 加仓那两颗按钮**不放这儿**（它们是有浮盈才出现的，会把这个区撑高）——
+           放下面那行按钮里，那行本来就固定高度。
       -->
       <div class="ord-read">
-        <span class="ord-r"><em>仓位</em><b>{{ pct }}%</b></span>
-        <span class="ord-r"><em>保证金</em><b>{{ marginText }} USDT</b></span>
-        <span class="ord-r"><em>数量</em><b>{{ quantityText }} {{ base }}</b></span>
         <span class="ord-r"
-          ><em>仓位价值</em><b>{{ notionalText }} USDT</b></span
+          ><em>保证金</em
+          ><b>{{ marginText }}<i>USDT</i></b></span
         >
+        <span class="ord-r"><em>数量</em><b>{{ quantityText }} {{ base }}</b></span>
+        <!--
+          可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast）。
+          真读到 0 的时候**标红 + 带一句怎么办**（用户 2026-10-05：「我怎么开仓位」——
+          默认那套 Key 的钱在现货/资金钱包，合约里是 0，光看「可用 0 USDT」不知道下一步）。
+        -->
+        <span
+          class="ord-r"
+          :title="
+            ready && available <= 0
+              ? '合约账户没有可用余额 —— 先去「我的 → 交易所账户 → 划转」把 USDT 划到合约钱包，或在「配置 → 下单账户」换一套 Key'
+              : undefined
+          "
+        >
+          <em>可用</em>
+          <b :class="{empty: ready && available <= 0}"
+            >{{ availableText }}<i>USDT</i></b
+          >
+        </span>
       </div>
 
-      <!-- 右下角那一行：两颗下单按钮（做多 / 做空），都在右边 -->
+      <!-- 底下那一行：加仓（有浮盈才有）+ 两颗下单按钮（做多 / 做空），铺满整行 -->
       <div class="ord-actions">
         <!-- 读不到余额时才有：重新拉一次（放在这一行，不占头部额外高度） -->
         <button
@@ -1318,6 +1361,25 @@ onMounted(async () => {
         >
           重试
         </button>
+        <!--
+          浮盈加仓（用户 2026-10-14：「如果还有盈利 还可以选择加仓 50% 或者 100%」）：
+          只有**有持仓且浮盈 > 0**时才出现；方向跟持仓一致（加多 / 加空），
+          数量 = 浮盈 × 50% / 100% 当保证金（见 `addQuantity`）。
+          放这一行是为了**不改变上面那个「固定高度」的计算区**。
+        -->
+        <template v-if="canAdd">
+          <button
+            v-for="n in ADD_STEPS"
+            :key="n"
+            type="button"
+            class="ghost tiny ord-add-b"
+            :disabled="busy || levBusy"
+            :title="`用浮盈加仓 ${n}%（${addHint(n)}）`"
+            @click="submitAdd(n)"
+          >
+            加仓 {{ n }}%
+          </button>
+        </template>
         <!--
           直接两颗按钮（用户 2026-10-05：「做多做空不要切换了直接两个按钮吧」）——
           原来那颗「方向开关」得先把方向拨对、再点下单，两下才下得去，
