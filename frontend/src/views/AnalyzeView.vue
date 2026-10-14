@@ -73,10 +73,12 @@ import {
   showSteps,
   steps,
   symbol,
+  testArmed,
   testAt,
   testBarTime,
   testMode,
-  testPoint
+  testPoint,
+  toggleTestMode
 } from '../analyze'
 import {
   balanceBadge,
@@ -112,20 +114,26 @@ onMounted(() => window.addEventListener('resize', onViewport))
 onBeforeUnmount(() => window.removeEventListener('resize', onViewport))
 
 /**
- * 手机端（≤900px）：一级 tab = **K 线 / 实时分析 / 历史分析**。
+ * 手机端（≤900px）：一级 tab = **K 线 / 预测结果 / 自动化预测 / 知识库**。
  *
  * 窄屏放不下「左分析 + 右 K 线」两栏；而 K 线那块现在头顶行情条、脚下涨幅行，
  * 自己就是一整屏 —— 所以手机上它自己占一格，不再另开一排开关。
  *
- * 「测试 / 添加案例」在手机端**不摆出来**：这两件都要在图上看点/拖，
+ * 「测试 / 添加案例」那两格在手机端**不摆出来**：这两件都要在图上看点 / 拖，
  * 一屏放不下就来回切，反倒没法用（添加案例挪到 K 线那格的「＋」里去了）。
+ * 但**测试本身在手机上是能用的**（用户 2026-10-15：「移动端开单分析的测试功能加上」）——
+ * 入口改成 K 线头上、**配置左边那颗测试图标**，走的是「选结束线 → 跳预测结果」那条：
+ *   · 点图标 ⇒ 进测试模式 + 开始等着点线；窄屏的图只在自己那一格，所以先切到「K 线」；
+ *   · 在图上点一根 ⇒ 自动切回「预测结果」（那儿有结束线、判断按钮和结论）；
+ *   · 「清掉」= 退出测试模式（窄屏从「预测结果」里看不到那颗图标，得留一条退路）。
+ * tab 行摆不下第 5 格：390px 宽下 4 格 + 模型余额刚好铺满（实测 seg 274 + 余额 75 ≈ 362）。
  *
- * 桌面端图常驻右栏，这几格照旧。
+ * 桌面端图常驻右栏，这几格照旧（那颗测试图标桌面上也在，跟「测试」那格等价）。
  * 断点 `MOBILE_MAX` 跟 CSS 里那套对齐，定义在 `../analyze`（默认选中哪一格也在那儿）。
  */
 const isMobile = ref(window.innerWidth <= MOBILE_MAX)
 
-/** 窄屏不摆的那两格（都要在图上看点 / 拖，一屏放不下） */
+/** 窄屏不摆的那几格（都要在图上看点 / 拖，一屏放不下）——「测试」的入口改走 K 线头上那颗图标 */
 const MOBILE_HIDDEN_TABS: string[] = ['test', 'add']
 
 /** 跑分析那颗按钮的文案（桌面 / 手机两处按钮共用一个，不会写漂） */
@@ -161,12 +169,15 @@ function onViewport(): void {
    * 宽窄切换时把「对方不存在的那一格」收回来：
    * 「K 线」只在窄屏有，「合约行情」只在宽屏有（2026-10-04 提成单独一页了），
    * 「测试 / 添加案例」反过来只有宽屏有。
+   * ⚠️ 从「测试」那格被收回来时，把**测试模式**转成 `testArmed` 带走 ——
+   *    不然光切个窗口宽度，下一局就从「测试（不存档）」变成「实时（存档）」了。
    */
   if (!m && leftTab.value === 'chart') leftTab.value = 'market'
   if (
     m &&
     (leftTab.value === 'market' || MOBILE_HIDDEN_TABS.includes(leftTab.value))
   ) {
+    if (leftTab.value === 'test') testArmed.value = true
     leftTab.value = 'chart'
   }
 }
@@ -542,10 +553,22 @@ function onPickRange(v: {from: number; to: number; bars: number}) {
   rangeDrawing.value = false
 }
 
-/** 图上点了结束线 → 记下那一刻，顺手退出选线模式 */
+/** 图上点了结束线 → 记下那一刻，顺手退出选线模式，并把人送到「预测结果」 */
 function onPickPoint(at: number) {
   testPoint.value = at
   pointPicking.value = false
+  /*
+   * 用户 2026-10-15：「选择线后跳转预测结果」。
+   *
+   * 线是在**图上**点的，而结论不在图那一格（窄屏图单独一格；宽屏人可能正停在
+   * 「合约行情」上），点完不切过去就像「点了没反应」。所以点定就切到「预测结果」：
+   * 那儿有结束线、判断按钮和结论。本来就在「预测结果 / 测试」就不动
+   * （宽屏那格「测试」是同一套渲染，切走反而把测试模式的那格 tab 弄没了）。
+   *
+   * ⚠️ 切过去之后还得是**测试跑**：靠 `analyze.ts` 的 `testArmed`（图标进去的那个状态）
+   *    撑住 `testMode` —— 否则 `testAt` 变 null，这一局会被当成实时跑存档。
+   */
+  if (leftTab.value !== 'live' && leftTab.value !== 'test') leftTab.value = 'live'
 }
 
 /* ---------------- 结论渲染 ---------------- */
@@ -668,15 +691,6 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
                 测试 · 结束线
                 <span class="tag">不存档</span>
               </h2>
-              <p class="hint">
-                在右边 K 线上<b>点一根</b>，把「结束线」放在那儿 —— AI
-                会把<b>这一根收盘之后</b>当成「当时」：只看得到那一刻之前
-                <b>已经收盘</b>的 K 线，之后的一根都不给。
-                <br />
-                取数永远是「以这一刻为终点往前推」，所以只用一个时刻，
-                <b>不用划一段</b>。
-              </p>
-
               <div class="follow-row" :class="{picked: testPoint !== null}">
                 <span class="k">结束线</span>
                 <span class="v">
@@ -688,12 +702,12 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
                     </em>
                   </template>
                   <template v-else-if="pointPicking">
-                    在右边图上点一根…
+                    在图上点一根…
                     <em>点一下就定好了（按 Esc 取消）</em>
                   </template>
                   <template v-else>
                     还没选
-                    <em>点右边「选结束线」开始</em>
+                    <em>点「选结束线」开始</em>
                   </template>
                 </span>
 
@@ -728,13 +742,14 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
               </div>
             </section>
 
-            <!-- 测试模式：必须一眼看出来这不是实时那一局 -->
+            <!--
+              测试模式：必须一眼看出来这不是实时那一局。
+              ⚠️ 2026-10-15 用户：「把测试下面小字描述去掉…只保留测试模式」——
+                 原来下面还有一行小字解释（AI 看得到什么 / 哪些字段留空 / 不存档），
+                 现在只留这一行「测试模式 · 判断时点」。
+            -->
             <div v-if="testAt" class="test-banner">
               <b>⏱ 测试模式 · 判断时点 {{ bjTime(testAt) }}</b>
-              <span
-                >AI 只看得到这一刻之前已收盘的 K 线；资金费率 / 持仓量 /
-                多空比拿不到、留空。<b>本次不存档。</b></span
-              >
             </div>
 
             <!--
@@ -986,6 +1001,33 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
                   （用户：「mm放在 下面最右侧和价格那一排」＋「右侧」）——
                   币种那一行不放它了，见下面 `#price-end` 插槽。
                 -->
+                <!--
+                  测试模式（用户 2026-10-15：「移动端开单分析的测试功能加上，配置旁加上测试的图标，
+                  选择线后跳转预测结果」）——
+                  挨着「配置」，**两端都露**：宽屏它跟左边那格「测试」tab 等价，
+                  窄屏没有那一格（tab 行摆不下第 5 格），这就是唯一的入口。
+                  点一下 = 进测试模式 + 开始等你在图上点结束线（窄屏顺带切到「K 线」那格）；
+                  已经开着时点一下 = 退出（连选线一起停掉）。
+                  亮起来（`.on`）就代表「这一局是测试跑、不存档」，跟面板顶上那条横幅一个意思。
+                -->
+                <button
+                  type="button"
+                  class="ghost tiny tk-test"
+                  :class="{on: testMode}"
+                  :title="
+                    testMode
+                      ? '正在测试模式（回到过去某一刻跑一局，不存档）—— 点一下退出'
+                      : '测试：在图上点一根 K 线，回到那一刻跑一局（不存档）'
+                  "
+                  :aria-label="testMode ? '退出测试模式' : '测试模式'"
+                  @click="toggleTestMode"
+                >
+                  <!-- 烧瓶：跟「配置」的滑块图标一眼分得开，也不用文字挤地方 -->
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9.4 3h5.2M10.6 3.6v5.9L5.3 17.9A1.9 1.9 0 0 0 6.9 20.8h10.2a1.9 1.9 0 0 0 1.6-2.9L13.4 9.5V3.6" />
+                    <path d="M8.2 14.6h7.6" />
+                  </svg>
+                </button>
                 <!-- 最右边：配置（点开从底部弹出来） -->
                 <button
                   class="ghost tiny tk-cfg"

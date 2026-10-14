@@ -253,10 +253,36 @@ export function stopRun(): void {
 /* ---------------- 测试模式：回到过去某一刻 ---------------- */
 
 /**
- * 「测试」现在是**左侧一级 tab**（2026-10-03 用户要求：查询栏那个实时/测试开关去掉）。
- * 选中它就等于「回到结束线那一刻跑一局」，结果不存档。
+ * 现在还是不是窄屏（断点跟 CSS 那套 ≤900px 对齐）。
+ *
+ * ⚠️ 一次性判断，**不是响应式的**（`AnalyzeView` 自己那份 `isMobile` 才是）——
+ * 这里只用来决定「点一下要不要切格」，不需要跟着窗口变。
  */
-export const testMode = computed(() => leftTab.value === 'test')
+export function isNarrow(): boolean {
+  return typeof window !== 'undefined' && window.innerWidth <= MOBILE_MAX
+}
+
+/**
+ * 「我确实在测试模式里」——**不靠 `leftTab` 也能撑住这个状态**。
+ *
+ * 用户 2026-10-15：「移动端开单分析的测试功能加上，配置旁加上测试的图标，
+ * 选择线后跳转预测结果」——
+ *   · 窄屏**没有「测试」那一格 tab**（tab 行 4 格 + 模型余额刚好铺满，摆不下第 5 格），
+ *     所以测试模式改从 **K 线头上那颗测试图标**进；
+ *   · 窄屏的图只在自己那一格（`.split.m-chart`），选线就得先切到「K 线」；
+ *     选完再切回「预测结果」看结论 —— 一进一出，`leftTab` 都不再是 `test`。
+ * 这个状态就是用来兜住那种情况的：只要它开着，切到哪儿都还是测试跑
+ *（`testAt` 不会变 null）——否则**测试跑会被当成实时跑存进库里**（踩过，见 `run()`）。
+ */
+export const testArmed = ref(false)
+
+/**
+ * 测试模式 = **「测试」那一格**（宽屏那格 tab，2026-10-03 定的）**或** 图标打开的那个状态。
+ * 进去就等于「回到结束线那一刻跑一局」，结果不存档。
+ */
+export const testMode = computed(
+  () => testArmed.value || leftTab.value === 'test'
+)
 
 /**
  * 测试模式：**结束线**放在哪 —— 也就是「我看到哪一刻」。
@@ -272,14 +298,51 @@ export const testPoint = ref<number | null>(null)
 /** 是不是正等着我在图上点一下，把结束线放下去 */
 export const pointPicking = ref(false)
 
-export function setPointPicking(v: boolean): void {
-  pointPicking.value = v
+/**
+ * 这一格能不能看到图 —— 窄屏只有「K 线」/「测试」两格有图（见 `style.css` 的 `.split.m-*`），
+ * 宽屏图常驻右栏、每一格都有。选线得在图上看，看不到图就不该停在「等着你点」那个状态。
+ */
+function chartVisible(t: LeftTab): boolean {
+  return !isNarrow() || t === 'chart' || t === 'test'
 }
 
-/** 清掉结束线（模板里不给导入的 ref 直接赋值） */
+export function setPointPicking(v: boolean): void {
+  pointPicking.value = v
+  /*
+   * 窄屏：点「重选」的时候人正停在「预测结果」那一格，图在隔壁「K 线」里 ——
+   * 不切过去就成了「让我点一根，可图在哪儿」。宽屏图常驻，不动。
+   */
+  if (v && !chartVisible(leftTab.value)) leftTab.value = 'chart'
+}
+
+/**
+ * 进 / 出测试模式（K 线头上那颗测试图标；宽屏那格「测试」tab 是另一个入口）。
+ *
+ * 进：顺手把「选结束线」打开（跟切到「测试」那格是同一套，少按一次）。
+ * 出：把选线停掉；人还杵在「测试」那格时再切回「预测结果」——
+ *     否则点了「退出」却看不出来（那一格里测试和预测结果是同一套渲染）。
+ */
+export function toggleTestMode(): void {
+  if (testMode.value) {
+    testArmed.value = false
+    pointPicking.value = false
+    if (leftTab.value === 'test') leftTab.value = 'live'
+    return
+  }
+  testArmed.value = true
+  setPointPicking(true)
+}
+
+/** 清掉结束线（模板里不给导入的 ref 直接赋值）—— 顺手退出测试模式 */
 export function clearTestPoint(): void {
   testPoint.value = null
   pointPicking.value = false
+  /*
+   * ⚠️ 窄屏进测试模式只有 K 线头上那颗图标，而人在「预测结果」那一格时
+   *    那颗图标在图里（看不到）——所以「清掉」也得能退出来，
+   *    不然窄屏一进测试就出不去（往后每一局都按测试跑、不存档）。
+   */
+  testArmed.value = false
 }
 
 /** 测试跑的「现在」= 结束线那一刻 */
@@ -295,7 +358,9 @@ export const testBarTime = computed(() =>
 /**
  * 切 tab 时顺手做两件事（就放这里，组件里不用再挂一个 watch）：
  *   1. **实时 ↔ 测试** 是两种跑法，切了就清掉上一局的结论，免得看成上一局的；
- *   2. 进「测试」就直接等我在图上点结束线（少按一次）；其它 tab 一律退出选线/拖动。
+ *   2. 进「测试」就直接等我在图上点结束线（少按一次）；图上点不到的那些格
+ *      （窄屏「预测结果 / 知识库」…）一律退出选线 —— 让人「点一根」却看不见图，
+ *      那是死路。测试模式本身不跟着 tab 走（见 `testArmed`）。
  */
 watch(leftTab, (v, prev) => {
   const running = (x: LeftTab) => x === 'live' || x === 'test'
@@ -304,7 +369,13 @@ watch(leftTab, (v, prev) => {
     steps.value = []
     error.value = ''
   }
-  pointPicking.value = v === 'test' && !testPoint.value
+  /*
+   * ⚠️ 这里**不能**每次都重算选线状态：窄屏点「重选」是先把选线打开、**再**切到
+   *    「K 线」那一格（见 `setPointPicking`），无条件重算会被这次切格自己抹掉 ——
+   *    人落到图上，却还是「没在选线」（踩过）。所以只在两种该变的地方动手。
+   */
+  if (v === 'test' && !testPoint.value) pointPicking.value = true
+  else if (!chartVisible(v)) pointPicking.value = false
   if (v !== 'add') rangeDrawing.value = false
 })
 
@@ -324,7 +395,7 @@ export function run(): void {
   }
   if (loading.value) return
   if (testMode.value && !testPoint.value) {
-    error.value = '测试模式：先在右边 K 线上点一根，定下「看到哪一刻」'
+    error.value = '测试模式：先在 K 线上点一根，定下「看到哪一刻」'
     return
   }
 

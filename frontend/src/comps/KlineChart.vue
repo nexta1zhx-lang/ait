@@ -3606,6 +3606,20 @@ watch([() => props.range, () => props.timeframe], drawSelection)
 // 回补历史 / 数据换了 / 缩放平移，范围与结束线的位置都要跟着重算
 watch(() => candles.length, drawSelection)
 watch(() => props.pointAt, drawPoint)
+/*
+ * 「选线」一停就把**拖动状态**收掉。
+ *
+ * ⚠️ 2026-10-15（用户：「再次点击测试图标，取消测试模式」→ 那条线还赖在图上）：
+ *    窄屏「在图上点一根」会顺手切到另一格（`AnalyzeView.onPickPoint`），
+ *    图被藏起来的那一刻手指还没抬 ⇒ 这个组件的 `pointerup` 收不到，
+ *    `dragLineX` 就永远停在刚才那一个像素上；而 `lineX = dragLineX ?? selLine`
+ *    **优先取它** ⇒ 之后取消测试模式，`selLine` 清了、`dragLineX` 还在，
+ *    线照画（`v-if="lineX !== null"`）。
+ *    选线都停了（点完了 / 按 Esc / 父组件收掉），拖动状态本就不该再留着。
+ */
+watch(picking, v => {
+  if (!v) dragLineX.value = null
+})
 
 /*
  * ⚠️ 这里原来还有三处「存下现在显示多少根」的 watcher（换币/换周期、配置面板那颗

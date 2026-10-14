@@ -2449,11 +2449,10 @@ body.fixed-viewport .analyze {
   color: var(--blue);
 }
 
-/* 左栏顶上的提醒：这一局不是实时那一局 */
+/* 左栏顶上的提醒：这一局不是实时那一局（就一行，用户 2026-10-15 把底下那行小字去掉了） */
 .test-banner {
   display: flex;
   flex-direction: column;
-  gap: 4px;
   padding: 8px 11px;
   border: 1px solid var(--blue);
   border-radius: 8px;
@@ -2462,15 +2461,6 @@ body.fixed-viewport .analyze {
 .test-banner b {
   font-size: 12px;
   color: var(--blue);
-}
-.test-banner span {
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--muted);
-}
-.test-banner span b {
-  font-size: 11px;
-  color: var(--warn);
 }
 
 /* K 线图上的「K 线到 ……」 */
@@ -2994,10 +2984,14 @@ body.fixed-viewport .split {
 }
 
 /*
- * 配置按钮（K 线头部「AI 分析 / ＋」那一行最右边）。
+ * 配置按钮（K 线头部「AI 分析 / ＋ / 测试 / 配置」那一行最右边）。
  * ⚠️ 跟「＋」不一样：桌面端也露（桌面也得能改配置），所以**不加** `tk-only-mobile`。
+ *
+ * 测试那颗（`.tk-test`，2026-10-15）跟它同一个盒子、同一种线描图标，
+ * 所以样式并在一起写 —— 只是测试那颗多一个「开着」状态（`.on`）。
  */
-.tk-head .tk-cfg {
+.tk-head .tk-cfg,
+.tk-head .tk-test {
   flex: 0 0 auto;
   width: 30px;
   height: 28px;
@@ -3021,7 +3015,8 @@ body.fixed-viewport .split {
   flex: 0 0 auto;
 }
 
-.tk-head .tk-cfg svg {
+.tk-head .tk-cfg svg,
+.tk-head .tk-test svg {
   width: 17px;
   height: 17px;
   fill: none;
@@ -3033,10 +3028,20 @@ body.fixed-viewport .split {
 
 /* 悬停：触屏不应用 */
 @media (hover: hover) {
-  .tk-head .tk-cfg:hover {
+  .tk-head .tk-cfg:hover,
+  .tk-head .tk-test:hover {
     color: var(--text);
     border-color: var(--blue);
   }
+}
+
+/*
+ * 「正在测试模式」：染蓝（跟「黑名单那颗锁」用同一个手法 —— 状态靠颜色说，
+ * 不额外摆一个章）。这一局不存档，得一眼看得出来。
+ */
+.tk-head .tk-test.on {
+  color: var(--blue);
+  border-color: var(--blue);
 }
 
 /* 提炼中：转圈遮罩（**不透明**，别让底下的行情穿透上来） */
