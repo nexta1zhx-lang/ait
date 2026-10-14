@@ -1927,26 +1927,26 @@ button.danger {
 }
 
 /*
- * 黑名单里的币（2026-10-14）：行情表里**置灰 + 一枚「禁用」标**。
+ * 黑名单里的币（2026-10-14）：行情表里**置灰 + 一枚图标**。
  * 用户：「加入黑名单后该币种在合约行情中也显示禁用」。
  * ⚠️ 只是**显示**；真正拦开单的是后端下单接口里那道闸（`db/blacklist.ts`）。
+ * ⚠️ 2026-10-15 用户：「禁用换行了，改为一个图标显示」—— 原来那枚标签写的是「禁用」
+ *    两个字，而且挂在 `.icell-txt`（flex 列）下面 ⇒ 自己占一整行。现在换成图标、
+ *    并排进币名那一行（见 `.mkt-table .icell-t`）。
  */
-.mkt-row.ban .icell-t {
+.mkt-row.ban .icell-name {
   color: var(--muted);
   text-decoration: line-through;
 }
 .mkt-row.ban td.num {
   opacity: 0.5;
 }
-.ban-tag {
-  margin-left: 5px;
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-xs, 6px);
+.ban-ico {
+  /* `flex: 0 0 auto`：币名再长也不许把图标挤掉 / 换行 */
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
   color: var(--muted);
-  font-size: 10px;
-  line-height: 15px;
-  vertical-align: 1px;
 }
 
 /* 置顶段和后面之间一条分界线 */
@@ -1973,7 +1973,18 @@ button.danger {
   line-height: 1.2;
 }
 
+/*
+ * 币名那一行：**名字（可截断）+ 黑名单图标**。
+ * 用户 2026-10-15：「禁用换行了，改为一个图标显示」 ⇒ 这一行改成 flex 行，
+ * 名字自己负责截断（`min-width: 0` + ellipsis），图标固定宽度、永不换行。
+ */
 .mkt-table .icell-t {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.mkt-table .icell-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -979,18 +979,47 @@ const arrowOf = (v: number | null): string =>
                       不写就把整格顶宽）。
                   -->
                   <span class="icell-txt">
-                    <span class="icell-t">{{ r.base }}</span>
                     <!--
-                      黑名单标记（用户 2026-10-14：「加入黑名单后该币种在合约行情中
-                      也显示禁用」）。⚠️ 只是**显示** —— 真正不让开单的是后端
-                      下单接口里那道闸（`db/blacklist.ts` 的 `lockedUntil`）。
+                      币名那一行：**名字 + 黑名单图标**。
+                      ⚠️ 2026-10-15 用户：「合约行情禁用换行了，改为一个图标显示」——
+                         原来那枚写着「禁用」的小标签是 `.icell-txt`（**flex 列**）的直接子项，
+                         于是它自己占一整行（币名一行、禁用一行、成交额再一行）。
+                         `margin-left: 0` 之外怎么摆都救不回来 —— 必须挪进这一行的 flex 里，
+                         并且把文字换成图标（文字太长，窄屏会把币名挤没）。
                     -->
-                    <span
-                      v-if="isBanned(r.base)"
-                      class="ban-tag"
-                      title="在黑名单里，锁着期间不能开这个币的单"
-                    >
-                      禁用
+                    <span class="icell-t">
+                      <span class="icell-name">{{ r.base }}</span>
+                      <!--
+                        黑名单标记（用户 2026-10-14：「加入黑名单后该币种在合约行情中
+                        也显示禁用」）。⚠️ 只是**显示** —— 真正不让开单的是后端
+                        下单接口里那道闸（`db/blacklist.ts` 的 `lockedUntil`）。
+                      -->
+                      <svg
+                        v-if="isBanned(r.base)"
+                        class="ban-ico"
+                        viewBox="0 0 16 16"
+                        role="img"
+                        aria-label="禁用"
+                      >
+                        <title>在黑名单里，锁着期间不能开这个币的单</title>
+                        <circle
+                          cx="8"
+                          cy="8"
+                          r="6.2"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="1.6"
+                        />
+                        <line
+                          x1="3.9"
+                          y1="3.9"
+                          x2="12.1"
+                          y2="12.1"
+                          stroke="currentColor"
+                          stroke-width="1.6"
+                          stroke-linecap="round"
+                        />
+                      </svg>
                     </span>
                     <!--
                       第二行：市值排名 + 成交额。
