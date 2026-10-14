@@ -196,6 +196,7 @@ import {
 } from './db/candle-store'
 import {loadSymbols, symbolTableStats} from './db/symbols'
 import {
+  emit,
   reconcileKeyOrders,
   wakeExchangeStream,
   startExchangeStreams,
@@ -1996,6 +1997,14 @@ async function handleExchangeStream(
     /* 挂单变了 → 前端重读一次（**本地读**，毫秒级，见 docs 第 16 节） */
     if (ev.type === 'orders') return send('orders', {reason: ev.reason})
     if (ev.type === 'health') return send('health', {deaf: ev.deaf})
+    /*
+     * 自动止损挂完了（后台挂的，见下单那段）—— **原样**推给前端：
+     * 面板要拿它拼提示（挂在哪 / 跳过了手工止损 / 为什么失败）。
+     */
+    if (ev.type === 'auto-stop') {
+      const {type: _t, ...rest} = ev
+      return send('auto-stop', rest)
+    }
     return send('backfill', {added: ev.added})
   })
 
@@ -4526,7 +4535,6 @@ async function route(
        *   ⚠️ 这里**等**它（而不是丢后台）：等着才能把「挂在哪、挂了多少」告诉用户，
        *     「有没有保护」是他最想知道的那一句。
        */
-      let autoStop: AutoStopResult | null = null
       const autoPct = Number(body.autoStop ?? 0)
       if (!test && order.reduceOnly !== true && Number.isFinite(autoPct) && autoPct > 0) {
         const sym = str(body.symbol, 'BTCUSDT').toUpperCase()
@@ -4534,7 +4542,15 @@ async function route(
         const wasPos = liveStateOf(key.id)?.positions?.find(
           p => String(p.raw ?? '').toUpperCase() === sym
         )
-        autoStop = await ensureAutoStop({
+        /*
+         * ★ 2026-10-15（用户：「后台挂」）：**丢到后台去挂，不占这一单的响应**。
+         *
+         * 等着它有代价：成交要落地、止损要真挂上去，实测多等 3 秒左右（关掉 0.3 秒）。
+         * 而「有没有保护」这件事可以晚一两秒再说 —— 挂完推一条 `auto-stop` 事件，
+         * 面板补一句提示（挂在哪 / 跳过了手工止损 / 为什么失败）。
+         * ⚠️ `void` + `catch`：这条链上的任何异常都不许回到这一单上（它已经成交了）。
+         */
+        void ensureAutoStop({
           userId: me.id,
           keyId: key.id,
           creds,
@@ -4543,8 +4559,17 @@ async function route(
           pct: autoPct,
           before: Math.abs(Number(wasPos?.amount) || 0)
         })
+          .then(r => emit(key.id, {type: 'auto-stop', symbol: sym, ...r}))
+          .catch(e => {
+            emit(key.id, {
+              type: 'auto-stop',
+              symbol: sym,
+              ok: false,
+              error: e instanceof Error ? e.message : String(e)
+            })
+          })
       }
-      return sendJson(res, 200, {ok: true, test, order, autoStop, error: null})
+      return sendJson(res, 200, {ok: true, test, order, autoStop: null, error: null})
     } catch (e) {
       return failTrade(res, '下单', key.id, e)
     }

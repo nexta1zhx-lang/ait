@@ -67,6 +67,7 @@ import {
   accountEquityOf,
   availableBalanceOf,
   bindPositions,
+  onAutoStop,
   positionsOf,
   positionsRows,
   refreshPositions,
@@ -180,7 +181,22 @@ function say(text: string, tone: 'ok' | 'bad' = 'bad'): void {
   showToast(text, tone)
 }
 
+/*
+ * 开仓 / 加仓后的**自动止损是后台挂的**（后端不等它，见下单那段）⇒ 挂完从常驻流推一条
+ * `auto-stop` 过来，这里补一句提示。下单那条 toast 只管这一单本身，不再等止损。
+ */
+const stopAutoStop = onAutoStop(r => {
+  const text = autoStopText(r)
+  if (!text) return
+  /* `autoStopText` 是给「下单提示后面接一句」写的，这里自成一条 ⇒ 去掉开头的分隔符 */
+  const note = text.replace(/^ · /, '')
+  const bad = r.ok === false && r.skipped !== 'manual-stop'
+  /* 带上币种（`1000PEPEUSDT` → `1000PEPE`）：一个账户同时开几个币时得知道说的是谁 */
+  say(`${baseOf(r.symbol)} ${note}`, bad ? 'bad' : 'ok')
+})
+
 onBeforeUnmount(() => {
+  stopAutoStop()
   unbindPos?.()
   unbindPos = null
   stopForeground?.()
@@ -388,7 +404,16 @@ const roomBySymbol = computed(() =>
 const roomByAccount = computed(() =>
   Math.max(0, equity.value * ACCOUNT_LEV_MAX - openNotional.value)
 )
-const roomByMargin = computed(() => Math.max(0, available.value * lev.value))
+/**
+ * 可用保证金撑得起多少名义价值 = `可用 × 杠杆`。
+ *
+ * ⚠️ 留 **0.5% 给手续费**（`FEE_SLACK`，跟后端 `autoShrinkQty` 同一个数）：
+ *    交易所要的是「起始保证金 **+ 手续费**」，按可用顶格算出来的数量必被回 `-2019`；
+ *    而后端的自动收口**只下调**（算出来跟原数量一样甚至更多就原样抛错）⇒
+ *    用户看到的是「明明显示能开，点了一下说保证金不够」。
+ *    （2026-10-15 实测踩到：可用 5.9、面板数量 14505、回 -2019。）
+ */
+const roomByMargin = computed(() => Math.max(0, available.value * lev.value * 0.995))
 
 /** **还能开的名义价值**（USDT）—— 面板上那个大数字就是它 */
 const roomNotional = computed(() =>
@@ -1043,10 +1068,9 @@ async function submit(
         ? ` · 数量已从 ${o.adjusted.from} 自动调到 ${o.adjusted.to}（${o.adjusted.reason}）`
         : ''
       /*
-       * 自动止损那一句 —— 用户最关心的是「这仓到底有没有被保护住」，所以：
-       *   · 挂上了 → 报触发价 + 覆盖的数量；
-       *   · 跳过（已经有手工止损）→ 说清楚「没动你的那张」，别让他以为没保护；
-       *   · 失败 → 把原因原样报出来（这一单**已经成交**了，不能不说）。
+       * 自动止损那一句 —— 现在它**不在这个响应里**了（后端改成后台挂，见上）：挂完会从
+       * 常驻流推 `auto-stop` 过来，由上面那个订阅补一条独立提示。
+       * 这里仍然读一下 `r.autoStop`：万一哪天又改回同步返回，提示能自动接上。
        */
       const auto = autoStopText(r.autoStop)
       buzz(12)

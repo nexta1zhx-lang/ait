@@ -19,6 +19,7 @@ import {computed, ref} from 'vue'
 import {
   exchangeStream,
   fetchTradePositions,
+  type AutoStopPush,
   type FuturesPosition,
   type PositionsPatch,
   type TradePositionRow
@@ -94,6 +95,20 @@ interface KeyRows {
 const perKey = ref<Record<number, KeyRows>>({})
 /** 最近一次读数的错误（界面上顶多提示一句） */
 export const positionsErr = ref('')
+
+/**
+ * 自动止损的推送（后端后台挂完之后推的）+ 界面这一侧的订阅口。
+ *
+ * ⚠️ 只有**这条流活着**才收得到（页面在后台时会断开，那是设计如此）——
+ *    收不到也不影响止损：它该挂还是挂了，只是少一句提示。
+ */
+const autoStopListeners = new Set<(r: AutoStopPush) => void>()
+
+/** 订阅「自动止损挂完了」；返回退订函数（组件卸载时调） */
+export function onAutoStop(cb: (r: AutoStopPush) => void): () => void {
+  autoStopListeners.add(cb)
+  return () => autoStopListeners.delete(cb)
+}
 
 /** 每个 key 的订阅（引用计数到 0 才真的退订） */
 const stops = new Map<number, () => void>()
@@ -285,6 +300,10 @@ function start(keyId: number): void {
           live: Boolean(p.live),
           rows: (p.positions ?? []).map(toRow)
         })
+      },
+      /* 自动止损挂完了（后台挂）⇒ 转给订阅者（下单面板会补一句提示） */
+      autoStop: r => {
+        for (const cb of autoStopListeners) cb(r)
       },
       /* 这套账户不参与统计（现货 / 没填 Key）→ 别留着上一份数据 */
       reject: () => clear(keyId),

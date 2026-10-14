@@ -450,6 +450,25 @@ export type ExchangeEvent =
    *   前端收到这条就重读一次（本地，几乎零成本）。
    */
   | {type: 'orders'; reason: string}
+  /**
+   * **自动止损有结果了**（2026-10-15，用户选了「后台挂」）。
+   *
+   * 开仓 / 加仓的响应**不等**止损挂完（那样要多等 ~3 秒），结果走这条推给前端，
+   * 面板补一句提示（挂在哪 / 跳过了 / 为什么失败）。
+   * ⚠️ 没人订阅时 `emit` 是空转，止损照样挂 —— 这条只是**通知**，不是流程的一环。
+   */
+  | {
+      type: 'auto-stop'
+      symbol: string
+      ok: boolean
+      skipped?: string
+      price?: number
+      quantity?: number
+      orderId?: string
+      replaced?: string
+      existingPrice?: number | null
+      error?: string
+    }
   | {type: 'health'; deaf: boolean}
 
 /** key_id → 订阅者 */
@@ -491,7 +510,7 @@ function listenerCount(keyId: number | string): number {
   return listenerSets.get(keyOf(keyId))?.size ?? 0
 }
 
-function emit(keyId: number | string, ev: ExchangeEvent): void {
+export function emit(keyId: number | string, ev: ExchangeEvent): void {
   const set = listenerSets.get(keyOf(keyId))
   if (!set?.size) return
   for (const fn of set) {

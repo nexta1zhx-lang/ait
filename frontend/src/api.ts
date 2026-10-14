@@ -1916,7 +1916,9 @@ const EXCHANGE_EVENTS = [
   'positions',
   'income',
   'health',
-  'orders'
+  'orders',
+  /** 自动止损挂完了（**后台挂**，见 `POST /api/exchange/trade/order` 的 `autoStop`） */
+  'auto-stop'
 ]
 
 export function exchangeStream(
@@ -1937,6 +1939,12 @@ export function exchangeStream(
     reject?: (reason: string) => void
     /** 持仓增量（改造 P1/P4）：常驻流每次刷新持仓都会推 */
     positions?: (p: PositionsPatch) => void
+    /**
+     * **开仓 / 加仓后的自动止损挂完了**（2026-10-15，用户选的「后台挂」）。
+     *
+     * 下单响应不等它 —— 挂完从常驻流推这条过来，界面补一句提示。
+     */
+    autoStop?: (r: AutoStopPush) => void
     /**
      * 收到**任何**东西（数据事件或 20 秒一次的心跳）时回调。
      *
@@ -1964,6 +1972,7 @@ export function exchangeStream(
         else if (name === 'orders') on.orders?.(String(d?.reason ?? ''))
         else if (name === 'reject') on.reject?.(String(d?.reason ?? ''))
         else if (name === 'positions') on.positions?.(data as PositionsPatch)
+        else if (name === 'auto-stop') on.autoStop?.(data as AutoStopPush)
       },
       onReconnect: on.reconnect,
       onAlive: on.alive
@@ -2162,6 +2171,14 @@ export interface OrderInput {
    * ⚠️ 只在**真单 + 开仓那一侧**生效（减仓单不带）。
    */
   autoStop?: number
+}
+
+/**
+ * **自动止损挂完了**（从常驻流推过来 —— 后台挂，下单响应不等它）。
+ * 字段跟 `AutoStopResult` 一一对应，外加「哪个币」。
+ */
+export interface AutoStopPush extends AutoStopResult {
+  symbol: string
 }
 
 /** 自动止损的结果（附在下单响应里 —— 它成功与否都不影响那一单本身） */
