@@ -600,14 +600,19 @@ async function isDualSide(ex: any, cacheKey: number | string): Promise<boolean> 
 }
 
 /**
- * 杠杆上限（用户 2026-10-14 定）：
- *   · **单币最多 5 倍**；
- *   · **账户总杠杆最多 11 倍** = Σ各币持仓名义价值 ÷ 账户权益（钱包余额 + 未实现盈亏）。
+ * 下单前的两条硬上限（用户 2026-10-14 定，**当天改过一次口径**）：
+ *   · **单笔开单的名义金额 ≤ 5 × 账户权益**（权益 = 钱包余额 + 未实现盈亏）；
+ *   · **账户总杠杆 ≤ 11 倍** = (Σ各币持仓名义价值 + 本单名义价值) ÷ 账户权益。
  *
- * 两个都是**硬上限**：设杠杆和下单两处都拦，绕开界面直接打接口也拦得住。
- * ⚠️ 前端 `OrderPanel.vue` 的 `LEV_MAX` 是**显示**用的，要和这里对齐（改这里也要改那里）。
+ * ⚠️ 用户原话：「走个脚本将我交易所的所有币种的杠杆设置为 10 倍，**是开单的金额不能
+ *    超出 5 倍**」—— 所以 5 倍管的是**金额**，不是杠杆；**杠杆本身不设上限**
+ *    （统一 10x 由脚本设、面板跟随交易所显示）。
+ *    早上按「单币杠杆 ≤5x」做过一版，当天就按这个口径撤掉了 —— 别再改回去。
+ *
+ * 两条都是**硬上限**：下单接口里拦，绕开界面直接打接口也拦得住。
+ * ⚠️ 前端 `OrderPanel.vue` 里那两个常量是**显示**用的，要和这里对齐。
  */
-export const MAX_SYMBOL_LEVERAGE = 5
+export const MAX_ORDER_EQUITY_RATIO = 5
 export const MAX_ACCOUNT_LEVERAGE = 11
 
 /**
@@ -623,10 +628,6 @@ export async function setSymbolLeverage(
   assertTradable(c)
   if (!Number.isFinite(leverage) || leverage < 1)
     throw new Error('杠杆至少 1 倍')
-  if (Math.floor(leverage) > MAX_SYMBOL_LEVERAGE)
-    throw new Error(
-      `单币杠杆最多 ${MAX_SYMBOL_LEVERAGE} 倍，设不了 ${Math.floor(leverage)}x`
-    )
   const spec = await specFor(c, rawSymbol)
   const ex = createExchange(c)
 
@@ -639,23 +640,18 @@ export async function setSymbolLeverage(
 }
 
 /**
- * 开单前的杠杆体检（用户 2026-10-14 的两个上限）。
+ * 开单前的体检（上面那两条上限）。**只拦开仓** —— 减仓 / 平仓不走这里。
  *
- * ① **单币 ≤ 5x**：查交易所那边这个币**当前**的杠杆。
- *    正常走界面撞不上 —— 面板下单前会先把它设成 ≤5（`ensureLeverage`）；
- *    这条是拦「绕开界面直接打接口」的。
- *    ⚠️ **只查不改**：发现超了只报错，不替用户动交易所的设置 ——
- *       杠杆决定爆仓价，悄悄改比报错危险得多。
+ * ① **单笔开单名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益。
+ * ② **账户总杠杆 ≤ 11 倍**：(现有持仓名义 + 这一单) ÷ 账户权益。
  *
- * ② **账户总杠杆 ≤ 11x**：`(Σ现有持仓名义价值 + 这一单的名义价值) ÷ 账户权益`。
- *    权益按「钱包余额 + 未实现盈亏」（= 保证金余额 `totalMarginBalance`）。
- *    看不懂权益（读不到 / 为 0）就**不拦** —— 那种单子交易所自己会因保证金不足拒掉，
- *    别在这儿误伤。
+ * 两条共用同样两发请求（一次 `positionRisk` + 一次余额），所以合在一个函数里。
+ * 权益读不到 / 为 0 ⇒ **不拦** —— 那种单子交易所自己会因保证金不足拒掉，别在这儿误伤。
  *
  * @param quantity 这一单的数量（基础币）
- * @param price    参考价：限价单传委托价，市价单传面板的参考价；都没有就用标记价
+ * @param price    参考价：限价单传委托价，市价单传面板的参考价；都没有就退到标记价
  */
-export async function assertLeverageLimits(
+export async function assertOrderLimits(
   c: ExchangeCredentials,
   rawSymbol: string,
   quantity: number,
@@ -664,28 +660,11 @@ export async function assertLeverageLimits(
   assertTradable(c)
   const spec = await specFor(c, rawSymbol)
   const ex = createExchange(c)
-  /*
-   * 一次 `positionRisk`（**不带 symbol**）同时拿到两样东西：
-   *   · 这个币当前杠杆（没持仓也会有一行 —— v2 实测如此，见 `readPositionRiskRow`）
-   *   · 全账户持仓的名义价值（总杠杆的分子）
-   * 再配一次余额（分母）。3 个请求，下单不是高频操作，值。
-   */
   const [raw, balance] = await Promise.all([
     readPositionRiskRow(ex, undefined),
     fetchFuturesBalance(ex)
   ])
   const rows: any[] = Array.isArray(raw) ? raw : raw ? [raw] : []
-
-  const mine = rows.find(
-    r => String(r?.symbol ?? '').toUpperCase() === spec.symbol
-  )
-  const lev = nullish(mine?.leverage)
-  if (lev !== null && lev > MAX_SYMBOL_LEVERAGE) {
-    throw new Error(
-      `${spec.symbol} 当前杠杆 ${lev}x，超过单币上限 ${MAX_SYMBOL_LEVERAGE}x —— ` +
-        `先把杠杆调到 ${MAX_SYMBOL_LEVERAGE}x 以内再开`
-    )
-  }
 
   const notionals: number[] = []
   for (const r of rows) {
@@ -693,11 +672,23 @@ export async function assertLeverageLimits(
     if (p) notionals.push(p.notional)
   }
   const equity = balance.wallet + balance.unrealized
+  /* 参考价：限价单的委托价优先（那才是真实成交价），市价单退到标记价 */
+  const mine = rows.find(
+    r => String(r?.symbol ?? '').toUpperCase() === spec.symbol
+  )
   const ref =
     price !== undefined && price > 0 ? price : Number(mine?.markPrice) || 0
   const add = Math.max(0, quantity) * (Number.isFinite(ref) ? ref : 0)
+
+  const ratio = orderEquityRatio(add, equity)
+  if (ratio !== null && ratio > MAX_ORDER_EQUITY_RATIO) {
+    throw new Error(
+      `这一单名义金额约 ${add.toFixed(0)} USDT，是账户权益（${equity.toFixed(2)}）的 ` +
+        `${ratio.toFixed(1)} 倍，超过单笔上限 ${MAX_ORDER_EQUITY_RATIO} 倍 —— 数量取小一点再开`
+    )
+  }
+
   const after = totalLeverageAfter(notionals, equity, add)
-  /* 权益读不到 / 为 0 ⇒ 算不出比例，不拦（那种单子交易所自己会因保证金不足拒掉） */
   if (after !== null && after > MAX_ACCOUNT_LEVERAGE) {
     throw new Error(
       `这一单会把账户总杠杆推到 ${after.toFixed(1)}x（上限 ${MAX_ACCOUNT_LEVERAGE}x）：` +
@@ -713,12 +704,21 @@ function notionalSum(notionals: number[]): number {
 }
 
 /**
+ * `本单名义金额 ÷ 账户权益` —— 单笔开单占权益的几倍。
+ * 拆出来跟下面那个同一个理由：**能直接验**（算错会误拦真单子）。
+ * @returns 权益 ≤ 0（读不到 / 已经爆了）时 `null` = 算不出来
+ */
+export function orderEquityRatio(
+  addNotional: number,
+  equity: number
+): number | null {
+  if (!(equity > 0)) return null
+  return Math.max(0, addNotional) / equity
+}
+
+/**
  * `(Σ持仓名义价值 + 本单名义价值) ÷ 账户权益` —— 账户总杠杆。
- *
- * 单独拆出来是为了**能直接验**：这段算术算错会误拦真单子，
- * 不该只靠「看着像对」（`_verify-lev.ts` 里有几组数在跑它）。
- *
- * @returns 权益 ≤ 0（读不到 / 已经爆了）时返回 `null` = 比例算不出来
+ * @returns 权益 ≤ 0（读不到 / 已经爆了）时 `null` = 比例算不出来
  */
 export function totalLeverageAfter(
   notionals: number[],

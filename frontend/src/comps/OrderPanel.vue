@@ -235,42 +235,43 @@ const exchangeMaxLev = computed(() => {
 })
 
 /**
- * **单币杠杆上限 = 5 倍**（用户 2026-10-14 定）。
- *
- * ⚠️ 真正拦人的是后端（`MAX_SYMBOL_LEVERAGE`，设杠杆 / 下单两处都拦）——
- *    这里只是**显示**：档位里不给选超过 5 的，免得用户选了个注定被后端拒的值。
- *    要改上限，两边一起改。
+ * 杠杆**不设上限**（用户 2026-10-14 改的口径）：他要的是「所有币统一 10 倍」，
+ * 由 `scripts/set-leverage.mjs` 去交易所设，面板只负责**跟随交易所显示**。
+ * 所以这里只保留交易所自己的上限（冷门币可能只有 5x）和档位表本身。
  */
-const LEV_MAX = 5
-/**
- * **账户总杠杆上限 = 11 倍**（用户 2026-10-14 定）= Σ持仓名义价值 ÷ 账户权益。
- * 跟 `LEV_MAX` 一样：真正拦的是后端（`MAX_ACCOUNT_LEVERAGE`），这里只用于文案。
- */
-const ACCOUNT_LEV_MAX = 11
-/** 杠杆能选的档位（超过 `LEV_MAX` 的不会出现在弹层里） */
+/** 可选的杠杆档位 */
 const LEV_STEPS = [1, 2, 3, 5, 10, 15, 20]
+/** 面板自己最多给到 20x（用户 2026-10-05 定的档位表上限） */
+const LEV_UI_MAX = 20
 /**
  * 面板初值 —— **只有读不到交易所当前杠杆时才会用到它**
  * （正常情况下跟交易所同步，见 `load()` 里那段；用户 2026-10-14 提的「没有同步」）。
  */
-const DEFAULT_LEVERAGE = 5
+const DEFAULT_LEVERAGE = 10
+/**
+ * 下单的两条硬上限（用户 2026-10-14 定）。真正拦人的是后端
+ * （`MAX_ORDER_EQUITY_RATIO` / `MAX_ACCOUNT_LEVERAGE`），这里只用于文案：
+ *   · **单笔开单的名义金额 ≤ 5 × 账户权益**（权益 = 钱包余额 + 未实现盈亏）
+ *   · **账户总杠杆 ≤ 11 倍** = Σ持仓名义价值 ÷ 账户权益
+ */
+const ORDER_EQUITY_MAX = 5
+const ACCOUNT_LEV_MAX = 11
 const levOptions = computed(() =>
-  LEV_STEPS.filter(v => v <= Math.min(LEV_MAX, exchangeMaxLev.value))
+  LEV_STEPS.filter(v => v <= Math.min(LEV_UI_MAX, exchangeMaxLev.value))
 )
 const maxLev = computed(() => levOptions.value[levOptions.value.length - 1] ?? 10)
 
 /**
  * 一个杠杆值落到哪个**可选档位**上（交易所上限更低时不硬撑 —— 冷门币可能只有 5x）。
  *
- * 用户 2026-10-14 改了口径：**跟交易所同步** + **单币上限 5x**，所以：
+ * 用户 2026-10-14 定的口径：**跟交易所同步**、**杠杆本身不设上限**。所以：
  *   · 传进来读不到（0）→ 用 `DEFAULT_LEVERAGE`（或这币的交易所上限，取其小）
- *   · 传进来**不在档位里**或**超过上限**（8x、20x）→ 取不超过它的最大档
- *     （20x → 5x、8x → 5x）。夹过之后 `levConfirmed=false`，下单前会真设一次
- *     ⇒ 上限也就落到了交易所那边，不会出现「界面写 5、交易所是 20」。
+ *   · 传进来**不在档位里**（8x）→ 取不超过它的最大档（8x → 5x）
+ *   · 交易所给的比档位上限还高（比如 20x 就是顶格）→ 正常落在 20x 上
  */
 function fitLeverage(l: number): number {
   const opts = levOptions.value
-  const top = opts[opts.length - 1] ?? LEV_MAX
+  const top = opts[opts.length - 1] ?? LEV_UI_MAX
   const fallback = Math.min(DEFAULT_LEVERAGE, top)
   if (!(l >= 1)) return fallback
   const fit = opts.filter(v => v <= l)
@@ -1481,7 +1482,7 @@ onMounted(async () => {
           </button>
         </div>
         <p class="sheet-foot">
-          单币最高 <b>{{ maxLev }}x</b> · 账户总杠杆 ≤
+          单笔开单 ≤ <b>{{ ORDER_EQUITY_MAX }}</b> 倍账户权益 · 账户总杠杆 ≤
           <b>{{ ACCOUNT_LEV_MAX }}x</b>
           <template v-if="levConfirmed">
             · 当前 {{ lev }}x（交易所那边就是这个）
