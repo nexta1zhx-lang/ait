@@ -1443,32 +1443,28 @@ onMounted(async () => {
             ⚠️ 开仓时间挪到**底下一行**（用户：「开仓时间改为已开仓时间和按钮一行」）。
           -->
           <div class="ord-have-grid">
+            <!--
+              ⚠️ 这几格**不写单位**（用户 2026-10-14：「单位 都去掉」）——
+                 标签已经把意思说清了（数量 / 开仓价 / 仓位价值…），
+                 单位（USDT / 币种）挂在数字后面只是噪音。数量那边想核对币种看 title。
+            -->
             <span class="ord-hd" :title="`持仓数量：${posQty(curPos)}`"
-              ><em>数量</em
-              ><b>{{ posQtyNum(curPos) }}<i>{{ baseOf(curPos.symbol) }}</i></b></span
+              ><em>数量</em><b>{{ posQtyNum(curPos) }}</b></span
             >
             <span class="ord-hd"
               ><em>开仓价</em
-              ><b
-                >{{ price(curPos.entryPrice, pricePrecision) }}<i>USDT</i></b
-              ></span
+              ><b>{{ price(curPos.entryPrice, pricePrecision) }}</b></span
             >
             <span class="ord-hd"
               ><em>标记价</em
-              ><b
-                >{{ price(curPos.markPrice, pricePrecision) }}<i>USDT</i></b
-              ></span
+              ><b>{{ price(curPos.markPrice, pricePrecision) }}</b></span
+            >
+            <span class="ord-hd"><em>强平价</em><b>{{ liqText }}</b></span>
+            <span class="ord-hd"
+              ><em>仓位价值</em><b>{{ curNotionalText }}</b></span
             >
             <span class="ord-hd"
-              ><em>强平价</em><b>{{ liqText }}<i>USDT</i></b></span
-            >
-            <span class="ord-hd"
-              ><em>仓位价值</em
-              ><b>{{ curNotionalText }}<i>USDT</i></b></span
-            >
-            <span class="ord-hd"
-              ><em>保证金</em
-              ><b>{{ curMarginText }}<i>USDT</i></b></span
+              ><em>保证金</em><b>{{ curMarginText }}</b></span
             >
           </div>
           <!--
