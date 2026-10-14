@@ -426,15 +426,10 @@ const roomNotional = computed(() =>
 /** 这个币的 5 倍额度已经用满（还有仓）—— 界面要明说，别让人以为是坏了 */
 const fulled = computed(() => opened.value && roomBySymbol.value <= 0)
 
-/** 浮盈加仓的两档（用户 2026-10-14：「还有盈利可以选择加仓 50% 或者 100%」） */
-const ADD_STEPS = [50, 100]
-
 /** 当前持仓的**未实现盈利**（USDT）—— 加仓的钱从这里来（走实时那一份 `curPos`） */
 const posProfit = computed(() =>
   Math.max(0, Number(curPos.value?.unrealized ?? 0))
 )
-
-/* ---------------- 数字 ---------------- */
 
 /** 按交易所步长**向下**取整（宁可小一点，也别超余额 / 超精度） */
 function floorTo(v: number, decimals: number): number {
@@ -460,52 +455,102 @@ const quantityText = computed(() =>
     : '—'
 )
 
-/**
- * 浮盈加仓的数量：**保证金 = 浮盈 × pct%**，再受两道约束 ——
- * 不超过可用保证金、不超过账户总杠杆那条剩下的空间（`roomByAccount`）。
- *
- * ⚠️ **不再受「5 × 权益」那条限制**：用浮盈加仓本来就是「额度已经开满之后再往上加」，
- *    后端那边对这种情况有单独的预算（`symbolBudget` 的 `profitBudget` = 浮盈 × 杠杆）。
- */
-function addQuantity(pctOfProfit: number): number {
-  const p = refPrice.value
-  if (!(p > 0)) return 0
-  const addMargin = Math.min(
-    (posProfit.value * pctOfProfit) / 100,
-    available.value
-  )
-  const addNotional = Math.min(addMargin * lev.value, roomByAccount.value)
-  return addNotional > 0 ? floorTo(addNotional / p, amountPrecision.value) : 0
-}
+/* ---------------- 加仓（滑动选金额） ---------------- */
 
 /**
- * 加仓那一单的**名义金额**（USDT）—— **按钮上就报这个数**
- *（用户 2026-10-14：「**加仓显示加仓金额不显示百分比**」）。
- *
- * ⚠️ 报的是**仓位价值**（＝数量 × 标记价），跟上面那行「还能开 X USDT」、
- *    跟开单区的「仓位价值」是同一个口径；保证金（＝浮盈 × pct%）放 `title` 里。
+ * **加仓**：一个键位 + 弹层里滑动选「加仓金额（USDT）」
+ * （用户 2026-10-15：「改为一个键位加仓 加仓在平仓左侧，点击加 弹窗显示 改为可滑动加仓」，
+ *   并当面定了口径：滑的是**加仓金额**，上限取「可用保证金 / 额度 / 浮盈」允许的最大值）。
  */
-function addNotional(pctOfProfit: number): number {
-  const q = addQuantity(pctOfProfit)
-  const p = refPrice.value
-  return q > 0 && p > 0 ? q * p : 0
-}
+const addOpen = ref(false)
+/** 弹层里滑出来的加仓金额（USDT **名义价值**，不是保证金） */
+const addValue = ref(0)
 
-/** 按钮上的字：`3.30` / `—`（零点几那种小数也看得见） */
-function addNotionalText(pctOfProfit: number): string {
-  const v = addNotional(pctOfProfit)
-  return v > 0 ? fmt(v, 2) : '—'
-}
+/** 最小加仓金额 = 交易所的最小名义价值（拿不到就按 5 USDT 兜底） */
+const addMinCost = computed(() => Number(info.value?.minCost ?? 0) || 5)
 
-/** `title`：浮盈百分比 + 保证金 + 数量（百分比挪到这儿，不占按钮） */
-function addTitle(pctOfProfit: number): string {
-  const q = addQuantity(pctOfProfit)
-  if (!(q > 0)) return '浮盈不够开这一单'
-  const margin = (posProfit.value * pctOfProfit) / 100
-  return (
-    `用浮盈加仓 ${pctOfProfit}%（保证金 ${fmt(margin, 2)} USDT）· ` +
-    `约 ${q.toFixed(Math.min(12, amountPrecision.value))} ${base.value}`
+/** 浮盈能撑多少名义价值：`浮盈 × 杠杆`（后端 `symbolBudget` 的 profitBudget 同口径） */
+const profitRoom = computed(() => posProfit.value * lev.value)
+
+/**
+ * 这个币还能加到多少名义价值：**取「两条预算里够得着的那条」**
+ * —— 后端 `symbolBudget` 是「累计 ≤ 5×权益」**或者**「本单 ≤ 浮盈×杠杆」，
+ *    所以这里也是 `max(5 倍额度剩余, 浮盈预算)`，不是两者取小。
+ */
+const addRoom = computed(() => Math.max(roomBySymbol.value, profitRoom.value))
+
+/** 加仓金额的**上限**：可用保证金那条、账户总杠杆那条、上面那条币种预算，三者取小 */
+const addMax = computed(() =>
+  Math.max(
+    0,
+    Math.min(
+      // 0.5% 留给手续费（跟后端 `autoShrinkQty` 的 FEE_SLACK 同口径）
+      available.value * lev.value * 0.995,
+      roomByAccount.value,
+      addRoom.value
+    )
   )
+)
+
+/** 一笔加仓金额 → 数量（按合约精度向下取整） */
+function addQty(usdt: number): number {
+  const p = refPrice.value
+  return p > 0 && usdt > 0 ? floorTo(usdt / p, amountPrecision.value) : 0
+}
+
+/** 滑动条当前值对应的**真实**名义价值 / 保证金（取整之后可能比滑到的小一点） */
+const addQtyNum = computed(() => addQty(addValue.value))
+const addRealNotional = computed(() => addQtyNum.value * refPrice.value)
+const addRealMargin = computed(() =>
+  lev.value > 0 ? addRealNotional.value / lev.value : 0
+)
+/** 滑动条已填充的比例（`--fill` 那个 CSS 变量用，`0~100`） */
+const addFillPct = computed(() => {
+  const lo = addMinCost.value
+  const hi = Math.max(lo, addMax.value)
+  if (!(hi > lo)) return 0
+  return Math.max(0, Math.min(100, ((addValue.value - lo) / (hi - lo)) * 100))
+})
+
+/** 滑动条的步长：金额大就粗一点，不然手机上要划半天 */
+const addStep = computed(() =>
+  addMax.value >= 200 ? 1 : addMax.value >= 20 ? 0.5 : 0.1
+)
+
+/**
+ * 打开加仓弹层：先把滑动条放在一个**中间偏右**的位置（不是顶格）——
+ * 顶格一击就满仓太容易手滑，用户还得自己往回拖。
+ */
+function openAdd(): void {
+  const pos = curPos.value
+  if (!pos) {
+    say('现在没有持仓，不能加仓')
+    return
+  }
+  if (addBlocker.value) {
+    buzz([20, 60, 20])
+    say(addBlocker.value)
+    return
+  }
+  const mid = Math.min(addMax.value, Math.max(addMinCost.value, addMax.value * 0.5))
+  addValue.value = Math.round(mid * 100) / 100
+  addOpen.value = true
+}
+
+/** 确认加仓：方向跟持仓一致，数量按滑动条的金额折算 */
+async function confirmAdd(): Promise<void> {
+  const pos = curPos.value
+  if (!pos) return
+  const q = addQtyNum.value
+  if (!(q > 0)) {
+    say('这个金额按合约精度取整之后是 0，再往右滑一点')
+    return
+  }
+  addOpen.value = false
+  await submit(pos.side, q, `加仓 ${fmt(addRealNotional.value, 2)} USDT`, true)
+  /* 加完立刻重读（数量 / 浮盈 / 额度都要跟着变） */
+  loadedKey = ''
+  void load()
 }
 
 /**
@@ -541,7 +586,7 @@ const blocker = computed(() => {
     return (
       `${props.symbol.toUpperCase()} 的 ${ORDER_EQUITY_MAX} 倍额度已经开满` +
       `（已开 ${curNotional.value.toFixed(2)} / 额度 ${fiveNotional.value.toFixed(2)} USDT）` +
-      ` —— 想加仓就用「加仓 50% / 100%」（用浮盈加）`
+      ` —— 想加仓就点下面的「加仓」（用浮盈加，额度另算）`
     )
   /* 额度被别的仓位 / 可用保证金卡住了 */
   if (!(roomNotional.value > 0)) {
@@ -568,15 +613,22 @@ const blocker = computed(() => {
 
 /**
  * **加仓**不能下单的原因（空 = 能加）。
- * 跟 `blocker` 的区别就一条：**不看 5 倍额度**（加仓本来就是额度满了以后的事）。
+ *
+ * 跟 `blocker` 的区别就一条：**不看 5 倍额度**（加仓本来就是额度满了以后的事，
+ * 后端对「用浮盈加」有单独预算，见 `addRoom`）。
  */
 const addBlocker = computed(() => {
   const pre = preBlocked.value
   if (pre) return pre
   if (!opened.value) return '现在没有持仓，不能加仓'
-  if (!(posProfit.value > 0)) return '这个仓位还没有浮盈，不能加仓'
-  if (!(addQuantity(ADD_STEPS[0]) > 0))
-    return '浮盈不够开这一单（按这个合约的精度取整之后是 0）'
+  if (!(refPrice.value > 0)) return '还没拿到价格，稍等一下'
+  if (!(addMax.value >= addMinCost.value))
+    return (
+      `现在能加的空间不到最小下单量` +
+      `（${fmt(addMinCost.value, 2)} USDT）—— 先有点浮盈，或者平掉一点`
+    )
+  if (!(addQty(addMinCost.value) > 0))
+    return '按这个合约的精度取整之后是 0'
   return ''
 })
 
@@ -818,15 +870,6 @@ function autoStopText(r: AutoStopResult | null | undefined): string {
   if (r.skipped === 'disabled') return ''
   return ` · 自动止损失败：${r.error || '未知原因'}（这一单已成交）`
 }
-
-/**
- * 能加仓吗：有持仓 + **有浮盈** + 前置检查过关。
- * 没盈利就**不给**加仓入口（用户 2026-10-14：「如果**还有盈利**还可以选择加仓」）。
- *
- * ⚠️ 这里看的是 `addBlocker`（**不看 5 倍额度**）—— 额度开满了恰恰是最需要加仓按钮
- *    的时候，用 `blocker` 会把它们藏起来。
- */
-const canAdd = computed(() => !addBlocker.value)
 
 /* ---------------- 数据 ---------------- */
 
@@ -1093,31 +1136,6 @@ async function submit(
     busy.value = false
     busySide.value = null
   }
-}
-
-/**
- * 浮盈加仓：**方向和当前持仓一致**，数量按「浮盈 × pct%」算
- * （用户 2026-10-14：「如果还有盈利 还可以选择加仓 50% 或者 100%」）。
- *
- * 没持仓 / 没浮盈时按钮根本不显示（`canAdd`），这里再挡一次 —— 按钮的
- * `disabled` 只是视觉，键盘 / 手势有可能绕过去。
- */
-async function submitAdd(pctOfProfit: number): Promise<void> {
-  const pos = curPos.value
-  if (!pos) {
-    say('现在没有持仓，不能加仓')
-    return
-  }
-  const q = addQuantity(pctOfProfit)
-  if (!(q > 0)) {
-    say('浮盈不够开这一单（按这个合约的精度取整之后是 0）')
-    return
-  }
-  /* 方向跟持仓一致（加多 / 加空），杠杆那套流程跟正常开单完全一样 */
-  await submit(pos.side, q, `加仓 ${pctOfProfit}%（用浮盈）`, true)
-  /* 加完了也立刻重读一次（仓位数量 / 浮盈都要跟着变） */
-  loadedKey = ''
-  void load()
 }
 
 /** 列表里那一条的「币」：BTCUSDT → BTC */
@@ -1481,34 +1499,6 @@ onMounted(async () => {
       <!-- ================= ① 有仓位：只显示仓位 ================= -->
       <template v-else-if="opened && curPos">
         <!--
-          加仓在**仓位上面**（用户 2026-10-14 明确要求）。
-          左边那行小字是「还剩多少额度」—— 额度满了就直说，顺便告诉用户还能靠浮盈加。
-          浮盈 ≤ 0 时两颗加仓按钮不出现（用户：「**如果还有盈利**还可以选择加仓」），
-          这一行就只剩左边那句。
-        -->
-        <div class="ord-add-row">
-          <!--
-            ⚠️ 这行字要短：右边两颗「加仓 xx USDT」本身就宽，长了会被截成「额度已…」。
-               额度满时只写「额度已满」（已开多少在下面仓位卡的「仓位价值」里看得到）。
-          -->
-          <span class="ord-add-room" :class="{full: fulled}">
-            <template v-if="fulled">额度已满</template>
-            <template v-else>还能开 <b>{{ roomText }}</b> USDT</template>
-          </span>
-          <button
-            v-for="n in ADD_STEPS"
-            :key="n"
-            type="button"
-            class="ghost tiny ord-add-b"
-            :disabled="busy || levBusy || !(addQuantity(n) > 0)"
-            :title="addQuantity(n) > 0 ? addTitle(n) : addBlocker || '浮盈不够开这一单'"
-            @click="submitAdd(n)"
-          >
-            加仓 {{ addNotionalText(n) }}{{ addNotional(n) > 0 ? ' USDT' : '' }}
-          </button>
-        </div>
-
-        <!--
           这个币的仓位（`curPos`）：左边一条色条按方向绿 / 红 + 一枚「已开」小标，
           右边是数量 / 杠杆 / 浮盈，底下一行是均价 / 价值 + 平仓 / 全平。
         -->
@@ -1585,6 +1575,24 @@ onMounted(async () => {
             <span class="ord-have-meta" :title="openedAtTitle"
               >持仓 <b>{{ heldText }}</b></span
             >
+            <!--
+              加仓（用户 2026-10-15：「改为一个键位加仓 加仓在平仓左侧，点击加 弹窗显示
+              改为可滑动加仓」）—— 一颗按钮，点开是弹层（滑动选加仓金额）。
+              ⚠️ 常显、不可用时置灰（用户 2026-10-14：「加仓按钮要显示」）：
+                 加不了的时候 `title` 会说清为什么。
+            -->
+            <button
+              type="button"
+              class="ghost tiny ord-have-b"
+              :disabled="busy || levBusy || !!addBlocker"
+              :title="
+                addBlocker ||
+                `加仓：最多 ${fmt(addMax, 2)} USDT（方向跟持仓一致，可滑动选金额）`
+              "
+              @click="openAdd()"
+            >
+              加仓
+            </button>
             <button
               type="button"
               class="ghost tiny ord-have-b"
@@ -1769,6 +1777,62 @@ onMounted(async () => {
           </template>
           <template v-else> · 交易所那边不是 {{ lev }}x，下单前会先设成它</template>
         </p>
+      </section>
+    </Teleport>
+
+    <!--
+      加仓弹层（用户 2026-10-15：「点击加 弹窗显示 改为可滑动加仓」）：
+      滑动条滑的是**加仓金额（USDT 名义价值）**，上限是「可用保证金 / 账户总杠杆 /
+      这个币的预算（5×额度剩余 或 浮盈×杠杆）」三者取小。
+    -->
+    <Teleport to="body">
+      <div v-if="addOpen" class="sheet-mask" @click="addOpen = false" />
+      <section v-if="addOpen" class="sheet" role="dialog" aria-label="加仓">
+        <header class="sheet-head">
+          <b>加仓 {{ symbol.toUpperCase() }}</b>
+          <button
+            type="button"
+            class="ghost tiny"
+            title="关掉"
+            @click="addOpen = false"
+          >
+            ✕
+          </button>
+        </header>
+        <p class="sheet-text">
+          方向和持仓一致（{{ curPos ? sideText(curPos) : '' }}）· 最多
+          <b>{{ fmt(addMax, 2) }} USDT</b>
+          <span class="dim">（可用保证金 / 总杠杆 / 这个币的预算取最小）</span>
+        </p>
+        <label class="ord-field ord-slider">
+          <span>{{ fmt(addValue, 2) }}</span>
+          <span class="ord-bar">
+            <input
+              v-model.number="addValue"
+              type="range"
+              :min="addMinCost"
+              :max="Math.max(addMinCost, addMax)"
+              :step="addStep"
+              :style="{'--fill': addFillPct + '%'}"
+              :title="`加仓 ${fmt(addValue, 2)} USDT`"
+            />
+          </span>
+        </label>
+        <p class="tr-avail">
+          约
+          <b>{{ addQtyNum.toFixed(Math.min(12, amountPrecision)) }}</b>
+          {{ base }} · 保证金 <b>{{ fmt(addRealMargin, 2) }}</b> USDT
+          <span class="dim">（浮盈 {{ fmt(posProfit, 2) }} USDT）</span>
+        </p>
+        <button
+          type="button"
+          class="tr-go"
+          :disabled="busy || !(addQtyNum > 0)"
+          :title="testOrder ? '测试加仓（只校验）' : '加仓'"
+          @click="confirmAdd()"
+        >
+          {{ busy ? '提交中…' : testOrder ? `测试加仓 ${fmt(addValue, 2)}` : `加仓 ${fmt(addValue, 2)} USDT` }}
+        </button>
       </section>
     </Teleport>
 

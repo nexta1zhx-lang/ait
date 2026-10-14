@@ -5050,8 +5050,9 @@ body.fixed-viewport .split {
  */
 .ord-quota {
   position: relative;
-  margin-bottom: 8px;
-  padding: 9px 11px;
+  /* 2026-10-15 用户：「可开的数字小一点，空间整体都需要小一点」⇒ 这一卡整体收紧 */
+  margin-bottom: 6px;
+  padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm, 10px);
   /* ⚠️ **不加背景色**（用户 2026-10-14：「开单界面不要加背景色了」）——
@@ -5062,9 +5063,9 @@ body.fixed-viewport .split {
 /* 价值卡里那行小字：`数量 0.081 BTC`（用户 2026-10-14：「用小字放在下面就行」） */
 .ord-quota-sub {
   display: block;
-  margin-top: 2px;
-  font-size: 11.5px;
-  line-height: 1.5;
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.45;
   color: var(--muted);
 }
 
@@ -5085,9 +5086,9 @@ body.fixed-viewport .split {
 /* 「当前可开价值」那行小字（用户 2026-10-14：「价值那一行…加上文字」） */
 .ord-quota-lb {
   display: block;
-  margin-bottom: 1px;
-  font-size: 11.5px;
-  line-height: 1.4;
+  margin-bottom: 0;
+  font-size: 11px;
+  line-height: 1.35;
   color: var(--muted);
 }
 
@@ -5108,8 +5109,8 @@ body.fixed-viewport .split {
   background: var(--accent-soft);
   color: var(--accent);
   font-family: var(--mono);
-  font-size: 12px;
-  line-height: 22px;
+  font-size: 11.5px;
+  line-height: 20px;
   font-weight: var(--fw-mid);
   font-variant-numeric: tabular-nums;
 }
@@ -5133,8 +5134,8 @@ body.fixed-viewport .split {
 .ord-quota-num {
   display: block;
   font-family: var(--mono);
-  font-size: 22px;
-  line-height: 1.3;
+  font-size: 19px;
+  line-height: 1.25;
   font-weight: var(--fw-bold);
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -5158,17 +5159,17 @@ body.fixed-viewport .split {
   display: grid;
   /* 两列：数量已经单独一块了，这里只剩「所需保证金 / 账户可用」 */
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
 .ord-read .ord-r {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
   min-width: 0;
-  padding: 7px 10px;
-  line-height: 1.45;
+  padding: 5px 9px;
+  line-height: 1.35;
 }
 
 .ord-read .ord-r em {
@@ -5182,7 +5183,7 @@ body.fixed-viewport .split {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: var(--fw-mid);
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -5233,8 +5234,10 @@ body.fixed-viewport .split {
   display: flex;
   align-items: center;
   gap: 10px;
-  /* 行高也钉住：`做多/做空` 比加仓那两颗小胶囊高 3px */
-  min-height: 36px;
+  /* 行高钉住（跟做多/做空那颗按钮一样高，别再压矮） */
+  min-height: 38px;
+  /* 跟底下那条 tab 栏留一点距离（用户 2026-10-15：「和底下 tab 保持一定距离」） */
+  margin-bottom: 6px;
 }
 
 /*
@@ -5340,9 +5343,13 @@ body.fixed-viewport .split {
 .ord-submit {
   flex: 1 1 0;
   min-width: 0;
-  padding: 8px 12px;
+  /*
+   * 用户 2026-10-15：先「开仓键也小一点」，看完又说「（做多/做空）再高一点」
+   * ⇒ 文字小一号（13px），但**上下留够**（9px）—— 手感别跟着矮下去。
+   */
+  padding: 9px 12px;
   border-radius: var(--r-sm, 10px);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: var(--fw-bold);
   letter-spacing: 0.02em;
   white-space: nowrap;
