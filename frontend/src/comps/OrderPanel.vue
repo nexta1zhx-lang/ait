@@ -72,6 +72,7 @@ import {
 import {fmt, price, usd} from '../format'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {testOrder} from '../settings'
+import {pickSymbol, prefetchSymbol} from '../analyze'
 import {contracts} from '../store'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
 import {showToast} from '../toast'
@@ -358,15 +359,6 @@ const roomNotional = computed(() =>
 /** 这个币的 5 倍额度已经用满（还有仓）—— 界面要明说，别让人以为是坏了 */
 const fulled = computed(() => opened.value && roomBySymbol.value <= 0)
 
-/** 三条里最紧的是哪一条（说明为什么只能开这么点） */
-const roomLimitedBy = computed<'symbol' | 'account' | 'margin' | ''>(() => {
-  const r = roomNotional.value
-  if (!(r > 0)) return ''
-  if (r === roomBySymbol.value) return 'symbol'
-  if (r === roomByAccount.value) return 'account'
-  return 'margin'
-})
-
 /** 浮盈加仓的两档（用户 2026-10-14：「还有盈利可以选择加仓 50% 或者 100%」） */
 const ADD_STEPS = [50, 100]
 
@@ -584,22 +576,42 @@ const curNotionalText = computed(() =>
 /** 面板中间那个**大数字**：还能开多少（开满时就是 `0.00`，用户要的就是这个） */
 const roomText = computed(() => fmt(Math.max(0, roomNotional.value), 2))
 
+
+/* ---------------- 顶部：已开的币种（点一下切过去） ---------------- */
+
 /**
- * 大数字底下的那行小字：说清这个数是怎么来的。
- *   · 已经开着仓 ⇒「5 倍额度 66.11 · 已开 66.11」（用户：「剩余开仓应该是 0」）；
- *   · 还没开 ⇒「单笔上限 = 5 × 账户权益（13）」（额度或保证金不够时补一句谁卡的）。
+ * 账户里**当前有持仓的币种**（用户 2026-10-14：「顶部加上已开的币种，点击可切换」）——
+ * 在这只币的 K 线上看到一半、想换到另一只已开的币时，不用再点币种下拉翻。
+ *
+ * 数据读共享 store（`./positions`，SSE 推，跟「交易所账户」页同源）。
+ * ⚠️ 按**基础币**去重：双向持仓时同一个币会有两条（多 / 空），顶部只该出现一枚。
  */
-const roomHint = computed(() => {
-  if (fulled.value)
-    return `5 倍额度已用满：额度 ${fiveText.value} · 已开 ${curNotionalText.value} USDT`
-  if (opened.value)
-    return `5 倍额度 ${fiveText.value} · 已开 ${curNotionalText.value} USDT`
-  if (roomLimitedBy.value === 'margin')
-    return `按可用保证金算（${availableText.value} × ${lev.value}x），权益 ${equityText.value} USDT`
-  if (roomLimitedBy.value === 'account')
-    return `账户总杠杆快顶到 ${ACCOUNT_LEV_MAX}x 了，只能再开这么多`
-  return `单笔上限 = 5 × 账户权益（${equityText.value} USDT）`
+const heldSymbols = computed(() => {
+  const seen = new Map<string, {base: string; pnl: number}>()
+  for (const p of positionsRows.value) {
+    const base = baseOf(p.symbol)
+    if (!base) continue
+    const hit = seen.get(base)
+    if (hit) hit.pnl += Number(p.unrealized) || 0
+    else seen.set(base, {base, pnl: Number(p.unrealized) || 0})
+  }
+  return [...seen.values()]
 })
+
+/** 点顶部的币 → 切 K 线（走分析页那套全局币种，跟「合约」页点一行是同一条路） */
+function gotoSymbol(base: string): void {
+  if (!base || base === String(props.symbol).toUpperCase()) return
+  prefetchSymbol(base)
+  pickSymbol(base)
+  buzz(8)
+}
+
+/** 顶部那枚小字：浮盈（正负号 + 短数字） */
+function pnlShort(v: number): string {
+  if (!Number.isFinite(v) || !v) return ''
+  const a = Math.abs(v)
+  return `${v > 0 ? '+' : '−'}${a.toFixed(a < 1 ? 2 : 1)}`
+}
 
 /**
  * 账户里**所有持仓**的名义价值合计（跨交易对，取绝对值）。
@@ -628,6 +640,73 @@ const levAfterText = computed(() => (levAfter.value > 0 ? `${levAfter.value.toFi
 
 /** 会不会顶到、或顶穿那条 11 倍上限（顶到就标黄提醒） */
 const levAfterWarn = computed(() => levAfter.value >= ACCOUNT_LEV_MAX)
+
+/**
+ * **实时杠杆** = 这一单真开下去会占的杠杆 = 本单名义 ÷ 账户权益。
+ *
+ * 用户 2026-10-14：「右侧显示实时杠杆，**不够 5 倍数就是显示 4.3 这样**」——
+ * 额度被可用保证金卡住时（比如只够 5700、权益 1328）就是 `4.3x`，
+ * 够满 5 倍权益时就是 `5.0x`。没额度 / 读不到权益时不显示。
+ */
+const liveLevText = computed(() => {
+  if (!(equity.value > 0) || !(notional.value > 0)) return ''
+  return `${(notional.value / equity.value).toFixed(1)}x`
+})
+
+/* ---------------- 持仓的账本侧信息（已开仓时间 / 已实现盈利） ---------------- */
+
+/** 已开仓时间：`09-14 15:22`（跨年才带年份，别把这一行撑长） */
+const openedAtText = computed(() => {
+  const t = Number(info.value?.positionMeta?.openedAt ?? 0)
+  if (!(t > 0)) return '—'
+  const d = new Date(t)
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  /* 今天开的只给时分（`22:41`）；今年给 `10-14 22:41`；跨年才带年份 */
+  if (d.toDateString() === now.toDateString()) return hm
+  const md = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return d.getFullYear() === now.getFullYear()
+    ? `${md} ${hm}`
+    : `${d.getFullYear()}-${md} ${hm}`
+})
+
+/** 完整时间（放 title 里，那格显示的是上面那个短写法） */
+const openedAtTitle = computed(() => {
+  const t = Number(info.value?.positionMeta?.openedAt ?? 0)
+  if (!(t > 0)) return '本地账本里没有这一段仓位的开仓时间'
+  const d = new Date(t)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return (
+    `开仓时间：${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  )
+})
+
+/** 已实现盈利（**净**：已实现 − 手续费 + 资金费）；账本没这一段时是 `—` */
+const realizedText = computed(() => {
+  const m = info.value?.positionMeta
+  if (!m) return '—'
+  const v = Number(m.net) || 0
+  return `${v >= 0 ? '+' : '−'}${fmt(Math.abs(v), 2)}`
+})
+
+/** 已实现盈利是正是负（配色用）；`null` = 没数据 */
+const realizedUp = computed(() => {
+  const m = info.value?.positionMeta
+  return m ? (Number(m.net) || 0) >= 0 : null
+})
+
+/** 那两项的 `title`：把毛盈亏 / 手续费 / 资金费摊开说清楚 */
+const realizedTitle = computed(() => {
+  const m = info.value?.positionMeta
+  if (!m) return '本地账本里没有这一段仓位（开仓可能发生在记账之前）'
+  return (
+    `已实现 ${fmt(Number(m.realized) || 0, 2)} · 手续费 ${fmt(Number(m.fee) || 0, 2)} · ` +
+    `资金费 ${fmt(Number(m.funding) || 0, 2)}` +
+    (m.partial ? '（账本不全，这是残值）' : '')
+  )
+})
 
 /**
  * 能加仓吗：有持仓 + **有浮盈** + 前置检查过关。
@@ -806,6 +885,18 @@ async function submit(
       const dir = o.side === 'BUY' ? '做多' : '做空'
       const body = `${dir} ${o.quantity} ${base.value} · 市价`
       /*
+       * ★ 开完仓**立刻**重读一次合约账户（用户 2026-10-14：「**开单后界面没有及时换**」）。
+       *
+       * 为什么原来没换：面板的「已开 / 未开」是照 `/api/exchange/trade` 里的持仓判的，
+       * 而那份数据有 `INFO_FRESH_MS` 的保鲜期 + 常驻流最多 20 秒才推一次 ——
+       * 刚开完仓那几秒它还是旧的（没持仓），面板自然还停在「开单」那一块。
+       * 这里把缓存键清掉（`loadedKey = ''`）逼 `load()` 真去打一次，
+       * 持仓一回来就切到「仓位」那一块了。
+       */
+      loadedKey = ''
+      void load()
+      void loadPositions()
+      /*
        * 顶格差一点保证金时后端会**自动下调数量**重试（见后端 `MAX_AUTO_SHRINK`）——
        * 这事必须说出来：不然用户以为自己开满了 5 倍，实际少开了一点。
        */
@@ -853,6 +944,9 @@ async function submitAdd(pctOfProfit: number): Promise<void> {
   }
   /* 方向跟持仓一致（加多 / 加空），杠杆那套流程跟正常开单完全一样 */
   await submit(pos.side, q, `加仓 ${pctOfProfit}%（用浮盈）`, true)
+  /* 加完了也立刻重读一次（仓位数量 / 浮盈都要跟着变） */
+  loadedKey = ''
+  void load()
 }
 
 /** 列表里那一条的「币」：BTCUSDT → BTC */
@@ -862,6 +956,11 @@ function baseOf(symbol: string): string {
 
 function posQty(p: TradePositionRow): string {
   return `${p.amount.toFixed(Math.min(12, amountPrecision.value))} ${baseOf(p.symbol)}`
+}
+
+/** 细节格里那格「数量」只放数字（币种在标题里 / 一眼就知道是这个币），省宽度 */
+function posQtyNum(p: TradePositionRow): string {
+  return p.amount.toFixed(Math.min(12, amountPrecision.value))
 }
 
 function sideText(p: TradePositionRow): string {
@@ -1087,6 +1186,28 @@ onMounted(async () => {
       头部只剩「杠杆 · 下单账户 · 一键平仓」。
     -->
     <div class="ord-head">
+      <!--
+        **已开的币种**（用户 2026-10-14：「顶部加上已开的币种，点击可切换」，
+        后面又补一句「**币种切换和杠杆一行**」⇒ 就跟杠杆 / 账户挤在同一行里）。
+        点一枚切到那只币的 K 线（跟「合约」页点一行同一条路）；当前这只高亮、带浮盈小字。
+        一枚都没有时整块不出现（这一行就只剩杠杆和账户）。
+        ⚠️ 它 `flex: 1 1 auto` + `overflow-x: auto`：币多了**自己横向滚**，
+           不把杠杆那颗挤到第二行去。
+      -->
+      <div v-if="heldSymbols.length" class="ord-syms">
+        <button
+          v-for="s in heldSymbols"
+          :key="s.base"
+          type="button"
+          class="ord-sym"
+          :class="{on: s.base === String(symbol).toUpperCase()}"
+          :title="`切到 ${s.base} 的 K 线（这个币现在有仓位）`"
+          @click="gotoSymbol(s.base)"
+        >
+          {{ s.base }}
+          <i :class="s.pnl >= 0 ? 'up' : 'down'">{{ pnlShort(s.pnl) }}</i>
+        </button>
+      </div>
       <!-- 杠杆：小标签，点开弹层选（用户 2026-10-14：默认 10 倍、**最高也是 10 倍**） -->
       <button
         type="button"
@@ -1173,20 +1294,21 @@ onMounted(async () => {
           class="ord-have open"
           :class="curPos.side === 'long' ? 'long' : 'short'"
         >
+          <!--
+            首行：方向 + 杠杆 +（右边）浮盈含收益率。
+            ⚠️ 「已开」那枚小标**去掉了**（用户 2026-10-14：「已开字样去掉」）——
+               有仓位时面板整块就是仓位卡，不用再贴个标签说明；
+               开仓数量也**挪到下面那两行里**（用户：「开仓数量和下面同级」）。
+          -->
           <div class="ord-have-top">
-            <span class="ord-have-tag">已开</span>
             <span
               class="ord-have-side"
               :class="curPos.side === 'long' ? 'side-long' : 'side-short'"
               >{{ sideText(curPos) }}</span
             >
-            <b class="ord-have-qty" :title="`持仓数量：${posQty(curPos)}`"
-              >{{ posQty(curPos) }}</b
-            >
             <span class="ord-have-lev" title="这个交易对用的杠杆"
               >{{ curPos.leverage }}x</span
             >
-            <!-- 浮盈（金额 + 占保证金的百分比）—— 加仓能加多少就是照它算的 -->
             <span
               class="ord-have-pnl"
               :class="curPos.unrealized >= 0 ? 'pnl-up' : 'pnl-down'"
@@ -1196,25 +1318,42 @@ onMounted(async () => {
             >
           </div>
           <!--
-            细节（用户 2026-10-14：「**持有仓位显示一些细节**」）：
-            开仓价 / 标记价 / 强平价 / 仓位价值 / 保证金 —— 开着的仓一眼能核对，
-            不用再跳去「交易所账户」页。强平价拿不到（逐仓 / 交易所没给）就显示 `—`。
+            两行细节（用户 2026-10-14：「持有仓位显示一些细节…底下加上**已开仓时间**、
+            **已实现盈利**」）：数量 / 开仓价 / 标记价 / 强平价 / 仓位价值 / 保证金
+            + 已开仓时间 / 已实现盈利。前六项来自交易所的持仓行，
+            后两项来自**本地账本**（`positionMeta`，拿不到就是 `—`）。
           -->
           <div class="ord-have-grid">
+            <span class="ord-hd" :title="`持仓数量：${posQty(curPos)}`"
+              ><em>数量</em><b>{{ posQtyNum(curPos) }}</b></span
+            >
             <span class="ord-hd"
-              ><em>开仓价</em
+              ><em>开仓</em
               ><b>{{ price(curPos.entryPrice, pricePrecision) }}</b></span
             >
             <span class="ord-hd"
-              ><em>标记价</em
+              ><em>标记</em
               ><b>{{ price(curPos.markPrice, pricePrecision) }}</b></span
             >
-            <span class="ord-hd"><em>强平价</em><b>{{ liqText }}</b></span>
+            <span class="ord-hd"><em>强平</em><b>{{ liqText }}</b></span>
             <span class="ord-hd"
-              ><em>仓位价值</em><b>{{ curNotionalText }}</b></span
+              ><em>价值</em><b>{{ curNotionalText }}</b></span
             >
             <span class="ord-hd"
               ><em>保证金</em><b>{{ curMarginText }}</b></span
+            >
+            <span class="ord-hd" :title="openedAtTitle"
+              ><em>开仓时间</em><b>{{ openedAtText }}</b></span
+            >
+            <span class="ord-hd" :title="realizedTitle"
+              ><em>已实现</em
+              ><b
+                :class="{
+                  ok: realizedUp === true,
+                  bad: realizedUp === false
+                }"
+                >{{ realizedText }}</b
+              ></span
             >
           </div>
           <div class="ord-have-bot">
@@ -1249,28 +1388,27 @@ onMounted(async () => {
           开多大：**只显示这一块**（没持仓的时候）。大号数字 = 「能开」多少 =
           `min(5 × 权益, 可用 × 杠杆)`，开不满时就说清是谁把它卡小了。
         -->
+        <!--
+          这一格（用户 2026-10-14：「**能开（xxx）字样去掉**，右侧显示**实时杠杆**，
+          不够 5 倍数就是显示 4.3 这样，**下面一大段字去掉**」）：
+          一行放下「能开多少 + 实时杠杆」，别的字都不要 —— 面板整体要**一屏放得下**。
+          实时杠杆 = 本单名义 ÷ 权益，额度被可用保证金卡住时就是 4.3x 这种。
+        -->
         <div class="ord-quota">
-          <span class="ord-quota-lb">能开（5 倍额度）</span>
-          <span class="ord-quota-tag">5×</span>
           <b class="ord-quota-num">{{ roomText }}<i>USDT</i></b>
-          <span class="ord-quota-sub">
-            <span class="ord-quota-subtxt">{{ roomHint }}</span>
-            <!--
-              成交后的**预计账户总杠杆**（后端那条 11 倍闸的预演，见 `levAfter`）——
-              顶到上限就标黄：与其点下去被后端拒，不如提前看见。
-              `levAfter` 是 0（权益读不到）时整颗不显示，行高不变。
-            -->
-            <span
-              v-if="levAfterText"
-              class="ord-levhint"
-              :class="{warn: levAfterWarn}"
-              :title="
-                `这一单成交后：现有持仓名义 ${fmt(openNotional, 0)} + 本单 ${notionalText} = ` +
-                `${levAfter.toFixed(1)}x（上限 ${ACCOUNT_LEV_MAX}x，超了后端会拒单）`
-              "
-            >
-              总杠杆 {{ levAfterText }}
-            </span>
+          <span
+            v-if="liveLevText"
+            class="ord-lev-live"
+            :class="{warn: levAfterWarn}"
+            :title="
+              `实时杠杆 ${liveLevText}（本单 ${notionalText} ÷ 权益 ${equityText}）` +
+              ` · 上限 ${ORDER_EQUITY_MAX} 倍权益` +
+              (levAfterText
+                ? ` · 成交后账户总杠杆 ${levAfterText}（上限 ${ACCOUNT_LEV_MAX}x）`
+                : '')
+            "
+          >
+            <em>实时杠杆</em>{{ liveLevText }}
           </span>
         </div>
 

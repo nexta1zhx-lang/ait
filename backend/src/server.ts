@@ -4358,6 +4358,7 @@ async function route(
         reason: '这一套还没填 API Key（去「我的 → 个人信息 → 交易所」填）'
       })
     try {
+      const symbol = str(url.searchParams.get('symbol'), 'BTCUSDT')
       const info = await collectTradeInfo(
         {
           exchange: key.exchange,
@@ -4367,12 +4368,40 @@ async function route(
           marketType: key.marketType,
           sandbox: key.sandbox
         },
-        str(url.searchParams.get('symbol'), 'BTCUSDT')
+        symbol
       )
+      /*
+       * 持仓的**账本侧**信息（用户 2026-10-14：「底下加上已开仓时间，已实现盈利」）：
+       * 这两样币安的 `positionRisk` 里**都没有**，只能从**本地账本**还原 ——
+       *   · 已开仓时间 = 这一段仓位的**第一笔成交**时间（`buildCycles` 扫出来的 openAt）；
+       *   · 已实现盈利 = 这一段里**减仓那几笔**的已实现盈亏（净：扣手续费、加资金费）。
+       * ⚠️ 只有**真有持仓**时才算（两发本地查询，很便宜，但没必要每次都打）。
+       * ⚠️ 账本覆盖不到的老仓位 (`partial`) 会给出残值 —— 前端照实显示，不编。
+       */
+      let positionMeta: Record<string, unknown> | null = null
+      if (info.position) {
+        try {
+          const hist = await listPositionHistory(me.id, key.id, 1, info.symbol)
+          const open = hist.open[0]
+          if (open) {
+            positionMeta = {
+              openedAt: Date.parse(open.openAt) || null,
+              realized: open.realized,
+              net: open.net,
+              fee: open.fee,
+              funding: open.funding,
+              partial: open.partial
+            }
+          }
+        } catch {
+          /* 账本读不到就不给这两项（面板会显示 `—`），别把整个接口带崩 */
+        }
+      }
       return sendJson(res, 200, {
         ready: true,
         account: publicExchangeKey(key),
-        ...info
+        ...info,
+        positionMeta
       })
     } catch (e) {
       return sendJson(res, 200, {

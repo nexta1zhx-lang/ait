@@ -2087,6 +2087,23 @@ export interface TradeInfoResult {
   balanceError?: string | null
   /** 杠杆 / 最大杠杆没拿到的原因（提示用） */
   errors?: string[]
+  /**
+   * 持仓的**账本侧**信息（2026-10-14 加，用户：「底下加上已开仓时间，已实现盈利」）。
+   *
+   * `positionRisk` 里**没有**这两项，后端从本地账本还原（`buildCycles`）：
+   *   · `openedAt` —— 这一段仓位的**第一笔成交**时间（毫秒；账本不全时是残值）
+   *   · `realized` —— 减仓那几笔的已实现盈亏（毛）；`net` = 扣手续费、加资金费之后
+   * 没有持仓 / 账本读不到时是 `null`，面板显示 `—`。
+   */
+  positionMeta?: {
+    openedAt: number | null
+    realized: number
+    net: number
+    fee: number
+    funding: number
+    /** 账本覆盖不到这一段（第一笔本身就是平仓）⇒ 上面的时间/盈亏只是残值 */
+    partial: boolean
+  } | null
 }
 
 export const fetchTradeInfo = (symbol: string, id?: number) =>
