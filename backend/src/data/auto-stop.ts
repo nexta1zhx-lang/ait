@@ -42,12 +42,26 @@ export interface AutoStopInput {
    * 那一行当成结果（数量 / 均价都是旧的）。`0` / 不传 = 之前没持仓。
    */
   before?: number
+  /**
+   * **减仓专用**：触发价**保持原来那张不动**，只把数量收到当前仓位。
+   *
+   * 减仓不改开仓均价 ⇒ 触发价本来就该原地不动；而重算的话，万一用户在下单后又改了
+   * 配置里的百分比，减个仓会把止损价一起挪走 —— 那不是他要的（用户 2026-10-15
+   * 选的是「加仓按新均价重算」，减仓只说「跟着收数量」）。
+   */
+  keepPrice?: boolean
+  /**
+   * **减仓专用**：没有「自己挂的自动止损」时**不新建**，直接跳过。
+   *
+   * 用户把自动止损撤了 / 关了，减仓不该又给他挂回来（那是加仓那边的行为）。
+   */
+  noCreate?: boolean
 }
 
 export interface AutoStopResult {
   ok: boolean
   /** 没做 / 为什么没做（前端按这个出文案） */
-  skipped?: 'disabled' | 'no-position' | 'manual-stop' | 'unchanged'
+  skipped?: 'disabled' | 'no-position' | 'manual-stop' | 'unchanged' | 'no-auto-stop'
   /** 触发价 */
   price?: number
   /** 覆盖的数量（= 全部仓位） */
@@ -122,7 +136,13 @@ async function readPositionAfter(
  */
 export async function ensureAutoStop(input: AutoStopInput): Promise<AutoStopResult> {
   const pct = Number(input.pct)
-  if (!Number.isFinite(pct) || pct <= 0) return {ok: false, skipped: 'disabled'}
+  /*
+   * `keepPrice`（减仓「只收数量」那条）**不需要百分比** —— 触发价拿原来那张的，
+   * 百分比只是加仓 / 新建时算价用的。
+   */
+  const resizing = input.keepPrice === true
+  if (!resizing && (!Number.isFinite(pct) || pct <= 0))
+    return {ok: false, skipped: 'disabled'}
   const symbol = String(input.symbol ?? '').toUpperCase()
 
   try {
@@ -131,7 +151,10 @@ export async function ensureAutoStop(input: AutoStopInput): Promise<AutoStopResu
     if (!pos || !(pos.entryPrice > 0))
       return {ok: false, skipped: 'no-position'}
 
-    const price = pos.entryPrice * (input.side === 'long' ? 1 - pct / 100 : 1 + pct / 100)
+    const entryPrice =
+      Number.isFinite(pct) && pct > 0
+        ? pos.entryPrice * (input.side === 'long' ? 1 - pct / 100 : 1 + pct / 100)
+        : 0
     const closing: 'buy' | 'sell' = input.side === 'long' ? 'sell' : 'buy'
     const posSide = input.side === 'long' ? 'LONG' : 'SHORT'
     const dual = input.dual ?? (await isDualSide(input.creds, input.keyId))
@@ -158,7 +181,23 @@ export async function ensureAutoStop(input: AutoStopInput): Promise<AutoStopResu
     if (!mine && manual)
       return {ok: false, skipped: 'manual-stop', existingPrice: manual.stopPrice ?? null}
 
-    /* 已经就是我们想要的那张（触发价、数量都对得上）⇒ 不动它，省一次撤旧挂新 */
+    /*
+     * 减仓那一路：**没有自己挂的止损就不动**（不凭空挂一张出来）。
+     * 手工止损已经在上面挡过了 —— 这里挡的是「撤了 / 关了自动止损」那种情况。
+     */
+    if (!mine && input.noCreate) return {ok: false, skipped: 'no-auto-stop'}
+
+    /*
+     * 减仓保持原触发价（`keepPrice`）：拿自己那张的价，只收数量。
+     * 拿不到（`mine` 没有价）就退回按开仓均价算 —— 那是加仓那条路的口径。
+     */
+    const price =
+      input.keepPrice && mine && Number(mine.stopPrice) > 0
+        ? Number(mine.stopPrice)
+        : entryPrice
+    /* 已经就是我们想要的那张（触发价 + 数量都对得上）⇒ 不动它，省一次撤旧挂新 */
+    /* 算不出价（减仓又找不到自己那张的价）⇒ 不碰，别挂一张没触发价的单 */
+    if (!(price > 0)) return {ok: false, skipped: 'no-position'}
     const samePrice = mine && Math.abs(Number(mine.stopPrice) - price) <= price * 1e-6
     const sameQty = mine && Math.abs(Number(mine.amount) - pos.amount) < 1e-9
     if (mine && samePrice && sameQty)
