@@ -5045,14 +5045,27 @@ body.fixed-viewport .split {
 }
 
 /* 「仓位价值」这个标签：小、灰、不抢戏 —— 真正的主角是下面那个数 */
-/* 「数量」那块（跟价值卡同款，只是矮一点、数字小一号） */
-.ord-qty {
-  padding: 7px 11px;
-  margin-top: -4px;
+/* 价值卡里那行小字：`数量 0.081 BTC`（用户 2026-10-14：「用小字放在下面就行」） */
+.ord-quota-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
-.ord-qty .ord-quota-num {
-  font-size: 18px;
+.ord-quota-sub b {
+  font-family: var(--mono);
+  font-weight: var(--fw-mid);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ord-quota-sub i {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--muted);
 }
 
 /* 「当前可开价值」那行小字（用户 2026-10-14：「价值那一行…加上文字」） */

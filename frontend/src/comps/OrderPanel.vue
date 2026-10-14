@@ -1448,6 +1448,14 @@ onMounted(async () => {
               <em>实时杠杆</em>{{ liveLevText }}
             </span>
           </span>
+          <!--
+            数量当**一行小字**贴在价值下面（用户 2026-10-14：「数量不用单独一个，
+            用小字放在下面就行」）—— 它是这一单「买多少」，跟着价值看最顺。
+          -->
+          <span class="ord-quota-sub"
+            >数量 <b>{{ quantityText }}</b
+            ><i v-if="quantityText !== '—'">{{ base }}</i></span
+          >
         </div>
 
         <!--
@@ -1455,17 +1463,6 @@ onMounted(async () => {
           高度**不随数值变**（用户 2026-10-05：「下单区域高度固定」，上面的 K 线不能被顶来顶去）。
           ⚠️ 报错**不放这儿**（用户：「报错不占用内容」）—— 真正的原因都在点下单时弹提示。
         -->
-        <!--
-          数量**单独一块**（用户 2026-10-14：「数量是放在价值下面**是一个框**，
-          **不和其他两个一个行**」）—— 跟上面「当前可开价值」同款卡片、紧贴在它下面。
-        -->
-        <div class="ord-quota ord-qty">
-          <span class="ord-quota-lb">数量</span>
-          <span class="ord-quota-row">
-            <b class="ord-quota-num">{{ quantityText }}<i>{{ base }}</i></b>
-          </span>
-        </div>
-
         <div class="ord-read">
           <!-- 用户 2026-10-14：「占用改为**所需保证金**」 -->
           <span class="ord-r"
