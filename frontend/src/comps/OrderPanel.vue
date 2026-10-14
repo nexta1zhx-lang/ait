@@ -655,31 +655,38 @@ const liveLevText = computed(() => {
 
 /* ---------------- 持仓的账本侧信息（已开仓时间 / 已实现盈利） ---------------- */
 
-/** 已开仓时间：`09-14 15:22`（跨年才带年份，别把这一行撑长） */
-const openedAtText = computed(() => {
+/**
+ * **已经开了多久**（用户 2026-10-14：「开仓时间是开了多少分钟秒 小时 优化格式」）。
+ *
+ * 格式按长短分档，越久越粗：
+ *   · 不满 1 分 → `42秒`
+ *   · 不满 1 时 → `15分32秒`
+ *   · 不满 1 天 → `3时05分`
+ *   · 更久     → `2天4时`
+ * ⚠️ 跟着 `nowTick`（每秒跳）走 —— 直接读 `Date.now()` 模板不会重算，秒数不会动。
+ */
+const heldText = computed(() => {
   const t = Number(info.value?.positionMeta?.openedAt ?? 0)
   if (!(t > 0)) return '—'
-  const d = new Date(t)
-  const now = new Date()
+  const sec = Math.max(0, Math.floor((nowTick.value - t) / 1000))
   const pad = (n: number) => String(n).padStart(2, '0')
-  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  /* 今天开的只给时分（`22:41`）；今年给 `10-14 22:41`；跨年才带年份 */
-  if (d.toDateString() === now.toDateString()) return hm
-  const md = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  return d.getFullYear() === now.getFullYear()
-    ? `${md} ${hm}`
-    : `${d.getFullYear()}-${md} ${hm}`
+  if (sec < 60) return `${sec}秒`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}分${pad(sec % 60)}秒`
+  const hour = Math.floor(min / 60)
+  if (hour < 24) return `${hour}时${pad(min % 60)}分`
+  return `${Math.floor(hour / 24)}天${pad(hour % 24)}时`
 })
 
-/** 完整时间（放 title 里，那格显示的是上面那个短写法） */
+/** 完整时间（放 title 里，那格显示的是「开了多久」） */
 const openedAtTitle = computed(() => {
   const t = Number(info.value?.positionMeta?.openedAt ?? 0)
   if (!(t > 0)) return '本地账本里没有这一段仓位的开仓时间'
   const d = new Date(t)
   const pad = (n: number) => String(n).padStart(2, '0')
   return (
-    `开仓时间：${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
-    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    `已开仓时间 ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())} · 已持仓 ${heldText.value}`
   )
 })
 
@@ -1356,7 +1363,7 @@ onMounted(async () => {
           -->
           <div class="ord-have-bot">
             <span class="ord-have-meta" :title="openedAtTitle"
-              >已开仓时间 {{ openedAtText }}</span
+              >持仓 <b>{{ heldText }}</b></span
             >
             <button
               type="button"
