@@ -617,6 +617,13 @@ CREATE TABLE IF NOT EXISTS exchange_open_orders (
   raw         JSONB,
   UNIQUE (key_id, order_id)
 );
+-- 2026-10-15：「开仓自动止损」得能**认出自己挂的那张**。
+-- 为什么必须有：加仓之后要把自动单撤旧换新（按新均价重算、覆盖全部仓位），
+-- 而币安那边**不区分谁挂的** —— 认不出来的话就只能两种结果：要么不敢动
+-- （自动单永远不跟随），要么把用户手工挂的止损也一起撤了（更糟）。
+-- ⚠️ 对账（replaceOpenOrders）只 upsert / 删除，upsert 的 DO UPDATE 列表里
+--    **没有**这一列 ⇒ 标记不会被下一轮对账抹掉。
+ALTER TABLE exchange_open_orders ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS exchange_open_orders_key_idx ON exchange_open_orders (key_id, ts DESC);
 -- 定期对账时按 seen_at 判断哪些是「这轮没见到、已经不在了」的
 CREATE INDEX IF NOT EXISTS exchange_open_orders_seen_idx ON exchange_open_orders (key_id, seen_at);

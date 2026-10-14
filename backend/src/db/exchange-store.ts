@@ -732,6 +732,13 @@ export interface OpenOrderInput {
   reduceOnly: boolean
   /** 下单时间（毫秒） */
   time: number
+  /**
+   * 这张单**是谁挂的**（`''` = 交易所那边本来就有的 —— 我们不知道，当用户手工的）。
+   *
+   * ★ 2026-10-15 加：目前只有 `'auto-stop'`（开仓 / 加仓后自动挂的 −N% 止损）。
+   *   加仓时要把它撤旧换新，而**手工挂的止损绝不能碰** ⇒ 必须分得出来。
+   */
+  source?: string
   raw?: unknown
 }
 
@@ -749,8 +756,8 @@ export async function upsertOpenOrder(
   await query(
     `INSERT INTO exchange_open_orders
        (user_id, key_id, order_id, symbol, side, type, pos_side, price, stop_price,
-        amount, filled, reduce_only, ts, seen_at, raw)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now(), $14)
+        amount, filled, reduce_only, ts, seen_at, source, raw)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now(), COALESCE($14,''), $15)
      ON CONFLICT (key_id, order_id) DO UPDATE SET
        symbol      = EXCLUDED.symbol,
        side        = EXCLUDED.side,
@@ -763,6 +770,15 @@ export async function upsertOpenOrder(
        reduce_only = EXCLUDED.reduce_only,
        ts          = EXCLUDED.ts,
        seen_at     = now(),
+       /*
+        * ⚠️ 这一列**不进** EXCLUDED 覆盖：对账（replaceOpenOrders）拿交易所那一份
+        *    盖过来时 source 是空的，盖一下就把「这是自动止损」的标记抹了 ——
+        *    那就再也认不出自己那张单了。只有明确带了标记的调用方才写得动它。
+        */
+       source      = CASE
+                       WHEN COALESCE(EXCLUDED.source, '') <> '' THEN EXCLUDED.source
+                       ELSE exchange_open_orders.source
+                     END,
        raw         = EXCLUDED.raw`,
     [
       userId,
@@ -778,6 +794,7 @@ export async function upsertOpenOrder(
       o.filled,
       o.reduceOnly,
       new Date(o.time),
+      o.source ?? '',
       o.raw ?? null
     ]
   )
@@ -835,7 +852,7 @@ export async function listOpenOrdersDb(
 ): Promise<OpenOrderInput[]> {
   const rows = await query<Record<string, unknown>>(
     `SELECT order_id, symbol, side, type, pos_side, price, stop_price,
-            amount, filled, reduce_only, ts
+            amount, filled, reduce_only, ts, source
        FROM exchange_open_orders
       WHERE user_id = $1 AND key_id = $2
       ORDER BY ts DESC`,
@@ -853,6 +870,7 @@ export async function listOpenOrdersDb(
     amount: num(r.amount),
     filled: num(r.filled),
     reduceOnly: r.reduce_only === true,
-    time: r.ts ? new Date(String(r.ts)).getTime() : 0
+    time: r.ts ? new Date(String(r.ts)).getTime() : 0,
+    source: String(r.source ?? '')
   }))
 }

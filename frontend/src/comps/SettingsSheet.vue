@@ -30,6 +30,8 @@
  */
 import {computed, ref, watch} from 'vue'
 import {
+  autoStopOn,
+  autoStopPct,
   chartShowHistory,
   chartShowLiq,
   chartShowOrders,
@@ -101,6 +103,15 @@ async function toggleTest(): Promise<void> {
   })
   if (ok) testOrder.value = false
 }
+
+/** 开仓自动止损的**触发距离**（百分点）—— 1~50 之外一律夹回去（0 会变成「挂不上」） */
+const stopPct = computed({
+  get: () => autoStopPct.value,
+  set: (v: unknown) => {
+    const n = Math.round(Number(v) || 0)
+    autoStopPct.value = Math.min(50, Math.max(1, n))
+  }
+})
 
 /**
  * 「订单设置」那四格（用户 2026-10-06 要的四个开关，2026-10-07 改成格子）。
@@ -353,6 +364,48 @@ function offsetLabel(min: number): string {
         >
           <span />
         </button>
+      </div>
+
+      <!--
+        开仓自动止损（用户 2026-10-15）：「开仓后自动加入 −4% 个点的全部仓位止损」。
+        百分比**在这儿配、下单时带给后端**（后端不写死数字，也不读这个配置）——
+        所以改个 3%、5% 不用重新发版。
+        ⚠️ 每次**加仓**都会按新的开仓均价重算、数量覆盖全部仓位；
+           用户手工挂的止损**不碰**（碰到已有手工单就跳过，面板会提示）。
+      -->
+      <div class="sheet-row">
+        <span class="rk">开仓自动止损</span>
+        <div class="ctl" style="gap: 8px">
+          <input
+            v-model.number="stopPct"
+            type="number"
+            min="1"
+            max="50"
+            step="1"
+            inputmode="decimal"
+            :disabled="!autoStopOn"
+            aria-label="自动止损的触发距离（百分点）"
+            title="触发价 = 开仓均价 × (1 − 这个百分比)。加仓会按新的开仓均价重算，数量一直是全部仓位。"
+            style="width: 64px"
+          />
+          <span>%</span>
+          <button
+            type="button"
+            class="switch end"
+            :class="{on: autoStopOn}"
+            role="switch"
+            :aria-checked="autoStopOn"
+            :aria-label="autoStopOn ? '开仓自动止损已开启' : '开仓自动止损已关闭'"
+            :title="
+              autoStopOn
+                ? '开仓 / 加仓后自动挂一张覆盖全部仓位的止损单'
+                : '已关闭：开仓后不会自动挂止损'
+            "
+            @click="autoStopOn = !autoStopOn"
+          >
+            <span />
+          </button>
+        </div>
       </div>
 
       <!--

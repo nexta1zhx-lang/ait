@@ -28,6 +28,10 @@ interface Stored {
   exchangeCurrency?: 'usd' | 'cny'
   /** 下单走测试单（默认**开**）。`false` = 真下单 —— 见 `testOrder` */
   testOrder?: boolean
+  /** 开仓自动挂止损（默认**开**）—— 见 `autoStopOn` */
+  autoStopOn?: boolean
+  /** 自动止损的触发距离（**百分点**，默认 4）—— 见 `autoStopPct` */
+  autoStopPct?: number
   /** 订单设置（2026-10-06）：这四样画不画在 K 线上。缺省 = 都画 */
   chartShowPosition?: boolean
   chartShowHistory?: boolean
@@ -53,6 +57,8 @@ function read(): Stored {
         marketMinVolM: v.marketMinVolM,
         exchangeCurrency: v.exchangeCurrency === 'cny' ? 'cny' : 'usd',
         testOrder: v.testOrder !== false,
+        autoStopOn: v.autoStopOn !== false,
+        autoStopPct: Number.isFinite(v.autoStopPct) ? Number(v.autoStopPct) : undefined,
         chartShowPosition: v.chartShowPosition !== false,
         chartShowHistory: v.chartShowHistory !== false,
         chartShowOrders: v.chartShowOrders !== false,
@@ -197,6 +203,31 @@ export const exchangeCurrency = ref<'usd' | 'cny'>(
 export const testOrder = ref(saved.testOrder !== false)
 
 /**
+ * **开仓 / 加仓后自动挂一张全部仓位的止损**（用户 2026-10-15：
+ * 「开仓后自动加入 −4% 个点的全部仓位止损」）。
+ *
+ * · `autoStopOn`（**默认开**）—— 总开关；
+ * · `autoStopPct`（**默认 4**）—— 触发距离：触发价 = 开仓均价 × (1 ∓ pct%)。
+ *
+ * ⚠️ 百分比**在这里配、随下单请求带给后端**（`OrderPanel` 的 `autoStop` 字段）：
+ *    后端不写死数字，改口径不用重新发版。
+ * ⚠️ 跟「测试下单」一样，测试模式下不会真挂（那条路径本来就没成交、没仓位）。
+ * ⚠️ 每次加仓都会**按新的开仓均价重算**、数量覆盖全部仓位 —— 但**只动自己挂的那张**，
+ *    用户手工挂的止损不碰（见后端的 `ensureAutoStop`）。
+ */
+export const autoStopOn = ref(saved.autoStopOn !== false)
+export const autoStopPct = ref(
+  saved.autoStopPct && saved.autoStopPct > 0 && saved.autoStopPct <= 90
+    ? saved.autoStopPct
+    : 4
+)
+
+/** 下单请求里带过去的那个值（`0` = 这次不要自动止损） */
+export function autoStopOf(): number {
+  return autoStopOn.value ? autoStopPct.value : 0
+}
+
+/**
  * 「订单设置」（用户 2026-10-06）——
  * 「配置界面可以配置订单设置，1.仓位 2.订单历史 3.仓位委托 4.强平价格」
  * 「是控制和 k 线联动的价格或历史是否显示在 k 线上」。
@@ -266,6 +297,8 @@ watch(
     marketMinVolM,
     exchangeCurrency,
     testOrder,
+    autoStopOn,
+    autoStopPct,
     chartShowPosition,
     chartShowLiq,
     chartShowOrders,
@@ -283,6 +316,8 @@ watch(
           marketMinVolM: marketMinVolM.value,
           exchangeCurrency: exchangeCurrency.value,
           testOrder: testOrder.value,
+          autoStopOn: autoStopOn.value,
+          autoStopPct: autoStopPct.value,
           chartShowPosition: chartShowPosition.value,
           chartShowLiq: chartShowLiq.value,
           chartShowOrders: chartShowOrders.value,

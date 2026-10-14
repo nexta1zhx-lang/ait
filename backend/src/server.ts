@@ -146,6 +146,7 @@ import {
 import {hydrateMarketsCache} from './data/ccxt-markets'
 import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
 import {listPositionHistory, positionMetaOf, type PositionMeta} from './data/position-history'
+import {ensureAutoStop, type AutoStopResult} from './data/auto-stop'
 import {RateBudgetError, takeWeight} from './util/rate-budget'
 import {
   assertOrderLimits,
@@ -4512,7 +4513,38 @@ async function route(
       )
       /* 真单才会真的多/少一张挂单；测试单没进撮合，不用作废缓存 */
       if (!test) void reconcileKeyOrders(key.id)
-      return sendJson(res, 200, {ok: true, test, order, error: null})
+      /*
+       * ★ 2026-10-15：**开仓 / 加仓**成功后自动挂一张止损（用户：「开仓后自动加入
+       *   −4% 个点的全部仓位止损」）。
+       *
+       * 三条交代：
+       *   · 百分比**由前端配置**（`settings.ts` 的「开仓自动止损」，`autoStop` 传过来）——
+       *     后端不写死数字，0 / 不传就是不做；
+       *   · **只挂开仓那一侧**（`reduceOnly` 的减仓单不挂，它本来就是往外跑的）；
+       *   · 挂失败**绝不影响这一单**：结果只作为 `autoStop` 附带回报，`ok` 仍是 true
+       *     —— 已经成交的单不能被一张止损的错说成失败。
+       *   ⚠️ 这里**等**它（而不是丢后台）：等着才能把「挂在哪、挂了多少」告诉用户，
+       *     「有没有保护」是他最想知道的那一句。
+       */
+      let autoStop: AutoStopResult | null = null
+      const autoPct = Number(body.autoStop ?? 0)
+      if (!test && order.reduceOnly !== true && Number.isFinite(autoPct) && autoPct > 0) {
+        const sym = str(body.symbol, 'BTCUSDT').toUpperCase()
+        /* 下单前这个方向有多少张（加仓时要靠它判断新持仓已经到了）*/
+        const wasPos = liveStateOf(key.id)?.positions?.find(
+          p => String(p.raw ?? '').toUpperCase() === sym
+        )
+        autoStop = await ensureAutoStop({
+          userId: me.id,
+          keyId: key.id,
+          creds,
+          symbol: sym,
+          side,
+          pct: autoPct,
+          before: Math.abs(Number(wasPos?.amount) || 0)
+        })
+      }
+      return sendJson(res, 200, {ok: true, test, order, autoStop, error: null})
     } catch (e) {
       return failTrade(res, '下单', key.id, e)
     }

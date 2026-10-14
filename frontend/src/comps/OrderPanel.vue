@@ -59,6 +59,7 @@ import {
   fetchTradeInfo,
   placeOrder,
   setTradeLeverage,
+  type AutoStopResult,
   type TradeInfoResult,
   type TradePositionRow
 } from '../api'
@@ -73,7 +74,7 @@ import {
 } from '../positions'
 import {fmt, price, usd} from '../format'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
-import {testOrder} from '../settings'
+import {autoStopOf, testOrder} from '../settings'
 import {pickSymbol, prefetchSymbol} from '../analyze'
 import {contracts} from '../store'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
@@ -769,6 +770,31 @@ const realizedTitle = computed(() => {
 })
 
 /**
+ * 自动止损结果 → 提示后面那一小句（`null` / 没开这个功能时是空串）。
+ *
+ * ⚠️ 手工止损那张**我们没动**，要明说 —— 否则用户以为「自动止损跳过了」= 裸奔，
+ *    其实保护还在（只是价是他自己定的那个）。
+ */
+function autoStopText(r: AutoStopResult | null | undefined): string {
+  if (!r) return ''
+  if (r.ok && r.skipped === 'unchanged')
+    return ` · 自动止损 ${fmt(Number(r.price) || 0, pricePrecision.value)}（已是最新）`
+  if (r.ok)
+    return (
+      ` · 自动止损 ${fmt(Number(r.price) || 0, pricePrecision.value)}` +
+      `（覆盖 ${fmt(Number(r.quantity) || 0, amountPrecision.value)} ${base.value}` +
+      `${r.replaced ? '，已更新旧单' : ''}）`
+    )
+  if (r.skipped === 'manual-stop')
+    return ` · 自动止损跳过：这个币已有手工止损${
+      r.existingPrice ? `（${fmt(Number(r.existingPrice), pricePrecision.value)}）` : ''
+    }，没动它`
+  if (r.skipped === 'no-position') return ' · 自动止损跳过：没读到仓位'
+  if (r.skipped === 'disabled') return ''
+  return ` · 自动止损失败：${r.error || '未知原因'}（这一单已成交）`
+}
+
+/**
  * 能加仓吗：有持仓 + **有浮盈** + 前置检查过关。
  * 没盈利就**不给**加仓入口（用户 2026-10-14：「如果**还有盈利**还可以选择加仓」）。
  *
@@ -983,7 +1009,12 @@ async function submit(
         type: 'market',
         quantity: qtyOverride ?? quantity.value,
         // 带上参考价：后端拿它做「最小名义价值」的体检（不发给交易所）
-        price: refPrice.value
+        price: refPrice.value,
+        /*
+         * 开仓 / 加仓成功后自动挂止损（配置里可关）。
+         * ⚠️ 减仓走的是 `/close` 那条路，不带这个 —— 「全部仓位的止损」只在往里开的时候挂。
+         */
+        autoStop: autoStopOf()
       },
       keyId.value,
       testOrder.value
@@ -1011,12 +1042,20 @@ async function submit(
       const adj = o.adjusted
         ? ` · 数量已从 ${o.adjusted.from} 自动调到 ${o.adjusted.to}（${o.adjusted.reason}）`
         : ''
+      /*
+       * 自动止损那一句 —— 用户最关心的是「这仓到底有没有被保护住」，所以：
+       *   · 挂上了 → 报触发价 + 覆盖的数量；
+       *   · 跳过（已经有手工止损）→ 说清楚「没动你的那张」，别让他以为没保护；
+       *   · 失败 → 把原因原样报出来（这一单**已经成交**了，不能不说）。
+       */
+      const auto = autoStopText(r.autoStop)
       buzz(12)
       say(
         o.test
           ? `测试单通过校验：${note ? `${note} · ` : ''}${body}（没进撮合、没真开仓）${adj}`
           : `已下单${note ? `（${note}）` : ''}：${body}${adj}` +
-              (o.orderId ? ` · 单号 ${o.orderId}` : ''),
+              (o.orderId ? ` · 单号 ${o.orderId}` : '') +
+              auto,
         'ok'
       )
     } else {

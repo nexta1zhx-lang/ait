@@ -590,7 +590,9 @@ export async function collectTradeInfo(
 const dualSideCache = new Map<number | string, {at: number; dual: boolean}>()
 const DUAL_TTL = 5 * 60 * 1000
 
-async function isDualSide(ex: any, cacheKey: number | string): Promise<boolean> {
+/** 账户是不是**双向持仓**模式（`positionSide` 能不能带 `LONG`/`SHORT`）。
+ *  ⚠️ 2026-10-15 导出：`auto-stop.ts` 挂自动止损时也要按它决定带不带 `positionSide`。 */
+export async function isDualSide(ex: any, cacheKey: number | string): Promise<boolean> {
   const hit = dualSideCache.get(cacheKey)
   if (hit && Date.now() - hit.at < DUAL_TTL) return hit.dual
   const r: any = await ex.fapiPrivateGetPositionSideDual()

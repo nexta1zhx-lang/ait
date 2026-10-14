@@ -2154,6 +2154,29 @@ export interface OrderInput {
    * `false` = **真下单**（配置里「测试下单」关掉时才会传）。
    */
   test?: boolean
+  /**
+   * **开仓 / 加仓成功后自动挂止损**：触发价 = 开仓均价 × (1 ∓ pct%)，数量覆盖全部仓位。
+   *
+   * 值 = 触发距离（**百分点**，`4` = 4%）。`0` / 不传 = 这次不要。
+   * 百分比由前端配置（`settings.ts` 的「开仓自动止损」）带过来，后端不写死。
+   * ⚠️ 只在**真单 + 开仓那一侧**生效（减仓单不带）。
+   */
+  autoStop?: number
+}
+
+/** 自动止损的结果（附在下单响应里 —— 它成功与否都不影响那一单本身） */
+export interface AutoStopResult {
+  ok: boolean
+  /** 没做 / 为什么没做 */
+  skipped?: 'disabled' | 'no-position' | 'manual-stop' | 'unchanged'
+  price?: number
+  quantity?: number
+  orderId?: string
+  /** 撤掉的旧自动单（加仓时撤旧换新） */
+  replaced?: string
+  /** 已有**手工**止损时，把它的触发价带回来（前端提示用） */
+  existingPrice?: number | null
+  error?: string
 }
 
 /** 后端复述回来的「实际发出去的参数」 */
@@ -2208,10 +2231,14 @@ export const placeOrder = (
   id?: number,
   test = true
 ) =>
-  post<{ok: boolean; test?: boolean; order?: PlacedOrder; error: string | null}>(
-    `/api/exchange/trade/order${id ? `?id=${id}` : ''}`,
-    {...input, test}
-  )
+  post<{
+    ok: boolean
+    test?: boolean
+    order?: PlacedOrder
+    /** 自动止损的结果（没开这个功能 / 没触发时是 `null`） */
+    autoStop?: AutoStopResult | null
+    error: string | null
+  }>(`/api/exchange/trade/order${id ? `?id=${id}` : ''}`, {...input, test})
 
 /**
  * 挂一张**止盈 / 止损**单（用户 2026-10-06：K 线上按住仓位线上下拖 → 确认单 → 发这张）。
