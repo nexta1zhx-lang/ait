@@ -1295,10 +1295,10 @@ onMounted(async () => {
           :class="curPos.side === 'long' ? 'long' : 'short'"
         >
           <!--
-            首行：方向 + 杠杆 +（右边）浮盈含收益率。
-            ⚠️ 「已开」那枚小标**去掉了**（用户 2026-10-14：「已开字样去掉」）——
-               有仓位时面板整块就是仓位卡，不用再贴个标签说明；
-               开仓数量也**挪到下面那两行里**（用户：「开仓数量和下面同级」）。
+            首行（用户 2026-10-14）：**方向 + 币种**（「方向旁 币种要加上」）＋ 杠杆；
+            右边两行：上面浮动盈亏（含收益率），下面**「已实现」**（用户：「已实现放在未实现
+            盈利下面」）。整块**不要背景、不要左侧色条**（用户：「去掉左侧的背景」）——
+            方向和币种自己带颜色，够区分了。
           -->
           <div class="ord-have-top">
             <span
@@ -1306,22 +1306,29 @@ onMounted(async () => {
               :class="curPos.side === 'long' ? 'side-long' : 'side-short'"
               >{{ sideText(curPos) }}</span
             >
+            <b class="ord-have-sym">{{ baseOf(curPos.symbol) }}</b>
             <span class="ord-have-lev" title="这个交易对用的杠杆"
               >{{ curPos.leverage }}x</span
             >
-            <span
-              class="ord-have-pnl"
-              :class="curPos.unrealized >= 0 ? 'pnl-up' : 'pnl-down'"
-              :title="`未实现盈亏：${pnlText(curPos.unrealized)}（占保证金 ${curRoeText || '—'}）`"
-              >{{ pnlText(curPos.unrealized) }}
-              <i v-if="curRoeText">({{ curRoeText }})</i></span
-            >
+            <span class="ord-have-nums">
+              <span
+                class="ord-have-pnl"
+                :class="curPos.unrealized >= 0 ? 'pnl-up' : 'pnl-down'"
+                :title="`未实现盈亏：${pnlText(curPos.unrealized)}（占保证金 ${curRoeText || '—'}）`"
+                >{{ pnlText(curPos.unrealized) }}
+                <i v-if="curRoeText">({{ curRoeText }})</i></span
+              >
+              <span class="ord-have-real" :title="realizedTitle"
+                >已实现
+                <b :class="{ok: realizedUp === true, bad: realizedUp === false}"
+                  >{{ realizedText }}</b
+                ></span
+              >
+            </span>
           </div>
           <!--
-            两行细节（用户 2026-10-14：「持有仓位显示一些细节…底下加上**已开仓时间**、
-            **已实现盈利**」）：数量 / 开仓价 / 标记价 / 强平价 / 仓位价值 / 保证金
-            + 已开仓时间 / 已实现盈利。前六项来自交易所的持仓行，
-            后两项来自**本地账本**（`positionMeta`，拿不到就是 `—`）。
+            细节两行（用户：「持有仓位显示一些细节」）：数量 / 开仓 / 标记 / 强平 / 价值 / 保证金。
+            ⚠️ 开仓时间挪到**底下一行**（用户：「开仓时间改为已开仓时间和按钮一行」）。
           -->
           <div class="ord-have-grid">
             <span class="ord-hd" :title="`持仓数量：${posQty(curPos)}`"
@@ -1342,21 +1349,15 @@ onMounted(async () => {
             <span class="ord-hd"
               ><em>保证金</em><b>{{ curMarginText }}</b></span
             >
-            <span class="ord-hd" :title="openedAtTitle"
-              ><em>开仓时间</em><b>{{ openedAtText }}</b></span
-            >
-            <span class="ord-hd" :title="realizedTitle"
-              ><em>已实现</em
-              ><b
-                :class="{
-                  ok: realizedUp === true,
-                  bad: realizedUp === false
-                }"
-                >{{ realizedText }}</b
-              ></span
-            >
           </div>
+          <!--
+            底下一行：左边**已开仓时间**，右边两颗按钮（用户：「开仓时间改为已开仓时间
+            和按钮一行」）。
+          -->
           <div class="ord-have-bot">
+            <span class="ord-have-meta" :title="openedAtTitle"
+              >已开仓时间 {{ openedAtText }}</span
+            >
             <button
               type="button"
               class="ghost tiny ord-have-b"
