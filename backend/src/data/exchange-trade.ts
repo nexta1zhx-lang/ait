@@ -651,12 +651,59 @@ export async function setSymbolLeverage(
 }
 
 /**
- * 开单前的体检（上面那两条上限）。**只拦开仓** —— 减仓 / 平仓不走这里。
+ * 一个交易对的**额度账**（纯函数，`_verify` 那类临时脚本直接打它）。
  *
- * ① **单笔开单名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益。
- * ② **账户总杠杆 ≤ 11 倍**：(现有持仓名义 + 这一单) ÷ 账户权益。
+ *   · `cap`      = 5 × 权益 —— **这个币的总额度**（不是「每一单各自 5 倍」）；
+ *   · `existing` = 这个币**已经开着**的名义价值；
+ *   · `add`      = 这一单要加的名义价值；
+ *   · `profitBudget` = `浮盈 × 杠杆` —— **用浮盈加仓**能额外吃掉的额度；
+ *   · `overflow` = 放不放行（`false` = 放行）。
  *
- * 两条共用同样两发请求（一次 `positionRisk` + 一次余额），所以合在一个函数里。
+ * ★ 为什么是「总额度」（用户 2026-10-14）：用户开了仓之后发现界面还在说「还能开 5 倍」，
+ *   原话是「**我都已经开仓了，剩余开仓应该是 0**」—— 所以 5 倍按**这个币的累计名义**
+ *   算才对得上（早先那句「开单的金额不能超出 5 倍」也按总额度理解才自洽）。
+ *
+ * ★ 为什么留 `profitBudget`：同一轮用户还定了「**如果还有盈利还可以选择加仓 50% 或者
+ *   100%**」—— 加仓的钱来自**未实现盈利**，所以给它「浮盈 × 杠杆」的预算：
+ *   只要这一单不超过这个预算就放行，哪怕累计已经超过 5 倍。
+ *
+ * @returns 权益读不到（≤ 0）时 `overflow` 恒为 `false`：那种单子交易所自己会因保证金不足拒掉
+ */
+export function symbolBudget(
+  equity: number,
+  existingNotional: number,
+  addNotional: number,
+  unrealizedProfit: number,
+  leverage: number
+): {
+  cap: number
+  existing: number
+  add: number
+  profitBudget: number
+  overflow: boolean
+} {
+  const cap = equity > 0 ? equity * MAX_ORDER_EQUITY_RATIO : 0
+  const existing = Math.abs(Number(existingNotional) || 0)
+  const add = Math.max(0, Number(addNotional) || 0)
+  const lev = Number(leverage) >= 1 ? Math.floor(Number(leverage)) : 1
+  const profitBudget = Math.max(0, Number(unrealizedProfit) || 0) * lev
+  if (!(cap > 0)) return {cap: 0, existing, add, profitBudget, overflow: false}
+  if (existing + add <= cap + 1e-9)
+    return {cap, existing, add, profitBudget, overflow: false}
+  /* 超了 5 倍额度，但这一单整个都在「浮盈撑得起」的范围里 ⇒ 是加仓，放行 */
+  if (add <= profitBudget + 1e-9)
+    return {cap, existing, add, profitBudget, overflow: false}
+  return {cap, existing, add, profitBudget, overflow: true}
+}
+
+/**
+ * 开单前的体检（三条上限）。**只拦开仓** —— 减仓 / 平仓不走这里。
+ *
+ * ① **单笔开单名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益；
+ * ② **这个币的累计名义 ≤ 5 × 权益**（`symbolBudget`；用浮盈加仓的那部分除外）；
+ * ③ **账户总杠杆 ≤ 11 倍**：(现有持仓名义 + 这一单) ÷ 账户权益。
+ *
+ * 三条共用同样两发请求（一次 `positionRisk` + 一次余额），所以合在一个函数里。
  * 权益读不到 / 为 0 ⇒ **不拦** —— 那种单子交易所自己会因保证金不足拒掉，别在这儿误伤。
  *
  * @param quantity 这一单的数量（基础币）
@@ -696,6 +743,29 @@ export async function assertOrderLimits(
     throw new Error(
       `这一单名义金额约 ${add.toFixed(0)} USDT，是账户权益（${equity.toFixed(2)}）的 ` +
         `${ratio.toFixed(1)} 倍，超过单笔上限 ${MAX_ORDER_EQUITY_RATIO} 倍 —— 数量取小一点再开`
+    )
+  }
+
+  /*
+   * ② 这个币的**累计**额度：已开的 + 这一单 ≤ 5 × 权益。
+   *   例外是「用浮盈加仓」那一档（`profitBudget`），见 `symbolBudget`。
+   */
+  const minePos = mine ? positionFromRow(mine) : null
+  const budget = symbolBudget(
+    equity,
+    minePos?.notional ?? 0,
+    add,
+    n(mine?.unrealizedProfit),
+    n(mine?.leverage)
+  )
+  if (budget.overflow) {
+    throw new Error(
+      `${spec.symbol} 这个币的 ${MAX_ORDER_EQUITY_RATIO} 倍额度已经用满：` +
+        `已开 ${budget.existing.toFixed(0)} + 本单 ${budget.add.toFixed(0)} = ` +
+        `${(budget.existing + budget.add).toFixed(0)} USDT，` +
+        `超过额度 ${budget.cap.toFixed(0)}（${MAX_ORDER_EQUITY_RATIO} × 权益 ${equity.toFixed(2)}）` +
+        ` —— 还想加仓的话用浮盈（浮盈可用额度约 ${budget.profitBudget.toFixed(2)} USDT），` +
+        `或者先把现在的仓位平掉`
     )
   }
 
