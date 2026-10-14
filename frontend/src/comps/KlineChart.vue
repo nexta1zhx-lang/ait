@@ -17,7 +17,7 @@ import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
 import {livePrice, setLivePrice} from '../ticker'
-import {isForeground, onForegroundChange} from '../live'
+import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
   chartShowHistory,
   chartShowLiq,
@@ -1839,6 +1839,8 @@ function baseToName(symbol: string): string {
  *    （实测挂一张要 **15.3 秒**才画出来），SSE 那条路接上之后就删了。
  */
 let stopOverlayForeground: (() => void) | null = null
+/** 链路恢复：断网期间没盘成的残单，网一回来得重新盘一遍 */
+let stopOverlayResume: (() => void) | null = null
 
 /*
  * 「没仓位的残留平仓单」定时盘一遍账户（用户 2026-10-06：仓位平了、单还挂着）。
@@ -3582,6 +3584,11 @@ onMounted(() => {
     }
     syncOrphanTimer()
   })
+  stopOverlayResume = onNetworkResume(() => {
+    void pullOverlay()
+    void sweepOrphans()
+    syncOrphanTimer()
+  })
 })
 watch(() => props.active, on => {
   if (on) {
@@ -3624,6 +3631,8 @@ onBeforeUnmount(() => {
   ordersPullTimer = null
   stopOverlayForeground?.()
   stopOverlayForeground = null
+  stopOverlayResume?.()
+  stopOverlayResume = null
   /* 画叠加线的那个 primitive 挂在蜡烛系列上，图拆掉之前先摘下来 */
   overlayLines.detach()
   try {

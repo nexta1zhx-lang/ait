@@ -1,0 +1,10 @@
+# 装到 /etc/systemd/system/ait-alert.service
+# 用法见 docs/DEPLOY.md 的「告警」一节。
+[Unit]
+Description=Ait 可用性看门狗（应用+数据库+容器 → Telegram 告警）
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/crypto-advisor/scripts/alert-watchdog.sh

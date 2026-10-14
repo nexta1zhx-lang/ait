@@ -60,7 +60,7 @@ import {
 } from '../positions'
 import {pickSymbol, prefetchSymbol} from '../analyze'
 import {fmt, price, usd} from '../format'
-import {isForeground, onForegroundChange} from '../live'
+import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {testOrder} from '../settings'
 import {contracts} from '../store'
 import {askConfirm} from '../confirm'
@@ -185,6 +185,8 @@ onBeforeUnmount(() => {
   unbindPos = null
   stopForeground?.()
   stopForeground = null
+  stopResume?.()
+  stopResume = null
 })
 
 /**
@@ -838,6 +840,8 @@ function syncPosTimer(): void {
 
 /** 前后台翻转：回前台立刻补一次，并重排订阅 */
 let stopForeground: (() => void) | null = null
+/** 链路恢复：断网期间漏掉的持仓，网一回来得重新拉一次 */
+let stopResume: (() => void) | null = null
 
 /**
  * 全平：**这一条**持仓整个平掉。
@@ -1031,6 +1035,10 @@ onMounted(async () => {
    */
   stopForeground = onForegroundChange(on => {
     if (on && tab.value === 'position' && props.active) void loadPositions()
+    syncPosTimer()
+  })
+  stopResume = onNetworkResume(() => {
+    if (tab.value === 'position' && props.active) void loadPositions()
     syncPosTimer()
   })
   syncPosTimer()

@@ -372,6 +372,24 @@ function serveStatic(res: http.ServerResponse, urlPath: string): void {
     return
   }
 
+  /*
+   * 静态资源目录（/assets、/fonts）里的文件**必须**命中，命不中就是真 404 ——
+   * 绝不能回落 index.html。
+   *
+   * 为什么：这两个目录里的文件名带内容哈希、响应头是 `immutable`。浏览器一旦
+   * 拿着**旧的** index.html 去要旧名字的 js / css，这里回一坨 HTML（200 +
+   * text/html）⇒ 浏览器按 ES module 解析失败 ⇒ **整页白屏，而线索只在控制台**。
+   * 回 404 至少让「取不到」表现为「取不到」，而不是伪装成成功的 HTML。
+   */
+  if (/^(assets|fonts)[/\\]/.test(safeRel)) {
+    res.writeHead(404, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store'
+    })
+    res.end('404 Not Found\n')
+    return
+  }
+
   // 其余路径交给前端路由（/knowledge、/usage …），刷新也能打开
   const indexHtml = path.join(PUBLIC_DIR, 'index.html')
   if (fs.existsSync(indexHtml)) {

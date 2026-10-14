@@ -1,0 +1,11 @@
+# 装到 /etc/systemd/system/ait-alert.timer
+# 用法见 docs/DEPLOY.md 的「告警」一节。
+[Unit]
+Description=每分钟跑一次 Ait 可用性看门狗
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

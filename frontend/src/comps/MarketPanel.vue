@@ -30,7 +30,7 @@ import {
   type TickerPatch
 } from '../api'
 import {bjTime, decimalsFor, fmt} from '../format'
-import {isForeground, onForegroundChange} from '../live'
+import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
   ensurePins,
   isPinnedBase,
@@ -381,6 +381,8 @@ watch(() => props.active, sync)
 let bodyRO: ResizeObserver | null = null
 /** 前台变化的取消函数：组件卸载时必须调，否则监听会一直挂着 */
 let offForeground: (() => void) | null = null
+/** 链路恢复的取消函数：断网期间失败的那批请求，网一回来得重发一遍 */
+let offResume: (() => void) | null = null
 
 onMounted(() => {
   sync()
@@ -391,6 +393,11 @@ onMounted(() => {
    *    标签页级别，原生壳切后台 / 锁屏不一定发（见 `live.ts`）。
    */
   offForeground = onForegroundChange(sync)
+  /*
+   * 链路恢复也补一次（`onNetworkResume` 与前台变化是两回事，见 `live.ts`）：
+   * 断网期间这些请求全是失败的，不补的话界面就一直停在旧数据上。
+   */
+  offResume = onNetworkResume(sync)
   if (bodyEl.value && typeof ResizeObserver !== 'undefined') {
     bodyRO = new ResizeObserver(() => measureScrollbar())
     bodyRO.observe(bodyEl.value)
@@ -403,6 +410,8 @@ onBeforeUnmount(() => {
   stop() // 里面会取消排队的刷新 / 清掉缓冲
   offForeground?.()
   offForeground = null
+  offResume?.()
+  offResume = null
   bodyRO?.disconnect()
   bodyRO = null
 })

@@ -73,3 +73,38 @@ export function onForegroundChange(cb: (active: boolean) => void): () => void {
     stopWatch()
   }
 }
+
+/**
+ * 「链路恢复了」的订阅者。
+ *
+ * 跟上面那个是**两回事**，别合并：前后台翻转是「用户切走了 / 切回来了」，
+ * 链路恢复是「网又通了」—— 断网期间用户可能一直盯着界面没动过。
+ */
+const resumeHandlers = new Set<() => void>()
+
+/**
+ * `api.ts` 的探活戳通 `/api/health` 之后调这个，广播「网回来了」。
+ *
+ * 为什么不直接听 `window` 的 `online`：断的往往只是**路径**（丢包但**不回 RST**），
+ * 接口一直是连着的，系统始终认为「有网」，`online` 永远不触发 ——
+ * 2026-10-14 那次 5G 断 10 分钟就是这样。所以只能靠探活（见 `api.ts`）。
+ */
+export function notifyNetworkResume(): void {
+  for (const cb of [...resumeHandlers]) cb()
+}
+
+/**
+ * 订阅「网络恢复了」（含浏览器/系统自己报的 `online`）。
+ *
+ * 用途：断网期间所有一次性接口都会失败或超时，网络一回来得有人把它们**重新发
+ * 一遍**，否则界面就一直停在旧数据上（同一次事故：只能大退 App 才恢复）。
+ * 返回取消函数，组件卸载时必须调。
+ */
+export function onNetworkResume(cb: () => void): () => void {
+  resumeHandlers.add(cb)
+  window.addEventListener('online', cb)
+  return () => {
+    resumeHandlers.delete(cb)
+    window.removeEventListener('online', cb)
+  }
+}

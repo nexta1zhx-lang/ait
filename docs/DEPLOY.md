@@ -714,6 +714,85 @@ bash scripts/release.sh -y       # 打包上传（Caddyfile 没变就不会重�
 现在这一步是**改了 Caddyfile 才会**触发（release.sh 比对解包前后的 md5）——
 所以「只是为了换 APK」的发布不用重建 caddy，文件是 bind mount 的、立刻生效。
 
+## 告警（可用性看门狗 → Telegram，2026-10-14）
+
+`scripts/alert-watchdog.sh` 在服务器上每分钟跑一次：查 `/api/health`（串起 Node + Postgres）
++ 三个容器在不在跑，**只在状态变化时**推 Telegram —— 挂了推一条、恢复了推一条；
+连续 `FAIL_THRESHOLD`（默认 3）次失败才算数，避免网络抖一下就响。
+
+凭据放 `/etc/ait-alert.env`（**root 600，不进 git**）：
+
+```bash
+TELEGRAM_BOT_TOKEN=...   # @BotFather 拿
+TELEGRAM_CHAT_ID=...     # 给 bot 发一条 /start 后，用 getUpdates 拿
+# 可选：HEALTH_URL / FAIL_THRESHOLD / HEARTBEAT_HHMM（如 09:00，每天报一条平安）
+```
+
+装单元（脚本由 `release.sh` 带上服务器；**单元文件不在部署范围里，换机器要重装**）：
+
+```bash
+sudo install -m 755 scripts/alert-watchdog.sh /opt/crypto-advisor/scripts/
+sudo cp scripts/systemd/ait-alert.service scripts/systemd/ait-alert.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ait-alert.timer
+systemctl list-timers ait-alert.timer
+```
+
+自测 / 排查：
+
+```bash
+sudo bash /opt/crypto-advisor/scripts/alert-watchdog.sh --test   # 直接发一条测试消息
+journalctl -u ait-alert.service -n 20 --no-pager                 # 每次运行的结果
+cat /var/lib/ait-alert/state                                     # 状态机：up/down + 连续失败次数
+```
+
+### ⚠️ 它**发现不了**「外网不可达 / 某条链路被掐」
+
+看门狗跑在**同一台机器**上，只能发现「应用 / 数据库 / 容器自己挂了」。
+
+**2026-10-14 那次（约 15:07–15:16，约 10 分钟）**正是它抓不到的那一类，证据：
+
+- 手机上所有请求**无响应**（不是报错）；App「大退」重开后才恢复；
+- 同一台服务器、同一分钟，还在正常为**另一条链路**（家里宽带）转发流量
+  —— `xray` 访问日志里 15:10:43 / 15:11:20 有记录；
+- `ca-caddy` 访问日志在那 10 分钟里**一条请求都没有**（包根本没到），也没有任何 TLS
+  握手失败；`xray` / `caddy` / 应用容器**全程没重启**；
+- 域名解析正常（4 台权威 DNS + 4 个公共 DNS 共 160 次查询全对）。
+
+结论：**手机那条出口链路被静默丢弃（黑洞）**，与服务器无关。之所以「必须大退」，
+是因为 HTTP/2 把所有请求复用**一条**连接（实测一条连接背过 1784 个请求），
+链路黑洞后那条连接既不报错也不断开，客户端内核要重传很多次才判定失败。
+
+所以要抓这类问题**必须从外部探**。装在同一台机器上的监控（含 Uptime Kuma）都不算数
+—— 那台机器连自己的公网 IP 都到不了，会一直误报。
+
+### 外部探针（用来区分「服务器挂」和「我这条链路断」）
+
+免费的外部服务（UptimeRobot / BetterStack 等）都支持**关键字监控**，配两个就够：
+
+| 字段 | 监控 ①（应用 + 库） | 监控 ②（静态产物） |
+| --- | --- | --- |
+| URL | `https://bitcoooin.cn/api/health` | `https://bitcoooin.cn/` |
+| 类型 | Keyword（exists） | Keyword（exists） |
+| 关键字 | `"db":{"ok":true` | `id="app"` |
+| 间隔 | 免费档通常 5 分钟 | 同左 |
+| 告警 | Telegram（填 bot token + chat id） | 同左 |
+
+⚠️ 别拿 `/assets/index-xxxx.js` 当目标或关键字 —— 那串哈希**每次构建都变**。
+⚠️ 用**关键字**而不是只看状态码：只判 200 的话，「200 但返回的是错的东西」会被判成正常
+（比如 SPA 兜底把 HTML 当 JS 发那类故障）。
+
+收到告警后的判断：
+
+| 外部探针 | 你手机 | 结论 |
+| --- | --- | --- |
+| 🔴 | 打不开 | 服务器 / 网站真挂了 → 看 `docker logs` |
+| 🟢 | 打不开 | **是你这条链路的问题** → 切流量 / 开关飞行模式 |
+| 🟢 | 能开 | 没事 |
+
+⚠️ 海外探针证明的是「**服务器从公网活着**」，**证明不了**「你的 5G 能不能到它」；
+想要「国内多线路」视角得用国内拨测（阿里云云监控的站点监控 / 云拨测），
+它能从电信 / 联通 / 移动分别探同一个 URL。
+
 ## 常用命令
 
 ```bash

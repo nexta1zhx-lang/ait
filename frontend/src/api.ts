@@ -2,7 +2,7 @@
 
 import {ref} from 'vue'
 import {isNativeShell} from './platform'
-import {isForeground, onForegroundChange} from './live'
+import {isForeground, notifyNetworkResume, onForegroundChange} from './live'
 
 /* ---------------- 登录态 ---------------- */
 
@@ -761,44 +761,213 @@ export function closeAllStreams(): void {
   for (const e of [...sharedStreams.values()]) dropStream(e)
 }
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
+/* ------------------------------------------------------------------ */
+/* 网络自愈：超时 · 重试 · 恢复探活                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 单次请求的超时（毫秒）。
+ *
+ * ⚠️ **必须有**：`fetch()` 在浏览器 / WebView 里**没有默认超时**。链路被黑洞
+ *    （丢包、但**不回 RST**）时，请求会一直挂着 —— 界面既不报错也不刷新，用户
+ *    只能杀进程重开。2026-10-14 实测：5G 断约 10 分钟，App 整片数据僵死，
+ *    「大退」才恢复。
+ *
+ * 12 秒是折中：`/api/exchange/trade/*` 要现问交易所，正常也可能几秒；线上实测
+ * 3 小时内只有 1 个非流式请求超过 5 秒。个别接口想放宽就自己传 `timeoutMs`
+ * （传 0 = 不限时，等于老行为）。
+ */
+const REQ_TIMEOUT_MS = 12_000
+
+/** 幂等读取（GET）失败后最多再试几次。写操作**永不重试**，理由见 `req`。 */
+const REQ_RETRY_MAX = 2
+
+/** 重试退避（毫秒） */
+const REQ_RETRY_BACKOFF_MS = [600, 1_500]
+
+/** 出故障后探活的间隔 / 一轮探活最长持续多久 */
+const PROBE_INTERVAL_MS = 5_000
+const PROBE_MAX_MS = 15 * 60_000
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * 网络层错误（连不上 / 超时 / 中途断了）。
+ *
+ * 刻意跟 HTTP 错误（4xx / 5xx）分开：**只有这一类值得重试** —— HTTP 错误是
+ * 服务器明确答复过的，重试还是同一个结果。
+ */
+class NetworkError extends Error {
+  constructor(
+    message: string,
+    /** 调用方主动取消（自己传了 signal）时不该重试 */
+    readonly retryable = true
+  ) {
+    super(message)
+  }
+}
+
+/**
+ * 发一次请求并读完 body，**超时覆盖「建连 + 收完」全过程**。
+ *
+ * ⚠️ 只给 `fetch()` 加超时是不够的：`fetch` 拿到响应头就 resolve 了，后面
+ *    `res.json()` 还要继续收 body —— 链路半死时卡住的正是这一步。
+ */
+async function fetchJson(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  /** 探活自己发的请求传 `false`：失败是预期的，别去触发新一轮探活 */
+  note = true
+): Promise<{res: Response; data: unknown}> {
+  const ac = timeoutMs > 0 ? new AbortController() : null
+  const outer = init.signal
+  const relay = (): void => ac?.abort()
+  if (ac && outer) {
+    if (outer.aborted) ac.abort()
+    else outer.addEventListener('abort', relay, {once: true})
+  }
+  const timer = ac ? setTimeout(() => ac.abort(), timeoutMs) : null
+  try {
+    const res = await fetch(url, ac ? {...init, signal: ac.signal} : init)
+    let data: unknown = null
+    try {
+      data = await res.json()
+    } catch (e) {
+      // 解析失败 = 真的不是 JSON（有的接口本来就没 body）；
+      // 但**被超时中断**不是解析失败，得往上抛，否则会被当成「成功但空」
+      if (ac?.signal.aborted) throw e
+    }
+    return {res, data}
+  } catch {
+    if (note) noteTrouble()
+    throw new NetworkError(
+      outer?.aborted ? '请求已取消' : '网络不通（超时或连接中断）',
+      !outer?.aborted
+    )
+  } finally {
+    if (timer) clearTimeout(timer)
+    outer?.removeEventListener('abort', relay)
+  }
+}
+
+/*
+ * ---- 「链路恢复」探活 ----
+ *
+ * 不能只靠 `window` 的 `online` 事件：断的往往只是**路径**（丢包不回 RST），
+ * 接口一直连着、系统始终认为有网，`online` 永远不触发 —— 2026-10-14 那次 5G
+ * 就是这样。所以只能自己戳：一旦有请求因为网络挂了，就周期性请求
+ * `/api/health`；通了就广播 `notifyNetworkResume()`，让各页面把数据重拉一遍。
+ */
+
+/** 有请求因为网络挂了 —— 0 = 当前没故障 */
+let troubleSince = 0
+
+/** 探活循环在跑吗（防重入） */
+let probing = false
+
+function noteTrouble(): void {
+  if (!troubleSince) troubleSince = Date.now()
+  if (!probing) void probeUntilOnline()
+}
+
+async function probeUntilOnline(): Promise<void> {
+  probing = true
+  // 截止时间**进循环前**算定：否则每次失败都会把窗口往后推，永远出不来
+  const deadline = Date.now() + PROBE_MAX_MS
+  try {
+    while (troubleSince && Date.now() <= deadline) {
+      await sleep(PROBE_INTERVAL_MS)
+      // 后台不戳（省电 / 省流量）：回前台时各页面本来就会补一次数据
+      if (!isForeground()) continue
+      let ok = false
+      try {
+        const {res} = await fetchJson(apiUrl('/api/health'), {}, 3_000, false)
+        ok = res.ok
+      } catch {
+        /* 还不通，接着等 */
+      }
+      if (ok) {
+        troubleSince = 0
+        notifyNetworkResume()
+      }
+    }
+  } finally {
+    probing = false
+    // 探满一轮还没通：清掉标记收工；下次再有请求失败会重新开一轮（= 一直自愈）
+    if (troubleSince && Date.now() > deadline) troubleSince = 0
+  }
+}
+
+async function req<T>(
+  url: string,
+  init?: RequestInit,
+  opts: {timeoutMs?: number} = {}
+): Promise<T> {
   // 带上登录态（公开接口带了也无害）
   const headers = new Headers(init?.headers)
   if (authToken.value) headers.set('Authorization', `Bearer ${authToken.value}`)
-  const res = await fetch(apiUrl(url), {...init, headers})
-  let data: unknown = null
-  try {
-    data = await res.json()
-  } catch {
-    /* 非 JSON */
-  }
-  if (!res.ok) {
-    const msg =
-      (data as {error?: string} | null)?.error ??
-      `请求失败（HTTP ${res.status}）`
-    /*
-     * 401 = 登录过期：把本地 token 清掉，App 会退回登录页。
-     *
-     * ⚠️ **只有 401 才算「登录失效」** —— 网络不通 / 5xx（部署窗口容器重建、
-     *    数据库抽一下）绝不能清 token，否则一次抖动就把人永久踢下线。
-     *    所以给这个错误打个 `auth` 标记（`initAuth` 靠它区分）。
-     */
-    if (res.status === 401) {
-      setAuthToken('')
-      const err = new Error(msg) as Error & {auth?: boolean}
-      err.auth = true
-      throw err
+  const timeoutMs = opts.timeoutMs ?? REQ_TIMEOUT_MS
+  const method = (init?.method ?? 'GET').toUpperCase()
+  /*
+   * ⚠️ **只有 GET 重试**。POST / PUT / PATCH / DELETE 一律一次到底 —— 下单、
+   *    平仓、改杠杆重试一次就是**重复的真操作**，宁可让用户看到错误自己决定。
+   *    （超时对两者都生效：超时 ≠ 重试。）
+   */
+  const attempts = method === 'GET' ? REQ_RETRY_MAX + 1 : 1
+
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) {
+      await sleep(
+        REQ_RETRY_BACKOFF_MS[
+          Math.min(attempt - 1, REQ_RETRY_BACKOFF_MS.length - 1)
+        ]
+      )
     }
-    throw new Error(msg)
+    try {
+      const {res, data} = await fetchJson(
+        apiUrl(url),
+        {...init, headers},
+        timeoutMs
+      )
+      if (!res.ok) {
+        const msg =
+          (data as {error?: string} | null)?.error ??
+          `请求失败（HTTP ${res.status}）`
+        /*
+         * 401 = 登录过期：把本地 token 清掉，App 会退回登录页。
+         *
+         * ⚠️ **只有 401 才算「登录失效」** —— 网络不通 / 5xx（部署窗口容器重建、
+         *    数据库抽一下）绝不能清 token，否则一次抖动就把人永久踢下线。
+         *    所以给这个错误打个 `auth` 标记（`initAuth` 靠它区分）。
+         */
+        if (res.status === 401) {
+          setAuthToken('')
+          const err = new Error(msg) as Error & {auth?: boolean}
+          err.auth = true
+          throw err
+        }
+        // 服务器明确答复过（4xx / 5xx）：重试也是同样的结果，直接抛
+        throw new Error(msg)
+      }
+      return data as T
+    } catch (e) {
+      // 只有网络层错误才重试；HTTP 错误（含 401）立刻上抛
+      if (!(e instanceof NetworkError) || !e.retryable) throw e
+      lastError = e
+    }
   }
-  return data as T
+  throw lastError ?? new Error('请求失败')
 }
 
 /** 这个错误是「登录失效（401）」吗 —— 网络不通 / 5xx 都不是 */
 export const isAuthError = (e: unknown): boolean =>
   Boolean((e as {auth?: boolean} | null)?.auth)
 
-const get = <T>(url: string) => req<T>(url)
+const get = <T>(url: string, opts?: {timeoutMs?: number}) =>
+  req<T>(url, undefined, opts)
 
 const post = <T>(url: string, body: unknown) =>
   req<T>(url, {
