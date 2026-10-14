@@ -4700,6 +4700,19 @@ body.fixed-viewport .split {
 }
 
 /*
+ * 「正在读合约账户…」（切币种 / 切账户那一瞬间的占位，见 `reading`）——
+ * 高度留到跟「开单」那块差不多（≈130px），这样数据回来时面板不会上下跳。
+ */
+.ord-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 130px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/*
  * 顶部那一排「已开的币种」（用户 2026-10-14：「顶部加上已开的币种，点击可切换」）：
  * 一枚一个基础币，当前那只高亮，右边跟一枚小字浮盈（绿 / 红）。
  * 横向可滚（币多了一行放不下），滚动条不画。
@@ -4922,8 +4935,9 @@ body.fixed-viewport .split {
  */
 .ord-have-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 3px 12px;
+  /* 两列（不是三列）：数量带上币种单位之后一行要放得下，三列会被截成「21133 1000…」 */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 14px;
   margin-top: 6px;
 }
 
@@ -4959,6 +4973,15 @@ body.fixed-viewport .split {
   font-weight: var(--fw-mid);
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+/* 数量后面那截币种（`21133 1000BONK`）——小一号、灰一点，别跟数字抢 */
+.ord-hd b i {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
 }
 
 /* 底下那一行只有「平仓 / 全平」两颗，靠右（均价已经挪进上面那张细节格） */

@@ -108,7 +108,13 @@ const exSymbol = computed(
 )
 
 const info = ref<TradeInfoResult | null>(null)
-const loading = ref(false)
+/**
+ * 正在读合约账户。
+ * ⚠️ 初值是 `true`：面板**第一帧**就按「还没读到」渲染（见 `reading` 的那个占位），
+ *    不然挂载那一瞬间会先闪一下「能开 0.00 USDT」再跳成真的数字。
+ *    `load()` 一进来就把它按真实进度设掉，切币种 / 切账户也同样走 `reading`。
+ */
+const loading = ref(true)
 const busy = ref(false)
 const levBusy = ref(false)
 
@@ -324,6 +330,16 @@ const curPos = computed<TradePositionRow | null>(() => {
 const curNotional = computed(() =>
   curPos.value ? Math.abs(Number(curPos.value.notional) || 0) : 0
 )
+
+/**
+ * 「这一份合约账户数据**还没到**」—— 正在读、且手上没有可用的那一份。
+ *
+ * 切币种 / 切账户会先把 `info` 清空再重读，那一小会儿面板本来会按
+ * 「没持仓 + 权益 0」渲染 ⇒ 先闪一下「能开 0.00 USDT」再跳成「仓位」。
+ * 用户 2026-10-14 明确要治这个（「切换会跳到未开仓在显示已开，未开是会先显示 0」）：
+ * 这期间只显示一行占位，两块正文都不渲染。
+ */
+const reading = computed(() => !info.value && loading.value)
 
 /** 有持仓吗（界面靠它分「已开 / 未开」两种样子） */
 const opened = computed(() => curPos.value !== null)
@@ -1263,8 +1279,17 @@ onMounted(async () => {
         两块互斥（`v-if` / `v-else`），不会再并排堆着让人分不清「已开还是没开」。
       -->
 
+      <!--
+        ★ 还没读到这一份数据（切币种 / 切账户那一刻）先摆一行「正在读合约账户…」。
+        用户 2026-10-14：「现在切换会跳到未开仓在显示已开，未开是会先显示 0，能优化吗」——
+        原因是换币会先把 `info` 清空，面板那一瞬间按「没持仓 + 权益 0」渲染，
+        于是先闪一下「能开 0.00 USDT」，等数据回来才切到「仓位」那一块。
+        这里用一个**跟两块都长得不一样的占位**盖住那一瞬间（高度也留够，不跳）。
+      -->
+      <div v-if="reading" class="ord-loading">正在读合约账户…</div>
+
       <!-- ================= ① 有仓位：只显示仓位 ================= -->
-      <template v-if="opened && curPos">
+      <template v-else-if="opened && curPos">
         <!--
           加仓在**仓位上面**（用户 2026-10-14 明确要求）。
           左边那行小字是「还剩多少额度」—— 额度满了就直说，顺便告诉用户还能靠浮盈加。
@@ -1339,7 +1364,8 @@ onMounted(async () => {
           -->
           <div class="ord-have-grid">
             <span class="ord-hd" :title="`持仓数量：${posQty(curPos)}`"
-              ><em>数量</em><b>{{ posQtyNum(curPos) }}</b></span
+              ><em>数量</em
+              ><b>{{ posQtyNum(curPos) }}<i>{{ baseOf(curPos.symbol) }}</i></b></span
             >
             <span class="ord-hd"
               ><em>开仓</em
