@@ -1429,20 +1429,24 @@ onMounted(async () => {
           实时杠杆 = 本单名义 ÷ 权益，额度被可用保证金卡住时就是 4.3x 这种。
         -->
         <div class="ord-quota">
-          <b class="ord-quota-num">{{ roomText }}<i>USDT</i></b>
-          <span
-            v-if="liveLevText"
-            class="ord-lev-live"
-            :class="{warn: levAfterWarn}"
-            :title="
-              `实时杠杆 ${liveLevText}（本单 ${notionalText} ÷ 权益 ${equityText}）` +
-              ` · 上限 ${ORDER_EQUITY_MAX} 倍权益` +
-              (levAfterText
-                ? ` · 成交后账户总杠杆 ${levAfterText}（上限 ${ACCOUNT_LEV_MAX}x）`
-                : '')
-            "
-          >
-            <em>实时杠杆</em>{{ liveLevText }}
+          <!-- 用户 2026-10-14：「价值那一行…加上文字，**当前可开价值**」 -->
+          <span class="ord-quota-lb">当前可开价值</span>
+          <span class="ord-quota-row">
+            <b class="ord-quota-num">{{ roomText }}<i>USDT</i></b>
+            <span
+              v-if="liveLevText"
+              class="ord-lev-live"
+              :class="{warn: levAfterWarn}"
+              :title="
+                `实时杠杆 ${liveLevText}（本单 ${notionalText} ÷ 权益 ${equityText}）` +
+                ` · 上限 ${ORDER_EQUITY_MAX} 倍权益` +
+                (levAfterText
+                  ? ` · 成交后账户总杠杆 ${levAfterText}（上限 ${ACCOUNT_LEV_MAX}x）`
+                  : '')
+              "
+            >
+              <em>实时杠杆</em>{{ liveLevText }}
+            </span>
           </span>
         </div>
 
@@ -1452,11 +1456,15 @@ onMounted(async () => {
           ⚠️ 报错**不放这儿**（用户：「报错不占用内容」）—— 真正的原因都在点下单时弹提示。
         -->
         <div class="ord-read">
+          <!-- 用户 2026-10-14：「数量放在价值下面」（所以它是第一格）、「保证金改为占用」 -->
           <span class="ord-r"
-            ><em>保证金</em
+            ><em>数量</em
+            ><b>{{ quantityText }}<i>{{ base }}</i></b></span
+          >
+          <span class="ord-r"
+            ><em>占用</em
             ><b>{{ marginText }}<i>USDT</i></b></span
           >
-          <span class="ord-r"><em>数量</em><b>{{ quantityText }} {{ base }}</b></span>
           <!--
             可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast）。
             真读到 0 的时候**标红 + 带一句怎么办**（用户 2026-10-05：「我怎么开仓位」——
@@ -1470,7 +1478,7 @@ onMounted(async () => {
                 : undefined
             "
           >
-            <em>可用</em>
+            <em>账户可用</em>
             <b :class="{empty: ready && available <= 0}"
               >{{ availableText }}<i>USDT</i></b
             >
