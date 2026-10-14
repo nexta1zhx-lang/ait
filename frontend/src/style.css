@@ -4935,19 +4935,22 @@ body.fixed-viewport .split {
  */
 .ord-have-grid {
   display: grid;
-  /* 两列（不是三列）：数量带上币种单位之后一行要放得下，三列会被截成「21133 1000…」 */
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 3px 14px;
-  margin-top: 6px;
+  /* **三列**（用户 2026-10-14：「已开三列显示」）—— 每格「标签一行 + 值一行」，
+     六个字段正好两行排完，比两列矮一行。 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin-top: 7px;
 }
 
 .ord-hd {
+  /* **上下排**（用户 2026-10-14：「显示为上下显示详情」）：标签一行、值一行 */
   display: flex;
-  align-items: baseline;
-  gap: 4px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
   min-width: 0;
   font-size: 11.5px;
-  line-height: 1.6;
+  line-height: 1.45;
   white-space: nowrap;
 }
 

@@ -742,51 +742,99 @@ const canAdd = computed(() => !addBlocker.value)
 
 /* ---------------- 数据 ---------------- */
 
+/**
+ * 上一份合约账户数据（按 `币种@账户` 存）。
+ *
+ * ★ 为什么要它（用户 2026-10-14：「**为什么会有加载的过程，能都优化掉**」）：
+ *   面板的数据是 `/api/exchange/trade` 现拉的，切一次币就要等一个来回，
+ *   这段时间只能摆「正在读合约账户…」。但**同一个币来回切**（尤其是顶栏那排
+ *   已开的币种）根本不用重新问一遍 —— 记一份、命中就直接渲染，
+ *   后台再静默重读一次（数据不新鲜就自己补上，界面不闪）。
+ * ⚠️ 只留最近 6 份，别把一个会话摸过的币全攒着。
+ */
+const INFO_CACHE_MAX = 6
+const infoCache = new Map<string, TradeInfoResult>()
+
+/** 把一份读回来的数据落到面板状态上（缓存命中和真请求都走这里） */
+function applyInfo(r: TradeInfoResult): void {
+  info.value = r
+  if (!r.balanceError) setAvailableBalance(keyId.value, r.balance?.available)
+  /*
+   * 杠杆：**跟交易所同步**（用户 2026-10-14：「但是杠杆没有和币安的同步」）。
+   *
+   * 以前这里按默认值来（2026-10-05 定的「默认 10 倍」），结果面板永远显示 10x ——
+   * 你在币安手动设的值它不认，下单前还会把 10x 写回去顶掉。
+   * 现在：**交易所报多少就显示多少**（夹到可选档位，最高 10x），
+   * 只有读不到（`leverage` 为空）才退回默认值。
+   * 夹过之后 `levConfirmed=false`，下单前会真设一次 ⇒ 面板上写几倍就按几倍开。
+   */
+  const l = Math.floor(Number(r.leverage ?? 0))
+  lev.value = l >= 1 ? fitLeverage(l) : fitLeverage(DEFAULT_LEVERAGE)
+  levConfirmed.value = l === lev.value
+}
+
+/**
+ * 悄悄把某几个币的合约账户数据**先取回来**（预热缓存）。
+ *
+ * 顶栏那排「已开的币种」就是用户最常点的几个 ⇒ 提前拉好，点下去**直接出内容**，
+ * 不会有「正在读」那一下。失败就拉倒（真要切过去时照常现拉）。
+ */
+function prefetchInfo(symbols: string[]): void {
+  const key = keyId.value
+  for (const base of symbols.slice(0, 4)) {
+    const sym = String(base).toUpperCase().endsWith('USDT')
+      ? String(base).toUpperCase()
+      : `${String(base).toUpperCase()}USDT`
+    const k = `${sym}@${key ?? ''}`
+    if (infoCache.has(k) || sym === exSymbol.value) continue
+    void fetchTradeInfo(sym, key)
+      .then(r => {
+        infoCache.set(k, r)
+        while (infoCache.size > INFO_CACHE_MAX)
+          infoCache.delete(String(infoCache.keys().next().value))
+      })
+      .catch(() => {})
+  }
+}
+
 async function load(): Promise<void> {
   const sym = exSymbol.value
   if (!sym) return
   /*
-   * 切页回来（`watch(props.active)`）本来就要重读一次余额；但用户主场景是
-   * **两个 tab 来回切**，几秒内切 4 轮就会白打 4 发交易所。所以同一份数据
-   * 在这个窗口内不重读 —— `info` 还在（内容没被作废）且币种 / Key 都没变才跳。
-   * 换币、换账户都会先把 `info` 清成 `null`，走不到这里。
-   *
-   * 「正在飞」那一发只在**代次没被顶掉**时才算数：换币 / 换账户会 `seq++`，
-   * 旧代次的结果本来就要丢（A→B→A 快速来回时不能被旧的那发挡住，否则面板会空着）。
+   * ⚠️ 这里**没有再**把 `info` 清空 —— 缓存命中时先渲染旧的一份（0 等待），
+   *    再让下面那次真请求把新数据补上（`applyInfo` 会覆盖它）。
    */
   const k = `${sym}@${keyId.value ?? ''}`
+  const cached = infoCache.get(k) ?? null
+  const fresh = info.value && k === loadedKey && Date.now() - loadedAt < INFO_FRESH_MS
+  if (fresh && info.value) return
+  if (cached && info.value !== cached) {
+    /* 命中缓存 ⇒ 先渲染，不显示「正在读」 */
+    applyInfo(cached)
+    loadedKey = k
+    loadedAt = 0
+  }
+  /* 手上已经有这个币的**新旧任一**数据 ⇒ 后台静默重读，不摆「正在读」 */
+  loading.value = !info.value && !cached
   if (info.value == null && k === pendingKey && pendingSeq === seq) return
-  if (info.value && k === loadedKey && Date.now() - loadedAt < INFO_FRESH_MS)
-    return
   const my = ++seq
   pendingKey = k
   pendingSeq = my
-  loading.value = true
   try {
     const r = await fetchTradeInfo(sym, keyId.value)
     if (my !== seq) return
-    info.value = r
-    if (!r.balanceError) setAvailableBalance(keyId.value, r.balance?.available)
+    infoCache.set(k, r)
+    while (infoCache.size > INFO_CACHE_MAX)
+      infoCache.delete(String(infoCache.keys().next().value))
+    applyInfo(r)
     loadedKey = k
     loadedAt = Date.now()
-    /*
-     * 杠杆：**跟交易所同步**（用户 2026-10-14：「但是杠杆没有和币安的同步」）。
-     *
-     * 以前这里按默认值来（2026-10-05 定的「默认 10 倍」），结果面板永远显示 10x ——
-     * 你在币安手动设的值它不认，下单前还会把 10x 写回去顶掉。
-     * 现在：**交易所报多少就显示多少**（夹到可选档位，最高 10x），
-     * 只有读不到（`leverage` 为空）才退回默认值。
-     * 夹过之后 `levConfirmed=false`，下单前会真设一次 ⇒ 面板上写几倍就按几倍开。
-     */
-    const l = Math.floor(Number(r.leverage ?? 0))
-    lev.value = l >= 1 ? fitLeverage(l) : fitLeverage(DEFAULT_LEVERAGE)
-    levConfirmed.value = l === lev.value
     /* 读失败的原因（没配 Key / 现货 / IP 白名单 / 网络）也走提示，不占内容区 */
     if (!r.ready) say(r.reason || '现在下不了单')
     else if (r.balanceError) say(r.balanceError)
   } catch (e) {
     if (my !== seq) return
-    info.value = null
+    if (!info.value) info.value = null
     say((e as Error).message)
   } finally {
     if (pendingSeq === my) pendingKey = ''
@@ -1135,12 +1183,42 @@ async function closeOne(p: TradePositionRow): Promise<void> {
 
 /* ---------------- 跟着币种 / 页面走 ---------------- */
 
-/** 换币：整块重来（数字全都跟着上一个币算的，不能留） */
+/**
+ * 换币：重读这一只的合约账户数据。
+ *
+ * ⚠️ **不再把 `info` 清空**（用户 2026-10-14：「为什么会有加载的过程，能都优化掉」）：
+ *    清空就等于那一瞬间面板没数据可渲染，只能摆「正在读合约账户…」。
+ *    现在改成：`load()` 里先看缓存 ——
+ *      · 这只币之前读过（来回切 / 顶栏那排已开的币种点一下）⇒ **立刻渲染**，不闪；
+ *      · 从没读过 ⇒ 才摆一次「正在读」（这一下是真的要等交易所，省不掉）。
+ */
 watch(exSymbol, () => {
   seq++
-  info.value = null
+  /*
+   * ⚠️ 必须**当场决定**这一只币手上有没有数据可渲染：
+   *   · 缓存里有 ⇒ 立刻换上（顶栏那排已开的币种点一下就属于这种，0 等待、不闪）；
+   *   · 缓存里没有 ⇒ **必须清空** —— 留着上一只币的数据顶着一看就像「这只币的仓位」，
+   *     数字全是别人的（用户看到会以为算错了，真下单时额度也是照错的那份算的）。
+   *     这种情况就老老实实摆一次「正在读合约账户…」（那一下是真要等交易所的）。
+   */
+  const k = `${exSymbol.value}@${keyId.value ?? ''}`
+  const cached = infoCache.get(k) ?? null
+  if (info.value !== cached) info.value = cached
+  loadedKey = cached ? k : ''
+  loading.value = !cached
   void load()
 })
+
+/*
+ * 顶栏那排「已开的币种」变了（开仓 / 平仓 / 换账户）：把它们的合约账户数据**先取回来**，
+ * 点的时候直接出内容（见 `prefetchInfo`）。
+ */
+watch(
+  () => heldSymbols.value.map(s => s.base).join(','),
+  list => {
+    if (props.active && list) prefetchInfo(list.split(','))
+  }
+)
 
 /* 切走再回来：余额可能变了，重新读一次（没有轮询，不会在后台打交易所） */
 watch(
@@ -1180,6 +1258,8 @@ onMounted(async () => {
   /* 先把 Key 列表拿来（`tradeKey` 靠它算），不然第一发会打到默认那套上去 */
   await loadTradeKeys()
   if (props.active) void load()
+  /* 顺手把「已开的币种」预热一遍：点顶栏那排时不用等 */
+  prefetchInfo(heldSymbols.value.map(s => s.base))
   /*
    * 前后台翻转：回前台**立刻补一次**持仓，并把订阅按当前前后台状态重排
    * —— 切后台就解掉，别在后台一直占着。
@@ -1368,19 +1448,27 @@ onMounted(async () => {
               ><b>{{ posQtyNum(curPos) }}<i>{{ baseOf(curPos.symbol) }}</i></b></span
             >
             <span class="ord-hd"
-              ><em>开仓</em
-              ><b>{{ price(curPos.entryPrice, pricePrecision) }}</b></span
+              ><em>开仓价</em
+              ><b
+                >{{ price(curPos.entryPrice, pricePrecision) }}<i>USDT</i></b
+              ></span
             >
             <span class="ord-hd"
-              ><em>标记</em
-              ><b>{{ price(curPos.markPrice, pricePrecision) }}</b></span
-            >
-            <span class="ord-hd"><em>强平</em><b>{{ liqText }}</b></span>
-            <span class="ord-hd"
-              ><em>价值</em><b>{{ curNotionalText }}</b></span
+              ><em>标记价</em
+              ><b
+                >{{ price(curPos.markPrice, pricePrecision) }}<i>USDT</i></b
+              ></span
             >
             <span class="ord-hd"
-              ><em>保证金</em><b>{{ curMarginText }}</b></span
+              ><em>强平价</em><b>{{ liqText }}<i>USDT</i></b></span
+            >
+            <span class="ord-hd"
+              ><em>仓位价值</em
+              ><b>{{ curNotionalText }}<i>USDT</i></b></span
+            >
+            <span class="ord-hd"
+              ><em>保证金</em
+              ><b>{{ curMarginText }}<i>USDT</i></b></span
             >
           </div>
           <!--
