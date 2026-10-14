@@ -3126,38 +3126,76 @@ body.fixed-viewport .split {
 
 /* -------------------- 信息提示（toast） --------------------
  *
- * 位置：顶部中间（`top: 14px`，横向居中）—— 用户 2026-10-05：「提示都放顶部」。
- * 底色**不透明**：盖在图上 / 弹层上都得看得清。
- * 点一下立即关；自己走掉的时间见 `toast.ts`（好 4s / 坏 8s）。
+ * 位置：**顶部偏下**（`top: 56px + 安全区`）—— 用户 2026-10-05：「提示都放顶部」；
+ * 2026-10-15 又说「位置再下来一点」⇒ 从 14px 挪下来，不再压住最上面那行标题 / tab。
+ * 底色**不透明**（半透明 + 模糊只是为了好看，不透明那层在底下兜着）：盖在图上 /
+ * 弹层上都得看得清。点一下立即关；自己走掉的时间见 `toast.ts`（好 4s / 坏 8s）。
+ *
+ * ★ 2026-10-15 用户：「整体消息提示层优化，目前样式不太好看」⇒ 这一版：
+ *   · 大圆角 + 轻微渐变 + `backdrop-filter` 毛玻璃（纯装饰，算不出来也不影响可读性）；
+ *   · 左对齐（订单那种长句读起来才不散）+ 入场滑一下淡入，别硬蹦出来。
+ * ⚠️⚠️ **左边不许再放任何「垫底」的东西**（用户 2026-10-15：「不要加左侧背景！！」）——
+ *    试过一条 3px 的分色条 + 圆点带一圈光晕，被否了：左侧就是纯文字区。
+ *   · 左对齐（带圆点），多行文案（订单那种长句）读起来才不散；
+ *   · 入场滑一下 + 淡入，别硬蹦出来。
+ * ⚠️ 颜色**不要用 `color-mix()`**（安卓 System WebView 算不出来，见上面暖色皮肤那段）。
+ * ⚠️ 文案里**不写状态符号**（`✅` / `❌`）：成 / 败由颜色表达（用户 2026-10-06）。
  */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
 .toast {
   position: fixed;
   left: 50%;
-  top: 14px;
+  top: calc(var(--safe-top, 0px) + 56px);
   transform: translateX(-50%);
   z-index: 400;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   max-width: min(92vw, 560px);
-  padding: 9px 16px;
-  border-radius: 10px;
-  background: var(--panel);
+  padding: 10px 15px;
+  border-radius: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(26, 30, 32, 0.96);
+  -webkit-backdrop-filter: blur(9px);
+  backdrop-filter: blur(9px);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.55;
+  letter-spacing: 0.01em;
+  text-align: left;
   cursor: pointer;
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.5),
+    0 2px 6px rgba(0, 0, 0, 0.35);
+  animation: toast-in 0.2s ease-out;
 }
 
-/* 成功 / 中性：绿底绿字（跟全站 `--ok` 一套，但底色是不透明的深绿） */
+/* 成功 / 中性：青绿（跟全站 `--ok` 一套）。成 / 败只靠**底色 + 字色**表达 */
 .toast.ok {
-  background: #123028;
-  border: 1px solid #2f8f83;
-  color: #8ff0e2;
+  background: linear-gradient(180deg, rgba(20, 46, 40, 0.96), rgba(15, 32, 28, 0.96));
+  border-color: rgba(47, 143, 131, 0.55);
+  color: #93f0e2;
 }
 
-/* 失败：红底红字 —— 报错才用它，别拿它当「提醒」 */
+/* 失败：红 —— 报错才用它，别拿它当「提醒」 */
 .toast.bad {
-  background: #33191b;
-  border: 1px solid #a8464a;
-  color: #ffb3b0;
+  background: linear-gradient(180deg, rgba(50, 26, 28, 0.96), rgba(36, 19, 21, 0.96));
+  border-color: rgba(176, 74, 79, 0.55);
+  color: #ffb6b3;
+}
+
+/* 悬停稍微提一点亮：能点（关掉）这件事实要有反馈 */
+.toast:hover {
+  filter: brightness(1.06);
 }
 
 /*
