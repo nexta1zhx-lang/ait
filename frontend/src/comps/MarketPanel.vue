@@ -29,6 +29,7 @@ import {
   type MarketRow,
   type TickerPatch
 } from '../api'
+import {ensureBlacklist, lockLeftMs} from '../blacklist'
 import {bjTime, decimalsFor, fmt} from '../format'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
@@ -348,6 +349,10 @@ function sync(): void {
   void ensurePins().catch(e =>
     console.warn(`[行情] 读取收藏失败：${(e as Error).message}`)
   )
+  /* 黑名单也一起拉（同样是 20 秒新鲜度窗口）—— 有它才知道哪几行要显示「禁用」 */
+  void ensureBlacklist().catch(e =>
+    console.warn(`[行情] 读取黑名单失败：${(e as Error).message}`)
+  )
   if (shouldRun()) {
     // 回来先补一次全表：中间漏掉的增量不追了，直接拿最新的
     if (Date.now() - lastSnapshotAt > SNAPSHOT_FRESH_MS) void loadSnapshot()
@@ -447,6 +452,18 @@ const pinTip = ref('')
 const pinBusy = ref('')
 
 const isPinned = isPinnedBase
+
+/**
+ * 这个币现在被黑名单锁着吗 —— 行情表里**置灰 + 打「禁用」标**
+ * （用户 2026-10-14：「加入黑名单后该币种在合约行情中也显示禁用」）。
+ *
+ * ⚠️ 这里直接读 `Date.now()`：这一格只求「是不是锁着」，
+ *    跟着行情增量重渲染就够刷新了，不值得为它单独挂一个每秒跳的时钟。
+ * ⚠️ 只是**显示**，拦下单的是后端那道闸。
+ */
+function isBanned(base: string): boolean {
+  return lockLeftMs(base, Date.now()) > 0
+}
 
 function flashPinTip(text: string, ms = 3200): void {
   pinTip.value = text
@@ -904,6 +921,7 @@ const arrowOf = (v: number | null): string =>
               :class="{
                 on: r.base === symbol.toUpperCase(),
                 pin: isPinned(r.base),
+                ban: isBanned(r.base),
                 // 置顶那一段和后面之间来一条分界线（第一行没有前一行，跳过）
                 sep:
                   i > 0 && isPinned(visible[i - 1]!.base) && !isPinned(r.base)
@@ -962,6 +980,18 @@ const arrowOf = (v: number | null): string =>
                   -->
                   <span class="icell-txt">
                     <span class="icell-t">{{ r.base }}</span>
+                    <!--
+                      黑名单标记（用户 2026-10-14：「加入黑名单后该币种在合约行情中
+                      也显示禁用」）。⚠️ 只是**显示** —— 真正不让开单的是后端
+                      下单接口里那道闸（`db/blacklist.ts` 的 `lockedUntil`）。
+                    -->
+                    <span
+                      v-if="isBanned(r.base)"
+                      class="ban-tag"
+                      title="在黑名单里，锁着期间不能开这个币的单"
+                    >
+                      禁用
+                    </span>
                     <!--
                       第二行：市值排名 + 成交额。
                       用户 2026-10-04：「24h 替换成市值排名 如 no.1」——

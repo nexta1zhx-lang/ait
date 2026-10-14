@@ -1926,6 +1926,29 @@ button.danger {
   color: var(--accent, #d3b583);
 }
 
+/*
+ * 黑名单里的币（2026-10-14）：行情表里**置灰 + 一枚「禁用」标**。
+ * 用户：「加入黑名单后该币种在合约行情中也显示禁用」。
+ * ⚠️ 只是**显示**；真正拦开单的是后端下单接口里那道闸（`db/blacklist.ts`）。
+ */
+.mkt-row.ban .icell-t {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.mkt-row.ban td.num {
+  opacity: 0.5;
+}
+.ban-tag {
+  margin-left: 5px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs, 6px);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 15px;
+  vertical-align: 1px;
+}
+
 /* 置顶段和后面之间一条分界线 */
 .mkt-row.sep td {
   border-top: 1px solid var(--border);

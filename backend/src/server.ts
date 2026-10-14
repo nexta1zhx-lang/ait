@@ -148,6 +148,7 @@ import {getPositions, liveStateOf, subscribePositions} from './data/position-cac
 import {listPositionHistory} from './data/position-history'
 import {RateBudgetError, takeWeight} from './util/rate-budget'
 import {
+  assertLeverageLimits,
   cancelOrphanOrders,
   cancelTradeOrder,
   cancelTradeOrders,
@@ -4431,6 +4432,14 @@ async function route(
        *    漏传 / 传了别的值一律当测试单。
        */
       const test = body.test !== false
+      const creds = {
+        exchange: key.exchange,
+        apiKey: key.apiKey,
+        secret: key.secret,
+        password: key.password,
+        marketType: key.marketType,
+        sandbox: key.sandbox
+      }
       /*
        * 黑名单（用户 2026-10-10）：锁着的币**不让开单**。
        *
@@ -4452,15 +4461,23 @@ async function route(
           })
         }
       }
+
+      /*
+       * 杠杆上限（用户 2026-10-14）：单币 ≤ 5x、账户总杠杆 ≤ 11x
+       * （`Σ持仓名义价值 ÷ 账户权益`，权益 = 钱包余额 + 未实现盈亏）。
+       *
+       * 跟黑名单一样**只拦开仓** —— 减仓 / 平仓放行：手里有仓必须跑得掉。
+       */
+      if (!body.reduceOnly) {
+        await assertLeverageLimits(
+          creds,
+          str(body.symbol, 'BTCUSDT'),
+          Number(body.quantity),
+          body.price === undefined ? undefined : Number(body.price)
+        )
+      }
       const order = await placeOrder(
-        {
-          exchange: key.exchange,
-          apiKey: key.apiKey,
-          secret: key.secret,
-          password: key.password,
-          marketType: key.marketType,
-          sandbox: key.sandbox
-        },
+        creds,
         key.id,
         {
           symbol: str(body.symbol, 'BTCUSDT'),

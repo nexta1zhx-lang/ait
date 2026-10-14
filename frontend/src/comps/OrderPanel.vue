@@ -235,31 +235,43 @@ const exchangeMaxLev = computed(() => {
 })
 
 /**
- * 杠杆能选的档位：**最高 20 倍**（用户 2026-10-05 定）。
- * 交易所那边上限更低（冷门币可能只有 5x）时不硬撑，按它来。
+ * **单币杠杆上限 = 5 倍**（用户 2026-10-14 定）。
+ *
+ * ⚠️ 真正拦人的是后端（`MAX_SYMBOL_LEVERAGE`，设杠杆 / 下单两处都拦）——
+ *    这里只是**显示**：档位里不给选超过 5 的，免得用户选了个注定被后端拒的值。
+ *    要改上限，两边一起改。
  */
+const LEV_MAX = 5
+/**
+ * **账户总杠杆上限 = 11 倍**（用户 2026-10-14 定）= Σ持仓名义价值 ÷ 账户权益。
+ * 跟 `LEV_MAX` 一样：真正拦的是后端（`MAX_ACCOUNT_LEVERAGE`），这里只用于文案。
+ */
+const ACCOUNT_LEV_MAX = 11
+/** 杠杆能选的档位（超过 `LEV_MAX` 的不会出现在弹层里） */
 const LEV_STEPS = [1, 2, 3, 5, 10, 15, 20]
-/** 面板打开时的杠杆（用户 2026-10-05：「杠杆默认 10 倍」） */
-const DEFAULT_LEVERAGE = 10
+/**
+ * 面板初值 —— **只有读不到交易所当前杠杆时才会用到它**
+ * （正常情况下跟交易所同步，见 `load()` 里那段；用户 2026-10-14 提的「没有同步」）。
+ */
+const DEFAULT_LEVERAGE = 5
 const levOptions = computed(() =>
-  LEV_STEPS.filter(v => v <= Math.min(20, exchangeMaxLev.value))
+  LEV_STEPS.filter(v => v <= Math.min(LEV_MAX, exchangeMaxLev.value))
 )
 const maxLev = computed(() => levOptions.value[levOptions.value.length - 1] ?? 10)
 
 /**
  * 一个杠杆值落到哪个**可选档位**上（交易所上限更低时不硬撑 —— 冷门币可能只有 5x）。
  *
- * 用户 2026-10-05 定「默认 10 倍、最高 20 倍」：
- *   · 传进来读不到（0）→ 用 **10**（或这币的上限，取其小）
- *   · 传进来**不在档位里**（8x、50x）→ 取不超过它的最大档
- *     （50x → 20x，因为上限就是 20；8x → 5x）
- *   · ⚠️ 现在**只拿它来夹 `DEFAULT_LEVERAGE`**，不再拿交易所当前值当默认
- *     （那是 20x，会把「默认 10 倍」顶掉，见 `load()` 里那段注释）。
+ * 用户 2026-10-14 改了口径：**跟交易所同步** + **单币上限 5x**，所以：
+ *   · 传进来读不到（0）→ 用 `DEFAULT_LEVERAGE`（或这币的交易所上限，取其小）
+ *   · 传进来**不在档位里**或**超过上限**（8x、20x）→ 取不超过它的最大档
+ *     （20x → 5x、8x → 5x）。夹过之后 `levConfirmed=false`，下单前会真设一次
+ *     ⇒ 上限也就落到了交易所那边，不会出现「界面写 5、交易所是 20」。
  */
 function fitLeverage(l: number): number {
   const opts = levOptions.value
-  const top = opts[opts.length - 1] ?? 10
-  const fallback = Math.min(10, top)
+  const top = opts[opts.length - 1] ?? LEV_MAX
+  const fallback = Math.min(DEFAULT_LEVERAGE, top)
   if (!(l >= 1)) return fallback
   const fit = opts.filter(v => v <= l)
   return fit.length ? fit[fit.length - 1] : opts[0]
@@ -450,16 +462,16 @@ async function load(): Promise<void> {
     loadedKey = k
     loadedAt = Date.now()
     /*
-     * 杠杆：**默认 10 倍**（用户 2026-10-05 定了两次）。
+     * 杠杆：**跟交易所同步**（用户 2026-10-14：「但是杠杆没有和币安的同步」）。
      *
-     * ⚠️ 不跟着**交易所当前值**走：以前是 `fitLeverage(交易所报的)`，
-     *    而那两个账户上交易所值是 **20x**，于是「默认」实际变成了 20x
-     *    —— 用户 2026-10-05 又提了一次「杠杆默认 10 倍」，这次按默认值来。
-     *    交易所那边不等于 10x 时 `levConfirmed=false`，下单前会真设一次 10x，
-     *    所以面板上写 10x 就一定按 10x 开（不会出现「写着 10、其实是 20」）。
+     * 以前这里按默认值来（2026-10-05 定的「默认 10 倍」），结果面板永远显示 10x ——
+     * 你在币安手动设的值它不认，下单前还会把 10x 写回去顶掉。
+     * 现在：**交易所报多少就显示多少**（夹到可选档位，且不超过单币上限 5x），
+     * 只有读不到（`leverage` 为空）才退回默认值。
+     * 夹过之后 `levConfirmed=false`，下单前会真设一次 ⇒ 面板上写几倍就按几倍开。
      */
     const l = Math.floor(Number(r.leverage ?? 0))
-    lev.value = fitLeverage(DEFAULT_LEVERAGE)
+    lev.value = l >= 1 ? fitLeverage(l) : fitLeverage(DEFAULT_LEVERAGE)
     levConfirmed.value = l === lev.value
     if (!priceInput.value) prefillPrice()
     /* 读失败的原因（没配 Key / 现货 / IP 白名单 / 网络）也走提示，不占内容区 */
@@ -1469,11 +1481,12 @@ onMounted(async () => {
           </button>
         </div>
         <p class="sheet-foot">
-          最高 <b>{{ maxLev }}x</b>
+          单币最高 <b>{{ maxLev }}x</b> · 账户总杠杆 ≤
+          <b>{{ ACCOUNT_LEV_MAX }}x</b>
           <template v-if="levConfirmed">
             · 当前 {{ lev }}x（交易所那边就是这个）
           </template>
-          <template v-else> · 还没读到交易所当前的杠杆，下单前会先设成它</template>
+          <template v-else> · 交易所那边不是 {{ lev }}x，下单前会先设成它</template>
         </p>
       </section>
     </Teleport>

@@ -62,6 +62,13 @@ export async function lockBase(
       already: true
     }
   }
+  /* 只能给「最近交易过」的币上锁，理由见 `hasRecentTrade` */
+  if (!(await hasRecentTrade(userId, base))) {
+    throw new Error(
+      `最近 ${TRADE_LOOKBACK_DAYS} 天没有 ${base} 的成交记录 —— ` +
+        `黑名单是给刚交易过的币上锁用的，这个币现在不能加`
+    )
+  }
   const rows = await query<{until: Date}>(
     `INSERT INTO user_blacklist (user_id, base, until)
      VALUES ($1, $2, now() + interval '${BLACKLIST_HOURS} hours')
@@ -74,6 +81,41 @@ export async function lockBase(
     entry: {base, until: new Date(String(rows[0]!.until)).toISOString()},
     already: false
   }
+}
+
+/**
+ * 加黑名单的门槛：最近这么多天得有成交（用户 2026-10-14）。
+ *
+ * 用户原话：「加入黑名单只能是近 5 天有过交易记录的」。
+ * 道理：黑名单是给**刚做过、怕自己手痒又冲回去**的币上锁用的，
+ * 随便挑一个没碰过的币也能锁，锁的就不是「刚做过的单」了。
+ */
+export const TRADE_LOOKBACK_DAYS = 5
+
+/**
+ * 这个币最近 `TRADE_LOOKBACK_DAYS` 天有成交吗。
+ *
+ * 口径：只认**本地成交账本** `exchange_fills`（按 `user_id`）——
+ * 它是这套系统里「你确实交易过这个币」的权威记录，一次查询就够，
+ * 不用为了点一下锁去问交易所。
+ *
+ * ⚠️ 币种映射是 `base || 'USDT'`：正好跟 `normalizeBase()` 反过来
+ *    （那个把尾巴上的 USDT 剥掉）。这套系统只做 U 本位 USDT 合约，够用。
+ */
+export async function hasRecentTrade(
+  userId: number | null,
+  base: string
+): Promise<boolean> {
+  if (userId === null) return false
+  const row = await queryOne<{ok: number}>(
+    `SELECT 1 AS ok FROM exchange_fills
+      WHERE user_id = $1
+        AND upper(symbol) = $2 || 'USDT'
+        AND ts > now() - interval '${TRADE_LOOKBACK_DAYS} days'
+      LIMIT 1`,
+    [userId, base]
+  )
+  return row !== null
 }
 
 /**
