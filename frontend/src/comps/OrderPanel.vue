@@ -68,6 +68,7 @@ import {
   availableBalanceOf,
   bindPositions,
   onAutoStop,
+  positionsAt,
   positionsOf,
   positionsRows,
   refreshPositions,
@@ -226,7 +227,13 @@ let pendingKey = ''
 let pendingSeq = 0
 /** 上一次**成功**读回来的是哪一发、什么时候 */
 let loadedKey = ''
-let loadedAt = 0
+/**
+ * 手上这份 `/api/exchange/trade` 是**什么时候真读回来的**（毫秒；缓存命中时是 0）。
+ *
+ * ⚠️ 必须是 `ref`：`curPos` 要靠它判断「流和 info 谁更新」（见 `storeAhead`），
+ *    普通变量 Vue 不会跟着重算。
+ */
+const loadedAt = ref(0)
 /** 同一份下单信息这么久内不重读（来回切 tab 时别每秒都去问余额） */
 const INFO_FRESH_MS = 30_000
 
@@ -332,6 +339,25 @@ const equity = computed(() => {
 })
 
 /**
+ * 常驻流那份持仓**是不是比手上这份 `/api/exchange/trade` 更新**。
+ *
+ * ★ 2026-10-15 修的 bug（用户：「止盈止损后开单界面没更新」）：
+ *   止盈 / 止损是**交易所侧**触发的，面板什么都没做 ⇒ `info` 还是旧的（有仓位）。
+ *   常驻流随后推「那一行没了」⇒ store 里查不到 ⇒ 原来会**回落到旧 info** 把那个仓
+ *   复活，面板就一直挂着「已开」（数量、均价全是旧的）。
+ *   ⇒ 现在按时间判：**流比 info 新**时，「这个币没有那一行」就是真没有。
+ *   反过来（刚下完单、流还没推过来）`info` 更新 ⇒ 照旧用 `info.position`，
+ *   所以「开仓后立刻切到已开」那条不受影响。
+ *   `loadedAt === 0` = 这份 info 是**缓存命中**（不是真读回来的）⇒ 以流为准。
+ */
+const storeAhead = computed(() => {
+  const at = positionsAt.value
+  if (!(at > 0)) return false
+  const mine = loadedAt.value
+  return mine === 0 || at > mine
+})
+
+/**
  * **这个币**当前的持仓（`null` = 没持仓）—— 用户 2026-10-14：「只显示当前开单仓位」。
  *
  * ★ 两个来源，**优先共享 store**（`./positions`）：
@@ -339,6 +365,8 @@ const equity = computed(() => {
  *      比我们开完单再发一次 `/api/exchange/trade`（一个来回）**更快**；
  *      用户说的「**平仓后没有及时切换、开仓后有延时**」就靠这个抹平；
  *   ② 退路是这次 `/api/exchange/trade` 带回的那一行（store 没绑定时，比如页面在后台）。
+ *      ⚠️ 但退路只在 **info 不比流旧** 时用（见 `storeAhead`）—— 否则止盈止损打掉仓位后
+ *         旧 info 会把它复活。
  *
  * ⚠️ 双向持仓时同一个币会有两条（多 / 空）⇒ 取名义大的那条（面板只展示一条）。
  */
@@ -358,6 +386,11 @@ const curPos = computed<TradePositionRow | null>(() => {
      */
     return {...live, leverage: Number(live.leverage) || lev.value}
   }
+  /*
+   * 流比 info 新 ⇒ 这个币**真的没仓**了（止盈止损打掉 / 别处平掉），
+   * 别拿旧 info 里那一行把它复活。
+   */
+  if (storeAhead.value) return null
   const p = info.value?.position
   if (!p || !(Number(p.amount) > 0)) return null
   return {
@@ -937,13 +970,14 @@ async function load(): Promise<void> {
    */
   const k = `${sym}@${keyId.value ?? ''}`
   const cached = infoCache.get(k) ?? null
-  const fresh = info.value && k === loadedKey && Date.now() - loadedAt < INFO_FRESH_MS
+  const fresh = info.value && k === loadedKey && Date.now() - loadedAt.value < INFO_FRESH_MS
   if (fresh && info.value) return
   if (cached && info.value !== cached) {
     /* 命中缓存 ⇒ 先渲染，不显示「正在读」 */
     applyInfo(cached)
     loadedKey = k
-    loadedAt = 0
+    /* 缓存命中：这份不是真读回来的 ⇒ 0（`storeAhead` 会以常驻流为准） */
+    loadedAt.value = 0
   }
   /* 手上已经有这个币的**新旧任一**数据 ⇒ 后台静默重读，不摆「正在读」 */
   loading.value = !info.value && !cached
@@ -959,7 +993,7 @@ async function load(): Promise<void> {
       infoCache.delete(String(infoCache.keys().next().value))
     applyInfo(r)
     loadedKey = k
-    loadedAt = Date.now()
+    loadedAt.value = Date.now()
     /* 读失败的原因（没配 Key / 现货 / IP 白名单 / 网络）也走提示，不占内容区 */
     if (!r.ready) say(r.reason || '现在下不了单')
     else if (r.balanceError) say(r.balanceError)
@@ -1381,6 +1415,21 @@ watch(
     syncPosTimer()
   }
 )
+
+/*
+ * 仓位**在外部没了**（止盈止损打掉 / 别处平掉）：立刻重读一次合约账户，
+ * 让开单区的余额、杠杆、`positionMeta` 都跟上那一秒的真实情况
+ * （面板切回「开单」是靠 `curPos`，这里只是把那份 info 也刷新）。
+ *
+ * ⚠️ 只在自己没在忙、且确实发生了「有 → 无」时刷；`load()` 自己有保鲜期 + 单飞，
+ *    重复触发也不会打爆接口。
+ */
+watch(opened, (now, before) => {
+  if (before && !now && storeAhead.value) {
+    loadedKey = ''
+    void load()
+  }
+})
 
 onMounted(async () => {
   /* 先把 Key 列表拿来（`tradeKey` 靠它算），不然第一发会打到默认那套上去 */
