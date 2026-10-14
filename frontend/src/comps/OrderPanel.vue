@@ -63,8 +63,10 @@ import {
   type TradePositionRow
 } from '../api'
 import {
+  accountEquityOf,
   availableBalanceOf,
   bindPositions,
+  positionsOf,
   positionsRows,
   refreshPositions,
   setAvailableBalance
@@ -304,6 +306,10 @@ const refPrice = computed(() => markRef.value)
  * 后端那三条上限（`assertOrderLimits`）用的就是这个口径，两边必须一致。
  */
 const equity = computed(() => {
+  /* ★ 优先共享 store 那一份（常驻流每次推持仓都带钱包 + 浮盈 ⇒ 跟着行情实时动）；
+     没有（还没读到 / 没绑流）才退回这份 REST 快照里的余额 */
+  const live = accountEquityOf(keyId.value)
+  if (live !== null) return live
   const b = info.value?.balance
   return b ? Number(b.wallet ?? 0) + Number(b.unrealized ?? 0) : 0
 })
@@ -311,16 +317,35 @@ const equity = computed(() => {
 /**
  * **这个币**当前的持仓（`null` = 没持仓）—— 用户 2026-10-14：「只显示当前开单仓位」。
  *
- * 数据来自 `/api/exchange/trade` 的 `position`（跟余额一次拿回来的那一行），
- * 顺手补齐 `symbol` / `leverage` / `keyName`，这样能直接丢给
- * `openReduce()` / `closeOne()`（它们要的是 `TradePositionRow`）。
+ * ★ 两个来源，**优先共享 store**（`./positions`）：
+ *   ① 它有常驻**用户数据流（SSE）**在推 —— 币安那边一成交就推过来（通常一两百毫秒），
+ *      比我们开完单再发一次 `/api/exchange/trade`（一个来回）**更快**；
+ *      用户说的「**平仓后没有及时切换、开仓后有延时**」就靠这个抹平；
+ *   ② 退路是这次 `/api/exchange/trade` 带回的那一行（store 没绑定时，比如页面在后台）。
+ *
+ * ⚠️ 双向持仓时同一个币会有两条（多 / 空）⇒ 取名义大的那条（面板只展示一条）。
  */
 const curPos = computed<TradePositionRow | null>(() => {
+  const sym = exSymbol.value
+  const rows = positionsOf(sym)
+  const live = rows.length
+    ? rows.reduce((a, b) =>
+        Math.abs(Number(b.notional) || 0) > Math.abs(Number(a.notional) || 0) ? b : a
+      )
+    : null
+  if (live) {
+    /*
+     * ⚠️ 币安 WS 的 `ACCOUNT_UPDATE` 里**没有杠杆** ⇒ 刚开的仓位在流里那一两秒是 `0`
+     *    （要等下一次 REST 快照才补上）。面板上直接印就会闪一下「0x」——
+     *    这里退回面板当前的杠杆（下单前 `ensureLeverage()` 已把它写到交易所，同一个值）。
+     */
+    return {...live, leverage: Number(live.leverage) || lev.value}
+  }
   const p = info.value?.position
   if (!p || !(Number(p.amount) > 0)) return null
   return {
     ...p,
-    symbol: exSymbol.value,
+    symbol: sym,
     leverage: Number(p.leverage) || lev.value,
     keyName: tradeKey.value?.name
   }
@@ -378,9 +403,9 @@ const fulled = computed(() => opened.value && roomBySymbol.value <= 0)
 /** 浮盈加仓的两档（用户 2026-10-14：「还有盈利可以选择加仓 50% 或者 100%」） */
 const ADD_STEPS = [50, 100]
 
-/** 当前持仓的**未实现盈利**（USDT）—— 加仓的钱从这里来 */
+/** 当前持仓的**未实现盈利**（USDT）—— 加仓的钱从这里来（走实时那一份 `curPos`） */
 const posProfit = computed(() =>
-  Math.max(0, Number(info.value?.position?.unrealized ?? 0))
+  Math.max(0, Number(curPos.value?.unrealized ?? 0))
 )
 
 /* ---------------- 数字 ---------------- */
@@ -672,6 +697,18 @@ const liveLevText = computed(() => {
 /* ---------------- 持仓的账本侧信息（已开仓时间 / 已实现盈利） ---------------- */
 
 /**
+ * 这一段仓位的**账本侧**信息（开仓时间 / 已实现盈利）。
+ *
+ * ★ 优先取**持仓流**里带的那一份（`LivePosition.meta`，2026-10-14 加）——
+ *   它跟着每一轮持仓推送更新，减完仓的「已实现」不用等下一次 REST；
+ *   退路才是打开面板那一次 `/api/exchange/trade` 的 `positionMeta`。
+ *   用户：「我需要全部实时」。
+ */
+const posMeta = computed(
+  () => curPos.value?.meta ?? info.value?.positionMeta ?? null
+)
+
+/**
  * **已经开了多久**（用户 2026-10-14：「开仓时间是开了多少分钟秒 小时 优化格式」）。
  *
  * 格式按长短分档，越久越粗：
@@ -682,7 +719,7 @@ const liveLevText = computed(() => {
  * ⚠️ 跟着 `nowTick`（每秒跳）走 —— 直接读 `Date.now()` 模板不会重算，秒数不会动。
  */
 const heldText = computed(() => {
-  const t = Number(info.value?.positionMeta?.openedAt ?? 0)
+  const t = Number(posMeta.value?.openedAt ?? 0)
   if (!(t > 0)) return '—'
   const sec = Math.max(0, Math.floor((nowTick.value - t) / 1000))
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -696,7 +733,7 @@ const heldText = computed(() => {
 
 /** 完整时间（放 title 里，那格显示的是「开了多久」） */
 const openedAtTitle = computed(() => {
-  const t = Number(info.value?.positionMeta?.openedAt ?? 0)
+  const t = Number(posMeta.value?.openedAt ?? 0)
   if (!(t > 0)) return '本地账本里没有这一段仓位的开仓时间'
   const d = new Date(t)
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -708,7 +745,7 @@ const openedAtTitle = computed(() => {
 
 /** 已实现盈利（**净**：已实现 − 手续费 + 资金费）；账本没这一段时是 `—` */
 const realizedText = computed(() => {
-  const m = info.value?.positionMeta
+  const m = posMeta.value
   if (!m) return '—'
   const v = Number(m.net) || 0
   return `${v >= 0 ? '+' : '−'}${fmt(Math.abs(v), 2)}`
@@ -716,13 +753,13 @@ const realizedText = computed(() => {
 
 /** 已实现盈利是正是负（配色用）；`null` = 没数据 */
 const realizedUp = computed(() => {
-  const m = info.value?.positionMeta
+  const m = posMeta.value
   return m ? (Number(m.net) || 0) >= 0 : null
 })
 
 /** 那两项的 `title`：把毛盈亏 / 手续费 / 资金费摊开说清楚 */
 const realizedTitle = computed(() => {
-  const m = info.value?.positionMeta
+  const m = posMeta.value
   if (!m) return '本地账本里没有这一段仓位（开仓可能发生在记账之前）'
   return (
     `已实现 ${fmt(Number(m.realized) || 0, 2)} · 手续费 ${fmt(Number(m.fee) || 0, 2)} · ` +
@@ -1079,6 +1116,13 @@ async function confirmReduce(pct: number): Promise<void> {
       )
       void loadPositions()
       /*
+       * ★ 平完 / 减完**马上重读一次合约账户**（用户 2026-10-14：「平仓后没有及时切换」）——
+       *   面板的「已开 / 未开」除了看共享 store，还看这一份（余额、杠杆、精度都在里头），
+       *   不重读的话它要等下一次刷新才肯换回「开单」那一块。
+       */
+      loadedKey = ''
+      void load()
+      /*
        * 平掉一部分也可能把仓位清成 0（弹层里选 100%）—— 那几张「平仓保护」单
        * （止损 / 止盈 / 全平型条件单）不会自己消失，图上的线还在。
        * 这里立刻清一次（后端只撤**真的没仓位**的那几张，没清空就什么都不动）。
@@ -1163,6 +1207,9 @@ async function closeOne(p: TradePositionRow): Promise<void> {
         'ok'
       )
       void loadPositions()
+      /* ★ 全平之后同样马上重读一次合约账户（同上：面板要立刻换回「开单」那一块） */
+      loadedKey = ''
+      void load()
       /*
        * 全平之后**立刻**清这个币的残留平仓单（用户 2026-10-10：「平仓后没有及时撤单，
        * 线还在」）—— 币安不会因为仓位归零就自动撤那几张止损 / 止盈单，

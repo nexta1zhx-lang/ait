@@ -64,9 +64,41 @@ import {
   type OpenOrderInput
 } from './db/exchange-store'
 import {cancelOrphanOrders, listOpenOrders} from './data/exchange-trade'
+import {positionMetaOf, type PositionMeta} from './data/position-history'
 import {query, queryOne} from './db/client'
 import {takeWeight} from './util/rate-budget'
 import {noteRateLimit} from './util/rate-cool'
+
+/**
+ * 账本还没记上这一段时的**重试间隔**（毫秒）。
+ *
+ * 开仓成交不是立刻进账本的（走的是 RST 对账，异步、要几秒）⇒ 头几次查不到很正常，
+ * 不能把「查不到」当成定论缓存下来，否则面板上「已开仓时间 / 已实现」会一直显示 `—`
+ * 直到下一次仓位变动。退避问到第 5 次就不再问了（查不到就是账本覆盖不到这一段）。
+ */
+const META_RETRY_MS = [2_000, 5_000, 10_000, 30_000, 60_000]
+
+/**
+ * 一次成交之后，账本**不是立刻就有的**（`/api/exchange/trade` 那一发是现拉成交再写库，
+ * 要几秒）⇒ 刚变化的仓位先按「还在对账」处理，过这么久再补读一次把手续费/已实现补齐。
+ */
+const META_SETTLE_MS = 3_000
+
+interface PosMetaCache {
+  /**
+   * 缓存时的**持仓量** —— 一变（开 / 加 / 减 / 平）就重查。
+   *
+   * ⚠️ 只拿数量当键，别把开仓均价一起比：WS 事件里的 `ep` 是 `0.00404233`、
+   *    REST 快照里是 `0.004042328571428571`，同一个价位两种写法会让键**反复「变化」**，
+   *    于是每轮推送都重读一次账本（白打库）。数量只有成交才会变，够用。
+   */
+  qty: number
+  meta: PositionMeta | null
+  /** 已经定稿：下一次该重读的时刻（`Infinity` = 不用再读了） */
+  nextAt: number
+  /** `meta` 还是 `null` 时已经问了几次（按 `META_RETRY_MS` 退避） */
+  tries: number
+}
 
 /**
  * 动手打交易所之前先跟**全局权重预算**报一声。
@@ -743,6 +775,20 @@ export class KeyStream {
   /** 定期对账 / 健康检查的定时器 */
   private reconTimer: NodeJS.Timeout | null = null
   private healthTimer: NodeJS.Timeout | null = null
+
+  /**
+   * 币安原始符号 → 这一段仓位的**账本侧**信息（开仓时间 / 已实现盈利）。
+   *
+   * 缓存键带 `qty + entry`：**数量或开仓均价变了才重查账本**（成交会同时改这两个），
+   * 不然每次推持仓都打一次库。仓位消失时条目会被清掉 —— 否则「平掉、再按同样大小
+   * 开回来」会拿到上一段的开仓时间。
+   */
+  private readonly posMeta = new Map<string, PosMetaCache>()
+  private metaBusy = false
+  /** 账本还没记上这一段时，下一次再问的定时器 */
+  private metaTimer: NodeJS.Timeout | null = null
+  /** 上一次推给前端的 `live` 口径（账本读完要照它再推一份，别把口径改了） */
+  private lastPushLive = true
 
   constructor(private readonly row: KeyRow) {}
 
@@ -2577,28 +2623,101 @@ export class KeyStream {
    * 把当前持仓写进**统一来源**（`position-cache`）—— 写一次就广播一次，
    * 前端所有页面（交易所板子 / K 线叠加 / 下单页）拿到的都是这一份。
    *
-   * `live` = 这一份有没有叠过行情重算（`false` 就是刚拉回来的 REST 快照口径）。
-   */
-  /**
-   * 把当前持仓写进**统一来源**（`position-cache`）—— 写一次就广播一次。
-   *
    * ⚠️ 口径跟曲线点（`writeLivePoint` → `liveOverview`）**共用同一个 `withMark`**：
    *    两边各算一遍迟早会算出两个数（页面上一个、曲线上一段）。
+   *
+   * `live` = 这一份有没有叠过行情重算（`false` 就是刚拉回来的 REST 快照口径）。
+   * 每条持仓上还挂着账本侧的 `meta`（开仓时间 / 已实现）—— 见 `refreshPosMeta`。
    */
   private pushLive(live: boolean): void {
     const ov = this.lastOverview
     if (!ov) return
+    this.lastPushLive = live
     const liveOv = this.liveOverview(ov, live)
-    const positions: LivePosition[] = liveOv.futures.positions.map(p => {
-      const raw = this.rawOf(p.symbol)
-      return {...p, raw: raw || p.symbol}
-    })
+    const rows = liveOv.futures.positions.map(p => ({
+      raw: this.rawOf(p.symbol) || p.symbol,
+      /* 12 位有效数字就够区分成交（也顺手抹掉浮点写法差异） */
+      qty: Number((Math.abs(Number(p.amount) || 0)).toPrecision(12)),
+      pos: p
+    }))
+    /* 已经不在的仓位 ⇒ 清掉它的账本缓存（平掉再看开回来要重新查） */
+    const alive = new Set(rows.map(r => r.raw))
+    for (const sym of [...this.posMeta.keys()]) if (!alive.has(sym)) this.posMeta.delete(sym)
+
+    const positions: LivePosition[] = rows.map(r => ({
+      ...r.pos,
+      raw: r.raw,
+      meta: this.posMeta.get(r.raw)?.meta ?? null
+    }))
     publishLive(this.row.id, {
       wallet: liveOv.futures.wallet,
       available: liveOv.futures.available,
       positions,
       live: live && this.marks.size > 0
     })
+    this.refreshPosMeta(rows)
+  }
+
+  /**
+   * 补齐 / 刷新持仓的账本侧信息（开仓时间、已实现盈利）。
+   *
+   * 交易所的 `positionRisk` 里**没有**这两项，只能查本地账本；查完**立刻再推一份**，
+   * 免得面板要等下一轮推送才看到（用户 2026-10-14：「我需要全部实时」）。
+   * 数量 / 开仓价没变就不重查 ⇒ 稳态里一次库都不打。
+   */
+  private refreshPosMeta(rows: {raw: string; qty: number}[]): void {
+    if (this.stopped || this.metaBusy) return
+    const need = rows.filter(r => {
+      const hit = this.posMeta.get(r.raw)
+      if (!hit) return true
+      /* 成交了（数量 / 开仓均价动了）⇒ 这一段变了，重查 */
+      if (hit.qty !== r.qty) return true
+      /* 到点该补读了（对账中 / 上次没查到这一段） */
+      return Date.now() >= hit.nextAt
+    })
+    if (!need.length) return
+    this.metaBusy = true
+    void (async () => {
+      let changed = false
+      try {
+        for (const r of need) {
+          const prev = this.posMeta.get(r.raw)
+          const keyChanged = !prev || prev.qty !== r.qty
+          let meta: PositionMeta | null = null
+          try {
+            meta = await positionMetaOf(this.row.user_id, this.row.id, r.raw)
+          } catch {
+            /* 账本读不到就先不给这两项（面板显示 `—`），别把整条流带崩 */
+          }
+          const tries = meta || !keyChanged ? 0 : (prev?.tries ?? 0) + 1
+          let nextAt = Number.POSITIVE_INFINITY
+          if (keyChanged) {
+            /* 刚成交：这一刻账本多半还没记全，过一会儿再补读一次 */
+            nextAt = Date.now() + META_SETTLE_MS
+          } else if (!meta && tries <= META_RETRY_MS.length) {
+            nextAt = Date.now() + (META_RETRY_MS[tries - 1] ?? 0)
+          }
+          this.posMeta.set(r.raw, {qty: r.qty, meta, nextAt, tries})
+          changed = true
+        }
+      } finally {
+        this.metaBusy = false
+      }
+      if (changed && !this.stopped) this.pushLive(this.lastPushLive)
+
+      /* 还有「没定稿」的仓位 ⇒ 到点自己再推一轮（推的时候会顺带重读账本） */
+      if (this.stopped || this.metaTimer) return
+      let dueAt = Number.POSITIVE_INFINITY
+      for (const r of rows) {
+        const hit = this.posMeta.get(r.raw)
+        if (hit && hit.nextAt < dueAt) dueAt = hit.nextAt
+      }
+      if (dueAt === Number.POSITIVE_INFINITY) return
+      this.metaTimer = setTimeout(() => {
+        this.metaTimer = null
+        if (!this.stopped) this.pushLive(this.lastPushLive)
+      }, Math.max(500, dueAt - Date.now()))
+    })()
   }
 
   private scheduleLiveBalanceRefresh(): void {
@@ -2754,6 +2873,8 @@ export class KeyStream {
     if (this.reconTimer) clearInterval(this.reconTimer)
     if (this.healthTimer) clearInterval(this.healthTimer)
     if (this.liveBalanceTimer) clearTimeout(this.liveBalanceTimer)
+    if (this.metaTimer) clearTimeout(this.metaTimer)
+    this.metaTimer = null
     this.keepTimer = null
     this.retryTimer = null
     this.reconTimer = null

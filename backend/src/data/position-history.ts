@@ -329,6 +329,46 @@ export interface HistoryRange {
   to?: number | null
 }
 
+/**
+ * 这一段仓位的「**账本侧**」信息 —— 交易所的 `positionRisk` 里没有开仓时间、也没有
+ * 已实现盈亏，只能从本地账本（`exchange_fills`）还原。
+ *
+ * ⚠️ 2026-10-14 起**常驻流也带它**（见 `position-cache` 的 `LivePosition.meta`）：
+ *    面板上那两项不再只在「打开面板那一次 REST」里更新，而是跟着持仓推送一起走
+ *    （用户：「我需要全部实时」）。
+ */
+export interface PositionMeta {
+  /** 开仓时间（毫秒）；账本覆盖不到时 `null` */
+  openedAt: number | null
+  /** 已实现盈亏（**毛**：减仓那几笔的 `realized` 之和） */
+  realized: number
+  /** 净：扣手续费、加资金费 */
+  net: number
+  fee: number
+  funding: number
+  /** 账本不全（开仓发生在记账之前）⇒ 上面这几个数只是残值 */
+  partial: boolean
+}
+
+/** 某一段**未平仓位**的账本侧信息；账本里没有这一段时 `null` */
+export async function positionMetaOf(
+  userId: number,
+  keyId: number,
+  symbol: string
+): Promise<PositionMeta | null> {
+  const hist = await listPositionHistory(userId, keyId, 1, symbol)
+  const open = hist.open[0]
+  if (!open) return null
+  return {
+    openedAt: Date.parse(open.openAt) || null,
+    realized: open.realized,
+    net: open.net,
+    fee: open.fee,
+    funding: open.funding,
+    partial: open.partial
+  }
+}
+
 export async function listPositionHistory(
   userId: number,
   keyId: number,

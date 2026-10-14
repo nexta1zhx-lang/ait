@@ -145,7 +145,7 @@ import {
 } from './data/exchange-account'
 import {hydrateMarketsCache} from './data/ccxt-markets'
 import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
-import {listPositionHistory} from './data/position-history'
+import {listPositionHistory, positionMetaOf, type PositionMeta} from './data/position-history'
 import {RateBudgetError, takeWeight} from './util/rate-budget'
 import {
   assertOrderLimits,
@@ -4378,21 +4378,10 @@ async function route(
        * ⚠️ 只有**真有持仓**时才算（两发本地查询，很便宜，但没必要每次都打）。
        * ⚠️ 账本覆盖不到的老仓位 (`partial`) 会给出残值 —— 前端照实显示，不编。
        */
-      let positionMeta: Record<string, unknown> | null = null
+      let positionMeta: PositionMeta | null = null
       if (info.position) {
         try {
-          const hist = await listPositionHistory(me.id, key.id, 1, info.symbol)
-          const open = hist.open[0]
-          if (open) {
-            positionMeta = {
-              openedAt: Date.parse(open.openAt) || null,
-              realized: open.realized,
-              net: open.net,
-              fee: open.fee,
-              funding: open.funding,
-              partial: open.partial
-            }
-          }
+          positionMeta = await positionMetaOf(me.id, key.id, info.symbol)
         } catch {
           /* 账本读不到就不给这两项（面板会显示 `—`），别把整个接口带崩 */
         }

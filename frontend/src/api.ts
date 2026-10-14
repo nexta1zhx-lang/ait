@@ -1422,6 +1422,8 @@ export interface FuturesPosition {
   maintMargin?: number
   /** 维持保证金率（0.004 = 0.4%），前端按它随标记价重算 */
   mmr?: number
+  /** 账本侧信息（开仓时间 / 已实现盈利）—— 常驻流每次推送都带，见 `PositionMeta` */
+  meta?: PositionMeta | null
   /**
    * **币安原始符号**（`BTCUSDT`）—— 2026-10-06 改造 P1 加。
    *
@@ -1987,9 +1989,34 @@ export interface TradeBalance {
 }
 
 /** 一条持仓 + 它的交易对（「仓位」那一格列出来的那种） */
+/**
+ * 这一段仓位的**账本侧**信息（开仓时间 / 已实现盈利）。
+ *
+ * 交易所的 `positionRisk` 里没有这两项 ⇒ 后端从本地账本还原，**两路都带**：
+ *   · `/api/exchange/trade` 的 `positionMeta`
+ *   · 常驻流 `positions` 推送里每条持仓的 `meta`（2026-10-14 加，用户：「我需要全部实时」）
+ */
+export interface PositionMeta {
+  /** 开仓时间（毫秒；账本覆盖不到时是残值 / `null`） */
+  openedAt: number | null
+  /** 已实现盈亏（毛） */
+  realized: number
+  /** 净 = 已实现 − 手续费 + 资金费 */
+  net: number
+  fee: number
+  funding: number
+  /** 账本覆盖不到这一段（第一笔本身就是平仓）⇒ 上面的数只是残值 */
+  partial: boolean
+}
+
 export interface TradePositionRow extends TradePosition {
   /** 币安原始符号（BTCUSDT） */
   symbol: string
+  /**
+   * 常驻流推过来的账本侧信息（开仓时间 / 已实现盈利）。
+   * `undefined` = 这份数据没带（REST 兜底那份就没带），消费端要能退回到别处的同项。
+   */
+  meta?: PositionMeta | null
 }
 
 /** 当前持仓（`positionRisk` 里那一行） */
@@ -2095,15 +2122,7 @@ export interface TradeInfoResult {
    *   · `realized` —— 减仓那几笔的已实现盈亏（毛）；`net` = 扣手续费、加资金费之后
    * 没有持仓 / 账本读不到时是 `null`，面板显示 `—`。
    */
-  positionMeta?: {
-    openedAt: number | null
-    realized: number
-    net: number
-    fee: number
-    funding: number
-    /** 账本覆盖不到这一段（第一笔本身就是平仓）⇒ 上面的时间/盈亏只是残值 */
-    partial: boolean
-  } | null
+  positionMeta?: PositionMeta | null
 }
 
 export const fetchTradeInfo = (symbol: string, id?: number) =>

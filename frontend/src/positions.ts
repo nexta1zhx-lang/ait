@@ -51,6 +51,22 @@ export function setAvailableBalance(
   }
 }
 
+/**
+ * 这套账户现在的**权益** = 钱包余额 + 未实现盈亏 —— 后端那三条上限
+ * （`assertOrderLimits`）、面板的「5 倍额度」用的都是这个口径。
+ *
+ * 数据来自常驻流（SSE 每次推持仓都带），所以它**跟着行情实时动**；
+ * 拿不到（还没读到）时返回 `null`，调用方退回自己手上那份。
+ */
+export function accountEquityOf(keyId: number | undefined): number | null {
+  if (typeof keyId !== 'number' || keyId <= 0) return null
+  const k = perKey.value[keyId]
+  if (!k) return null
+  const wallet = Number(k.wallet ?? 0)
+  if (!(wallet > 0)) return null
+  return wallet + Number(k.unrealized ?? 0)
+}
+
 export function availableBalanceOf(keyId: number | undefined): number | null {
   if (typeof keyId !== 'number' || keyId <= 0) return null
   return availableBalances.value[keyId]?.value ?? null
@@ -180,8 +196,27 @@ function toRow(p: FuturesPosition): TradePositionRow {
     unrealized: Number(p.unrealizedPnl ?? 0),
     notional: Number(p.notional ?? 0),
     leverage: Number(p.leverage ?? 0),
-    liquidationPrice: p.liquidationPrice ?? null
+    liquidationPrice: p.liquidationPrice ?? null,
+    /* 账本侧（开仓时间 / 已实现）—— 常驻流每次推送都带；没有就是 `null` */
+    meta: p.meta ?? null
   }
+}
+
+/**
+ * REST 兜底那份持仓**不带**账本侧信息（`meta`），但它有可能晚于 SSE 到、
+ * 把 SSE 那份盖掉。所以这里把上一次同一个币、**数量与开仓价都对得上**的 `meta`
+ * 继承过来 —— 否则每次 `refreshPositions()` 都会让「已实现 / 已开仓时间」闪成 `—`。
+ */
+function inheritMeta(keyId: number, p: TradePositionRow): TradePositionRow {
+  const prev = perKey.value[keyId]?.rows ?? []
+  const hit = prev.find(
+    r =>
+      r.symbol === p.symbol &&
+      r.side === p.side &&
+      Math.abs(r.amount - p.amount) < 1e-12 &&
+      Math.abs(r.entryPrice - p.entryPrice) < 1e-12
+  )
+  return hit?.meta ? {...p, meta: hit.meta} : p
 }
 
 /* ---------------- 取数 ---------------- */
@@ -203,10 +238,13 @@ async function load(keyId: number, fresh = false): Promise<void> {
     }
     positionsErr.value = ''
     setAvailableBalance(keyId, r.available)
-    const rows = (r.positions ?? []).map(p => ({
-      ...p,
-      symbol: String(p.symbol ?? '').toUpperCase()
-    }))
+    const rows = (r.positions ?? []).map(p => {
+      const row: TradePositionRow = {
+        ...p,
+        symbol: String(p.symbol ?? '').toUpperCase()
+      }
+      return inheritMeta(keyId, row)
+    })
     apply(keyId, {
       at: startedAt,
       live: Boolean(r.live),

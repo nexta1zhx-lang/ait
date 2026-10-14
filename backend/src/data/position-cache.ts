@@ -32,6 +32,7 @@ import {listPositions, type FuturesPositionRow} from './exchange-trade'
 import {takeWeight} from '../util/rate-budget'
 import type {ExchangeCredentials} from './exchange-account'
 import type {ExchangeOverview, FuturesPosition as OverviewPosition} from './exchange-overview'
+import type {PositionMeta} from './position-history'
 
 /**
  * 前端拿到的统计口径。
@@ -45,6 +46,15 @@ type Stats = ExchangeOverview['stats'] & {maintMargin: number}
 export interface LivePosition extends OverviewPosition {
   /** 币安原始符号，如 `BTCUSDT` */
   raw: string
+  /**
+   * 这一段仓位的**账本侧**信息（开仓时间 / 已实现盈利）。
+   *
+   * ⚠️ 2026-10-14 加：交易所的 `positionRisk` 里没有这两项，以前只有
+   *    `/api/exchange/trade` 那一次 REST 顺手算一把。用户要「全部实时」⇒
+   *    常驻流每次推持仓也带上（`KeyStream.pushLive` 查的账本，按数量变化缓存）。
+   *    账本里查不到这一段（开仓发生在记账之前）就是 `null`，消费端显示 `—`。
+   */
+  meta?: PositionMeta | null
 }
 
 /** 内存里这一套 key 的持仓状态 */
