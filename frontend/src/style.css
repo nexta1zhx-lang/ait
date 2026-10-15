@@ -3301,8 +3301,9 @@ body.fixed-viewport .split {
   cursor: pointer;
 }
 .chart-head .tk-persist svg {
-  width: 17px;
-  height: 17px;
+  /* 19px：早先 17px 时四周留白太明显（用户 2026-10-15：「随机波动不要边距」） */
+  width: 19px;
+  height: 19px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.7;
@@ -3326,9 +3327,9 @@ body.fixed-viewport .split {
  *   所以：不是转，是滚；折线本身是**周期性锯齿波**（4 个周期，见 AnalyzeView 里那条 `d`）。
  *
  * 滚动怎么做到"无缝"（这是这段唯一的坑）：
- *   · 路径从 -12 画到 36（viewBox 只有 24 宽）⇒ 滚到任何位置，窗口里都有线，边缘不露白；
- *   · 一次动画正好挪**一个周期**（12）= 整条路径 bbox（48）的 **25%** ⇒ 首尾完全重合，
- *     看不出接缝。⚠️ 改周期/宽度就得同步改这个百分比。
+ *   · 路径从 -24 画到 48（viewBox 只有 24 宽）= 3 个周期 ⇒ 滚到任何位置窗口里都有线，边缘不露白；
+ *   · 一次动画正好挪**一个周期**（24）= 整条路径 bbox（72）的 **1/3** ⇒ 首尾完全重合，
+ *     看不出接缝。⚠️ 改周期/宽度就得同步改这个百分比（现在是 -33.333%）。
  *   · 用 `transform-box: fill-box` + 百分比：这样它跟着图标尺寸走，
  *     不用写死 px（写死 px 会在不同 DPR / 尺寸下滚歪）。
  *   · 只动 `path`，不动 `svg`/按钮（动它们会把 30×28 的框一起晃）。
@@ -3340,14 +3341,18 @@ body.fixed-viewport .split {
 .chart-head .tk-persist.on svg path {
   transform-box: fill-box;
   transform-origin: 0 0;
-  animation: tk-persist-scroll 2.6s linear infinite;
+  /*
+   * 5s/格：周期从 12 改成 24（见 AnalyzeView 那条 `d`）之后，同样的 2.6s 会让**像素速度
+   * 翻倍**（看着发飘、发急）。5s 是照原来那个速度折回来的 —— 慢慢滚才像行情。
+   */
+  animation: tk-persist-scroll 5s linear infinite;
 }
 @keyframes tk-persist-scroll {
   from {
     transform: translateX(0);
   }
   to {
-    transform: translateX(-25%);
+    transform: translateX(-33.3333%);
   }
 }
 /* 晕动症：宁可不动，也别让人一直盯着滚 */
