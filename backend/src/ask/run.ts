@@ -45,6 +45,13 @@ export interface AskStep {
 export interface AskAnswer {
   answer: string
   steps: AskStep[]
+  /**
+   * 用户按了「终止」。
+   *
+   * ⚠️ 这时候 `answer` 多半是半截 —— 前端要**把它留住并标出来**，
+   *    而不是当成一次"回答失败"（他可能正是靠半截回答看出来它在瞎查）。
+   */
+  aborted: boolean
   rounds: number
   /** 真查过库吗 —— 没查过就答 = 它自己编的，前端要标出来 */
   verified: boolean
@@ -59,6 +66,17 @@ export interface AskInput {
   question: string
   /** 前几轮对话（最新的在后面），用来支持追问 */
   history?: {role: 'user' | 'assistant'; content: string}[]
+  /**
+   * 用户按了「终止」。
+   *
+   * 用途有两块（都要有，缺一个就会出现"按了没用"或"库白查了"）：
+   *  ① **别把结果写回去**：跑完一半的结果对用户没意义，而且他已经在问下一句了；
+   *  ② **下一个工具调用之前就停住**：一轮里可能有好几个工具，前一个跑完了、
+   *     后一个还没开始 —— 这时候停掉，不用白查剩下的。
+   * ⚠️ 正在跑的那个工具（一条 SQL）**不打断**：几毫秒到几十毫秒的事，
+   *    为它引一套中断机制不值当（真正慢的是大模型的多次往返）。
+   */
+  signal?: AbortSignal
 }
 
 function parseArgs(raw: unknown): Record<string, unknown> {
@@ -108,13 +126,22 @@ let usageOnStream = true
 /** 开一条**流式**的补全（第 2 次起会记住「不认 stream_options」这件事） */
 async function openStream(
   client: OpenAI,
-  params: Record<string, unknown>
+  params: Record<string, unknown>,
+  signal?: AbortSignal
 ): Promise<AsyncIterable<OpenAI.Chat.ChatCompletionChunk>> {
   const p: Record<string, unknown> = {...params, stream: true}
   if (usageOnStream) p.stream_options = {include_usage: true}
+  /*
+   * ⚠️⚠️ `signal` 必须走**第二个参数**（`RequestOptions`），塞进请求体是**没用的** ——
+   *    那样它只会被当成一个普通字段发给服务端，取消完全不生效。
+   *    2026-10-16 实测踩过：按了终止，后端照样把这一跑跑完、照样记一笔账
+   *    （用「断开后 llm_usage 有没有多一条」验出来的）。只"不写结果"是不够的。
+   */
+  const opts = signal ? {signal} : undefined
   try {
     return (await client.chat.completions.create(
-      p as never
+      p as never,
+      opts as never
     )) as unknown as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>
   } catch (e) {
     const msg = (e as Error)?.message ?? ''
@@ -125,7 +152,8 @@ async function openStream(
     )
     delete p.stream_options
     return (await client.chat.completions.create(
-      p as never
+      p as never,
+      opts as never
     )) as unknown as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>
   }
 }
@@ -170,7 +198,11 @@ export async function askData(
   let rounds = 0
   const startedAt = Date.now()
 
+  /** 用户按了「终止」—— 每一处都问一遍，别再往下跑 */
+  const aborted = (): boolean => input.signal?.aborted === true
+
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    if (aborted()) break
     rounds = round + 1
     sink?.({type: 'round', round: rounds, max: MAX_ROUNDS})
 
@@ -184,7 +216,7 @@ export async function askData(
     // 跟别的调用点一样：只在用户明确配了思考力度时才传（有些服务商不认这个参数）
     if (config.llm.reasoningEffort) params.reasoning_effort = config.llm.reasoningEffort
 
-    const stream = await openStream(client, params)
+    const stream = await openStream(client, params, input.signal)
 
     let text = ''
     /*
@@ -193,6 +225,7 @@ export async function askData(
      */
     const acc = new Map<number, {id: string; name: string; args: string}>()
     for await (const chunk of stream) {
+      if (aborted()) break
       if (chunk?.usage) usage = addUsage(usage, readUsage(chunk))
       const d = chunk?.choices?.[0]?.delta
       if (!d) continue
@@ -233,7 +266,11 @@ export async function askData(
       }))
     } as OpenAI.Chat.ChatCompletionMessageParam)
 
+    // 一轮里可能有好几个工具：前一个跑完、后一个还没开始时也停（别白查）
+    if (aborted()) break
+
     for (const call of calls) {
+      if (aborted()) break
       const name = call.name
       const args = parseArgs(call.args)
       const t0 = Date.now()
@@ -283,7 +320,19 @@ export async function askData(
     }
   }
 
-  if (!answer) {
+  const wasAborted = aborted()
+  /*
+   * 留一行日志：这条是**唯一**能确认「终止真的生效」的地方（用户按了终止之后
+   * 前端什么都不显示了，出问题时只能看服务端）。带轮数和已跑工具数，
+   * 一眼能看出是"第一轮就停了"还是"跑到一半才停"。
+   */
+  if (wasAborted) {
+    console.log(
+      `[ask] 已终止（连接断开）：第 ${rounds} 轮 / 已跑 ${steps.length} 个工具 / ` +
+        `${Date.now() - startedAt}ms / 已收 ${usage.totalTokens} tok`
+    )
+  }
+  if (!answer && !wasAborted) {
     answer = steps.some(s => s.ok)
       ? '查到了数据，但这一轮没组织出回答（可能是模型返回了空内容）。请再问一次，或把问题说得再具体一点。'
       : '没查到能回答这个问题的数据。可以先试试问「最近 30 天的分析记录」「我在跟踪哪些币」这类问题。'
@@ -309,6 +358,7 @@ export async function askData(
 
   return {
     answer,
+    aborted: wasAborted,
     steps,
     rounds,
     verified: steps.some(s => s.ok),

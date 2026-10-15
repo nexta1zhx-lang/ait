@@ -23,6 +23,7 @@ import AnswerBody from '../comps/AnswerBody.vue'
 import {
   ask,
   askBusy,
+  stopAsk,
   activeThread,
   activeTurns,
   closeSideQuietly,
@@ -288,6 +289,8 @@ const title = computed(() => activeThread.value?.title || '数据问答')
             <!-- 逐字长出来的那段末尾挂个光标，一眼看出还在写 -->
             <div v-if="t.streaming && t.answer" class="caret" />
             <div v-if="t.error" class="error box">{{ t.error }}</div>
+            <!-- 用户自己按的终止：半截回答留住，标一句（不是错误） -->
+            <div v-if="t.stopped" class="stopped">已终止（下面是已经查到的部分）</div>
 
             <div class="foot">
               <button
@@ -328,20 +331,33 @@ const title = computed(() => activeThread.value?.title || '数据问答')
           <div ref="tail" class="tail" />
           </div>
 
-          <form class="composer" @submit.prevent="send">
+          <!--
+        输入框那一排：**正在跑的时候 send 变成「终止」**（用户 2026-10-16：
+        「聊天的时候底部可以添加一个终止的按钮」）。
+
+        ⚠️ 用 `type="button"` 而不是再放一个按钮：主按钮只有一颗、位置不变，
+           用户不用去找新出现的那个（而且窄屏一行放不下三个东西）。
+        ⚠️ 打字框在忙的时候**保持可用**（不禁用）：他能先把下一句写完，
+           按终止之后顺手就发出去。
+      -->
+      <form class="composer" @submit.prevent="send">
             <textarea
               v-model="draft"
               rows="1"
               placeholder="问点你自己库里的数据…"
-              :disabled="askBusy"
               @keydown.enter.exact.prevent="send"
             />
             <button
-              type="submit"
-              class="send"
-              :disabled="askBusy || !draft.trim()"
+              v-if="askBusy"
+              type="button"
+              class="send stop"
+              title="停止这次查询"
+              @click="stopAsk"
             >
-              {{ askBusy ? '查询中' : '发送' }}
+              终止
+            </button>
+            <button v-else type="submit" class="send" :disabled="!draft.trim()">
+              发送
             </button>
           </form>
         </div>
@@ -627,6 +643,25 @@ const title = computed(() => activeThread.value?.title || '数据问答')
 }
 .send:disabled {
   opacity: 0.5;
+}
+/*
+ * 「终止」那颗：**别用主色**（主色是"确认/继续"的意思，终止是反过来的），
+ * 但也要够醒目 —— 用户正在等它救场。
+ */
+.send.stop {
+  background: var(--panel-2);
+  color: #ff9b98;
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+}
+.send.stop:hover {
+  background: var(--bad-soft);
+}
+
+/* 「已终止」那一行：中性色，不是错误（红色只留给真的出错） */
+.stopped {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
 }
 
 /* ── 轮次内部（跟之前一样的那些小块） ── */

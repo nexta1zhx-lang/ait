@@ -3620,13 +3620,38 @@ export function askStream(
   const es = openSse('/api/ask/stream?' + q.toString())
   let finished = false
 
+  /**
+   * 看门狗 —— **治"卡住"的那个东西**。
+   *
+   * ⚠️ 没有它就会真的卡死（2026-10-16 用户：「聊天界面有时候会卡住，正在调数据库」）：
+   *    后端断了 / 卡住时，浏览器**自己会静默重连**（`readyState = CONNECTING`），
+   *    而 `onerror` 那种「CONNECTING 就先不管」的写法等于把这件事咽下去 ——
+   *    界面永远停在「正在查库」，**而且重连还会把那个查询重跑一遍**。
+   *
+   * 判据：后端每 20 秒推一次 `heartbeat`。**120 秒**没收到任何东西 = 死了
+   * （一轮大模型调用实测十几秒，三轮也够；真慢到 120 秒那种，让用户重问比干等好）。
+   */
+  let lastAt = Date.now()
+  const WATCHDOG_MS = 120_000
+  const watchdog = window.setInterval(() => {
+    if (finished) return
+    if (Date.now() - lastAt <= WATCHDOG_MS) return
+    stop()
+    handlers.onError(
+      '连接断了（两分钟没收到响应）。可能是这次查询太重或网络断了 —— 再问一次试试。'
+    )
+  }, 5_000)
+
   const stop = (): void => {
     finished = true
+    window.clearInterval(watchdog)
     es.close()
   }
   const parse = (e: Event): Record<string, any> | null => {
     try {
-      return JSON.parse((e as MessageEvent).data)
+      const d = JSON.parse((e as MessageEvent).data)
+      lastAt = Date.now()
+      return d
     } catch {
       return null
     }
@@ -3665,9 +3690,19 @@ export function askStream(
       stop()
       handlers.onError('连接中断，请重试')
     }
-    // CONNECTING：浏览器正在自动重连，等一下再看
+    /*
+     * ⚠️ `CONNECTING`（浏览器在自己重连）**不能不管**：这正是"卡住"的来源。
+     *    这里什么都不做，交给上面那个看门狗兜底 —— 它会在 120 秒后收场。
+     *    （别在这里立刻报错：网络抖一下、几秒内连回来是正常的。）
+     */
   }
 
+  /**
+   * 对外返回的「终止」：关流 + 停看门狗。
+   *
+   * ⚠️ 「谁按的终止」由**调用方**记（`ask.ts` 里的 `userStopped`）—— 这里只是一个
+   *    取消函数，`stopAsk()` 分不出是用户按的还是内部收尾，硬在这里打标记会写反。
+   */
   return stop
 }
 

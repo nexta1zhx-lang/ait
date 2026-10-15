@@ -6042,10 +6042,23 @@ async function handleAskStream(
     history = []
   }
 
-  // 页面切走了就别再往回写（大模型调用中途没法取消，但至少别浪费）
+  /*
+   * 页面切走 / 用户按「终止」⇒ **真把这一跑停掉**。
+   *
+   * ⚠️ 只能听 `res` 的 close（`req` 的 close 在请求收完就触发，等于立刻"已关闭"）。
+   * ⚠️ 别用 `req.on('aborted')`：HTTP/2 / 代理后面不保证触发，而且它和 `res.close`
+   *    会在同一次断开里都来，容易写出「取消两遍」的代码。听一个就够。
+   */
+  const ac = new AbortController()
   let closed = false
-  /* ⚠️ 只能听 `res` 的 close（`req` 的 close 在请求收完就触发，等于立刻「已关闭」） */
-  res.on('close', () => (closed = true))
+  res.on('close', () => {
+    closed = true
+    if (!ac.signal.aborted) {
+      ac.abort()
+      // 一行诊断：终止到底有没有传到（见 `test: true` 那套验证里怎么用它）
+      console.log('[ask] 连接断开（页面关了 / 用户按了终止）→ 取消这一跑')
+    }
+  })
 
   // 心跳：前端那条看门狗靠它判断连接还活着（见 `liveSse` 的说明）
   const beat = setInterval(() => {
@@ -6054,14 +6067,23 @@ async function handleAskStream(
 
   try {
     const out = await askData(
-      {userId: user.id, question, history: askHistory(history)},
+      {
+        userId: user.id,
+        question,
+        history: askHistory(history),
+        signal: ac.signal
+      },
       e => {
         if (!closed) send(e.type, e)
       }
     )
     if (!closed) send('done', out)
   } catch (e) {
-    if (!closed) send('failed', {error: (e as Error).message})
+    /*
+     * 用户终止时 `signal` 会把请求打断，于是这里会收到一个 abort 错误 ——
+     * 那不是"失败"，别弹一条红色的错误气泡（他已经按了终止、也知道自己在终止）。
+     */
+    if (!closed && !ac.signal.aborted) send('failed', {error: (e as Error).message})
   } finally {
     clearInterval(beat)
     res.end()

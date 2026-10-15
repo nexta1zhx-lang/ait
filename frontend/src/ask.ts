@@ -27,6 +27,8 @@ export interface AskExchange {
   latencyMs: number
   /** 有没有真答出来（用来决定要不要进多轮历史） */
   ok: boolean
+  /** 用户按了「终止」—— 半截回答要留住并标出来（不是"失败"） */
+  stopped: boolean
   /** 正在流式接收（显示光标 + 不让再发） */
   streaming: boolean
   /** 走到第几轮 / 一共最多几轮（写「正在查库…第 2/4 轮」） */
@@ -123,6 +125,7 @@ function shapeTurn(raw: unknown): AskExchange | null {
     costUsd: Number(o.costUsd) || 0,
     latencyMs: Number(o.latencyMs) || 0,
     ok: Boolean(o.ok),
+    stopped: Boolean(o.stopped),
     streaming: false,
     round: 0,
     roundMax: 0
@@ -265,12 +268,29 @@ export function closeSideQuietly(): void {
 
 /* ---------------- 提问 ---------------- */
 
-/** 当前那条流的取消函数（切会话 / 清空时要把上一次收掉） */
+/** 当前那条流的取消函数（切会话 / 清空 / 用户按终止时调） */
 let stopStream: (() => void) | null = null
 
-/** 收掉正在跑的那条流（后端那一跑停不了，但至少不再收数据） */
+/**
+ * 用户按了「终止」没有。
+ *
+ * ⚠️ 必须用这个标志区分「用户主动停」和「内部收尾」—— 两者都走 `stopStream()`，
+ *    光看"流关了"分不出来。而且 `ask()` 的收尾要用它决定**是留半截回答还是报错**。
+ */
+let userStopped = false
+
+/**
+ * 终止当前这一跑（用户按的按钮、或者离开 / 清空时顺手收掉）。
+ *
+ * ⚠️ 前端的「终止」= **关掉 SSE 连接**。后端那边的取数循环会跟着结束 ——
+ *    它听的是 `res.close`（见 `server.ts` 的 `handleAskStream`）：
+ *    连接一断就 `AbortController.abort()`，正在等的大模型请求和剩下的工具调用都停。
+ *    所以这里不用再单独发一个"取消"请求。
+ */
 export function stopAsk(): void {
-  stopStream?.()
+  if (!stopStream) return
+  userStopped = true
+  stopStream()
   stopStream = null
 }
 
@@ -310,6 +330,7 @@ export async function ask(question: string): Promise<void> {
       costUsd: 0,
       latencyMs: 0,
       ok: false,
+      stopped: false,
       streaming: true,
       round: 0,
       roundMax: 0
@@ -322,11 +343,25 @@ export async function ask(question: string): Promise<void> {
   // 拿数组里那一份（不是刚 push 的裸对象）来改，Vue 才盯得到
   const entry = askThreads.value.find(t => t.id === id)!.turns.at(-1)!
   askBusy.value = true
+  userStopped = false
 
   await new Promise<void>(resolve => {
     const finish = (): void => {
       entry.streaming = false
+      /*
+       * 用户按了终止：把半截回答留住并标出来。
+       *
+       * ⚠️ 这条**必须在 `onError` 之前判**：终止会让 SSE 那边以"连接中断"收尾，
+       *    于是 `onError` 也会来 —— 不区分的话，用户按了终止会看到一句红色的
+       *    「连接中断，请重试」，好像是他自己搞坏了什么。
+       */
+      if (userStopped) {
+        entry.stopped = true
+        entry.ok = false
+        if (!entry.error && !entry.answer) entry.error = '已终止'
+      }
       stopStream = null
+      userStopped = false
       askBusy.value = false
       save()
       resolve()
@@ -360,13 +395,16 @@ export async function ask(question: string): Promise<void> {
         entry.model = res.model ?? ''
         entry.costUsd = res.costUsd ?? 0
         entry.latencyMs = res.latencyMs ?? 0
-        entry.ok = Boolean(entry.answer)
+        // 后端也可能自己判定被终止（它听的是连接断开，比前端更准）
+        if (res.aborted) entry.stopped = true
+        entry.ok = Boolean(entry.answer) && !entry.stopped
         const th = askThreads.value.find(t => t.id === id)
         if (th) th.updatedAt = Date.now()
         finish()
       },
       onError: message => {
-        entry.error = message
+        // 用户自己按的终止不算错误（见 `finish()` 里那段说明）
+        if (!userStopped) entry.error = message
         finish()
       }
     })
