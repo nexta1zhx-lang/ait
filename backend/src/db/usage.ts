@@ -1,11 +1,12 @@
 import {query} from './client'
 import {TokenUsage, costOf, emptyUsage} from '../llm/pricing'
 
-export type UsageKind = 'judge' | 'extract'
+export type UsageKind = 'judge' | 'extract' | 'ask'
 
 export const KIND_LABEL: Record<string, string> = {
   judge: '开单分析',
-  extract: '案例提炼'
+  extract: '案例提炼',
+  ask: '数据问答'
 }
 
 export interface RecordUsageInput {
@@ -209,7 +210,7 @@ function mapBucket(r: RawBucket, label?: (k: string) => string): UsageBucket {
 }
 
 /** 允许筛选的用途；白名单，直接拼进 SQL 也安全 */
-const USAGE_KINDS: UsageKind[] = ['judge', 'extract']
+const USAGE_KINDS: UsageKind[] = ['judge', 'extract', 'ask']
 
 function kindOf(v: unknown): UsageKind | null {
   const s = String(v ?? '').trim()

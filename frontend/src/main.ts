@@ -1,7 +1,7 @@
 import {createApp} from 'vue'
 import App from './App.vue'
 import {router} from './router'
-import {authToken, setAuthToken} from './api'
+import {devAutoLogin} from './session'
 import {setupAndroidBack} from './back-button'
 import {setupNativeShell} from './native'
 import {isNativeShell} from './platform'
@@ -133,25 +133,11 @@ addEventListener(
 /*
  * 本地开发**免登录**（2026-10-15 用户：「就是我不想每次登录」）。
  *
- * 只在 vite 开发模式（`import.meta.env.DEV`）且本地还没有 token 时，找后端要一条
- * （后端 `/api/auth/dev-login` 还有两道闸：`NODE_ENV !== production` + 显式设了
- * `DEV_AUTO_LOGIN`；线上两者都不成立 → 404）。
- *
- * ⚠️ 必须在 `mount` **之前**拿到：挂载后再补 token 会先闪一下登录页，守卫已经跳过去了。
- * ⚠️ 拿不到就当没有（后端没开、或压根没起）—— 照常显示登录页，不报错。
+ * 实现在 `./session` 里（那边管登录态）—— 这里只负责**在 `mount` 之前**调一次：
+ * 挂载后再补 token 会先闪一下登录页，守卫已经跳过去了。
+ * ⚠️ 「本地有 token 但已经失效（被踢 / 过期）」那一路由 `initAuth()` 自己补
+ *   —— 见那边的说明，不然表现就是「明明开了 DEV_AUTO_LOGIN 还是弹登录页」。
  */
-async function devAutoLogin(): Promise<void> {
-  if (!import.meta.env.DEV || authToken.value) return
-  try {
-    const r = await fetch('/api/auth/dev-login')
-    if (!r.ok) return
-    const d = (await r.json()) as {token?: string}
-    if (d.token) setAuthToken(d.token)
-  } catch {
-    /* 后端没起 —— 无所谓 */
-  }
-}
-
 void devAutoLogin().then(() => {
   /*
    * App 推送（FCM）：只有原生壳里才做事（Web 上是空操作）。

@@ -31,7 +31,8 @@ const props = withDefaults(defineProps<{keyId?: number | null}>(), {
 const KINDS = [
   {value: '' as const, label: '全部用途'},
   {value: 'judge' as const, label: '开单分析'},
-  {value: 'extract' as const, label: '案例提炼'}
+  {value: 'extract' as const, label: '案例提炼'},
+  {value: 'ask' as const, label: '数据问答'}
 ]
 
 /*
@@ -52,7 +53,7 @@ const bjShift = (day: string, n: number): string => {
 
 const from = ref(bjShift(bjToday(), -29))
 const to = ref(bjToday())
-const kind = ref<'' | 'judge' | 'extract'>('')
+const kind = ref<'' | 'judge' | 'extract' | 'ask'>('')
 
 const rangeText = computed(() =>
   from.value === to.value ? from.value : `${from.value} ~ ${to.value}`

@@ -23,6 +23,7 @@ import {useScrollMemory} from '../scroll'
 import PaneShell from '../comps/PaneShell.vue'
 import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
 import ProfileView from './ProfileView.vue'
+import AskView from './AskView.vue'
 import AdminView from './AdminView.vue'
 import ModelPaneView, {type ModelTab} from './ModelPaneView.vue'
 import {user} from '../session'
@@ -35,7 +36,7 @@ const AccountStatsView = defineAsyncComponent(
   () => import('./AccountStatsView.vue')
 )
 
-type Pane = 'exchange' | 'stats' | 'profile' | 'model' | 'admin'
+type Pane = 'exchange' | 'stats' | 'ask' | 'profile' | 'model' | 'admin'
 
 /** 「管理」里那四段：用户管理 / 服务器 / 代理订阅 / 远程桌面 */
 export type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk'
@@ -50,6 +51,12 @@ export type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk'
 const PANES: {value: Pane; label: string}[] = [
   {value: 'exchange', label: '交易所账户'},
   {value: 'stats', label: '账户统计'},
+  /*
+   * ★ 2026-10-16：用户「新功能 —— 问 AI，它读我的问题、去库里取数、再回答我」。
+   *   入口放「我的」，单一个 tab。工具和 SQL 写死在 `backend/src/ask/tools.ts`，
+   *   页面见 `views/AskView.vue`。
+   */
+  {value: 'ask', label: '数据问答'},
   {value: 'profile', label: '个人信息'},
   /*
    * ★ 2026-10-12：用户「ai 提示词 tab 改为模型配置，个人信息中的模型配置内容提出到这个页面
@@ -79,7 +86,8 @@ function readPane(v: unknown): Pane {
   //   「模型配置」这一格里的子 tab —— 具体落哪一段由下面 `applyRoute()` 决定
   if (v === 'llm' || v === 'usage' || v === 'prompts') return 'model'
   if (v === 'replay') return 'stats'
-  if (v === 'stats' || v === 'profile' || v === 'model' || v === 'admin') return v
+  if (v === 'stats' || v === 'ask' || v === 'profile' || v === 'model' || v === 'admin')
+    return v
   return 'exchange'
 }
 
@@ -242,7 +250,9 @@ function setModelTab(v: ModelTab): void {
     :class="{
       'no-bar': pane === 'exchange' || pane === 'stats',
       // 统计那格底部要留出底栏的高度（它自己滚到最后一段，别被底栏压住）
-      'stats-pane': pane === 'stats'
+      'stats-pane': pane === 'stats',
+      // 数据问答那格底部是输入框，同样别被窄屏的固定底栏压住
+      'ask-pane': pane === 'ask'
     }"
     :model-value="pane"
     :options="panes"
@@ -279,6 +289,12 @@ function setModelTab(v: ModelTab): void {
       但各自的订阅 / 轮询必须停（`ServerStatusView` 就在轮询）。
     -->
     <ProfileView v-if="pageAlive && pane === 'profile'" />
+    <!--
+      数据问答：**切走即卸载**（列表类，重挂很便宜）—— 会话本身在 `../ask.ts` 的
+      模块作用域里活着，所以切回来还在。⚠️ 必须独立 `v-if`，别接进上面那条
+      `v-else-if` 链子（原因见 `ProfileView` 那段）。
+    -->
+    <AskView v-if="pageAlive && pane === 'ask'" />
     <!-- 「管理」里再分两个 tab：用户管理 / 服务器；ServerStatusView 是 v-if 里挂的，
          切到用户管理那半就卸载 → 它自己的轮询和图表会一起停掉 -->
     <AdminView
@@ -320,5 +336,23 @@ function setModelTab(v: ModelTab): void {
  */
 .tabpane.stats-pane :deep(.tabpane-body) {
   padding-bottom: calc(var(--tabbar-h, 59px) + env(safe-area-inset-bottom) + 18px);
+}
+/*
+ * 数据问答那格：**自己不滚**（`AskView` 内部是「左侧历史 + 右侧对话 + 底部输入框」，
+ * 两块各自滚）。整页滚的话输入框会被推走、侧栏也跟着动，那套布局就散了。
+ *
+ * ⚠️ 这里把它变成 **flex 容器**，让 `.ask` 作为 flex 项被**拉伸**到满高 ——
+ *    第一版写的是 `.ask { height: 100% }`，实测**没撑起来**（百分比高度要求父级是
+ *    "确定高度"，而 `.tabpane-body` 的高度是 flex 分出来的，各引擎处理不一致）：
+ *    表现是整格只有内容那么高、下面空一块，窄屏抽屉跟着变短、上下露出间距。
+ *    拉伸不吃百分比那一套，稳。
+ * ⚠️ 顺手把 `PaneShell` 给滚动条留的 12px 内边距收掉 —— 这一格不用它的滚动条。
+ */
+.tabpane.ask-pane :deep(.tabpane-body) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-right: 0;
+  margin-right: 0;
 }
 </style>

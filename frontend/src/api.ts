@@ -3470,7 +3470,7 @@ export interface UsageQuery {
    */
   from?: string | null
   to?: string | null
-  kind: '' | 'judge' | 'extract'
+  kind: '' | 'judge' | 'extract' | 'ask'
   /** 只看某把密钥（llm_key_id）；不传 / 0 = 全部 */
   keyId?: number | null
 }
@@ -3489,7 +3489,8 @@ function usageQs(q: UsageQuery, extra: Record<string, string | number> = {}) {
 
 export const KIND_TEXT: Record<string, string> = {
   judge: '开单分析',
-  extract: '案例提炼'
+  extract: '案例提炼',
+  ask: '数据问答'
 }
 
 export const fetchUsageSummary = (q: UsageQuery, recent = 10) =>
@@ -3546,6 +3547,149 @@ export const fetchPredictions = (q: PredictionQuery) => {
 
 export const deletePrediction = (id: number) =>
   del<{ok: boolean}>(`/api/analyses/${id}`)
+
+/* ---------------- 数据问答（「我的 → 数据问答」） ---------------- */
+
+/** 这一轮模型调了哪个工具、拿到多少行 —— 前端「取值过程」摊开给用户看 */
+export interface AskStep {
+  tool: string
+  /** 工具的中文短名 */
+  label: string
+  args: Record<string, unknown>
+  ok: boolean
+  ms: number
+  rows: number
+  detail: string
+  error: string | null
+}
+
+export interface AskReply {
+  answer: string
+  steps: AskStep[]
+  rounds: number
+  /**
+   * 真查过库吗。false = 这回答**没碰数据库**（模型直接开口了），
+   * UI 必须标出来 —— 数据类问答最怕的就是它自己编。
+   */
+  verified: boolean
+  model: string
+  latencyMs: number
+  costUsd: number
+  usage: {
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+  }
+}
+
+/** 多轮追问带回去的那几轮（后端只认 role + content） */
+export interface AskTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+/**
+ * 问一句 —— **流式版**（2026-10-16）。
+ *
+ * 后端 `GET /api/ask/stream` 边跑边推：`round`（第几轮）· `step`（一个工具跑完，立刻长进
+ * 「取值过程」）· `delta`（回答逐字）· `done`（最后那份完整结果）· `failed`。
+ *
+ * 为什么要流式：这条链路**取数比写字慢得多**（3~4 轮工具调用 + 每轮一次大模型往返），
+ * 不流的话用户盯着一个转圈十几秒，不知道里头在干什么；流式能让他**看着它查**。
+ *
+ * ⚠️ 跟 `analyzeStream` 一样是**任务型**的流：断了不重连（重连 = 再问一遍、再花一次钱），
+ *    所以这里直接用裸 `EventSource`、收尾就关，不走 `liveSse` 那套看门狗重连。
+ * @returns 取消函数（组件卸载 / 用户切走时调）
+ */
+export function askStream(
+  question: string,
+  history: AskTurn[],
+  handlers: {
+    onRound?: (round: number, max: number) => void
+    onStep?: (step: AskStep) => void
+    onDelta?: (text: string) => void
+    /** 这一轮的文字作废（只是旁白，不是回答）*/
+    onDrop?: () => void
+    onDone: (reply: AskReply) => void
+    onError: (message: string) => void
+  }
+): () => void {
+  const q = new URLSearchParams({q: question})
+  // 历史：只带 role + content（后端还会再过一遍形状）
+  if (history.length) q.set('h', JSON.stringify(history))
+  const es = openSse('/api/ask/stream?' + q.toString())
+  let finished = false
+
+  const stop = (): void => {
+    finished = true
+    es.close()
+  }
+  const parse = (e: Event): Record<string, any> | null => {
+    try {
+      return JSON.parse((e as MessageEvent).data)
+    } catch {
+      return null
+    }
+  }
+
+  es.addEventListener('round', e => {
+    const d = parse(e)
+    if (d) handlers.onRound?.(Number(d.round) || 1, Number(d.max) || 1)
+  })
+  es.addEventListener('step', e => {
+    const d = parse(e)
+    if (d?.step) handlers.onStep?.(d.step as AskStep)
+  })
+  es.addEventListener('delta', e => {
+    const d = parse(e)
+    if (d?.text) handlers.onDelta?.(String(d.text))
+  })
+  // 这一轮只是旁白（它要去调工具）→ 前端把这段临时文字撤掉
+  es.addEventListener('drop', () => handlers.onDrop?.())
+  es.addEventListener('done', e => {
+    const out = parse(e) as AskReply | null
+    stop()
+    if (out) handlers.onDone(out)
+    else handlers.onError('结果是空的（解析失败）')
+  })
+  es.addEventListener('failed', e => {
+    const out = parse(e) as {error?: string} | null
+    stop()
+    handlers.onError(out?.error ?? '问答失败')
+  })
+
+  // 服务端正常结束时也会触发 error —— 已经收过 done/failed 就忽略
+  es.onerror = () => {
+    if (finished) return
+    if (es.readyState === EventSource.CLOSED) {
+      stop()
+      handlers.onError('连接中断，请重试')
+    }
+    // CONNECTING：浏览器正在自动重连，等一下再看
+  }
+
+  return stop
+}
+
+/**
+ * 问一句（**非流式**的老路，POST /api/ask）。
+ *
+ * 还留着：别的调用点（脚本、测试）要一次拿到完整结果时更省事。
+ * 网页走的是上面那条流式的。
+ *
+ * ⚠️ 默认那 12 秒超时**不够**：这一句后面可能是 4 轮「模型想 → 查库 → 再想」，
+ *    所以单独放宽到 2 分钟（POST 本来就不重试，超时不会重复花钱）。
+ */
+export const askData = (question: string, history: AskTurn[]) =>
+  req<AskReply & {error?: string}>(
+    '/api/ask',
+    {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question, history})
+    },
+    {timeoutMs: 120_000}
+  )
 
 /* ---------------- 下载 ---------------- */
 

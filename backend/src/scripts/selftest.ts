@@ -24,6 +24,7 @@
  *      `pruneCandles` 就再也匹配不到过期子分区（表会一直涨），或者建分区时算出重叠区间
  *      （直接建不出来）。所以拿固定夹具卡住它们。
  *   ⑨ 同向加仓浮盈额度、其他币开仓 5 倍额度、账户总杠杆 11 倍上限。
+ *   ⑩ 「数据问答」的参数收敛（模型给的日期 / 跨度 / 条数 / 币种 → SQL 参数）
  */
 import {
   ALL_INTERVALS,
@@ -61,6 +62,17 @@ import {judgeSchema} from '../llm/schema'
 import {render} from '../output/render'
 import type {MarketSnapshot} from '../types'
 import {enteredGo, verdictOf, type Verdict} from '../analysis/verdict'
+import {
+  bjDayEndMs,
+  bjDayStartMs,
+  bjStamp,
+  clampInt,
+  dur,
+  dayShift,
+  normalizeDay,
+  normalizeRange,
+  normalizeSymbol
+} from '../ask/range'
 
 /* ------------------------------------------------------------------ */
 /* ① 契约防漂移                                                        */
@@ -652,6 +664,175 @@ function checkVerdict(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ⑩ 数据问答：模型给的参数 → SQL 参数（唯一的闸）                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 夹具在卡什么：`ask/range.ts` 那几个函数是「模型的话 → SQL 参数」之间**唯一**一道闸。
+ * 它们的失效方式很隐蔽 —— 区间被悄悄写坏（认不出的日期原样带下去、跨度没夹住），
+ * 界面上只看到「没数据」，分不清是真没有还是参数烂了。
+ *
+ * 所以固定一个「今天」（`2026-10-16`）来卡边界，不吃真实时钟。
+ */
+function checkAsk(): boolean {
+  let ok = true
+  const bad = (msg: string): void => {
+    console.error(`❌ 数据问答夹具：${msg}`)
+    ok = false
+  }
+  const TODAY = '2026-10-16'
+
+  // ① 日期：认得出 / 带时间 / 自然语言 / 不存在的日子
+  const dayCases: [unknown, string | null][] = [
+    ['2026-10-01', '2026-10-01'],
+    /* 模型经常带时间戳 —— 取前 10 位 */
+    ['2026-10-01T12:00:00Z', '2026-10-01'],
+    /* 认不出的**必须**是 null，调用方走兜底；原样带下去就是一条永远空结果的查询 */
+    ['上周三', null],
+    /* 日历上不存在的日子 */
+    ['2026-02-31', null],
+    [null, null]
+  ]
+  for (const [raw, want] of dayCases) {
+    const got = normalizeDay(raw)
+    if (got !== want)
+      bad(`normalizeDay(${JSON.stringify(raw)}) 期望 ${want}，实际 ${got}`)
+  }
+
+  // ② 区间：默认 30 天 / 写反 / 将来 / 跨度截断
+  const rangeCases: {
+    from: unknown
+    to: unknown
+    want: [string, string, number]
+    why: string
+  }[] = [
+    {
+      from: null,
+      to: null,
+      want: ['2026-09-17', TODAY, 30],
+      why: '两个都缺 = 默认最近 30 天（含今天）'
+    },
+    {
+      from: '2026-10-01',
+      to: '2026-10-10',
+      want: ['2026-10-01', '2026-10-10', 10],
+      why: '正常区间要原样'
+    },
+    {
+      from: '2026-10-10',
+      to: '2026-10-01',
+      want: ['2026-10-01', '2026-10-10', 10],
+      why: '写反了要对调'
+    },
+    {
+      from: '2026-10-01',
+      to: '2030-01-01',
+      want: ['2026-10-01', TODAY, 16],
+      why: '结束日在未来要收到今天'
+    },
+    {
+      from: '2020-01-01',
+      to: TODAY,
+      want: ['2025-09-12', TODAY, 400],
+      why: '跨度过大要截到 400 天'
+    },
+    {
+      from: '上周三',
+      to: '前天',
+      want: ['2026-09-17', TODAY, 30],
+      why: '两个都认不出 = 默认区间'
+    }
+  ]
+  for (const c of rangeCases) {
+    const r = normalizeRange(c.from, c.to, TODAY)
+    if (r.from !== c.want[0] || r.to !== c.want[1] || r.days !== c.want[2])
+      bad(
+        `${c.why}：期望 ${c.want.join(' / ')}，实际 ${r.from} / ${r.to} / ${r.days}`
+      )
+  }
+  /* 改过的区间**要说出来** —— 不说的话用户会以为「真的只查到这么多」 */
+  if (!normalizeRange('上周三', '前天', TODAY).note.includes('认不出'))
+    bad('区间被兜底替换时必须给出 note')
+  if (normalizeRange('2026-10-01', '2026-10-10', TODAY).note)
+    bad('正常区间不该有 note')
+
+  // ③ 条数：缺省 / 夹上限 / 非法
+  const intCases: [unknown, number, number, number][] = [
+    [undefined, 20, 200, 20],
+    ['50', 20, 200, 50],
+    [9999, 20, 200, 200],
+    [0, 20, 200, 20],
+    [-5, 20, 200, 20],
+    ['abc', 20, 200, 20]
+  ]
+  for (const [raw, def, max, want] of intCases) {
+    const got = clampInt(raw, def, max)
+    if (got !== want)
+      bad(`clampInt(${JSON.stringify(raw)}, ${def}, ${max}) 期望 ${want}，实际 ${got}`)
+  }
+
+  // ④ 币种：库里存基础币，模型可能给交易对写法
+  const symCases: [unknown, string][] = [
+    ['btc', 'BTC'],
+    [' BTC ', 'BTC'],
+    ['BTC/USDT:USDT', 'BTC'],
+    ['BTC/USDT', 'BTC'],
+    ['BTCUSDT', 'BTC'],
+    ['', ''],
+    ['BTC-', '']
+  ]
+  for (const [raw, want] of symCases) {
+    const got = normalizeSymbol(raw)
+    if (got !== want)
+      bad(`normalizeSymbol(${JSON.stringify(raw)}) 期望「${want}」，实际「${got}」`)
+  }
+
+  // ⑤ 日期加减（跨月/跨年，`dayShift` 的进位别错）
+  if (dayShift('2026-03-01', -1) !== '2026-02-28')
+    bad('dayShift 跨月不对')
+  if (dayShift('2027-01-01', -1) !== '2026-12-31')
+    bad('dayShift 跨年不对')
+
+  /*
+   * ⑥ 北京时刻 → 毫秒（账本查询要的）与 → 显示串。
+   *
+   * 「差 8 小时」是这类代码最典型的静默错：查出来的成交会显示成**前一天的傍晚**，
+   * 数字都对、时间全错，而且很难一眼看出来。所以两边都钉死。
+   */
+  const dayStart = bjDayStartMs('2026-10-16')
+  if (dayStart !== Date.parse('2026-10-16T00:00:00+08:00'))
+    bad(`北京 10-16 00:00 换算错了：${new Date(dayStart).toISOString()}`)
+  if (bjDayEndMs('2026-10-16') !== bjDayStartMs('2026-10-17') - 1)
+    bad('bjDayEndMs 不是「下一天起点减 1 毫秒」')
+  // 16 日 23:30 UTC = 北京 **17 日** 07:30（跨了一个自然日）
+  const stamp = bjStamp(Date.parse('2026-10-16T23:30:00Z'))
+  if (stamp !== '2026-10-17 07:30')
+    bad(`bjStamp 期望「2026-10-17 07:30」，实际「${stamp}」`)
+  if (bjStamp('不是时间') !== '') bad('bjStamp 遇到认不出的时间该回空串')
+
+  // ⑦ 持仓时长（`ask/tools.ts` 的 `dur`）—— 60/60 分、48 小时这两个进位点最容易写错
+  const durCases: [number, string][] = [
+    [45, '45 秒'],
+    [60, '1 分'],
+    [90 * 60, '1 小时 30 分'],
+    [47 * 3600, '47 小时 0 分'],
+    [48 * 3600, '2 天 0 小时']
+  ]
+  for (const [sec, want] of durCases) {
+    const got = dur(sec)
+    if (got !== want) bad(`dur(${sec}) 期望「${want}」，实际「${got}」`)
+  }
+
+  if (ok)
+    console.log(
+      `✅ 数据问答：${dayCases.length} 组日期 + ${rangeCases.length} 组区间 + ` +
+        `${intCases.length} 组条数 + ${symCases.length} 组币种 + ` +
+        `${durCases.length} 组时长 夹具通过`
+    )
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -665,6 +846,7 @@ if (!checkPartitions()) failed = true
 if (!checkWindows()) failed = true
 if (!checkTradeBudgets()) failed = true
 if (!checkVerdict()) failed = true
+if (!checkAsk()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)

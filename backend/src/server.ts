@@ -79,6 +79,7 @@ import {
   usageSummary
 } from './db/usage'
 import {deleteAnalysis, listAnalyses, saveAnalysis} from './db/analyses'
+import {MAX_QUESTION_CHARS, askData} from './ask/run'
 import {
   ADMIN_USERNAME,
   accountForTotp,
@@ -284,6 +285,7 @@ import {
   type MarkInfo
 } from './data/kline-stream'
 import {buildContext} from './context/builder'
+import {claimSingleInstance} from './util/single-instance'
 import {judge, type JudgeMeta, type JudgeResult} from './llm/client'
 import {Candle, MarketSnapshot, MarketType, Timeframe} from './types'
 
@@ -5806,6 +5808,53 @@ async function route(
     return
   }
 
+  /* ---- 数据问答（2026-10-16）----
+   *
+   * 「用自然语言问自己库里的数据」。模型能做的只有「选工具 + 给参数」——
+   * `grade` / `verdict` 这些口径和 SQL 都写死在 `ask/tools.ts` 的 6 个工具里
+   * （为什么不让模型直接写 SQL：越权 + 口径会飘，见那个文件的说明）。
+   *
+   * 答不出来 / 模型报错都回 **200 + `{error}`**：前端把它当一条「这次没答上来」的
+   * 气泡渲染，不该变成一个「请求失败」的 toast。
+   */
+  if (p === '/api/ask') {
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    let body: Record<string, unknown>
+    try {
+      body = await readJsonBody(req)
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+    const question = str(body.question).trim()
+    if (!question) return sendJson(res, 400, {error: '缺少 question'})
+    if (question.length > MAX_QUESTION_CHARS)
+      return sendJson(res, 400, {
+        error: `问题太长了（上限 ${MAX_QUESTION_CHARS} 字）`
+      })
+
+    // 多轮追问：只认形状对得上的那几轮，其余丢掉（别让前端塞进来的东西进 prompt）
+    const history = askHistory(body.history)
+
+    try {
+      const out = await askData({userId: me.id, question, history})
+      return sendJson(res, 200, out)
+    } catch (e) {
+      return sendJson(res, 200, {error: (e as Error).message})
+    }
+  }
+
+  /*
+   * 流式版：`GET /api/ask/stream?q=问题&h=<历史 JSON>`。
+   * SSE 带不了请求头，所以 token 走 `?token=`（鉴权那层两种都认）。
+   */
+  if (p === '/api/ask/stream') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    await handleAskStream(url, res, me)
+    return
+  }
+
   /* ---- AI 提示词文档（分析预测 / 知识库提炼，全部存数据库） ---- */
   if (p === '/api/ai-docs') {
     if (method === 'GET') return handleListAiDocs(res)
@@ -5930,6 +5979,95 @@ const server = http.createServer((req, res) => {
   route(req, res, url).catch(e => fail(res, url.pathname, e))
 })
 
+/**
+ * 「数据问答」收到的历史轮次 —— 只认形状对得上的那几轮，其余丢掉
+ *（别让前端塞进来的东西进 prompt）。POST 与流式两条路共用。
+ */
+function askHistory(raw: unknown): {role: 'user' | 'assistant'; content: string}[] {
+  return (Array.isArray(raw) ? raw : [])
+    .map(t => t as {role?: unknown; content?: unknown})
+    .filter(
+      t =>
+        (t?.role === 'user' || t?.role === 'assistant') &&
+        typeof t?.content === 'string'
+    )
+    .map(t => ({
+      role: t.role as 'user' | 'assistant',
+      content: (t.content as string).slice(0, 4000)
+    }))
+}
+
+/**
+ * 数据问答的**流式**版（Server-Sent Events）。
+ *
+ * 事件：`round`（进入第 N 轮）· `step`（一个工具跑完）· `delta`（回答逐字增量）·
+ *      `done`（最后那份完整结果，前端拿它盖掉 delta 拼出来的）· `failed`。
+ *
+ * ⚠️ 跟 `handleAnalyzeStream` 一样：这是**任务型**的流，断了不重连
+ *    （重连等于再问一遍、再花一次钱）。所以前端那边也该这么对待它。
+ */
+async function handleAskStream(
+  url: URL,
+  res: http.ServerResponse,
+  user: User
+): Promise<void> {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    ...CORS
+  })
+
+  const send = (event: string, data: unknown): void => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
+
+  const question = (url.searchParams.get('q') ?? '').trim()
+  if (!question) {
+    send('failed', {error: '缺少 q（问题）'})
+    res.end()
+    return
+  }
+  if (question.length > MAX_QUESTION_CHARS) {
+    send('failed', {error: `问题太长了（上限 ${MAX_QUESTION_CHARS} 字）`})
+    res.end()
+    return
+  }
+
+  let history: unknown = []
+  try {
+    history = JSON.parse(url.searchParams.get('h') ?? '[]')
+  } catch {
+    history = []
+  }
+
+  // 页面切走了就别再往回写（大模型调用中途没法取消，但至少别浪费）
+  let closed = false
+  /* ⚠️ 只能听 `res` 的 close（`req` 的 close 在请求收完就触发，等于立刻「已关闭」） */
+  res.on('close', () => (closed = true))
+
+  // 心跳：前端那条看门狗靠它判断连接还活着（见 `liveSse` 的说明）
+  const beat = setInterval(() => {
+    if (!closed) send('heartbeat', {})
+  }, 20_000)
+
+  try {
+    const out = await askData(
+      {userId: user.id, question, history: askHistory(history)},
+      e => {
+        if (!closed) send(e.type, e)
+      }
+    )
+    if (!closed) send('done', out)
+  } catch (e) {
+    if (!closed) send('failed', {error: (e as Error).message})
+  } finally {
+    clearInterval(beat)
+    res.end()
+  }
+}
+
 /** 挂上 Vite 开发中间件后不为 null */
 let viteDev: ViteDev | null = null
 
@@ -5947,6 +6085,16 @@ async function resolveFrontend(): Promise<'vite' | 'dist'> {
 }
 
 async function main(): Promise<void> {
+  /*
+   * ★ 先拦「第二个实例」（2026-10-16）。
+   *
+   * 必须排在最前面：本机同时跑两个后端 = 两套交易所流 + 两套补历史挤**同一条**
+   * 按出口 IP 算的权重预算（见 `util/rate-budget.ts`），报出来是
+   * 「取数失败：交易所请求太频繁」，而且两个实例互相甩锅、很难查。
+   * 拿不到锁就直接退出（急着手动起第二个：`ALLOW_MULTI_SERVER=1`）。
+   */
+  claimSingleInstance(PORT)
+
   /*
    * ★ 先占端口，再干重活（2026-10-07 线上事故）。
    *
