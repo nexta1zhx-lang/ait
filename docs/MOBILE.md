@@ -173,9 +173,10 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
    ⚠️ 后面「添加 SDK / Gradle」那几步**全部跳过**（依赖 `android/build.gradle` 里早配好了）。
 3. 那个 json 放到 **`android/app/google-services.json`**。
 4. 项目设置（左上齿轮）→ **服务账号** → 「生成新的私钥」→ 下载得到
-   `…-firebase-adminsdk-….json`（**别放仓库里**）→ 传到服务器：
-   `/opt/crypto-advisor/firebase-sa.json`（`chmod 600`）+ `.env` 里加
-   `FCM_SERVICE_ACCOUNT_FILE=/opt/crypto-advisor/firebase-sa.json` → 重启 `ca-app`。
+   `…-firebase-adminsdk-….json`（**别放仓库里**）→ 传上服务器，整段 JSON **内联**进
+   `/opt/crypto-advisor/.env` 的 `FCM_SERVICE_ACCOUNT=` → 重启 `ca-app`。
+   ⚠️ **别用文件路径**：app 容器没挂那个目录，而且 `release.sh` 每次部署会把它清掉。
+   具体命令与原因见 [DEPLOY.md](./DEPLOY.md) 的「App 推送（FCM）的凭据也要进这个 `.env`」。
 5. `npm run apk` 打新包 → 装到手机 → **打开一次**（弹"允许通知"→ 允许）。
    这一步之后 `push_tokens` 里才有你的设备 —— 服务端只认表里有的设备。
 
@@ -187,6 +188,10 @@ token 仓储 `backend/src/db/push.ts` + `push_tokens` 表。
 服务端只认 `push_tokens` 里有的设备，所以**先装新包再点「加入持久化分析」**。
 改了通知渠道（`channel_id: 'ait-alert'`）要注意：Android 的渠道是**建了就改不掉**的，
 `push.ts` 里 `createChannel()` 的参数只在第一次生效。
+
+**怎么验**：网页「我的 → 账户信息」→ 那张**推送卡** → 「发一条测试推送」
+（手机在手上就会立刻弹；卡上还列着报过哪些设备、哪个被标死、上次失败原因）。
+不用等"转可做"——那可能要等一整天。
 
 排查顺序（从下往上）：
 

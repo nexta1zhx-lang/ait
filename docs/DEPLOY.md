@@ -793,16 +793,57 @@ sudo docker compose logs --tail 20 ca-app | grep -i telegram
 服务端发 FCM 要一份**服务账号私钥**（Firebase 控制台 → 项目设置 → 服务账号 → 生成新的私钥），
 放服务器上、路径写进容器 env：
 
+**做法（2026-10-15 实测走通的这条）**：整段 JSON **内联**进 `.env` 的 `FCM_SERVICE_ACCOUNT`，
+不要用文件路径。两个原因，都踩过：
+
+1. ⚠️⚠️ app 容器**没有**挂载 `/opt/crypto-advisor`（只挂 `downloads` 和 docker.sock），
+   所以 `FCM_SERVICE_ACCOUNT_FILE=/opt/crypto-advisor/xxx.json` 在容器里根本读不到；
+2. ⚠️⚠️ `release.sh` 每次部署会**清空** `$APP_DIR` 下除 `.env` / `downloads` / `Caddyfile`
+   之外的一切 —— 手动丢进去的文件下次发布就没了，推送会静默失效
+   （日志里一行「读不了 …（ENOENT）」）。
+
+`.env` 是被保留的，而且它本来就是 600、不被 git 跟踪 —— 内联最省事：
+
 ```bash
-# 服务器上：把私钥放好（600，只有 ubuntu 读得到），再把路径写进 .env
-sudo install -m 600 -o ubuntu -g ubuntu firebase-sa.json /opt/crypto-advisor/firebase-sa.json
-grep -q '^FCM_SERVICE_ACCOUNT_FILE=' /opt/crypto-advisor/.env ||
-  echo 'FCM_SERVICE_ACCOUNT_FILE=/opt/crypto-advisor/firebase-sa.json' | sudo tee -a /opt/crypto-advisor/.env
-cd /opt/crypto-advisor && sudo docker compose up -d ca-app
-docker compose -f docker-compose.prod.yml logs app | grep '\[push\]'   # 没有"没配"字样就对了
+# 本机：把私钥传上去（先落到 /tmp，root 读得到）
+scp -i ~/.ssh/LightsailDefaultKey-ap-northeast-1.pem \
+  ~/Downloads/<项目>-firebase-adminsdk-xxxx.json ubuntu@52.194.6.144:/tmp/fa.json
+```
+
+服务器上把那段 JSON 压成一行写进 `.env`（**顺手备份原 `.env`、写完删掉 `/tmp` 那份**）——
+一小段 Python 最稳（`json.dumps(..., separators=(',',':'))` 出来就是单行，
+`private_key` 里的换行本来就是 `\n` 转义，不会真换行）：
+
+```bash
+sudo python3 - <<'PY'
+import json, os, shutil, time
+env = '/opt/crypto-advisor/.env'
+sa = json.load(open('/tmp/fa.json'))
+line = 'FCM_SERVICE_ACCOUNT=' + json.dumps(sa, separators=(',', ':'))
+shutil.copy2(env, env + '.bak-' + time.strftime('%Y%m%d-%H%M%S'))
+keep = [l for l in open(env).read().splitlines() if not l.startswith('FCM_SERVICE_ACCOUNT')]
+open(env, 'w').write('\n'.join(keep + [line]).rstrip() + '\n')
+os.chmod(env, 0o600)
+os.remove('/tmp/fa.json')
+print('ok', sa['project_id'], len(line))
+PY
+
+cd /opt/crypto-advisor && sudo docker compose -f docker-compose.prod.yml up -d app
+```
+
+验一下**容器里**能拿到（只打长度和项目号，不打印内容）：
+
+```bash
+sudo docker compose -f docker-compose.prod.yml exec -T app sh -s <<'EOS'
+node -e 'const r=process.env.FCM_SERVICE_ACCOUNT||"";console.log("长度",r.length,JSON.parse(r).project_id)'
+EOS
 ```
 
 ⚠️ 私钥**绝不能进 git、也不能出现在日志里**（`notify/push.ts` 出错只打状态码，不打请求体）。
+
+**怎么知道推送通了**：网页「我的 → 账户信息」那张**推送卡**上点「发一条测试推送」
+（`POST /api/push/test`）—— 不用等"转可做"。卡上还会列出这台账号报过哪些设备、
+哪个被标死、上次失败原因。
 ⚠️ 日志里**不许出现 token**：出错时也不回显 Telegram 的响应体（里面带 bot 地址）。
 
 ## 告警（可用性看门狗 → Telegram，2026-10-14）
