@@ -3500,13 +3500,21 @@ function onLayerDown(e: PointerEvent) {
   if (picking.value) return onLineDown(e)
   onRangeDown(e)
 }
+/**
+ * ⚠️ 判据先看「**手上有没有正在拖的结束线**」，再看 `picking`。
+ *
+ * 为什么：`picking` 是**受控**的（父组件的 `pointPicking`），拖动过程中父组件
+ * 完全可能把它收掉（2026-10-15 就踩到：选完一下就把选线停了）。那时如果按
+ * `picking` 判，这一拖会**当场变成「划范围」**——线不跟手、还多出一个选择框。
+ * 拖动一旦开始（`dragLineX !== null`）就该由这里负责到抬手为止。
+ */
 function onLayerMove(e: PointerEvent) {
-  if (picking.value) return onLineMove(e)
+  if (dragLineX.value !== null || picking.value) return onLineMove(e)
   onRangeMove(e)
 }
 
 function onLayerUp(e: PointerEvent) {
-  if (picking.value) return onLineUp(e)
+  if (dragLineX.value !== null || picking.value) return onLineUp(e)
   onRangeUp(e)
 }
 

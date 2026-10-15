@@ -134,7 +134,13 @@ onBeforeUnmount(() => window.removeEventListener('resize', onViewport))
  */
 const isMobile = ref(window.innerWidth <= MOBILE_MAX)
 
-/** 窄屏不摆的那几格（都要在图上看点 / 拖，一屏放不下）——「测试」的入口改走 K 线头上那颗图标 */
+/**
+ * 窄屏不摆的那几格（都要在图上看点 / 拖，一屏放不下）。
+ *
+ * ⚠️ `test`（桌面那格「测试」tab）2026-10-15 已从 `LEFT_TABS` 里删掉 ——
+ *    留在这儿只是**兜住老状态**（本地记住的 tab / 老链接可能还是 `test`）：
+ *    宽 → 窄 切过来时照样把 `testArmed` 带走并落到「K 线」，别让那一局变成实时跑。
+ */
 const MOBILE_HIDDEN_TABS: string[] = ['test', 'add']
 
 /** 跑分析那颗按钮的文案（桌面 / 手机两处按钮共用一个，不会写漂） */
@@ -169,8 +175,9 @@ function onViewport(): void {
   /*
    * 宽窄切换时把「对方不存在的那一格」收回来：
    * 「K 线」只在窄屏有，「合约行情」只在宽屏有（2026-10-04 提成单独一页了），
-   * 「测试 / 添加案例」反过来只有宽屏有。
-   * ⚠️ 从「测试」那格被收回来时，把**测试模式**转成 `testArmed` 带走 ——
+   * 「添加案例」反过来只有宽屏有（窄屏走 K 线头上那颗 ＋）。
+   * ⚠️ `test` 那格 2026-10-15 已整格删掉（PC 跟手机统一走烧瓶图标）——
+   *    这里认它只是为了兜老状态：被收回来时把**测试模式**转成 `testArmed` 带走，
    *    不然光切个窗口宽度，下一局就从「测试（不存档）」变成「实时（存档）」了。
    */
   if (!m && leftTab.value === 'chart') leftTab.value = 'market'
@@ -185,9 +192,11 @@ function onViewport(): void {
 
 /**
  * 窄屏的 tab：「K 线」排第一个（它也是默认落的那一格），
- * 后面跟宽屏那套去掉「合约行情 / 测试 / 添加案例」。
+ * 后面跟宽屏那套去掉「合约行情 / 添加案例」。
  *
  * ⚠️ 「合约行情」已经搬去底栏的「合约」页（用户 2026-10-04），窄屏不再摆。
+ * ⚠️ 2026-10-15 起两端的 tab 几乎一样了 —— 「测试」那格删掉之后，
+ *    窄屏只多一格「K 线」、少一格「添加案例」（那件事窄屏走图上的 ＋）。
  */
 const tabs = computed(() => {
   if (!isMobile.value) return LEFT_TABS
@@ -218,6 +227,11 @@ const router = useRouter()
 function readTab(v: unknown): LeftTab | null {
   if (v === 'chart') return 'chart'
   if (v === 'history') return 'live'
+  /*
+   * `test` 也是**老值**（2026-10-15 之前桌面端有一格「测试」tab）：
+   * 那格已经删掉（PC 跟手机统一走 K 线头上那颗烧瓶），老链接落到「预测结果」。
+   */
+  if (v === 'test') return 'live'
   return LEFT_TABS.some(t => t.value === v) ? (v as LeftTab) : null
 }
 
@@ -555,17 +569,19 @@ function onPickRange(v: {from: number; to: number; bars: number}) {
 }
 
 /**
- * 图上点了结束线 → 记下那一刻，**停掉选线但不跳格**。
+ * 图上点了结束线 → 记下那一刻。
  *
- * ★ 2026-10-15 用户重做测试流程：「点击测试图标消掉，变成勾和叉……确定完线后，
- *   **点击 ✓ 跳转分析**」——所以这里不再自动跳「预测结果」（上一版是自动跳），
- *   跳格交给 K 线头上那颗 ✓（`confirmTestPoint`）。线刚点完，人还在图上，
- *   那颗 ✓ 就在同一行的头部，够得着；给一句提示说明下一步点哪儿。
+ * ⚠️ 这里**只记时点**，别做别的事：
+ *   · **不能**在这儿 `pointPicking = false`（2026-10-15 实测踩到）：拖动那条线时
+ *     `KlineChart` **每动一下就 emit 一次** `point`（好让「判断时点」跟着跳），
+ *     一停选线 ⇒ 图那边的 `watch(picking)` 立刻把 `dragLineX` 清掉、
+ *     `onLayerMove` 也改走「划范围」那条路 ⇒ **线拖到一半就不跟手、手指还在屏上就断了**。
+ *     选线什么时候停由**图自己**在抬手时决定（`onLineUp` → `setPicking(false)`）。
+ *   · **不要**在这儿弹提示（用户 2026-10-15：「确定好线之后，不需要弹窗提示说确定线了」）——
+ *     而且拖动过程中每动一下都会触发这里，弹出来就是刷屏。
  */
 function onPickPoint(at: number) {
   testPoint.value = at
-  pointPicking.value = false
-  showToast('结束线已定 · 点右上角的 ✓ 去分析', 'ok')
 }
 
 /* ---------------- 结论渲染 ---------------- */

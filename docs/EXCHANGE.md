@@ -5177,3 +5177,53 @@ ReferenceError: Cannot access 'openNotional' before initialization
 **0 条**；✓ 在没点线时 `disabled=true`，点完线变 `false`；点 ✓ ⇒ `leftTab='live'` 且横幅
 变成「结束线 … / 判断时点 …」；点 ✗ ⇒ `testArmed=false` / `testPoint=null` / `pointPicking=false`、
 图标回到单颗烧瓶、横幅消失。
+
+## 67. 测试流程再修四处（PC 统一 / 拖线 / 去掉提示 / ✓ 要出结果，2026-10-15 用户）
+
+用户一句话点了四件事：「**PC 模式也改为跟手机端一样**。现在那个**拖动的线在移动的不好拖，适配一下**，
+然后那个确定好线之后，**不需要弹窗提示消息**说确定线了，点击勾号的时候，**跳转页面没有显示分析结果**，
+有问题。」
+
+### ① PC 跟手机统一：桌面那格「测试」tab 删掉
+
+两端现在**只有一个测试入口** —— K 线头上那颗烧瓶（点开变 ✓ / ✗）。
+`LEFT_TABS` 里那格删了（桌面从 6 格变 5 格），老链接 `?t=test` 由 `readTab` 映射到 `live`；
+`LeftTab` 类型里**保留 `'test'`**（`testMode` 的判据、以及「宽 → 窄切回来时把测试模式带走」
+还要认它，见 `MOBILE_HIDDEN_TABS` 那段注释）。
+
+### ② 拖不动那条线（真因是 §66 自己挖的坑）
+
+`KlineChart.commitLine()` 在拖动过程中**每动一下就 `emit('point')` 一次**
+（好让面板上的「判断时点」跟着跳），而 §66 的 `onPickPoint` 里写了
+`pointPicking.value = false` ⇒ 第一次 move 就把选线关掉：
+
+- `watch(picking)` 立刻把 `dragLineX` 清掉 ⇒ 线**停在原地不跟手**；
+- 同时 `onLayerMove` 按 `picking` 判路线 ⇒ 这一拖**变成「划范围」**，凭空多出一个选择框。
+
+两处一起改：
+1. `AnalyzeView.onPickPoint` **只记时点**（停选线交给图的 `onLineUp` 在抬手时做）；
+2. `KlineChart` 的 `onLayerMove`/`onLayerUp` 判据改成「**手上有没有正在拖的线**」
+   （`dragLineX !== null`）优先 —— 拖动一旦开始就归它管到抬手为止，父组件中途改状态也不会串道；
+3. 顺手把命中区从 15px 放宽到 **26px**（触屏手指落点误差大，2px 的线本来就难抓）。
+
+### ③ 不再弹「结束线已定」那条提示
+
+同一条链：拖动时每 move 都触发 `onPickPoint` ⇒ 提示会**刷屏**。用户也不要它，整句删掉。
+
+### ④ 点 ✓ 要能看见结果
+
+原来 ✓ 只切格，落过去是一片空的（还得自己再点一下「按这段行情判断」）—— 用户说「有问题」。
+现在 **✓ = 去分析**：跳「预测结果」+ 当场 `run()`。两条不重复烧钱的规矩：
+**正在跑**（`loading`）不打断；**同一个结束线**刚跑过（`analyze.ts` 里的 `lastRunAt` === `testAt`）
+不重跑。
+
+**实测**（临时挂载页 + 真实 pointer 事件驱动，跑完已删）：
+
+| 检查 | 结果 |
+|---|---|
+| 1400px 下 tab 行 | 合约行情 / 预测结果 / 自动化预测 / 知识库 / 添加案例 —— **没有「测试」** ✓ |
+| 拖动中 `pointPicking` | **保持 true**（改前会被 `onPickPoint` 关掉）✓ |
+| 拖动中 `.range-box.live` | **0**（不会变成划范围）✓ |
+| 拖动中 / 抬手后 toast | **都是 null**（不再刷屏）✓ |
+| 抬手后 | `pointPicking=false`（线定住）✓ |
+| 点 ✓ | `leftTab='live'` **且 `loading=true`**（自动开跑）✓ |

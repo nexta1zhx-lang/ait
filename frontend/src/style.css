@@ -3636,13 +3636,18 @@ body.fixed-viewport .split {
   cursor: ew-resize;
 }
 
-/* 2px 的线太细抓不住，铺一条 15px 宽的透明命中区 */
+/*
+ * 2px 的线太细抓不住，铺一条透明命中区。
+ * ⚠️ 2026-10-15 用户：「那个拖动的线……不好拖，适配一下」—— 原来 15px 在桌面用鼠标
+ *    还行、在触屏上就偏窄（手指落点误差本来就大），放宽到 26px；线本身还是 2px，
+ *    视觉上没变粗，只是**好抓**了。别再加宽：再宽就开始挡旁边的图表平移手势。
+ */
 .range-line-hit {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -7px;
-  width: 15px;
+  left: -13px;
+  width: 26px;
 }
 
 .range-line.live {

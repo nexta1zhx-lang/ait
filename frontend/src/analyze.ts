@@ -165,13 +165,26 @@ export const LEFT_TABS = [
    *    老链接 `?t=history` 由 `AnalyzeView.readTab` 映射过来。
    */
   {value: 'live' as const, label: '预测结果'},
-  {value: 'test' as const, label: '测试'},
+  /*
+   * ⚠️ 2026-10-15 用户：「**PC 模式也改为跟手机端一样**」—— 桌面那格「测试」
+   *    **整格删掉**，两端统一走 K 线头上那颗烧瓶（点开变 ✓ / ✗，见 `startTestMode`）。
+   *    老书签 `?t=test` 由 `AnalyzeView.readTab` 映射到 `live`
+   *   （`LeftTab` 里仍留着 `'test'`：`testMode` 的判据和老链接都要认它）。
+   */
   /* 用户 2026-10-12：「新建一个页面叫自动化预测 在预测历史后面」 */
   {value: 'auto' as const, label: '自动化预测'},
   {value: 'kb' as const, label: '知识库'},
   {value: 'add' as const, label: '添加案例'}
 ]
-export type LeftTab = (typeof LEFT_TABS)[number]['value'] | 'chart'
+/**
+ * 左侧一级 tab 的取值。
+ *
+ * ⚠️ `'test'` 是**遗留值**：2026-10-15 桌面那格「测试」tab 删掉了（PC 跟手机统一走
+ * K 线头上那颗烧瓶图标），但 `testMode` 的判据（`testArmed || leftTab === 'test'`）、
+ * 以及「老状态被收回来时把测试模式带走」那两处还要认它 —— 所以留在类型里，
+ * 只是 `LEFT_TABS` 不再摆出来（老链接 `?t=test` 由 `readTab` 映射到 `live`）。
+ */
+export type LeftTab = (typeof LEFT_TABS)[number]['value'] | 'chart' | 'test'
 
 /** 窄屏断点 —— 跟 CSS 里 ≤900px 那套对齐（手机上「K 线」是单独一格） */
 export const MOBILE_MAX = 900
@@ -249,6 +262,14 @@ export function stopRun(): void {
   closeStream = null
   loading.value = false
 }
+
+/**
+ * 上一次跑的是**哪一刻**（`testAt` 的值；`null` = 还没跑过 / 实时跑）。
+ *
+ * 只给 `confirmTestPoint` 用：同一个结束线点两次 ✓ 不该白烧两次模型调用。
+ * 不做成 ref —— 界面上没有任何地方要显示它（显示的是结果本身）。
+ */
+let lastRunAt: number | null = null
 
 /* ---------------- 测试模式：回到过去某一刻 ---------------- */
 
@@ -346,15 +367,22 @@ export function exitTestMode(): void {
 }
 
 /**
- * **✓**：结束线定好了 ⇒ 把人送到「预测结果」那一格（判断按钮和结论都在那儿）。
+ * **✓**：结束线定好了 ⇒ 切到「预测结果」**并当场把这一局跑起来**。
  *
- * ⚠️ 线是在**图上**点的：窄屏点完还杵在「K 线」那一格，不跳过去就跟没反应一样。
- *    （上一版是「点完自动跳」，2026-10-15 用户改成**点 ✓ 才跳** —— 见 `AnalyzeView` 的 `onPickPoint`。）
- * 没选线时不动（那颗 ✓ 也是灰的，按不动）。
+ * ⚠️ 线是在**图上**点的：窄屏点完还杵在「K 线」那一格，不跳过去就跟没反应一样
+ *    （上一版是「点完自动跳」，2026-10-15 用户改成**点 ✓ 才跳**）。
+ *
+ * ★ 为什么还顺手 `run()`：2026-10-15 用户实测后说「**点击✓跳转页面没有显示分析结果，有问题**」——
+ *   只切格的话，落过去是一片空的（还得自己再点一下「按这段行情判断」）。所以 ✓ = 去分析：
+ *   跳过去 + 立刻开跑，过程和结论都在那儿。
+ *   两条不重复烧钱的规矩：
+ *     · **正在跑**就不打断（`loading`）；
+ *     · **同一个结束线**刚跑过（结果还在屏幕上）也不重跑 —— `lastRunAt` 记着上一次跑的是哪一刻。
  */
 export function confirmTestPoint(): void {
   if (testPoint.value === null) return
   leftTab.value = 'live'
+  if (!loading.value && lastRunAt !== testAt.value) run()
 }
 
 /** 测试跑的「现在」= 结束线那一刻 */
@@ -422,6 +450,8 @@ export function run(): void {
   loading.value = true
 
   const at = testAt.value
+  /* 记下「这一跑看的是哪一刻」—— ✓ 拿它判「同一个结束线要不要重跑」（见 `confirmTestPoint`） */
+  lastRunAt = at
 
   closeStream = analyzeStream(
     s,
