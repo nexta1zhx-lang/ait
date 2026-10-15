@@ -3220,6 +3220,41 @@ const pointTip = computed(() =>
     : ''
 )
 
+/**
+ * 拖动时**上报**那一刻（最多一帧一次）。
+ *
+ * ⚠️ 为什么要限流：`commitLine` 每调一次，父组件（`AnalyzeView`）就把 `testPoint`
+ *    改一次 ⇒ 整个分析页跟着重渲染一遍。手指在屏上每秒能发 60~120 个 move，
+ *    全量上报在手机上就会觉得**线粘手 / 掉帧**（用户 2026-10-15：「按住之后可以任意拖动」）。
+ *    线本身的位置**不受影响**（`dragLineX` 每一下都立刻跟手，只重画那条线），
+ *    只是「判断时点」这类父组件状态按帧跟上。
+ * 抬手时必须 `commitLine` 立刻补一次（见 `onLineUp` / `onHandleUp`），不然最后一小段会丢。
+ */
+let pendingX: number | null = null
+let pendingRaf = 0
+
+function previewLine(x: number): void {
+  pendingX = x
+  if (pendingRaf) return
+  pendingRaf = requestAnimationFrame(() => {
+    pendingRaf = 0
+    const v = pendingX
+    pendingX = null
+    if (v !== null) commitLine(v)
+  })
+}
+
+/** 抬手 / Esc：把没来得及上报的那一下补上，并作废挂着的帧 */
+function flushLine(): void {
+  if (pendingRaf) {
+    cancelAnimationFrame(pendingRaf)
+    pendingRaf = 0
+  }
+  const v = pendingX
+  pendingX = null
+  if (v !== null) commitLine(v)
+}
+
 function onLineDown(e: PointerEvent) {
   if (!picking.value) return
   e.preventDefault()
@@ -3236,7 +3271,7 @@ function onLineMove(e: PointerEvent) {
   if (dragLineX.value === null) return
   e.preventDefault()
   dragLineX.value = localX(e)
-  commitLine(dragLineX.value)
+  previewLine(dragLineX.value)
 }
 
 /**
@@ -3258,7 +3293,9 @@ function onLineUp(e: PointerEvent) {
   e.preventDefault()
   dragLineX.value = null
   setPicking(false)
-  commitLine(x)
+  /* 抬手这一下定生死：挂着的帧作废，直接按最后那一下上报 */
+  pendingX = x
+  flushLine()
 }
 
 /* 已经放好的线：不用重选，直接拖它就行 */
@@ -3278,7 +3315,7 @@ function onHandleMove(e: PointerEvent) {
   if (dragLineX.value === null) return
   e.preventDefault()
   dragLineX.value = localX(e)
-  commitLine(dragLineX.value)
+  previewLine(dragLineX.value)
 }
 
 function onHandleUp(e: PointerEvent) {
@@ -3286,7 +3323,8 @@ function onHandleUp(e: PointerEvent) {
   if (x === null) return
   e.preventDefault()
   dragLineX.value = null
-  commitLine(x)
+  pendingX = x
+  flushLine()
 }
 
 /** 拖到一半按 Esc 就取消（挂在 window 上，不用先点图） */
@@ -3294,6 +3332,12 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key !== 'Escape') return
   if (picking.value) {
     dragLineX.value = null
+    /* 挂着的上报帧一起作废：否则松开前那一下会把线又挪回去 */
+    pendingX = null
+    if (pendingRaf) {
+      cancelAnimationFrame(pendingRaf)
+      pendingRaf = 0
+    }
     setPicking(false)
     return
   }
@@ -3642,7 +3686,17 @@ watch(() => props.pointAt, drawPoint)
  *    选线都停了（点完了 / 按 Esc / 父组件收掉），拖动状态本就不该再留着。
  */
 watch(picking, v => {
-  if (!v) dragLineX.value = null
+  if (v) return
+  dragLineX.value = null
+  /*
+   * 挂着的「上报那一帧」也要作废：不然它会在下一帧把 `dragLineX` 清掉之后
+   * 再补发一次位置（线已经收起来了，那一下纯属多余）。
+   */
+  pendingX = null
+  if (pendingRaf) {
+    cancelAnimationFrame(pendingRaf)
+    pendingRaf = 0
+  }
 })
 
 /*
@@ -3660,6 +3714,10 @@ onBeforeUnmount(() => {
   if (labelSyncRaf) cancelAnimationFrame(labelSyncRaf)
   labelSyncRaf = 0
   labelSyncKey = ''
+  /* 拖动结束线的「上报那一帧」同样要收（别在组件没了之后还去改状态） */
+  if (pendingRaf) cancelAnimationFrame(pendingRaf)
+  pendingRaf = 0
+  pendingX = null
   /* 订单信息那套（定时器 + 前后台监听）也要收掉，不然切页之后还在打交易所 */
   unbindOverlayPositions()
   if (orphanTimer) clearInterval(orphanTimer)

@@ -3551,9 +3551,16 @@ body.fixed-viewport .split {
   overflow: hidden;
 }
 
+/*
+ * 拖动模式：整层接管事件。
+ * ⚠️ `touch-action: none` 不能少（跟 `.range-line` 同一个坑）：这一层就是「在图上按住
+ *    → 结束线跟着手走」的那块面，触屏上不加它，手指一竖划就被浏览器判成页面滚动、
+ *    `pointercancel` 把这一拖掐断（用户 2026-10-15：「按住之后可以任意拖动」）。
+ */
 .range-layer.drawing {
   pointer-events: auto;
   cursor: crosshair;
+  touch-action: none;
 }
 
 .range-box {
@@ -3634,20 +3641,35 @@ body.fixed-viewport .split {
   border-left: 2px solid var(--warn, #d29922);
   pointer-events: auto;
   cursor: ew-resize;
+  /*
+   * ⚠️⚠️ `touch-action: none` **必须有**（2026-10-15 用户第二次报「还是不好拖，应该是按住之后
+   *    可以任意拖动」）：不加的话，手指在屏幕上拖动这条线时，浏览器会把纵向 / 斜向的那点位移
+   *    当成**页面滚动**，于是发 `pointercancel` —— 拖动当场断掉，只有横着慢慢挪才勉强动。
+   *    同仓库另外两个拖拽件（`.range-box .rb-*`、`.ord-labels .olb.draggable`）都带着它，
+   *    注释里也写着这个坑；唯独这条结束线漏了。
+   * 顺带把长按选中 / 系统菜单也关掉：线上挂着一块文字标签，长按会弹「拷贝」把拖动顶掉。
+   */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 /*
  * 2px 的线太细抓不住，铺一条透明命中区。
  * ⚠️ 2026-10-15 用户：「那个拖动的线……不好拖，适配一下」—— 原来 15px 在桌面用鼠标
- *    还行、在触屏上就偏窄（手指落点误差本来就大），放宽到 26px；线本身还是 2px，
- *    视觉上没变粗，只是**好抓**了。别再加宽：再宽就开始挡旁边的图表平移手势。
+ *    还行、在触屏上就偏窄（手指落点误差本来就大），放宽到 **44px**（≈ 一个标准触控目标，
+ *    跟其它可点元素同一档）。线本身还是 2px，视觉上没变粗，只是**好抓**。
+ *    别再加宽：再宽就开始挡旁边的图表平移手势。
+ * ⚠️ `touch-action: none` 跟线本体同一个理由（见上面 `.range-line` 的注释）。
  */
 .range-line-hit {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -13px;
-  width: 26px;
+  left: -22px;
+  width: 44px;
+  touch-action: none;
 }
 
 .range-line.live {

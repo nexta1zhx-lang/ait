@@ -5227,3 +5227,33 @@ ReferenceError: Cannot access 'openNotional' before initialization
 | 拖动中 / 抬手后 toast | **都是 null**（不再刷屏）✓ |
 | 抬手后 | `pointPicking=false`（线定住）✓ |
 | 点 ✓ | `leftTab='live'` **且 `loading=true`**（自动开跑）✓ |
+
+## 68. 结束线拖不动（真因：漏了 `touch-action: none`，2026-10-15 用户第二次报）
+
+用户：「**拖动线还是不好拖，应该是按住之后可以任意拖动**。」
+
+**真因**：`.range-line`（那条结束线）**没有 `touch-action: none`**。
+触屏上手指一拖，浏览器会把那点位移当成**页面滚动**，随即发 `pointercancel` ——
+`onLineUp` 收到就把这一拖结束了：表现就是「按住了，动两下就断，只有横着慢慢挪才勉强动」。
+
+同仓库另外两个拖拽件（`.range-box .rb-*`、`.ord-labels .olb.draggable`）**都带着这条**，
+`.olb` 那处的注释甚至写着「不加的话手指一竖划被当成页面滚动，拖不动」——
+唯独结束线漏了（§59 加这条线的时候没照抄）。
+
+**改动**（`style.css` + `KlineChart.vue`）：
+
+| 改哪 | 内容 |
+|---|---|
+| `.range-line` | 补 `touch-action: none`；顺带 `user-select: none` + `-webkit-touch-callout: none`（线上挂着一块文字标签，长按会弹系统菜单把拖动顶掉） |
+| `.range-line-hit` | 命中区 26px → **44px**（≈ 一个标准触控目标）；同样补 `touch-action: none` |
+| `.range-layer.drawing` | 补 `touch-action: none` —— 选线开着时整层就是那块拖动面，竖着拖同样会被判成滚动 |
+| `KlineChart` | 拖动中的「上报」按 `requestAnimationFrame` **限流**：`dragLineX` 每一下都立刻跟手（只重画那条线），但向上报「判断时点」最多一帧一次 —— 原来每个 move 都改父组件状态、整个分析页重渲染一遍，手机上就是「粘手」。抬手 / Esc / 卸载都把挂着的帧收干净（`flushLine()`） |
+
+**实测**（本机 dev + 真实鼠标事件 + 真 K 线数据，跑完已删）：
+
+| 检查 | 结果 |
+|---|---|
+| `touch-action`（线 / 命中区 / 拖动层） | 都是 **none** ✓，命中区宽 **44px** ✓ |
+| 选线开着时斜着拖（dy ±80px） | 线 160→210→260→320 一路跟手 ✓ |
+| 抓线斜着拖（含 y 偏离图外 200px） | 298→328→368→418→478 一路跟手 ✓ |
+| 抬手后 | `pointPicking=false`，最终那一刻**没丢**（rAF 补发）✓ |
