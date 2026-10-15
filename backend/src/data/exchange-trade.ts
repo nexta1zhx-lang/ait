@@ -692,8 +692,15 @@ export function symbolBudget(
   if (!(cap > 0)) return {cap: 0, existing, add, profitBudget, overflow: false}
   if (existing + add <= cap + 1e-9)
     return {cap, existing, add, profitBudget, overflow: false}
-  /* 超了 5 倍额度，但这一单整个都在「浮盈撑得起」的范围里 ⇒ 是加仓，放行 */
-  if (add <= profitBudget + 1e-9)
+  /*
+   * 超了 5 倍额度，但这一单整个都在「浮盈撑得起」的范围里 ⇒ 是加仓，放行。
+   *
+   * ⚠️ 这里留一点余量（0.5% + 0.5 USDT）：浮盈**每秒都在动**，而面板算「还能加多少」
+   *    用的是它自己那份实时流 —— 两边口径一样、时刻不一样，滑到满格再提交就被行情
+   *    抖一下拒掉（「明明显示还能加 59，点了说超额度」）。余量只对这一档生效，
+   *    5 倍额度那条主规则一点没放松。
+   */
+  if (add <= profitBudget * 1.005 + 0.5)
     return {cap, existing, add, profitBudget, overflow: false}
   return {cap, existing, add, profitBudget, overflow: true}
 }
@@ -753,11 +760,19 @@ export async function assertOrderLimits(
    *   例外是「用浮盈加仓」那一档（`profitBudget`），见 `symbolBudget`。
    */
   const minePos = mine ? positionFromRow(mine) : null
+  /*
+   * ⚠️⚠️ 字段名是 **`unRealizedProfit`（大写 R）** —— 币安 `positionRisk` 就是这么拼的
+   *   （账号级那个总数才是小写 r 的 `totalUnrealizedProfit`；同一文件里
+   *   `positionFromRow()` 用的就是这个大写 R 的）。
+   *   2026-10-15 用户报「浮盈加不了仓」：这里原来写的小写 `unrealizedProfit` ⇒ 恒为
+   *   `undefined` ⇒ `profitBudget` 恒 0 ⇒ 一过 5 倍额度就被拒（报错里那句
+   *   「浮盈可用额度约 0.00 USDT」就是它），四两的浮盈在规则里等于不存在。
+   */
   const budget = symbolBudget(
     equity,
     minePos?.notional ?? 0,
     add,
-    n(mine?.unrealizedProfit),
+    n(mine?.unRealizedProfit ?? mine?.unrealizedPnl),
     n(mine?.leverage)
   )
   if (budget.overflow) {
