@@ -16,10 +16,12 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/crypto-advisor}"
 REPO="${1:-}"
 
-c()   { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+# STEP 记「现在跑到哪一步」：发布失败时 Telegram 通知里要说卡在这儿（见下面 on_exit）
+STEP='脚本启动'
+c()   { STEP="$*"; printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()  { printf '    \033[1;32m✓\033[0m %s\n' "$*"; }
 warn(){ printf '    \033[1;33m!\033[0m %s\n' "$*"; }
-die() { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+die() { STEP="$*"; printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 [[ "$(uname -s)" == Linux ]] || die '这个脚本要在服务器（Linux）上跑，本机是 macOS'
 
@@ -30,6 +32,94 @@ elif sudo -n true 2>/dev/null; then
 else
   die '需要 sudo 权限（当前用户无法免密 sudo）'
 fi
+
+# ---------------------------------------------------------------- 0. 上线通知
+# 「每次推送上线，服务器发一条 Telegram」（2026-10-15 用户要求）。
+# 凭据跟可用性看门狗共用一份：/etc/ait-alert.env（root 600，不进 git）。
+# 提交信息由 release.sh 按环境变量带过来（见 docs/DEPLOY.md「上线通知」）：
+#   RELEASE_SHA / RELEASE_BRANCH_B64 / RELEASE_SUBJECT_B64 / RELEASE_STARTED_AT
+# ⚠️ 通知**永远不许影响发布**：凭据缺、网络不通、Telegram 报错 —— 一律只打一行警告。
+DEPLOY_T0=$(date +%s)
+HEALTH_STATE='（没跑到自检）'
+
+# 从 /etc/ait-alert.env 抠一个变量：不 source、不 eval
+# （deploy.sh 是 `sudo env PREBUILT=1 bash …` 跑的，读那个 root 600 的文件要靠 $SUDO）
+tg_part() {
+  $SUDO sh -c 'cat /etc/ait-alert.env 2>/dev/null' 2>/dev/null \
+    | sed -n "s/^$1=//p" | head -1 | tr -d '"' | tr -d "'" | tr -d ' \r'
+}
+
+tg_send() {
+  local text="$1" token chat resp curl_rc=0
+  token="$(tg_part TELEGRAM_BOT_TOKEN)"
+  chat="$(tg_part TELEGRAM_CHAT_ID)"
+  if [[ -z "$token" || -z "$chat" ]]; then
+    warn '没配 Telegram（/etc/ait-alert.env 里缺 BOT_TOKEN / CHAT_ID），跳过上线通知'
+    return 0
+  fi
+  # 不带 parse_mode：提交信息是外面来的，塞 HTML 还得转义，不值当。
+  # URL（含 bot token）通过 stdin 配置传给 curl，不放进进程参数或错误日志。
+  resp="$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" |
+    curl -fsS --max-time 15 --config - -X POST \
+      --data-urlencode "chat_id=${chat}" \
+      --data-urlencode "text=${text}" 2>/dev/null)" || curl_rc=$?
+  if (( curl_rc != 0 )); then
+    warn "Telegram 上线通知请求失败（curl 退出码 ${curl_rc}，详情省略以保护凭据）"
+    return 0
+  fi
+  if [[ "$resp" == *'"ok":true'* ]]; then
+    ok '已发 Telegram 上线通知'
+  else
+    warn 'Telegram API 未确认通知成功（响应详情省略以保护凭据，不影响发布）'
+  fi
+}
+
+# 成功、失败都从 EXIT trap 这一个出口走 —— 只有它能同时拿到退出码和上面记的 STEP
+on_exit() {
+  local rc=$? dur trip subj head when
+  set +e
+  dur=$(( $(date +%s) - DEPLOY_T0 ))
+  trip=''
+  if [[ "${RELEASE_STARTED_AT:-}" =~ ^[0-9]+$ ]]; then
+    trip=" · 整趟 $(( $(date +%s) - RELEASE_STARTED_AT ))s"
+  fi
+  subj=''
+  if [[ -n "${RELEASE_SUBJECT_B64:-}" ]]; then
+    subj="$(printf '%s' "$RELEASE_SUBJECT_B64" | base64 -d 2>/dev/null)"
+  fi
+  if [[ -n "${RELEASE_SHA:-}" ]]; then
+    head="提交：${RELEASE_SHA}${subj:+ $subj}"
+    branch=''
+    if [[ -n "${RELEASE_BRANCH_B64:-}" ]]; then
+      branch="$(printf '%s' "$RELEASE_BRANCH_B64" | base64 -d 2>/dev/null)"
+    fi
+    if [[ -n "$branch" ]]; then head+=$'\n'"分支：${branch}${trip}"; fi
+  else
+    head='提交：（手动部署，没带提交信息）'
+  fi
+  when="$(TZ=Asia/Shanghai date '+%m-%d %H:%M') 北京"
+  if (( rc == 0 )); then
+    if [[ "$HEALTH_STATE" == ✅* ]]; then
+      tg_send "🚀 已上线 bitcoooin.cn
+${head}
+自检：${HEALTH_STATE} · 部署 ${dur}s
+${when}"
+    else
+      tg_send "⚠️ 部署完成，但有告警：bitcoooin.cn
+${head}
+自检：${HEALTH_STATE} · 部署 ${dur}s
+${when}"
+    fi
+  else
+    tg_send "❌ 部署失败：bitcoooin.cn
+${head}
+卡在：${STEP//$'\n'/ }
+退出码 ${rc} · 部署 ${dur}s
+${when}"
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 
 # ---------------------------------------------------------------- 1. swap
 mem_mb=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
@@ -159,13 +249,16 @@ if [[ -s /tmp/ca-health.json ]]; then
   echo
   # HTTP 200 只说明进程起来了，数据库通不通要看 health 里的 ok
   if grep -q '"ok":false' /tmp/ca-health.json; then
+    HEALTH_STATE='⚠️ 容器起来了，但数据库连不上'
     warn '容器起来了，但数据库连不上（health 里 ok=false）—— 先看这两个日志：'
     printf '      docker compose -f docker-compose.prod.yml logs --tail=80 db\n'
     printf '      docker compose -f docker-compose.prod.yml logs --tail=80 app\n'
   else
+    HEALTH_STATE='✅ 应用 + 数据库正常'
     ok '应用已就绪（数据库正常）'
   fi
 else
+  HEALTH_STATE='⚠️ 健康检查（/api/health）没响应'
   warn '本地健康检查没通过，看日志：'
   printf '      docker compose -f docker-compose.prod.yml logs --tail=80 app\n'
 fi

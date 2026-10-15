@@ -4504,7 +4504,10 @@ async function route(
           creds,
           str(body.symbol, 'BTCUSDT'),
           Number(body.quantity),
-          body.price === undefined ? undefined : Number(body.price)
+          body.price === undefined ? undefined : Number(body.price),
+          /* 方向要传：`assertOrderLimits` 拿它判「这是加仓还是开仓」——
+             加仓不吃 5 倍额度（用户 2026-10-15），只受全账户 11 倍约束 */
+          side
         )
       }
       const order = await placeOrder(

@@ -695,20 +695,31 @@ export function symbolBudget(
  * 开单前的体检（三条上限）。**只拦开仓** —— 减仓 / 平仓不走这里。
  *
  * ① **单笔开单名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益；
- * ② **这个币的累计名义 ≤ 5 × 权益**（`symbolBudget`，**没有例外** —— 加仓同一把尺子）；
+ * ② **这个币的累计名义 ≤ 5 × 权益**（`symbolBudget`）；
  * ③ **账户总杠杆 ≤ 11 倍**：(现有持仓名义 + 这一单) ÷ 账户权益。
+ *
+ * ★★ 2026-10-15 用户最后定的口径：「**加仓不算在 5 倍内，但是总杠杠还是 11 最大**」——
+ *   所以 ①②（都是 5 倍那条尺子）**加仓整段跳过**，加仓只剩 ③ + 交易所的保证金；
+ *   一个币理论上能放到 11 × 权益（用户当面要的）。判「是不是加仓」看持仓方向：
+ *   这个币已经有仓位、方向跟这一单一致 = 加仓。
  *
  * 三条共用同样两发请求（一次 `positionRisk` + 一次余额），所以合在一个函数里。
  * 权益读不到 / 为 0 ⇒ **不拦** —— 那种单子交易所自己会因保证金不足拒掉，别在这儿误伤。
  *
  * @param quantity 这一单的数量（基础币）
  * @param price    参考价：限价单传委托价，市价单传面板的参考价；都没有就退到标记价
+ * @param side     这一单的方向 —— 判「加仓」要用：只有「已经有同向仓位」才算加仓
+ *                 （反向的是减仓，那一路根本不走这个函数）。
+ *                 ⚠️ 路由那层传下来的是 **`long` / `short`**（`server.ts` 里归一过），
+ *                    所以这里 `buy`/`sell`、`long`/`short` 两套写法都认。
+ *                    （第一版只认 `buy` ⇒ 判据恒 false ⇒ 豁免不生效，实测踩到。）
  */
 export async function assertOrderLimits(
   c: ExchangeCredentials,
   rawSymbol: string,
   quantity: number,
-  price?: number
+  price?: number,
+  side?: string
 ): Promise<void> {
   assertTradable(c)
   const spec = await specFor(c, rawSymbol)
@@ -733,30 +744,45 @@ export async function assertOrderLimits(
     price !== undefined && price > 0 ? price : Number(mine?.markPrice) || 0
   const add = Math.max(0, quantity) * (Number.isFinite(ref) ? ref : 0)
 
-  const ratio = orderEquityRatio(add, equity)
-  if (ratio !== null && ratio > MAX_ORDER_EQUITY_RATIO) {
-    throw new Error(
-      `这一单名义金额约 ${add.toFixed(0)} USDT，是账户权益（${equity.toFixed(2)}）的 ` +
-        `${ratio.toFixed(1)} 倍，超过单笔上限 ${MAX_ORDER_EQUITY_RATIO} 倍 —— 数量取小一点再开`
-    )
-  }
-
-  /*
-   * ② 这个币的**累计**额度：已开的 + 这一单 ≤ 5 × 权益。
-   *   ⚠️ **加仓同一把尺子，没有例外**（用户 2026-10-15：「最多也是按照 5 倍来」）——
-   *      见 `symbolBudget` 那段：浮盈是通过「权益」进来的，不再另开一份预算，
-   *      否则总量会突破 5 倍权益那条原则。
-   */
   const minePos = mine ? positionFromRow(mine) : null
-  const budget = symbolBudget(equity, minePos?.notional ?? 0, add)
-  if (budget.overflow) {
-    throw new Error(
-      `${spec.symbol} 这个币的 ${MAX_ORDER_EQUITY_RATIO} 倍额度已经用满：` +
-        `已开 ${budget.existing.toFixed(0)} + 本单 ${budget.add.toFixed(0)} = ` +
-        `${(budget.existing + budget.add).toFixed(0)} USDT，` +
-        `超过额度 ${budget.cap.toFixed(0)}（${MAX_ORDER_EQUITY_RATIO} × 权益 ${equity.toFixed(2)}）` +
-        ` —— 先把这个币的仓位平掉一点再加`
-    )
+  /*
+   * 这一单是**加仓**吗：这个币已经有仓位，而且方向跟这一单一致
+   * （多单再买 / 空单再卖 ⇒ 加仓；反向的那是减仓，前端走 `closePositions`，不进这里）。
+   *
+   * ★ 2026-10-15 用户：「**加仓不算在 5 倍内，但是总杠杠还是 11 最大**」——
+   *   所以下面 ①（单笔 5 倍）②（单币累计 5 倍）**加仓整段跳过**，
+   *   加仓只剩 ③（全账户 ≤ 11 倍）+ 交易所那条保证金。
+   *   ⚠️ 代价说清楚：一个币理论上能放到 **11 × 权益**（整账户压在它身上），
+   *      比开仓那 5 倍大一倍多 —— 这是用户要的（那天他先试过「浮盈另开预算」，
+   *      嫌那样总量会破 5 倍，最后定成这条）。
+   */
+  const dir = String(side ?? '').toLowerCase()
+  const wantSide: 'long' | 'short' | '' =
+    dir === 'buy' || dir === 'long' ? 'long' : dir === 'sell' || dir === 'short' ? 'short' : ''
+  const isAdd = !!minePos && wantSide !== '' && minePos.side === wantSide
+
+  if (!isAdd) {
+    const ratio = orderEquityRatio(add, equity)
+    if (ratio !== null && ratio > MAX_ORDER_EQUITY_RATIO) {
+      throw new Error(
+        `这一单名义金额约 ${add.toFixed(0)} USDT，是账户权益（${equity.toFixed(2)}）的 ` +
+          `${ratio.toFixed(1)} 倍，超过单笔上限 ${MAX_ORDER_EQUITY_RATIO} 倍 —— 数量取小一点再开`
+      )
+    }
+
+    /*
+     * ② 这个币的**累计**额度：已开的 + 这一单 ≤ 5 × 权益（**只拦开仓**，见上面 `isAdd`）。
+     */
+    const budget = symbolBudget(equity, minePos?.notional ?? 0, add)
+    if (budget.overflow) {
+      throw new Error(
+        `${spec.symbol} 这个币的 ${MAX_ORDER_EQUITY_RATIO} 倍额度已经用满：` +
+          `已开 ${budget.existing.toFixed(0)} + 本单 ${budget.add.toFixed(0)} = ` +
+          `${(budget.existing + budget.add).toFixed(0)} USDT，` +
+          `超过额度 ${budget.cap.toFixed(0)}（${MAX_ORDER_EQUITY_RATIO} × 权益 ${equity.toFixed(2)}）` +
+          ` —— 要加仓就点面板上的「加仓」（加仓不吃这 5 倍额度，只看全账户 ${MAX_ACCOUNT_LEVERAGE} 倍）`
+      )
+    }
   }
 
   const after = totalLeverageAfter(notionals, equity, add)

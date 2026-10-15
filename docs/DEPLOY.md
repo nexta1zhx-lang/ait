@@ -415,20 +415,27 @@ sudo docker logs --since 24h hbbs | grep -E "update_pk|IP change"
 
 ## 后续更新
 
-> ### 🛑 发布只能由用户**手工命令**（2026-10-07 用户明确要求）
+> ### 🛑 发布怎么授权（2026-10-15 起）
 >
-> **任何助手 / 自动化都不要自己跑 `scripts/release.sh`**（`-y` 更不行），
-> 也不要 ssh 过去手动 `deploy.sh` / `docker compose restart app`。
-> 助手只做到「**改完 → 本地验证 → commit → push**」，然后**停下等用户说「上线」**。
-> 发布是个有副作用的动作（重建镜像 + 重启容器 + 清 `/opt` 旧文件），
-> 必须由人按下。
+> **2026-10-07 的规矩**：发布只能由用户手工命令 —— 助手「改完 → 本地验证 → commit → push」
+> 就停下，等用户说「上线」。
+>
+> **2026-10-15 用户放开**：「**从这次开始推送允许**」—— 验证通过后，助手可以自己
+> `git push` + 跑 `scripts/release.sh` 上线，不用每次再等一句「上线」。
+> 但两条硬约束还在：
+>
+> 1. **不许加 `-y`**：最后那句确认必须**由人按下**（助手要用 PTY 驱动，看到 `[y/N]` 才写 `y`）；
+> 2. **不许跳过验证**：类型检查 / 构建 / 真单验证（`test: true`）该跑还得跑，跑不过就不发。
+>
+> 发布是有副作用的动作（重建镜像 + 重启容器 + 清 `/opt` 旧文件）。
+> 每次上线服务器会推一条 Telegram（见下面「上线通知」）—— 发没发过、发的哪一版，有据可查。
 
 **更新 = 本机提交 → 打包 → 上传 → 服务器上重跑 `scripts/deploy.sh`**。
 在本机跑一条命令就行（**不用 `git pull`**：tar 把工作区直接搬过去）：
 
 ```bash
 cd /Users/nexta1/Documents/预测
-bash scripts/release.sh            # 会问一句确认；加 -y 不问，加 --dry-run 只看不发
+bash scripts/release.sh            # 会问一句确认；--dry-run 只看不发
 ```
 
 `scripts/release.sh` 按顺序做：**先要求工作区已提交**（有未提交改动直接停，加 `--no-check` 可跳过）
@@ -713,6 +720,45 @@ bash scripts/release.sh -y       # 打包上传（Caddyfile 没变就不会重�
 ⚠️ 第一次加这个挂载**必须重建 caddy**，否则容器里没有 `/srv/dl`。
 现在这一步是**改了 Caddyfile 才会**触发（release.sh 比对解包前后的 md5）——
 所以「只是为了换 APK」的发布不用重建 caddy，文件是 bind mount 的、立刻生效。
+
+## 上线通知（每次发布 → Telegram，2026-10-15 用户要求）
+
+「每次推送上线服务器发一条 telegram 通知」—— `scripts/deploy.sh` 收尾时在**服务器那一侧**
+发一条，成功一条、失败一条：
+
+```text
+🚀 已上线 bitcoooin.cn
+提交：c74c423 止损触发基准换成最新成交价
+分支：main · 整趟 52s（部署 41s）
+自检：✅ 应用 + 数据库正常
+10-15 22:41 北京
+```
+
+失败那条会带上**卡在哪一步**和退出码（`c '…'` 的标题、或 `die` 的原话）：
+
+```text
+❌ 部署失败：bitcoooin.cn
+提交：c74c423 止损触发基准换成最新成交价
+卡在：Caddyfile 语法有问题，改完再跑一次
+退出码 1 · 部署 8s
+```
+
+- **提交信息是 `release.sh` 带过去的**（`RELEASE_SHA` / `RELEASE_BRANCH_B64` /
+  `RELEASE_SUBJECT_B64` / `RELEASE_STARTED_AT`，见 `release.sh` 里「第 8~11 个参数」）。
+  分支名和提交信息走 base64：里面可能有单引号 / 反斜杠，直接塞进 ssh 那条命令行会把引号拆坏。
+  手动在服务器上跑 `deploy.sh` 没这几个变量 —— 通知里就写「手动部署」，其余照发。
+- **凭据复用告警那份** `/etc/ait-alert.env`（root 600，不进 git）。`deploy.sh` 是
+  `sudo env PREBUILT=1 bash …` 跑的，读得到；脚本里没 source 那个文件，而是用
+  `sed -n 's/^KEY=//p'` 抠出来（不 eval 外部文件）。
+- ⚠️ **通知失败绝不影响发布**：凭据缺 / 网络不通 / Telegram 报错，都只打一行警告，
+  退出码还是原来的 —— `release.sh` 只看 `DEPLOY_EXIT`。
+- 只试通知、不重新部署：
+
+```bash
+sudo sh -c '. /etc/ait-alert.env
+  curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=测试：上线通知"'
+```
 
 ## 告警（可用性看门狗 → Telegram，2026-10-14）
 

@@ -3,9 +3,11 @@
 # 本机一键发布（在自己电脑上跑，不用先登服务器）：
 #   打包 → 上传 → 服务器清旧解包 → 重跑 scripts/deploy.sh → 公网验收
 #
-# 🛑🛑 **只由用户手工命令时才能跑**（2026-10-07 用户明确要求）。
-#    助手 / 自动化不要自己执行这个脚本（更不要加 `-y`）—— 做到「本地验证 + commit + push」
-#    就停下，等用户说上线。详见 docs/DEPLOY.md 顶部那段。
+# 🛑 别加 `-y`：最后那句确认要**人**按下（编辑器里用 PTY 驱动，看到 `[y/N]` 才写 `y`）。
+#
+#    2026-10-07：只由用户手工命令时才能跑。
+#    2026-10-15 用户放开：「从这次开始推送允许」——**验证通过后助手可以直接发**，
+#    不用每次再等一句「上线」。仍然不许跳过验证，也不许离开确认那一步。详见 docs/DEPLOY.md。
 #
 # 用法（在仓库根目录跑）：
 #   bash scripts/release.sh              # 打包 + 上传 + 部署（会问一句确认）
@@ -117,6 +119,15 @@ if (( CHECK )); then
   fi
   ok "代码已保存：$(git log -1 --format='%h %s')"
 fi
+
+# 上线通知（服务器侧 deploy.sh 发 Telegram）要的提交信息。
+# ⚠️ 提交信息里可能有单引号 / 反斜杠 —— 直接塞进 ssh 那条命令行会把引号拆坏，
+#    所以先 base64（只有 [A-Za-z0-9+/=]），到服务器上再解。
+REL_SHA="$(git log -1 --format=%h 2>/dev/null || true)"
+REL_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+REL_BRANCH_B64="$(printf '%s' "$REL_BRANCH" | base64 | tr -d '\n' || true)"
+REL_SUBJECT_B64="$(git log -1 --format=%s 2>/dev/null | base64 | tr -d '\n' || true)"
+REL_T0="$(date +%s)"
 
 # ---------------------------------------------------------------- 0b. 本机预构建
 # 2026-10-07：这一步是为了**别让服务器去编译**。原来每次发布都在服务器上跑
@@ -253,7 +264,7 @@ fi
 # ---------------------------------------------------------------- 5. 远端：检查 → 清旧 → 解包 → 核对 → 部署
 c '远端执行（清旧 → 解包 → 核对 → scripts/deploy.sh）'
 ssh "${SSH_OPTS[@]}" -i "$KEY" "$SSH_USER@$HOST" \
-  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR' '1' '$POLL_TIMEOUT'" <<'REMOTE'
+  "bash -s -- '$APP_DIR' '$REMOTE_TAR' '$LOCAL_MD5_TS' '$LOCAL_MD5_DEPLOY' '$REMOTE_APK_DIR' '1' '$POLL_TIMEOUT' '$REL_SHA' '$REL_BRANCH_B64' '$REL_SUBJECT_B64' '$REL_T0'" <<'REMOTE'
 set -euo pipefail
 APP_DIR="$1"; TAR="$2"; WANT_TS="$3"; WANT_DEPLOY="$4"; APK_STAGE="$5"
 # 第 7 个参数：等部署结束的上限（秒）—— 超时只报「可能还在跑」，不杀进程
@@ -261,6 +272,8 @@ POLL_TIMEOUT="${7:-1800}"
 # 第 6 个参数：PREBUILT —— 包里有本机构建好的 backend/dist / frontend/dist，
 # 让 compose 把 build-arg 传进 Dockerfile 跳过服务器上的编译（见上面「本机预构建」）。
 PREBUILT="${6:-0}"
+# 第 8~11 个参数：上线通知的提交信息（原样透传给 deploy.sh，见 docs/DEPLOY.md「上线通知」）
+REL_SHA="${8:-}"; REL_BRANCH_B64="${9:-}"; REL_SUBJECT_B64="${10:-}"; REL_T0="${11:-}"
 
 echo "==> 前置检查"
 [[ -d "$APP_DIR" ]] || { echo "✗ $APP_DIR 不存在 —— 首次部署请按 docs/DEPLOY.md 手动走一遍" >&2; exit 1; }
@@ -375,7 +388,8 @@ fi
 #    落文件之后客户端只是 `tail`，断了也不影响构建：构建是 setsid 出来的，不挂在 ssh 会话上。
 DEPLOY_LOG=/tmp/ca-deploy.log
 rm -f "$DEPLOY_LOG"
-setsid bash -c "sudo env PREBUILT=$PREBUILT bash scripts/deploy.sh > $DEPLOY_LOG 2>&1; echo DEPLOY_EXIT=\$? >> $DEPLOY_LOG" </dev/null >/dev/null 2>&1 &
+# RELEASE_*：给 deploy.sh 收尾那条 Telegram 上线通知用（值都是 shell 安全的）
+setsid bash -c "sudo env PREBUILT=$PREBUILT RELEASE_SHA='$REL_SHA' RELEASE_BRANCH_B64='$REL_BRANCH_B64' RELEASE_SUBJECT_B64='$REL_SUBJECT_B64' RELEASE_STARTED_AT='$REL_T0' bash scripts/deploy.sh > $DEPLOY_LOG 2>&1; echo DEPLOY_EXIT=\$? >> $DEPLOY_LOG" </dev/null >/dev/null 2>&1 &
 seen=0
 waited=0
 while true; do
