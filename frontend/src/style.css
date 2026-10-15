@@ -3317,29 +3317,18 @@ body.fixed-viewport .split {
 }
 
 /*
- * ★ 2026-10-15 用户：「激活改为转动态效果」。
+ * 亮着（`.on`）= 这个币正在被每 15 分钟问一次。
  *
- * 亮着（`.on`）= 这个币正在被每 15 分钟问一次。静态的蓝说不清"跑着"这件事，
- * 让那颗循环箭头**自己转**才一眼看得出来；停下来就是没在跑。
- * ⚠️ 只转 `svg`，不转按钮（转按钮会把 30×28 的框一起带着晃）。
- * ⚠️ 尊重 `prefers-reduced-motion`：晕动症的人看到一直转的图标会难受。
+ * ★ 2026-10-15 当天改了两回：先按用户说的「激活改为转动态效果」让它转，
+ *   当天又被否：「**不要一直转**，图标改为那种分析上下折线的那种样式」——
+ *   一直转的东西挂在图上一整天太吵，而且循环箭头那个形状天生就该转、放着不转也怪。
+ *   现在：**图标是折线（静态）**，在跑只靠颜色。
+ *   （想让它"活着"又不吵，可以做成**一次性**的脉冲：加上去那一刻亮一下。
+ *     真要做的话，加 `@keyframes` + 挂 `.just-on`，别用 `infinite`。）
  */
 .chart-head .tk-persist.on {
   color: var(--blue);
   border-color: var(--blue);
-}
-.chart-head .tk-persist.on svg {
-  animation: tk-persist-spin 1.8s linear infinite;
-}
-@keyframes tk-persist-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .chart-head .tk-persist.on svg {
-    animation: none;
-  }
 }
 
 /* ✓：结束线定好了才能按（没点线时灰着，`disabled`） */
@@ -7551,7 +7540,7 @@ button.badge:disabled {
    * 跟旁边那颗「＋」对齐；文案（分析 / 分析中… / 按这段行情判断）走 `title` + `aria-label`。
    */
   /*
-   * ★ 2026-10-15：持久化分析那颗循环箭头挪到这一行、**闪电左边**（用户：「自动化图标
+   * ★ 2026-10-15：持久化分析那颗图标挪到这一行、**闪电左边**（用户：「自动化图标
    *   放在闪电旁边」）—— 于是"顶到行尾"这件事从闪电交给它（它在前面），
    *   闪电自己不再吃 `margin-left: auto`（两个都吃会在它们中间撕一道缝）。
    */
