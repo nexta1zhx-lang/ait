@@ -58,8 +58,9 @@ import {
   chartRange,
   chartTf,
   clearChartRange,
-  clearTestPoint,
+  confirmTestPoint,
   error,
+  exitTestMode,
   leftTab,
   loading,
   pickSymbol,
@@ -71,14 +72,14 @@ import {
   setPointPicking,
   showResult,
   showSteps,
+  startTestMode,
   steps,
   symbol,
   testArmed,
   testAt,
   testBarTime,
   testMode,
-  testPoint,
-  toggleTestMode
+  testPoint
 } from '../analyze'
 import {
   balanceBadge,
@@ -553,22 +554,18 @@ function onPickRange(v: {from: number; to: number; bars: number}) {
   rangeDrawing.value = false
 }
 
-/** 图上点了结束线 → 记下那一刻，顺手退出选线模式，并把人送到「预测结果」 */
+/**
+ * 图上点了结束线 → 记下那一刻，**停掉选线但不跳格**。
+ *
+ * ★ 2026-10-15 用户重做测试流程：「点击测试图标消掉，变成勾和叉……确定完线后，
+ *   **点击 ✓ 跳转分析**」——所以这里不再自动跳「预测结果」（上一版是自动跳），
+ *   跳格交给 K 线头上那颗 ✓（`confirmTestPoint`）。线刚点完，人还在图上，
+ *   那颗 ✓ 就在同一行的头部，够得着；给一句提示说明下一步点哪儿。
+ */
 function onPickPoint(at: number) {
   testPoint.value = at
   pointPicking.value = false
-  /*
-   * 用户 2026-10-15：「选择线后跳转预测结果」。
-   *
-   * 线是在**图上**点的，而结论不在图那一格（窄屏图单独一格；宽屏人可能正停在
-   * 「合约行情」上），点完不切过去就像「点了没反应」。所以点定就切到「预测结果」：
-   * 那儿有结束线、判断按钮和结论。本来就在「预测结果 / 测试」就不动
-   * （宽屏那格「测试」是同一套渲染，切走反而把测试模式的那格 tab 弄没了）。
-   *
-   * ⚠️ 切过去之后还得是**测试跑**：靠 `analyze.ts` 的 `testArmed`（图标进去的那个状态）
-   *    撑住 `testMode` —— 否则 `testAt` 变 null，这一局会被当成实时跑存档。
-   */
-  if (leftTab.value !== 'live' && leftTab.value !== 'test') leftTab.value = 'live'
+  showToast('结束线已定 · 点右上角的 ✓ 去分析', 'ok')
 }
 
 /* ---------------- 结论渲染 ---------------- */
@@ -678,78 +675,31 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
         </div>
 
         <!--
-          ② 预测结果 / 测试（两块共用同一套渲染：测试多一块「结束线」面板）
+          ② 预测结果 / 测试（两块共用同一套渲染）
           ★ 2026-10-12 合并：这一格原来是「实时分析」，下面是**并列**的另一格「预测历史」；
             用户要求「实时分析和预测历史合并改为预测结果」—— 于是历史列表挂到这一格末尾，
             一次滚动看全：本次结论在上、以往记录在下。
+          ★ 2026-10-15 用户重做测试流程：「预测界面**只添加一个测试模式**」——
+            原来这儿那块「测试 · 结束线」面板（结束线那行 + 选结束线 / 重选 / 清掉 三颗按钮）
+            **整块删掉**：选线、重选、退出全走 K 线头上那对 ✓ / ✗（见下面 `tk-test` 那一段），
+            这一格只剩一条「测试模式」标识。
         -->
         <template v-if="leftTab === 'live' || leftTab === 'test'">
           <div class="scroll-body">
-            <!-- 测试模式：在图上点一根，定下「我看到哪一刻」 -->
-            <section v-if="testMode" class="panel test-panel">
-              <h2>
-                测试 · 结束线
-                <span class="tag">不存档</span>
-              </h2>
-              <div class="follow-row" :class="{picked: testPoint !== null}">
-                <span class="k">结束线</span>
-                <span class="v">
-                  <!-- 用 testBarTime 判空（它和 testPoint 同生同灭），这样 bjTime 的参数才是 number -->
-                  <template v-if="testBarTime !== null">
-                    看到 {{ bjTime(testBarTime) }} 这根收盘
-                    <em v-if="testPoint !== null">
-                      判断时点 = {{ bjTime(testPoint) }}
-                    </em>
-                  </template>
-                  <template v-else-if="pointPicking">
-                    在图上点一根…
-                    <em>点一下就定好了（按 Esc 取消）</em>
-                  </template>
-                  <template v-else>
-                    还没选
-                    <em>点「选结束线」开始</em>
-                  </template>
-                </span>
-
-                <button
-                  type="button"
-                  class="ghost tiny range-btn"
-                  :class="{on: pointPicking}"
-                  :title="
-                    pointPicking
-                      ? '在图上点一根 K 线，点中就算选好（Esc 取消）'
-                      : '在图上点一根 K 线，定下「我看到这一根收盘」'
-                  "
-                  @click="setPointPicking(!pointPicking)"
-                >
-                  {{
-                    pointPicking
-                      ? '取消'
-                      : testPoint !== null
-                        ? '重选'
-                        : '选结束线'
-                  }}
-                </button>
-                <button
-                  v-if="testPoint !== null"
-                  type="button"
-                  class="ghost tiny"
-                  title="清掉结束线，重新选"
-                  @click="clearTestPoint"
-                >
-                  清掉
-                </button>
-              </div>
-            </section>
-
             <!--
-              测试模式：必须一眼看出来这不是实时那一局。
-              ⚠️ 2026-10-15 用户：「把测试下面小字描述去掉…只保留测试模式」——
-                 原来下面还有一行小字解释（AI 看得到什么 / 哪些字段留空 / 不存档），
-                 现在只留这一行「测试模式 · 判断时点」。
+              测试模式：整格**只有这一条**（用户 2026-10-15：「只添加一个测试模式」）。
+              ⚠️ 早先这里是 `v-if="testAt"`（跑完才有），现在按 `testMode` 出 ——
+                 测试模式一开就挂上，一眼看得出来「这一局不存档」：
+                   · 还没点线 ⇒ 提示去图上点一根；
+                   · 点好了   ⇒ 报出结束线那一刻；
+                   · 跑过之后 ⇒ 再补一句判断时点。
             -->
-            <div v-if="testAt" class="test-banner">
-              <b>⏱ 测试模式 · 判断时点 {{ bjTime(testAt) }}</b>
+            <div v-if="testMode" class="test-banner">
+              <b v-if="testBarTime !== null"
+                >⏱ 测试模式 · 结束线 {{ bjTime(testBarTime) }}</b
+              >
+              <b v-else>⏱ 测试模式 · 在图上点一根 K 线定结束线</b>
+              <em v-if="testAt">判断时点 {{ bjTime(testAt) }}</em>
             </div>
 
             <!--
@@ -1002,32 +952,62 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
                   币种那一行不放它了，见下面 `#price-end` 插槽。
                 -->
                 <!--
-                  测试模式（用户 2026-10-15：「移动端开单分析的测试功能加上，配置旁加上测试的图标，
-                  选择线后跳转预测结果」）——
+                  测试模式（2026-10-15 用户重做：「**点击测试图标消掉，变成勾和叉**……
+                  确定完线后，点击 ✓ 跳转分析，点击 ✗ 关掉」）——
                   挨着「配置」，**两端都露**：宽屏它跟左边那格「测试」tab 等价，
                   窄屏没有那一格（tab 行摆不下第 5 格），这就是唯一的入口。
-                  点一下 = 进测试模式 + 开始等你在图上点结束线（窄屏顺带切到「K 线」那格）；
-                  已经开着时点一下 = 退出（连选线一起停掉）。
-                  亮起来（`.on`）就代表「这一局是测试跑、不存档」，跟面板顶上那条横幅一个意思。
+                    · 没在测试模式 ⇒ 一颗烧瓶；点一下**它自己消失**，原位换成 ✓ / ✗；
+                    · ✓ = 结束线定好了 ⇒ 跳「预测结果」看结论（没点线时是灰的、按不动）；
+                    · ✗ = 关掉测试模式，连结束线一起清（线不会赖在图上）。
+                  测试模式本身的状态靠「在图上那条结束线 + 预测结果里那条测试模式标识」看，
+                  图标不再有「亮着」这一档（用户要的就是勾和叉，不是开关）。
                 -->
-                <button
-                  type="button"
-                  class="ghost tiny tk-test"
-                  :class="{on: testMode}"
-                  :title="
-                    testMode
-                      ? '正在测试模式（回到过去某一刻跑一局，不存档）—— 点一下退出'
-                      : '测试：在图上点一根 K 线，回到那一刻跑一局（不存档）'
-                  "
-                  :aria-label="testMode ? '退出测试模式' : '测试模式'"
-                  @click="toggleTestMode"
-                >
-                  <!-- 烧瓶：跟「配置」的滑块图标一眼分得开，也不用文字挤地方 -->
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M9.4 3h5.2M10.6 3.6v5.9L5.3 17.9A1.9 1.9 0 0 0 6.9 20.8h10.2a1.9 1.9 0 0 0 1.6-2.9L13.4 9.5V3.6" />
-                    <path d="M8.2 14.6h7.6" />
-                  </svg>
-                </button>
+                <template v-if="!testMode">
+                  <button
+                    type="button"
+                    class="ghost tiny tk-test"
+                    title="测试：在图上点一根 K 线，回到那一刻跑一局（不存档）"
+                    aria-label="测试模式"
+                    @click="startTestMode()"
+                  >
+                    <!-- 烧瓶：跟「配置」的滑块图标一眼分得开，也不用文字挤地方 -->
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M9.4 3h5.2M10.6 3.6v5.9L5.3 17.9A1.9 1.9 0 0 0 6.9 20.8h10.2a1.9 1.9 0 0 0 1.6-2.9L13.4 9.5V3.6" />
+                      <path d="M8.2 14.6h7.6" />
+                    </svg>
+                  </button>
+                </template>
+                <template v-else>
+                  <!-- ✓：没点线时 `disabled`（灰着），点它就跳「预测结果」 -->
+                  <button
+                    type="button"
+                    class="ghost tiny tk-test ok"
+                    :disabled="testPoint === null"
+                    :title="
+                      testPoint === null
+                        ? '先在图上点一根 K 线定结束线'
+                        : `去分析：按结束线 ${bjTime(testBarTime ?? 0)} 那一刻跑一局`
+                    "
+                    aria-label="去分析"
+                    @click="confirmTestPoint()"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M5 12.6 9.6 17.2 19 7.4" />
+                    </svg>
+                  </button>
+                  <!-- ✗：关掉测试模式（结束线也一起清掉） -->
+                  <button
+                    type="button"
+                    class="ghost tiny tk-test no"
+                    title="关掉测试模式（结束线一起清掉）"
+                    aria-label="关掉测试模式"
+                    @click="exitTestMode()"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5" />
+                    </svg>
+                  </button>
+                </template>
                 <!-- 最右边：配置（点开从底部弹出来） -->
                 <button
                   class="ghost tiny tk-cfg"

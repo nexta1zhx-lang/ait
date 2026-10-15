@@ -316,33 +316,45 @@ export function setPointPicking(v: boolean): void {
 }
 
 /**
- * 进 / 出测试模式（K 线头上那颗测试图标；宽屏那格「测试」tab 是另一个入口）。
+ * **进**测试模式（K 线头上那颗烧瓶图标点一下）。
  *
- * 进：顺手把「选结束线」打开（跟切到「测试」那格是同一套，少按一次）。
- * 出：把选线停掉；人还杵在「测试」那格时再切回「预测结果」——
- *     否则点了「退出」却看不出来（那一格里测试和预测结果是同一套渲染）。
+ * ★ 2026-10-15 用户重做：「点击测试图标**消掉，变成勾和叉**」——
+ *   烧瓶不再是「开关」，点它就**消失**、原位换成 ✓ / ✗ 两颗（见 `AnalyzeView`）：
+ *     · ✓ = 结束线定好了，跳去「预测结果」（`confirmTestPoint`）；
+ *     · ✗ = 关掉（`exitTestMode`）。
+ *   进来顺手把「选结束线」打开：点这颗图标本来就是「我要在图上点一根」。
+ *   窄屏图只在自己那一格，`setPointPicking` 会先把人切到「K 线」。
  */
-export function toggleTestMode(): void {
-  if (testMode.value) {
-    testArmed.value = false
-    pointPicking.value = false
-    if (leftTab.value === 'test') leftTab.value = 'live'
-    return
-  }
+export function startTestMode(): void {
   testArmed.value = true
   setPointPicking(true)
 }
 
-/** 清掉结束线（模板里不给导入的 ref 直接赋值）—— 顺手退出测试模式 */
-export function clearTestPoint(): void {
+/**
+ * **出**测试模式（✓/✗ 里那个 ✗：「点击 ✗ 关掉」）。
+ *
+ * 关掉就是**真的关掉**：测试模式停掉 + 结束线一起清 —— 不然线赖在图上
+ *（用户 2026-10-15 早先报过「取消后线还赖在图上」）。
+ * 人还杵在宽屏「测试」那一格时顺手切回「预测结果」：那格里测试和预测结果是同一套渲染，
+ * 不切过去看不出已经退出了。
+ */
+export function exitTestMode(): void {
+  testArmed.value = false
   testPoint.value = null
   pointPicking.value = false
-  /*
-   * ⚠️ 窄屏进测试模式只有 K 线头上那颗图标，而人在「预测结果」那一格时
-   *    那颗图标在图里（看不到）——所以「清掉」也得能退出来，
-   *    不然窄屏一进测试就出不去（往后每一局都按测试跑、不存档）。
-   */
-  testArmed.value = false
+  if (leftTab.value === 'test') leftTab.value = 'live'
+}
+
+/**
+ * **✓**：结束线定好了 ⇒ 把人送到「预测结果」那一格（判断按钮和结论都在那儿）。
+ *
+ * ⚠️ 线是在**图上**点的：窄屏点完还杵在「K 线」那一格，不跳过去就跟没反应一样。
+ *    （上一版是「点完自动跳」，2026-10-15 用户改成**点 ✓ 才跳** —— 见 `AnalyzeView` 的 `onPickPoint`。）
+ * 没选线时不动（那颗 ✓ 也是灰的，按不动）。
+ */
+export function confirmTestPoint(): void {
+  if (testPoint.value === null) return
+  leftTab.value = 'live'
 }
 
 /** 测试跑的「现在」= 结束线那一刻 */

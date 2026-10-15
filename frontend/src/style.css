@@ -2441,18 +2441,15 @@ body.fixed-viewport .analyze {
   background: color-mix(in srgb, var(--blue) 8%, transparent);
 }
 
-/* 测试模式那个小面板：跟结论卡片区分开 */
-.test-panel {
-  border-color: var(--blue);
-}
-.test-panel h2 {
-  color: var(--blue);
-}
-
-/* 左栏顶上的提醒：这一局不是实时那一局（就一行，用户 2026-10-15 把底下那行小字去掉了） */
+/*
+ * 测试模式那条标识（2026-10-15 用户：「预测界面**只添加一个测试模式**」）——
+ * 预测结果那一格整格就这一条：结束线 / 判断时点都写成两行，不再有别的控件
+ *（选线 / 重选 / 退出全在 K 线头上那对 ✓ ✗）。
+ */
 .test-banner {
   display: flex;
   flex-direction: column;
+  gap: 3px;
   padding: 8px 11px;
   border: 1px solid var(--blue);
   border-radius: 8px;
@@ -2461,6 +2458,13 @@ body.fixed-viewport .analyze {
 .test-banner b {
   font-size: 12px;
   color: var(--blue);
+}
+/* 「判断时点 …」：跑过之后才有，比上一行轻一点（同一块里的第二行） */
+.test-banner em {
+  font-size: 11px;
+  font-style: normal;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 /* K 线图上的「K 线到 ……」 */
@@ -3026,22 +3030,41 @@ body.fixed-viewport .split {
   stroke-linejoin: round;
 }
 
-/* 悬停：触屏不应用 */
+/* 悬停：触屏不应用（`✓` 灰着的时候也别亮） */
 @media (hover: hover) {
   .tk-head .tk-cfg:hover,
-  .tk-head .tk-test:hover {
+  .tk-head .tk-test:hover:not(:disabled) {
     color: var(--text);
     border-color: var(--blue);
+  }
+  /*
+   * ✓ / ✗ 的悬停**只提亮、不改颜色**：它们的状态色就是那个蓝（等于「现在在测试模式」），
+   * 悬停改成白的反而看不出自己在测试模式里。
+   */
+  .tk-head .tk-test.ok:hover:not(:disabled),
+  .tk-head .tk-test.no:hover:not(:disabled) {
+    color: var(--blue);
+    filter: brightness(1.25);
   }
 }
 
 /*
- * 「正在测试模式」：染蓝（跟「黑名单那颗锁」用同一个手法 —— 状态靠颜色说，
- * 不额外摆一个章）。这一局不存档，得一眼看得出来。
+ * 「正在测试模式」这一档**取消了**：2026-10-15 用户把测试图标改成「点一下消掉、
+ * 原位换成 ✓ / ✗」（见 `.tk-test.ok` / `.tk-test.no`），不再有「亮着的开关」。
+ * 现在测试模式开没开看两处：图上那条结束线 + 「预测结果」里的测试模式标识。
  */
-.tk-head .tk-test.on {
+.tk-head .tk-test.ok,
+.tk-head .tk-test.no {
   color: var(--blue);
   border-color: var(--blue);
+}
+
+/* ✓：结束线定好了才能按（没点线时灰着，`disabled`） */
+.tk-head .tk-test.ok:disabled {
+  color: var(--muted);
+  border-color: var(--border);
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* 提炼中：转圈遮罩（**不透明**，别让底下的行情穿透上来） */
