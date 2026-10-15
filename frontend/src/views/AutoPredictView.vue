@@ -41,6 +41,7 @@ import {showToast} from '../toast'
 import {MOBILE_MAX, leftTab, pickSymbol, prefetchSymbol} from '../analyze'
 import AnalysisDetail from '../comps/AnalysisDetail.vue'
 import {
+  afterCell,
   leftText,
   persistBusy,
   persistSessions,
@@ -147,13 +148,6 @@ function verdictClass(v: string | null | undefined): string {
 function lineText(line: string | null | undefined, max = 60): string {
   return line ? markdownToPlain(line, max) : ''
 }
-function chgText(v: number | null): string {
-  return v === null ? '—' : `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}%`
-}
-function chgClass(v: number | null): string {
-  return v === null ? '' : v >= 0 ? 'up' : 'down'
-}
-
 function toggleAi(id: number): void {
   expandId.value = expandId.value === id ? null : id
 }
@@ -440,8 +434,8 @@ function pctClass(v: number): string {
                 <span class="ps-v" :class="verdictClass(r.verdict)">{{ verdictText(r.verdict) }}</span>
                 <span class="ps-line" :title="r.line">{{ lineText(r.line) }}</span>
                 <span class="ps-price num">{{ r.price === null ? '—' : fmt(r.price, 6) }}</span>
-                <span class="ps-c1 num" :class="chgClass(r.after1h)">{{ chgText(r.after1h) }}</span>
-                <span class="ps-c4 num" :class="chgClass(r.after4h)">{{ chgText(r.after4h) }}</span>
+                <span class="ps-c1 num" :class="afterCell(r, 1).cls">{{ afterCell(r, 1).text }}</span>
+                <span class="ps-c4 num" :class="afterCell(r, 4).cls">{{ afterCell(r, 4).text }}</span>
               </div>
             </div>
             <p v-else class="dim">还没跑出结论 —— 15 分钟内会出第一条，也可以点「跑一次」。</p>

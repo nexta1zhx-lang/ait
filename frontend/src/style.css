@@ -2609,6 +2609,12 @@ body.fixed-viewport .analyze {
  * 时间线那一行可以点开看全文（K 线弹层 / AI 分析两处都这么做）。
  * 窄屏上手指按下去要给点反馈，不然不知道点着了没有。
  */
+/* 「+1h / +4h」还没到点的那种灰字倒计时（见 persist.ts 的 afterCell） */
+.ps-tl .pending {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
 .ps-tl-row.clickable {
   cursor: pointer;
 }
@@ -3283,7 +3289,7 @@ body.fixed-viewport .split {
  * 持久化分析那颗（2026-10-15）：跟「烧瓶 / 配置」同一个盒子、同一种线描图标。
  * 亮着（`.on`）= 这个币正在被每 15 分钟问一次 AI —— 状态靠颜色说，不额外摆文字。
  */
-.tk-head .tk-persist {
+.chart-head .tk-persist {
   flex: 0 0 auto;
   width: 30px;
   height: 28px;
@@ -3294,7 +3300,7 @@ body.fixed-viewport .split {
   color: var(--muted);
   cursor: pointer;
 }
-.tk-head .tk-persist svg {
+.chart-head .tk-persist svg {
   width: 17px;
   height: 17px;
   fill: none;
@@ -3304,14 +3310,36 @@ body.fixed-viewport .split {
   stroke-linejoin: round;
 }
 @media (hover: hover) {
-  .tk-head .tk-persist:hover {
+  .chart-head .tk-persist:hover {
     color: var(--text);
     border-color: var(--blue);
   }
 }
-.tk-head .tk-persist.on {
+
+/*
+ * ★ 2026-10-15 用户：「激活改为转动态效果」。
+ *
+ * 亮着（`.on`）= 这个币正在被每 15 分钟问一次。静态的蓝说不清"跑着"这件事，
+ * 让那颗循环箭头**自己转**才一眼看得出来；停下来就是没在跑。
+ * ⚠️ 只转 `svg`，不转按钮（转按钮会把 30×28 的框一起带着晃）。
+ * ⚠️ 尊重 `prefers-reduced-motion`：晕动症的人看到一直转的图标会难受。
+ */
+.chart-head .tk-persist.on {
   color: var(--blue);
   border-color: var(--blue);
+}
+.chart-head .tk-persist.on svg {
+  animation: tk-persist-spin 1.8s linear infinite;
+}
+@keyframes tk-persist-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-head .tk-persist.on svg {
+    animation: none;
+  }
 }
 
 /* ✓：结束线定好了才能按（没点线时灰着，`disabled`） */
@@ -7522,11 +7550,19 @@ button.badge:disabled {
    * 样式：实心主色方块 + 墨色闪电（跟全站 CTA 那套一致），尺寸 30×28
    * 跟旁边那颗「＋」对齐；文案（分析 / 分析中… / 按这段行情判断）走 `title` + `aria-label`。
    */
+  /*
+   * ★ 2026-10-15：持久化分析那颗循环箭头挪到这一行、**闪电左边**（用户：「自动化图标
+   *   放在闪电旁边」）—— 于是"顶到行尾"这件事从闪电交给它（它在前面），
+   *   闪电自己不再吃 `margin-left: auto`（两个都吃会在它们中间撕一道缝）。
+   */
+  .chart-head .tk-persist {
+    margin-left: auto;
+    margin-right: 6px;
+  }
   .chart-head .tk-run {
     display: inline-flex;
     align-items: center;
-    /* 顶到行尾（这一行是铺满的，见 `.chart-head-right`） */
-    margin-left: auto;
+    margin-left: 0;
     flex: 0 0 auto;
     width: 30px;
     height: 28px;

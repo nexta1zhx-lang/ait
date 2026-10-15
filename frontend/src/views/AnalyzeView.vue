@@ -996,29 +996,6 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
                   测试模式本身的状态靠「在图上那条结束线 + 预测结果里那条测试模式标识」看，
                   图标不再有「亮着」这一档（用户要的就是勾和叉，不是开关）。
                 -->
-                <!--
-                  持久化分析（2026-10-15 用户：「在 k 线界面顶部加入持久化分析的图标」）——
-                  挨着「测试」，**两端都露**。点一下开弹层（没加入就是那句确认；加入之后是状态 + 结论时间线）。
-                  亮起来（`.on`）代表这个币正在被每 15 分钟问一次（谁在跑由后端决定，网页关着也跑）。
-                -->
-                <button
-                  type="button"
-                  class="ghost tiny tk-persist"
-                  :class="{on: !!persistNow}"
-                  :title="
-                    persistNow
-                      ? `正在持久化分析：第 ${persistNow.runs} 次 · 还剩 ${leftText(persistNow.endsAt)} —— 点一下看结论时间线`
-                      : '持久化分析：每 15 分钟问一次 AI，最长 8 小时'
-                  "
-                  aria-label="持久化分析"
-                  @click="persistOpen = true"
-                >
-                  <!-- 循环箭头：一眼跟「烧瓶 / 滑块 / ＋」分得开 -->
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M19.6 12a7.6 7.6 0 1 1-2.3-5.4" />
-                    <path d="M20.2 4.4v5h-5" />
-                  </svg>
-                </button>
                 <template v-if="!testMode">
                   <button
                     type="button"
@@ -1092,6 +1069,32 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
             它就跟桌面那颗一样老实待在文档流里（详见脚本里那段说明）。
           -->
           <template #head-end>
+            <!--
+              持久化分析（2026-10-15 用户：「在 k 线界面顶部加入持久化分析的图标」
+              →「**自动化图标放在闪电旁边**，激活改为转动态效果」）——
+              所以它现在待在**周期行最右端、那颗闪电左边**（不是上面那排「测试 / 配置」里）。
+              亮着（`.on`）= 这个币正在被每 15 分钟问一次；此时图标**自己转起来**
+              （用户：「激活改为转动态效果」）——静态的蓝跟"跑着"这件事没关系，转才看得出来。
+              点一下开弹层（没加入是那句确认，加入之后是状态 + 结论时间线）。
+            -->
+            <button
+              type="button"
+              class="ghost tiny tk-persist"
+              :class="{on: !!persistNow}"
+              :title="
+                persistNow
+                  ? `正在持久化分析：第 ${persistNow.runs} 次 · 还剩 ${leftText(persistNow.endsAt)} —— 点一下看结论时间线`
+                  : '持久化分析：每 15 分钟问一次 AI，最长 8 小时'
+              "
+              aria-label="持久化分析"
+              @click="persistOpen = true"
+            >
+              <!-- 循环箭头：一眼跟「烧瓶 / 滑块 / ＋」分得开；激活时就是它转 -->
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M19.6 12a7.6 7.6 0 1 1-2.3-5.4" />
+                <path d="M20.2 4.4v5h-5" />
+              </svg>
+            </button>
             <button class="btn-run head-run" :disabled="loading" @click="onRun">
               {{ runLabel }}
             </button>

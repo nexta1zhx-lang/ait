@@ -174,6 +174,63 @@ export async function runPersistOnce(id: number): Promise<void> {
   }
 }
 
+/**
+ * 时间线里「+1h / +4h」那两格的显示口径（**两处共用这一份**：K 线弹层 + AI 分析）。
+ *
+ * ★ 2026-10-15 用户看着一列 `—` 问「为什么没数值」—— 那会儿每条记录都还不到 1 小时，
+ *   本来就是「还没到点」。所以这里把那格分成三种情况：
+ *     · 有数          → `+0.8%`（涨绿跌红）
+ *     · **还没到点**  → `还剩 43m`（灰字倒计时；免得看着像坏了）
+ *     · 过了点还是空  → `—`（那才是真缺那根 K 线，鼠标悬停给提示）
+ */
+export function chgText(v: number | null): string {
+  return v === null ? '—' : `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}%`
+}
+
+export function chgClass(v: number | null): string {
+  return v === null ? '' : v >= 0 ? 'up' : 'down'
+}
+
+/** 离「那一刻 + `hours` 小时」还剩多久（人话）；已经过了就返回空串 */
+export function untilText(createdAt: string, hours: number, now = Date.now()): string {
+  const at = new Date(createdAt).getTime()
+  if (!Number.isFinite(at)) return ''
+  const ms = at + hours * 3600_000 - now
+  if (!(ms > 0)) return ''
+  const min = Math.ceil(ms / 60_000)
+  if (min >= 120) {
+    const h = Math.floor(min / 60)
+    return `${h}h${String(min % 60).padStart(2, '0')}m`
+  }
+  return `${min}m`
+}
+
+/**
+ * 时间线里「+1h / +4h」那一格要显示什么（**两处共用**：K 线弹层、AI 分析）。
+ *
+ * 行都长这样：`{createdAt, after1h, after4h}`（后端现算的）。
+ *   · 有数        → `+0.8%`（`cls` = up/down）
+ *   · 还没到点    → `43m后`（`cls` = pending，灰字倒计时）
+ *   · 过了点还空  → `—`（`cls` 空；那才是真缺那根 K 线）
+ *
+ * ⚠️ 别写成「还剩 43m」：窄屏那两列只有 68px，长这样会被右边缘切掉
+ *    （用户 2026-10-15 截图：「压缩了」）。列头已经写了 +1h / +4h，一个「后」够读。
+ */
+export interface AfterCell {
+  text: string
+  cls: string
+}
+
+export function afterCell(
+  row: {createdAt: string; after1h: number | null; after4h: number | null},
+  hours: 1 | 4
+): AfterCell {
+  const v = hours === 1 ? row.after1h : row.after4h
+  if (v !== null) return {text: chgText(v), cls: chgClass(v)}
+  const left = untilText(row.createdAt, hours)
+  return left ? {text: `${left}后`, cls: 'pending'} : {text: '—', cls: ''}
+}
+
 /** 剩余时长（人话：`7h24m`） */
 export function leftText(endsAt: string): string {
   const ms = new Date(endsAt).getTime() - Date.now()

@@ -16,6 +16,7 @@ import {markdownToPlain} from '../markdown'
 import AnalysisDetail from './AnalysisDetail.vue'
 import {
   activeSessionOf,
+  afterCell,
   addPersist,
   leftText,
   persistBusy,
@@ -23,6 +24,7 @@ import {
   persistSessions,
   refreshPersist,
   removePersist,
+  untilText,
   runPersistOnce,
   type PersistRow
 } from '../persist'
@@ -76,6 +78,28 @@ function openDetail(row: {
   }
 }
 
+/**
+ * 那两格的悬停提示：说清它是什么，免得「—」被当成坏掉。
+ *
+ * ⚠️ 「还剩 43m」那种是**倒计时**（那一刻还没到），「—」是**过了点还是没数**
+ *   （库里缺那根 K 线）—— 两种情况在最坏的时候看着一模一样，只能靠这里说清。
+ */
+function t1Title(r: {createdAt: string; after1h: number | null}): string {
+  const t = bjTime(new Date(new Date(r.createdAt).getTime() + 3600_000).toISOString())
+  if (r.after1h !== null) return `那一刻之后 1 小时的收盘价 vs 当时价（${t} 那根）`
+  return untilText(r.createdAt, 1)
+    ? `还没到点：${t} 之后才有数据`
+    : `库里还没有 ${t} 那根 1h K 线（这段缺数据）`
+}
+
+function t4Title(r: {createdAt: string; after4h: number | null}): string {
+  const t = bjTime(new Date(new Date(r.createdAt).getTime() + 4 * 3600_000).toISOString())
+  if (r.after4h !== null) return `那一刻之后 4 小时的收盘价 vs 当时价（${t} 那根）`
+  return untilText(r.createdAt, 4)
+    ? `还没到点：${t} 之后才有数据`
+    : `库里还没有 ${t} 那根 1h K 线（这段缺数据）`
+}
+
 /** 加入时用哪个周期：默认跟着图上那个（最常用 1h） */
 const tf = ref(props.timeframe || '1h')
 /** 回看天数（跟分析页那个口径一致） */
@@ -103,12 +127,7 @@ function vClass(v: string | null | undefined): string {
 function vText(v: string | null | undefined): string {
   return v === 'go' ? '可做' : v === 'no' ? '不可做' : '观望'
 }
-function chgText(v: number | null): string {
-  return v === null ? '—' : `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}%`
-}
-function chgClass(v: number | null): string {
-  return v === null ? '' : v >= 0 ? 'up' : 'down'
-}
+
 /**
  * 时间线里那句话：抹掉 Markdown、压掉换行，截到 80 字。
  *
@@ -207,8 +226,12 @@ function shortLine(line: string): string {
             <span class="ps-v" :class="vClass(r.verdict)">{{ vText(r.verdict) }}</span>
             <span class="ps-line" :title="r.line">{{ shortLine(r.line) }}</span>
             <span class="ps-price num">{{ r.price === null ? '—' : fmt(r.price, 6) }}</span>
-            <span class="ps-c1 num" :class="chgClass(r.after1h)">{{ chgText(r.after1h) }}</span>
-            <span class="ps-c4 num" :class="chgClass(r.after4h)">{{ chgText(r.after4h) }}</span>
+            <span class="ps-c1 num" :class="afterCell(r, 1).cls" :title="t1Title(r)">
+              {{ afterCell(r, 1).text }}
+            </span>
+            <span class="ps-c4 num" :class="afterCell(r, 4).cls" :title="t4Title(r)">
+              {{ afterCell(r, 4).text }}
+            </span>
           </div>
         </div>
         <p v-else class="ps-dim">还没跑出结论 —— 15 分钟内会出第一条（也可以点「立即跑一次」）。</p>
@@ -234,8 +257,12 @@ function shortLine(line: string): string {
             <span class="ps-v" :class="vClass(r.verdict)">{{ vText(r.verdict) }}</span>
             <span class="ps-line" :title="r.line">{{ shortLine(r.line) }}</span>
             <span class="ps-price num">{{ r.price === null ? '—' : fmt(r.price, 6) }}</span>
-            <span class="ps-c1 num" :class="chgClass(r.after1h)">{{ chgText(r.after1h) }}</span>
-            <span class="ps-c4 num" :class="chgClass(r.after4h)">{{ chgText(r.after4h) }}</span>
+            <span class="ps-c1 num" :class="afterCell(r, 1).cls" :title="t1Title(r)">
+              {{ afterCell(r, 1).text }}
+            </span>
+            <span class="ps-c4 num" :class="afterCell(r, 4).cls" :title="t4Title(r)">
+              {{ afterCell(r, 4).text }}
+            </span>
           </div>
         </div>
       </template>
