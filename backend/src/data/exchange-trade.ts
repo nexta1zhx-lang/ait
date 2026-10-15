@@ -664,12 +664,8 @@ export async function setSymbolLeverage(
  *   原话是「**我都已经开仓了，剩余开仓应该是 0**」—— 所以 5 倍按**这个币的累计名义**
  *   算才对得上（早先那句「开单的金额不能超出 5 倍」也按总额度理解才自洽）。
  *
- * ★★ 2026-10-15 用户把这笔账**收紧成没有例外**：「**最多也是按照 5 倍来**」
- *   +「那显示最大额**额外算**，总共不就会**超出 5 倍的原则**」。
- *   —— 所以这里不再有「用浮盈另开一份 `浮盈 × 杠杆` 预算」那一条：**总额（已开 + 本单）
- *   一律 ≤ 5 × 权益**。浮盈不是不算数，而是它**已经通过「权益」这一层进来了**
- *   （`equity = 钱包 + 未实现盈亏`，见 `assertOrderLimits`）—— 有浮盈时额度自己就长，
- *   不需要再叠一份，否则总量会突破「5 倍权益」这条原则（用户原话）。
+ * ★ 这个函数只校验**非加仓开仓**的 5 倍累计额度；同向加仓另按「该币浮盈 × 持仓杠杆」
+ *   校验单笔额度，见 `assertOrderLimits`。
  *
  * @returns 权益读不到（≤ 0）时 `overflow` 恒为 `false`：那种单子交易所自己会因保证金不足拒掉
  */
@@ -691,16 +687,28 @@ export function symbolBudget(
   return {cap, existing, add, overflow: !(existing + add <= cap * 1.002 + 0.5)}
 }
 
+/** 同向加仓的单笔名义额度 = 该币正浮盈 × 杠杆（杠杆最高按 10x 计）。 */
+export function positionProfitAddBudget(unrealizedProfit: number, leverage: number): number {
+  const profit = Number.isFinite(unrealizedProfit) ? Math.max(0, unrealizedProfit) : 0
+  const lev = Number.isFinite(leverage) ? Math.floor(leverage) : 1
+  return profit * Math.min(MAX_SYMBOL_LEVERAGE, Math.max(1, lev))
+}
+
+/** 浮盈随行情变化，比较时留 0.5% + 0.5 USDT 的取数余量；无浮盈时不允许加仓。 */
+export function isWithinPositionProfitAddBudget(addNotional: number, budget: number): boolean {
+  return budget > 0 && Math.max(0, addNotional) <= budget * 1.005 + 0.5
+}
+
 /**
  * 开单前的体检（三条上限）。**只拦开仓** —— 减仓 / 平仓不走这里。
  *
- * ① **单笔开单名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益；
- * ② **这个币的累计名义 ≤ 5 × 权益**（`symbolBudget`）；
+ * ① **非加仓单笔名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益；
+ * ② **非加仓单币累计名义 ≤ 5 × 权益**（`symbolBudget`）；
  * ③ **账户总杠杆 ≤ 11 倍**：(现有持仓名义 + 这一单) ÷ 账户权益。
  *
- * ★★ 2026-10-15 用户最后定的口径：「**加仓不算在 5 倍内，但是总杠杠还是 11 最大**」——
- *   所以 ①②（都是 5 倍那条尺子）**加仓整段跳过**，加仓只剩 ③ + 交易所的保证金；
- *   一个币理论上能放到 11 × 权益（用户当面要的）。判「是不是加仓」看持仓方向：
+ * ★★ 2026-10-15 用户最后定的口径：「**加仓额度按该币浮盈 × 10，其他币开仓仍按 5 倍，
+ *   全账户总杠杆最多 11 倍**」—— 同向加仓跳过 ①②，但本单不能超过该币浮盈 × 持仓杠杆；
+ *   所有订单仍受 ③ 和交易所保证金限制。判「是不是加仓」看持仓方向：
  *   这个币已经有仓位、方向跟这一单一致 = 加仓。
  *
  * 三条共用同样两发请求（一次 `positionRisk` + 一次余额），所以合在一个函数里。
@@ -736,10 +744,18 @@ export async function assertOrderLimits(
     if (p) notionals.push(p.notional)
   }
   const equity = balance.wallet + balance.unrealized
+  const dir = String(side ?? '').toLowerCase()
+  const wantSide: 'long' | 'short' | '' =
+    dir === 'buy' || dir === 'long' ? 'long' : dir === 'sell' || dir === 'short' ? 'short' : ''
   /* 参考价：限价单的委托价优先（那才是真实成交价），市价单退到标记价 */
-  const mine = rows.find(
-    r => String(r?.symbol ?? '').toUpperCase() === spec.symbol
-  )
+  const mine =
+    rows.find(
+      r =>
+        String(r?.symbol ?? '').toUpperCase() === spec.symbol &&
+        wantSide !== '' &&
+        positionFromRow(r)?.side === wantSide
+    ) ??
+    rows.find(r => String(r?.symbol ?? '').toUpperCase() === spec.symbol)
   const ref =
     price !== undefined && price > 0 ? price : Number(mine?.markPrice) || 0
   const add = Math.max(0, quantity) * (Number.isFinite(ref) ? ref : 0)
@@ -749,19 +765,23 @@ export async function assertOrderLimits(
    * 这一单是**加仓**吗：这个币已经有仓位，而且方向跟这一单一致
    * （多单再买 / 空单再卖 ⇒ 加仓；反向的那是减仓，前端走 `closePositions`，不进这里）。
    *
-   * ★ 2026-10-15 用户：「**加仓不算在 5 倍内，但是总杠杠还是 11 最大**」——
-   *   所以下面 ①（单笔 5 倍）②（单币累计 5 倍）**加仓整段跳过**，
-   *   加仓只剩 ③（全账户 ≤ 11 倍）+ 交易所那条保证金。
-   *   ⚠️ 代价说清楚：一个币理论上能放到 **11 × 权益**（整账户压在它身上），
-   *      比开仓那 5 倍大一倍多 —— 这是用户要的（那天他先试过「浮盈另开预算」，
-   *      嫌那样总量会破 5 倍，最后定成这条）。
+   * ★ 2026-10-15 用户确认：同向加仓额度按该币浮盈 × 持仓杠杆（当前最高 10x），
+   *   跳过开仓专用的 ①②；全账户总杠杆仍严格 ≤ 11 倍，交易所也会校验实际保证金。
    */
-  const dir = String(side ?? '').toLowerCase()
-  const wantSide: 'long' | 'short' | '' =
-    dir === 'buy' || dir === 'long' ? 'long' : dir === 'sell' || dir === 'short' ? 'short' : ''
   const isAdd = !!minePos && wantSide !== '' && minePos.side === wantSide
 
-  if (!isAdd) {
+  if (isAdd) {
+    const positionProfit = Math.max(0, minePos.unrealized)
+    const positionLeverage = Math.min(MAX_SYMBOL_LEVERAGE, Math.max(1, minePos.leverage || 1))
+    const profitBudget = positionProfitAddBudget(minePos.unrealized, minePos.leverage)
+    if (!isWithinPositionProfitAddBudget(add, profitBudget)) {
+      throw new Error(
+        `${spec.symbol} 本次加仓约 ${add.toFixed(2)} USDT，超过该币浮盈额度：` +
+          `浮盈 ${positionProfit.toFixed(2)} × 持仓杠杆 ${positionLeverage}x = ` +
+          `${profitBudget.toFixed(2)} USDT；全账户总杠杆仍不能超过 ${MAX_ACCOUNT_LEVERAGE}x`
+      )
+    }
+  } else {
     const ratio = orderEquityRatio(add, equity)
     if (ratio !== null && ratio > MAX_ORDER_EQUITY_RATIO) {
       throw new Error(
@@ -780,7 +800,7 @@ export async function assertOrderLimits(
           `已开 ${budget.existing.toFixed(0)} + 本单 ${budget.add.toFixed(0)} = ` +
           `${(budget.existing + budget.add).toFixed(0)} USDT，` +
           `超过额度 ${budget.cap.toFixed(0)}（${MAX_ORDER_EQUITY_RATIO} × 权益 ${equity.toFixed(2)}）` +
-          ` —— 要加仓就点面板上的「加仓」（加仓不吃这 5 倍额度，只看全账户 ${MAX_ACCOUNT_LEVERAGE} 倍）`
+          ` —— 要加仓就点面板上的「加仓」（按该币浮盈 × 持仓杠杆计算，并受全账户 ${MAX_ACCOUNT_LEVERAGE} 倍限制）`
       )
     }
   }

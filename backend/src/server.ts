@@ -4491,8 +4491,8 @@ async function route(
       }
 
       /*
-       * 开单金额上限（用户 2026-10-14）：
-       *   · **单笔开单名义金额 ≤ 5 × 账户权益**；
+       * 开单金额上限：
+       *   · 同向加仓 ≤ 该币浮盈 × 持仓杠杆；其他开仓单笔 / 单币仍 ≤ 5 × 账户权益；
        *   · **账户总杠杆 ≤ 11 倍**（`Σ持仓名义 ÷ 权益`）。
        *
        * ⚠️ 5 倍管的是**金额**、不是杠杆 —— 杠杆本身由 `setSymbolLeverage` 拦在 10x
@@ -4505,8 +4505,7 @@ async function route(
           str(body.symbol, 'BTCUSDT'),
           Number(body.quantity),
           body.price === undefined ? undefined : Number(body.price),
-          /* 方向要传：`assertOrderLimits` 拿它判「这是加仓还是开仓」——
-             加仓不吃 5 倍额度（用户 2026-10-15），只受全账户 11 倍约束 */
+          /* 方向要传：`assertOrderLimits` 拿它区分加仓与开仓，再应用对应额度 */
           side
         )
       }

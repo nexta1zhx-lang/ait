@@ -11,7 +11,7 @@
  * 那是个纯函数，而它的失效方式是"悄悄少一根 / 悄悄多一根坏根"—— 图上不报错，
  * 只有靠这组固定夹具才卡得住。所以必须离线可跑（不进网络）。
  *
- * 现在这里卡六件事：
+ * 现在这里卡九件事：
  *   ① 契约（提示词骨架）和 zod 校验结构**一模一样**
  *   ② 渲染能把这四个字段印出来
  *   ③ `sanitizeRows` 该丢的丢、该留的留、该覆盖的覆盖
@@ -23,6 +23,7 @@
  *      —— 这几个是**纯函数**，而它们的失效方式同样很隐蔽：命名约定一变，
  *      `pruneCandles` 就再也匹配不到过期子分区（表会一直涨），或者建分区时算出重叠区间
  *      （直接建不出来）。所以拿固定夹具卡住它们。
+ *   ⑨ 同向加仓浮盈额度、其他币开仓 5 倍额度、账户总杠杆 11 倍上限。
  */
 import {
   ALL_INTERVALS,
@@ -40,7 +41,12 @@ import {planContractChanges, type RawContract} from '../data/market'
 import {
   BINANCE_MAX_WINDOW_MS,
   BINANCE_RETENTION_MS,
-  planWindows
+  isWithinPositionProfitAddBudget,
+  orderEquityRatio,
+  planWindows,
+  positionProfitAddBudget,
+  symbolBudget,
+  totalLeverageAfter
 } from '../data/exchange-trade'
 import {
   KeyStream,
@@ -526,6 +532,35 @@ function checkWindows(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ⑨ 合约开仓与浮盈加仓额度                                            */
+/* ------------------------------------------------------------------ */
+function checkTradeBudgets(): boolean {
+  let ok = true
+  const bad = (msg: string): void => {
+    console.error(`❌ 加仓额度夹具：${msg}`)
+    ok = false
+  }
+
+  const profitBudget = positionProfitAddBudget(10, 10)
+  if (profitBudget !== 100) bad(`浮盈 10 × 10x 应为 100，实际 ${profitBudget}`)
+  if (positionProfitAddBudget(-3, 10) !== 0) bad('负浮盈不能生成加仓额度')
+  if (positionProfitAddBudget(10, 20) !== 100) bad('加仓额度杠杆必须封顶 10x')
+  if (!isWithinPositionProfitAddBudget(100, profitBudget)) bad('预算内的加仓单应放行')
+  if (isWithinPositionProfitAddBudget(102, profitBudget)) bad('超出浮盈预算的加仓单应拒绝')
+  if (isWithinPositionProfitAddBudget(5, 0)) bad('无浮盈时不应允许加仓')
+
+  if (orderEquityRatio(500, 100) !== 5) bad('新开仓恰为 5x 权益应放行')
+  if ((orderEquityRatio(501, 100) ?? 0) <= 5) bad('新开仓超过 5x 权益应拒绝')
+  if (symbolBudget(100, 0, 500).overflow) bad('新开其他币 5x 权益额度应放行')
+  if (!symbolBudget(100, 0, 502).overflow) bad('新开其他币超过 5x 权益应拒绝')
+  if (totalLeverageAfter([900], 100, 200) !== 11) bad('账户总杠杆恰为 11x 应放行')
+  if ((totalLeverageAfter([900], 100, 201) ?? 0) <= 11) bad('账户总杠杆超过 11x 应拒绝')
+
+  if (ok) console.log('✅ 加仓额度：浮盈 × 10、其他币开仓 5x、账户总杠杆 11x 夹具通过')
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -537,6 +572,7 @@ if (!checkTier()) failed = true
 if (!checkTierText()) failed = true
 if (!checkPartitions()) failed = true
 if (!checkWindows()) failed = true
+if (!checkTradeBudgets()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)
