@@ -502,17 +502,16 @@ const addValue = ref(0)
 /** 最小加仓金额 = 交易所的最小名义价值（拿不到就按 5 USDT 兜底） */
 const addMinCost = computed(() => Number(info.value?.minCost ?? 0) || 5)
 
-/** 浮盈能撑多少名义价值：`浮盈 × 杠杆`（后端 `symbolBudget` 的 profitBudget 同口径） */
-const profitRoom = computed(() => posProfit.value * lev.value)
-
 /**
- * 这个币还能加到多少名义价值：**取「两条预算里够得着的那条」**
- * —— 后端 `symbolBudget` 是「累计 ≤ 5×权益」**或者**「本单 ≤ 浮盈×杠杆」，
- *    所以这里也是 `max(5 倍额度剩余, 浮盈预算)`，不是两者取小。
+ * 加仓金额的**上限**：可用保证金那条、账户总杠杆那条、这个币的 **5 倍额度剩余**，三者取小。
+ *
+ * ★ 2026-10-15 用户把口径收紧了：「**最多也是按照 5 倍来**」+「那显示最大额**额外算**，
+ *   总共不就会**超出 5 倍的原则**」—— 所以加仓跟开仓用**同一把尺子**
+ *   （`已开 + 本单 ≤ 5 × 权益`，后端 `symbolBudget` 同口径，**没有例外**）。
+ *   浮盈不是不算数：它已经算进「权益」（钱包 + 未实现）里了，额度自然跟着长 ——
+ *   再叠一份「浮盈 × 杠杆」的话，总量就突破 5 倍权益那条原则了。
+ *   （2026-10-14 那版确实叠过一份 `profitRoom = 浮盈 × 杠杆`，同月 15 日按用户要求撤掉。）
  */
-const addRoom = computed(() => Math.max(roomBySymbol.value, profitRoom.value))
-
-/** 加仓金额的**上限**：可用保证金那条、账户总杠杆那条、上面那条币种预算，三者取小 */
 const addMax = computed(() =>
   Math.max(
     0,
@@ -520,7 +519,7 @@ const addMax = computed(() =>
       // 0.5% 留给手续费（跟后端 `autoShrinkQty` 的 FEE_SLACK 同口径）
       available.value * lev.value * 0.995,
       roomByAccount.value,
-      addRoom.value
+      roomBySymbol.value
     )
   )
 )
@@ -619,7 +618,7 @@ const blocker = computed(() => {
     return (
       `${props.symbol.toUpperCase()} 的 ${ORDER_EQUITY_MAX} 倍额度已经开满` +
       `（已开 ${curNotional.value.toFixed(2)} / 额度 ${fiveNotional.value.toFixed(2)} USDT）` +
-      ` —— 想加仓就点下面的「加仓」（用浮盈加，额度另算）`
+      ` —— 想加仓得先平掉这个币的一点仓位（加仓跟开仓同一把尺子）`
     )
   /* 额度被别的仓位 / 可用保证金卡住了 */
   if (!(roomNotional.value > 0)) {
@@ -647,8 +646,8 @@ const blocker = computed(() => {
 /**
  * **加仓**不能下单的原因（空 = 能加）。
  *
- * 跟 `blocker` 的区别就一条：**不看 5 倍额度**（加仓本来就是额度满了以后的事，
- * 后端对「用浮盈加」有单独预算，见 `addRoom`）。
+ * ⚠️ 2026-10-15 起加仓跟开仓**同一把尺子**（5 倍额度，没有例外，见 `addMax`）——
+ *    区别只剩一条：加仓还要看「这个币有没有持仓」（没持仓就不叫加仓了）。
  */
 const addBlocker = computed(() => {
   const pre = preBlocked.value
@@ -656,10 +655,12 @@ const addBlocker = computed(() => {
   if (!opened.value) return '现在没有持仓，不能加仓'
   if (!(refPrice.value > 0)) return '还没拿到价格，稍等一下'
   if (!(addMax.value >= addMinCost.value))
-    return (
-      `现在能加的空间不到最小下单量` +
-      `（${fmt(addMinCost.value, 2)} USDT）—— 先有点浮盈，或者平掉一点`
-    )
+    return addMax.value <= 0
+      ? `${props.symbol.toUpperCase()} 的 ${ORDER_EQUITY_MAX} 倍额度已经用满` +
+          ` —— 先平掉这个币的一点仓位再加`
+      : `这个币的 ${ORDER_EQUITY_MAX} 倍额度快用满了：还能加 ` +
+          `${fmt(addMax.value, 2)} USDT，不到最小下单量（${fmt(addMinCost.value, 2)} USDT）` +
+          ` —— 先平掉一点再加`
   if (!(addQty(addMinCost.value) > 0))
     return '按这个合约的精度取整之后是 0'
   return ''
@@ -1071,10 +1072,10 @@ async function submit(
   /** 文案前缀（如「加仓 50%（浮盈）」），只进提示 */
   note = '',
   /**
-   * 这一下是**加仓**吗（用浮盈往上加）。
+   * 这一下是**加仓**吗（往已有的仓位上加）。
    *
-   * ⚠️ 加仓跟开仓的闸**不一样**：加仓不看「5 倍额度」（额度开满本来就是要加仓的前提），
-   *    所以这里换用 `addBlocker` 判断 —— 见 `addQuantity` / 后端 `symbolBudget`。
+   * ⚠️ 加仓跟开仓走的是**同一套闸**（5 倍额度没有例外，后端 `symbolBudget` 同口径，
+   *    2026-10-15 用户定的）；`addBlocker` 只是把「得有持仓」这条也算进去。
    */
   isAdd = false
 ): Promise<void> {

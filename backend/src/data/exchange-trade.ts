@@ -658,58 +658,44 @@ export async function setSymbolLeverage(
  *   · `cap`      = 5 × 权益 —— **这个币的总额度**（不是「每一单各自 5 倍」）；
  *   · `existing` = 这个币**已经开着**的名义价值；
  *   · `add`      = 这一单要加的名义价值；
- *   · `profitBudget` = `浮盈 × 杠杆` —— **用浮盈加仓**能额外吃掉的额度；
  *   · `overflow` = 放不放行（`false` = 放行）。
  *
  * ★ 为什么是「总额度」（用户 2026-10-14）：用户开了仓之后发现界面还在说「还能开 5 倍」，
  *   原话是「**我都已经开仓了，剩余开仓应该是 0**」—— 所以 5 倍按**这个币的累计名义**
  *   算才对得上（早先那句「开单的金额不能超出 5 倍」也按总额度理解才自洽）。
  *
- * ★ 为什么留 `profitBudget`：同一轮用户还定了「**如果还有盈利还可以选择加仓 50% 或者
- *   100%**」—— 加仓的钱来自**未实现盈利**，所以给它「浮盈 × 杠杆」的预算：
- *   只要这一单不超过这个预算就放行，哪怕累计已经超过 5 倍。
+ * ★★ 2026-10-15 用户把这笔账**收紧成没有例外**：「**最多也是按照 5 倍来**」
+ *   +「那显示最大额**额外算**，总共不就会**超出 5 倍的原则**」。
+ *   —— 所以这里不再有「用浮盈另开一份 `浮盈 × 杠杆` 预算」那一条：**总额（已开 + 本单）
+ *   一律 ≤ 5 × 权益**。浮盈不是不算数，而是它**已经通过「权益」这一层进来了**
+ *   （`equity = 钱包 + 未实现盈亏`，见 `assertOrderLimits`）—— 有浮盈时额度自己就长，
+ *   不需要再叠一份，否则总量会突破「5 倍权益」这条原则（用户原话）。
  *
  * @returns 权益读不到（≤ 0）时 `overflow` 恒为 `false`：那种单子交易所自己会因保证金不足拒掉
  */
 export function symbolBudget(
   equity: number,
   existingNotional: number,
-  addNotional: number,
-  unrealizedProfit: number,
-  leverage: number
+  addNotional: number
 ): {
   cap: number
   existing: number
   add: number
-  profitBudget: number
   overflow: boolean
 } {
   const cap = equity > 0 ? equity * MAX_ORDER_EQUITY_RATIO : 0
   const existing = Math.abs(Number(existingNotional) || 0)
   const add = Math.max(0, Number(addNotional) || 0)
-  const lev = Number(leverage) >= 1 ? Math.floor(Number(leverage)) : 1
-  const profitBudget = Math.max(0, Number(unrealizedProfit) || 0) * lev
-  if (!(cap > 0)) return {cap: 0, existing, add, profitBudget, overflow: false}
-  if (existing + add <= cap + 1e-9)
-    return {cap, existing, add, profitBudget, overflow: false}
-  /*
-   * 超了 5 倍额度，但这一单整个都在「浮盈撑得起」的范围里 ⇒ 是加仓，放行。
-   *
-   * ⚠️ 这里留一点余量（0.5% + 0.5 USDT）：浮盈**每秒都在动**，而面板算「还能加多少」
-   *    用的是它自己那份实时流 —— 两边口径一样、时刻不一样，滑到满格再提交就被行情
-   *    抖一下拒掉（「明明显示还能加 59，点了说超额度」）。余量只对这一档生效，
-   *    5 倍额度那条主规则一点没放松。
-   */
-  if (add <= profitBudget * 1.005 + 0.5)
-    return {cap, existing, add, profitBudget, overflow: false}
-  return {cap, existing, add, profitBudget, overflow: true}
+  if (!(cap > 0)) return {cap: 0, existing, add, overflow: false}
+  /* 浮盈每秒在动 ⇒ 卡死在等号上会被行情抖一下拒掉，留一丁点余量（5 倍那条主规则没放松） */
+  return {cap, existing, add, overflow: !(existing + add <= cap * 1.002 + 0.5)}
 }
 
 /**
  * 开单前的体检（三条上限）。**只拦开仓** —— 减仓 / 平仓不走这里。
  *
  * ① **单笔开单名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益；
- * ② **这个币的累计名义 ≤ 5 × 权益**（`symbolBudget`；用浮盈加仓的那部分除外）；
+ * ② **这个币的累计名义 ≤ 5 × 权益**（`symbolBudget`，**没有例外** —— 加仓同一把尺子）；
  * ③ **账户总杠杆 ≤ 11 倍**：(现有持仓名义 + 这一单) ÷ 账户权益。
  *
  * 三条共用同样两发请求（一次 `positionRisk` + 一次余额），所以合在一个函数里。
@@ -757,32 +743,19 @@ export async function assertOrderLimits(
 
   /*
    * ② 这个币的**累计**额度：已开的 + 这一单 ≤ 5 × 权益。
-   *   例外是「用浮盈加仓」那一档（`profitBudget`），见 `symbolBudget`。
+   *   ⚠️ **加仓同一把尺子，没有例外**（用户 2026-10-15：「最多也是按照 5 倍来」）——
+   *      见 `symbolBudget` 那段：浮盈是通过「权益」进来的，不再另开一份预算，
+   *      否则总量会突破 5 倍权益那条原则。
    */
   const minePos = mine ? positionFromRow(mine) : null
-  /*
-   * ⚠️⚠️ 字段名是 **`unRealizedProfit`（大写 R）** —— 币安 `positionRisk` 就是这么拼的
-   *   （账号级那个总数才是小写 r 的 `totalUnrealizedProfit`；同一文件里
-   *   `positionFromRow()` 用的就是这个大写 R 的）。
-   *   2026-10-15 用户报「浮盈加不了仓」：这里原来写的小写 `unrealizedProfit` ⇒ 恒为
-   *   `undefined` ⇒ `profitBudget` 恒 0 ⇒ 一过 5 倍额度就被拒（报错里那句
-   *   「浮盈可用额度约 0.00 USDT」就是它），四两的浮盈在规则里等于不存在。
-   */
-  const budget = symbolBudget(
-    equity,
-    minePos?.notional ?? 0,
-    add,
-    n(mine?.unRealizedProfit ?? mine?.unrealizedPnl),
-    n(mine?.leverage)
-  )
+  const budget = symbolBudget(equity, minePos?.notional ?? 0, add)
   if (budget.overflow) {
     throw new Error(
       `${spec.symbol} 这个币的 ${MAX_ORDER_EQUITY_RATIO} 倍额度已经用满：` +
         `已开 ${budget.existing.toFixed(0)} + 本单 ${budget.add.toFixed(0)} = ` +
         `${(budget.existing + budget.add).toFixed(0)} USDT，` +
         `超过额度 ${budget.cap.toFixed(0)}（${MAX_ORDER_EQUITY_RATIO} × 权益 ${equity.toFixed(2)}）` +
-        ` —— 还想加仓的话用浮盈（浮盈可用额度约 ${budget.profitBudget.toFixed(2)} USDT），` +
-        `或者先把现在的仓位平掉`
+        ` —— 先把这个币的仓位平掉一点再加`
     )
   }
 
