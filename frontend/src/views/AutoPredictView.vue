@@ -18,10 +18,15 @@
  *     ⇒ 参数收进底部弹层（跟 K 线页那颗「配置」同一套 `.sheet`），**一行一项、不写说明**；
  *     候选列表从卡片改成三列表格。
  *
+ *   ③ **「自动 AI」那一格**（2026-10-15 用户：「在自动化预测中加入 tab，线上所有的已自动 ai 的显示」）
+ *      —— 列出**所有**已经加入持久化分析的币（在跑的排前面，7 天内的都留着），
+ *      每行是 币种 / 进度 / 最近结论，点一行**展开**：那一刻往后 1h、4h 涨了多少 + 看 K 线 / 跑一次 / 停止。
+ *      数据就是 `../persist` 那个 store（跟 K 线页顶部那个图标同一份），进页时刷一次。
+ *
  * ⚠️ 后面几段（定时扫描 → 快讯式判定 → App 通知）还没接：这里只解决"看清挑出来的是哪些币、
  *    参数怎么改"，以及"点一下去看图"。
  */
-import {computed, onMounted, ref} from 'vue'
+import {computed, onMounted, ref, watch} from 'vue'
 import {
   fetchScanPicks,
   fetchScanSettings,
@@ -30,9 +35,19 @@ import {
   type ScanPick,
   type ScanPicks
 } from '../api'
-import {bjTime, int} from '../format'
+import {bjTime, fmt, int} from '../format'
+import {markdownToPlain} from '../markdown'
 import {showToast} from '../toast'
 import {MOBILE_MAX, leftTab, pickSymbol, prefetchSymbol} from '../analyze'
+import {
+  leftText,
+  persistBusy,
+  persistSessions,
+  refreshPersist,
+  removePersist,
+  runPersistOnce,
+  type PersistRow
+} from '../persist'
 
 /** 已保存的那份参数（弹层打开时拿它当草稿的底稿） */
 const params = ref<ScanParams | null>(null)
@@ -103,6 +118,57 @@ const RULES = [
   {key: 'volume' as const, label: 'D 量能异动'}
 ]
 
+/* ---------------- 「自动 AI」那一格 ---------------- */
+
+/**
+ * 两格：`scan` = 筛选的币种（原样），`ai` = 自动 AI 分析（持久化会话）。
+ *
+ * ⚠️ 不做成 URL 参数：这一页本身就是 `/analyze?t=auto` 的一格，再加一层查询参数
+ *    会跟上面那层 tab 的 `?t=` 打架（`analyze.ts` 那套只认一层）。
+ */
+const tab = ref<'scan' | 'ai'>('scan')
+
+/** 展开了哪个会话（一次只展开一个，手上一屏放得下两个都会把页面拉得很长） */
+const expandId = ref<number | null>(null)
+
+/** 所有会话：在跑的排前面（后端 `listSessions` 已经排好，直接用） */
+const aiRows = computed<PersistRow[]>(() => persistSessions.value)
+
+const activeCount = computed(() => aiRows.value.filter(s => s.status === 'active').length)
+
+function verdictText(v: string | null | undefined): string {
+  return v === 'go' ? '可做' : v === 'no' ? '不可做' : '观望'
+}
+function verdictClass(v: string | null | undefined): string {
+  return v === 'go' ? 'go' : v === 'no' ? 'no' : 'wait'
+}
+/** 那一句话：抹 Markdown、压换行、截断（模型给的是一整篇，原样印出来没法看） */
+function lineText(line: string | null | undefined, max = 60): string {
+  return line ? markdownToPlain(line, max) : ''
+}
+function chgText(v: number | null): string {
+  return v === null ? '—' : `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}%`
+}
+function chgClass(v: number | null): string {
+  return v === null ? '' : v >= 0 ? 'up' : 'down'
+}
+
+function toggleAi(id: number): void {
+  expandId.value = expandId.value === id ? null : id
+}
+
+/** 刷新会话列表（进页 / 切格 / 点刷新都走它）；`quiet` 不走那个「读失败弹 toast」的分支 */
+async function refreshAi(): Promise<void> {
+  await refreshPersist(true)
+}
+
+watch(tab, t => {
+  if (t === 'ai') {
+    expandId.value = null
+    void refreshAi()
+  }
+})
+
 /* ---------------- 数据 ---------------- */
 
 async function loadPicks(): Promise<void> {
@@ -129,6 +195,8 @@ async function loadPicks(): Promise<void> {
 }
 
 onMounted(async () => {
+  /* 两格的数据都在进页时拉一次：切过去就是现成的，不用等 */
+  void refreshPersist(true)
   try {
     params.value = (await fetchScanSettings()).params
   } catch (e) {
@@ -198,7 +266,17 @@ function pctClass(v: number): string {
   <div class="col auto warm-skin">
     <div v-if="error" class="error">{{ error }}</div>
 
-    <section class="panel">
+    <!-- 两格：筛选的币种 / 自动 AI（持久化分析那批会话） -->
+    <div class="seg auto-seg">
+      <button type="button" :class="{active: tab === 'scan'}" @click="tab = 'scan'">
+        筛选的币种 <span class="tag">{{ picks.length }}</span>
+      </button>
+      <button type="button" :class="{active: tab === 'ai'}" @click="tab = 'ai'">
+        自动 AI <span class="tag">{{ aiRows.length }}</span>
+      </button>
+    </div>
+
+    <section v-if="tab === 'scan'" class="panel">
       <div class="sec-head">
         <h2>
           筛选的币种
@@ -250,6 +328,101 @@ function pctClass(v: number): string {
             </tr>
           </tbody>
         </table>
+      </div>
+    </section>
+
+    <!-- 「自动 AI」：所有加入过持久化分析的币（在跑的排前面，7 天内的都留着） -->
+    <section v-else class="panel">
+      <div class="sec-head">
+        <h2>
+          自动 AI 分析
+          <span class="tag">{{ activeCount }} 个在跑</span>
+        </h2>
+        <div class="sec-actions">
+          <button
+            class="ghost tiny"
+            :disabled="persistBusy"
+            title="重新拉一次列表"
+            @click="refreshAi"
+          >
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <p class="meta-line">
+        每 15 分钟自动问一次 AI、最长 8 小时；只有「可做」这一档进出时才提醒（站内 + Telegram）。
+        点一行展开看时间线和当时的结论。
+      </p>
+
+      <p v-if="!aiRows.length" class="dim">
+        还没有加入过 —— 到 K 线页顶部点那个循环箭头就能加入（每个币最多盯 8 小时）。
+      </p>
+
+      <div v-else class="ai-list">
+        <template v-for="s in aiRows" :key="s.id">
+          <div class="ai-row" :class="{open: expandId === s.id}" @click="toggleAi(s.id)">
+            <div class="ai-sym">
+              <b>{{ s.symbol }}</b>
+              <span class="dim">{{ s.timeframe }}</span>
+            </div>
+            <div class="ai-prog">
+              <span class="ai-st" :class="s.status === 'active' ? 'on' : 'off'">
+                {{ s.status === 'active' ? '在跑' : '已结束' }}
+              </span>
+              <span class="dim">第 {{ s.runs }} 次</span>
+              <span v-if="s.status === 'active'" class="dim">剩 {{ leftText(s.endsAt) }}</span>
+            </div>
+            <div class="ai-last">
+              <span class="ps-v" :class="verdictClass(s.lastVerdict)">
+                {{ verdictText(s.lastVerdict) }}
+              </span>
+              <span class="dim ai-line">{{ lineText(s.lastLine) || '还没跑出结论' }}</span>
+            </div>
+            <div class="ai-caret dim">{{ expandId === s.id ? '▴' : '▾' }}</div>
+          </div>
+
+          <div v-if="expandId === s.id" class="ai-detail">
+            <p class="dim ai-next">
+              <span v-if="s.status === 'active'">下一次 {{ bjTime(s.nextAt) }} · </span>
+              {{ bjTime(s.startedAt) }} 起 · 回看 {{ s.days }} 天
+              <span v-if="s.endedReason"> · {{ s.endedReason }}</span>
+            </p>
+
+            <div v-if="s.timeline.length" class="ps-tl">
+              <div class="ps-tl-head">
+                <span>时间</span><span>档位</span><span>结论</span>
+                <span class="ps-price">当时价</span><span class="ps-c1">+1h</span><span class="ps-c4">+4h</span>
+              </div>
+              <div v-for="r in [...s.timeline].reverse()" :key="r.id" class="ps-tl-row">
+                <span class="ps-t num dim">{{ bjTime(r.createdAt).slice(5) }}</span>
+                <span class="ps-v" :class="verdictClass(r.verdict)">{{ verdictText(r.verdict) }}</span>
+                <span class="ps-line" :title="r.line">{{ lineText(r.line) }}</span>
+                <span class="ps-price num">{{ r.price === null ? '—' : fmt(r.price, 6) }}</span>
+                <span class="ps-c1 num" :class="chgClass(r.after1h)">{{ chgText(r.after1h) }}</span>
+                <span class="ps-c4 num" :class="chgClass(r.after4h)">{{ chgText(r.after4h) }}</span>
+              </div>
+            </div>
+            <p v-else class="dim">还没跑出结论 —— 15 分钟内会出第一条，也可以点「跑一次」。</p>
+
+            <div class="ai-acts">
+              <button class="ghost tiny" @click.stop="openKline(s.symbol)">看 K 线</button>
+              <template v-if="s.status === 'active'">
+                <button
+                  class="ghost tiny"
+                  :disabled="persistBusy"
+                  title="不等下一个 15 分钟，现在就跑一轮"
+                  @click.stop="runPersistOnce(s.id)"
+                >
+                  跑一次
+                </button>
+                <button class="ghost tiny" :disabled="persistBusy" @click.stop="removePersist(s.id)">
+                  停止
+                </button>
+              </template>
+            </div>
+          </div>
+        </template>
       </div>
     </section>
 
@@ -429,6 +602,170 @@ function pctClass(v: number): string {
 <style scoped>
 .auto {
   gap: 10px;
+}
+
+/* 两格 tab（筛选的币种 / 自动 AI）：铺满一行，两格等宽，手指好按 */
+.auto-seg {
+  display: flex;
+  width: 100%;
+}
+
+.auto-seg button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+}
+
+/*
+ * 会话列表：一行 = 币种 / 进度 / 最近结论，点一下展开时间线。
+ * ⚠️ 用 grid + div 而不是 `<table>`：手机上要把四列折成两行（见下面那条媒体查询），
+ *    表格的 `display` 一改就到处是坑（对齐、边框、colspan），这里没必要冒那个险。
+ */
+.ai-list {
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  overflow: hidden;
+}
+
+.ai-row {
+  display: grid;
+  grid-template-columns: 92px 168px minmax(0, 1fr) 16px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  cursor: pointer;
+  border-top: 1px solid var(--line);
+}
+
+.ai-row:first-child {
+  border-top: 0;
+}
+
+.ai-row.open {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ai-row:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+@media (hover: hover) {
+  .ai-row:hover {
+    background: rgba(255, 255, 255, 0.035);
+  }
+}
+
+.ai-sym {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.ai-sym .dim {
+  font-size: 11px;
+}
+
+.ai-prog {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* 「在跑 / 已结束」那个小标 */
+.ai-st {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.ai-st.on {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.ai-st.off {
+  background: color-mix(in srgb, var(--border) 60%, transparent);
+  color: var(--muted);
+}
+
+.ai-last {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+/* 那一句话：一行省略号（完整的那句在展开的「结论」列里） */
+.ai-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-caret {
+  font-size: 11px;
+  text-align: right;
+}
+
+.ai-detail {
+  padding: 2px 10px 12px;
+  border-top: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.ai-next {
+  margin: 8px 0;
+  font-size: 11.5px;
+}
+
+.ai-acts {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/*
+ * 窄屏（手机）：四列折成两行 —— ① 币种 + 进度 ② 结论（整行、最多两行）。
+ * 跟 K 线页那个弹层的时间线同一个思路。
+ */
+@media (max-width: 560px) {
+  .ai-row {
+    grid-template-columns: minmax(0, 1fr) auto 16px;
+    grid-template-areas:
+      'sym  prog  caret'
+      'last last  last';
+    row-gap: 6px;
+  }
+  .ai-sym {
+    grid-area: sym;
+  }
+  .ai-prog {
+    grid-area: prog;
+  }
+  .ai-last {
+    grid-area: last;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    line-height: 1.45;
+  }
+  .ai-last .ai-line {
+    white-space: normal;
+  }
+  .ai-caret {
+    grid-area: caret;
+  }
+  .ai-acts {
+    flex-wrap: wrap;
+  }
 }
 
 .sec-head {
