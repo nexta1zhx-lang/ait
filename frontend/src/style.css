@@ -3319,16 +3319,42 @@ body.fixed-viewport .split {
 /*
  * 亮着（`.on`）= 这个币正在被每 15 分钟问一次。
  *
- * ★ 2026-10-15 当天改了两回：先按用户说的「激活改为转动态效果」让它转，
- *   当天又被否：「**不要一直转**，图标改为那种分析上下折线的那种样式」——
- *   一直转的东西挂在图上一整天太吵，而且循环箭头那个形状天生就该转、放着不转也怪。
- *   现在：**图标是折线（静态）**，在跑只靠颜色。
- *   （想让它"活着"又不吵，可以做成**一次性**的脉冲：加上去那一刻亮一下。
- *     真要做的话，加 `@keyframes` + 挂 `.just-on`，别用 `infinite`。）
+ * ★ 2026-10-15 当天改了三回，记在这免得下次又绕回来：
+ *   ① 「激活改为转动态效果」→ 做成**无限旋转**；
+ *   ② 「**不要一直转**，图标改为那种分析上下折线的那种样式」→ 换成折线 + 只染色；
+ *   ③ 「折线启动要动起来，感觉**一直在滚动**的感觉」→ 折线**横向滚动**（现在这个）。
+ *   所以：不是转，是滚；折线本身是**周期性锯齿波**（4 个周期，见 AnalyzeView 里那条 `d`）。
+ *
+ * 滚动怎么做到"无缝"（这是这段唯一的坑）：
+ *   · 路径从 -12 画到 36（viewBox 只有 24 宽）⇒ 滚到任何位置，窗口里都有线，边缘不露白；
+ *   · 一次动画正好挪**一个周期**（12）= 整条路径 bbox（48）的 **25%** ⇒ 首尾完全重合，
+ *     看不出接缝。⚠️ 改周期/宽度就得同步改这个百分比。
+ *   · 用 `transform-box: fill-box` + 百分比：这样它跟着图标尺寸走，
+ *     不用写死 px（写死 px 会在不同 DPR / 尺寸下滚歪）。
+ *   · 只动 `path`，不动 `svg`/按钮（动它们会把 30×28 的框一起晃）。
  */
 .chart-head .tk-persist.on {
   color: var(--blue);
   border-color: var(--blue);
+}
+.chart-head .tk-persist.on svg path {
+  transform-box: fill-box;
+  transform-origin: 0 0;
+  animation: tk-persist-scroll 2.6s linear infinite;
+}
+@keyframes tk-persist-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-25%);
+  }
+}
+/* 晕动症：宁可不动，也别让人一直盯着滚 */
+@media (prefers-reduced-motion: reduce) {
+  .chart-head .tk-persist.on svg path {
+    animation: none;
+  }
 }
 
 /* ✓：结束线定好了才能按（没点线时灰着，`disabled`） */
