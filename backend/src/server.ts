@@ -105,6 +105,7 @@ import {
   setUserPassword,
   startSession,
   touchSession,
+  userByName,
   userByToken,
   verifyUserPassword,
   type SessionMeta,
@@ -2875,6 +2876,36 @@ async function handleAuth(
     } catch (e) {
       return sendJson(res, 400, {error: (e as Error).message})
     }
+  }
+
+  /*
+   * **本地开发的「免登录」**（2026-10-15 用户：「就是我不想每次登录」）。
+   *
+   * 两道闸，缺一不可 —— 谁想开都得**同时**满足：
+   *   ① `NODE_ENV !== 'production'`：线上容器里是 `production`（`docker-compose.prod.yml`
+   *      和 `Dockerfile` 都写死了），命中这条直接 404，连存在都不承认；
+   *   ② 显式设了 `DEV_AUTO_LOGIN`（值是用户名；写 `1` 就当 `admin`）——
+   *      不是"没配就默认开"，没配就永远走不到。
+   *
+   * 命中后发的是一条**正常的会话 token**（照样落 `sessions` 表、同样 30 天、
+   * 「登录设备」里能看到、也能踢），不是绕过鉴权的后门：只是省掉输密码 + 动态口令。
+   */
+  if (p === '/api/auth/dev-login') {
+    if (method !== 'GET') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const flag = process.env.DEV_AUTO_LOGIN
+    if (process.env.NODE_ENV === 'production' || !flag) {
+      return sendJson(res, 404, {error: 'Not Found'})
+    }
+    const username = flag === '1' ? 'admin' : flag
+    const u = await userByName(username)
+    if (!u) {
+      return sendJson(res, 400, {
+        error: `DEV_AUTO_LOGIN 指定的用户不存在：${username}`
+      })
+    }
+    const s = await startSession(u.id, sessionMeta(req))
+    console.log(`  [dev] 免登录：${username}（DEV_AUTO_LOGIN 开的，线上没有这条）`)
+    return sendJson(res, 200, {token: s.token, expiresAt: s.expiresAt, user: u})
   }
 
   /* 两步验证第二关：中间票 + 6 位动态口令（也收恢复码） */

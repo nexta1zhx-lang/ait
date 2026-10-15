@@ -169,6 +169,20 @@ export async function userByToken(token: string): Promise<User | null> {
   return mapUser(row)
 }
 
+/**
+ * 按用户名找一个用户（**本地开发的免登录用**：`/api/auth/dev-login` 把 `DEV_AUTO_LOGIN`
+ * 里的用户名翻成这个用户 id）。线上那条路走的是 `checkLogin()`，密码 + 两步验证一个都不能少。
+ */
+export async function userByName(username: string): Promise<User | null> {
+  const u = String(username ?? '').trim()
+  if (!u) return null
+  const row = await queryOne<UserRaw>(
+    `SELECT id, username, is_admin, created_at FROM users WHERE username = $1`,
+    [u]
+  )
+  return row ? mapUser(row) : null
+}
+
 export async function deleteSession(token: string): Promise<void> {
   await query('DELETE FROM sessions WHERE token = $1', [token])
 }

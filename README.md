@@ -56,6 +56,27 @@ npm run dev -- BTC/USDT -t 4h -d 30     # 换周期 / 换天数
 | `npm run sync:contracts`                                           | 拉交易所合约表                                                     |
 | `npm run scan:pick`                                                | 手动跑一轮**选币**（自动化预测第一段，纯 SQL 不花钱）               |
 
+### 本地免登录（2026-10-15）
+
+本地开发不想每次输密码 + 动态口令，就在起后端时带上 `DEV_AUTO_LOGIN`：
+
+```bash
+DEV_AUTO_LOGIN=1 npm run web          # 1 = admin；也可以写用户名
+```
+
+前端（**只在 vite 开发模式**）发现本地没有 token 时会自己去 `GET /api/auth/dev-login` 换一条，
+拿到的是一条**正常的会话 token**（落 `sessions` 表、同样 30 天、「登录设备」里能看到也能踢）。
+
+两道闸，缺一不可，所以线上**不成立**：
+
+1. `NODE_ENV !== 'production'` —— 线上容器是 `production`（`docker-compose.prod.yml` / `Dockerfile`），
+   命中这条直接 404；
+2. 显式设了 `DEV_AUTO_LOGIN` —— 不设就永远走不到（默认关）。
+
+⚠️ 开到它就等于「本地不用登录了」：想测登录 / 登出流程记得**别带这个变量**起后端。
+⚠️ 顺带一个坑：token 存在 `localStorage`，而 `localStorage` **按 origin（含端口）隔离** ——
+本地换端口（8787 ↔ 8789 ↔ 8790）就会各登各的，看着像「每次都要登录」。本地固定一个端口最省事。
+
 环境变量放 `.env`（只剩交易所 / 数据库 / 汇率这些；`EXCHANGE` / `MARKET_TYPE` / `API_BASE` 可选）。
 **大模型配置（Key / 模型 / 接口地址 / 思考力度）不放 `.env`** —— 按用户存在数据库里，
 在网页「我的 → 个人信息 → 模型配置」里填；管理员能在「我的 → 管理」看每个人的配置。
