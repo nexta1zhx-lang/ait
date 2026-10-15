@@ -50,8 +50,15 @@ export interface TpSlTarget {
   name: string
   /** 开仓均价（算「预计收益」用） */
   entry: number
-  /** 当前标记价（判止盈 / 止损用；拿不到时传 0，后端还会自己校一遍） */
-  mark: number
+  /**
+   * **当前是哪个价**（判止盈 / 止损 + 「压在现价上」的拦截都用它；拿不到时传 0，
+   * 后端还会自己按同一个口径校一遍）。
+   *
+   * ⚠️ 2026-10-15 之前这里是**标记价**，现在统一成**最新成交价**（「现价」）——
+   *    跟后端 `placeStopOrder` 的触发基准对齐（那次实盘复盘见 `docs/EXCHANGE.md` §60：
+   *    标记价比合约盘口慢约 2%，止损触发晚、成交砸在坑里）。
+   */
+  last: number
   /** 持仓数量（张 / 基础币） */
   amount: number
   /**
@@ -120,6 +127,10 @@ export function closeSideOf(side: string): 'buy' | 'sell' {
  *   · 平多（卖）：触发价 **> 现价** ⇒ 涨到才触发 ⇒ 止盈；**< 现价** ⇒ 跌到才触发 ⇒ 止损
  *   · 平空（买）：反过来
  *
+ * ⚠️ 「现价」= **最新成交价**（2026-10-15 起；在那之前是标记价）。后端触发用的也是最新价
+ *    （`workingType: CONTRACT_PRICE`），两边必须同一个数 —— 判的价和触发的价不一样，
+ *    币安回 `-2021 立即触发`。
+ *
  * ⚠️ 它跟「相对**开仓价**是赚是亏」**不是一回事** —— 用户 2026-10-06 问的就是这个：
  *    多单开仓 5、现价 10、触发价填 8：相对开仓价是赚的（锁定 +3），
  *    但 8 在现价**下方** ⇒ 币安只收 `STOP_MARKET`。这就是**保本单 / 移动止损**，
@@ -128,14 +139,15 @@ export function closeSideOf(side: string): 'buy' | 'sell' {
 export function kindOfPrice(
   side: string,
   price: number,
-  mark: number
+  /** 现价（最新成交价）—— 见上面那段 */
+  basis: number
 ): 'profit' | 'stop' {
-  if (!(price > 0) || !(mark > 0)) return 'stop'
+  if (!(price > 0) || !(basis > 0)) return 'stop'
   return closeSideOf(side) === 'sell'
-    ? price > mark
+    ? price > basis
       ? 'profit'
       : 'stop'
-    : price < mark
+    : price < basis
       ? 'profit'
       : 'stop'
 }
@@ -146,7 +158,9 @@ export function tpSlOf(
   pos: Pick<
     FuturesPosition,
     'symbol' | 'side' | 'amount' | 'markPrice' | 'keyName' | 'raw'
-  >
+  >,
+  /** 这个币的**最新成交价**（排序用；拿不到传 0，就退回 `pos.markPrice`） */
+  last = 0
 ): TpSlHit {
   const out: TpSlHit = {profit: [], stop: []}
   const pair = pairOf(pos.raw ?? pos.symbol)
@@ -182,17 +196,18 @@ export function tpSlOf(
     })
   }
   /*
-   * **离标记价最近的那张排第一**（最先会触发的那张）—— 弹层只认第一张，
+   * **离现价最近的那张排第一**（最先会触发的那张）—— 弹层只认第一张，
    * 所以「哪张算主要的」得有个说得过去的定义，别按币安返回的顺序（那个是按下单时间）。
+   * ⚠️ 「现价」= 最新成交价（2026-10-15 起；在那之前用标记价），拿不到就退回标记价。
    */
-  const mark = Number(pos.markPrice ?? 0)
+  const basis = last > 0 ? last : Number(pos.markPrice ?? 0)
   const near = (a: TpSlOrder, b: TpSlOrder) =>
-    Math.abs(a.price - mark) - Math.abs(b.price - mark)
-  if (mark > 0) {
+    Math.abs(a.price - basis) - Math.abs(b.price - basis)
+  if (basis > 0) {
     out.profit.sort(near)
     out.stop.sort(near)
   } else {
-    /* 拿不到标记价就按价格排（止盈从低到高、止损从高到低），至少是稳定的 */
+    /* 拿不到现价就按价格排（止盈从低到高、止损从高到低），至少是稳定的 */
     out.profit.sort((a, b) => a.price - b.price)
     out.stop.sort((a, b) => b.price - a.price)
   }
@@ -252,6 +267,6 @@ export interface OrderEditTarget {
   amount: number
   /** 这条对应的**持仓**数量（算「平仓比例」用；对不上仓位就是 0） */
   held: number
-  /** 标记价 / 最新价：占位符 + 「压在现价上」的校验（拿不到是 0） */
-  mark: number
+  /** 现价（最新成交价；拿不到退回标记价）：占位符 + 「压在现价上」的校验（都没有才是 0） */
+  last: number
 }

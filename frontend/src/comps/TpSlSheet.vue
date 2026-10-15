@@ -132,8 +132,8 @@ function liveKind(r: Row): Kind {
   const t = props.target
   if (!t) return r.group
   const edited = !r.was || r.price !== r.was.price
-  return edited && r.price > 0 && t.mark > 0
-    ? kindOfPrice(t.side, r.price, t.mark)
+  return edited && r.price > 0 && t.last > 0
+    ? kindOfPrice(t.side, r.price, t.last)
     : r.group
 }
 
@@ -191,9 +191,9 @@ function estOf(r: Row): string {
 }
 
 /** 触发价正好压在现价上 ⇒ 币安一定判「立即触发」（-2021），先在这儿拦住 */
-function onMark(r: Row): boolean {
+function onLast(r: Row): boolean {
   const t = props.target
-  return !!t && t.mark > 0 && r.price > 0 && Math.abs(r.price - t.mark) < 1e-12
+  return !!t && t.last > 0 && r.price > 0 && Math.abs(r.price - t.last) < 1e-12
 }
 
 /**
@@ -217,7 +217,7 @@ const actions = computed(() =>
 )
 
 /** 有价但压在现价上的行 —— 拦住确认并说清是哪一行（不然只会看到 -2021） */
-const badRow = computed(() => rows.value.find(r => !r.removed && onMark(r)) ?? null)
+const badRow = computed(() => rows.value.find(r => !r.removed && onLast(r)) ?? null)
 
 /** 确认什么时候不能点：正在提交 / 有压在现价上的行 */
 const blocked = computed(() => !!props.busy || !!badRow.value)
@@ -340,7 +340,7 @@ const qtyOf = (r: Row) => ((props.target?.amount ?? 0) * r.pct) / 100
             inputmode="decimal"
             :disabled="r.removed"
             :placeholder="
-              target && target.mark > 0 ? `现价 ${fmtPrice(target.mark)}` : '触发价'
+              target && target.last > 0 ? `现价 ${fmtPrice(target.last)}` : '触发价'
             "
             :aria-label="`${kind === 'profit' ? '止盈' : '止损'}触发价`"
             @change="onPrice(r, ($event.target as HTMLInputElement).value)"
@@ -368,7 +368,7 @@ const qtyOf = (r: Row) => ((props.target?.amount ?? 0) * r.pct) / 100
           </div>
 
           <div class="ts-act">
-            <span v-if="onMark(r)" class="ts-bad">
+            <span v-if="onLast(r)" class="ts-bad">
               触发价就是现价，币安会判「立即触发」，挪一点
             </span>
             <span v-else-if="r.removed" class="ts-bad">这一张在确认后撤掉</span>

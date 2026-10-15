@@ -16,7 +16,7 @@ import IconCalendar from './IconCalendar.vue'
 import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
-import {livePrice, setLivePrice} from '../ticker'
+import {freshLivePrice, livePrice, setLivePrice} from '../ticker'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
   chartShowHistory,
@@ -829,14 +829,16 @@ interface DragRef {
   /** 开仓均价（算「预计收益」） */
   entry: number
   /**
-   * **当前标记价** —— 判「这张单该发止盈还是止损」用的是它，**不是**开仓价。
+   * **当前最新成交价（现价）** —— 判「这张单该发止盈还是止损」用的是它，**不是**开仓价。
    *
    * ⚠️ 2026-10-06 修 `-2021`：币安的触发方向是死的（止损类型 = 价格跌到触发价才成交），
    *    所以「相对**现价**在哪一侧」才有意义。多单浮盈时把触发价拖到开仓价（保本单）——
    *    相对开仓价是赚的，但相对现价在**下方** ⇒ 只能发 `STOP_MARKET`；
    *    按开仓价判成「止盈」就会被币安回 `Order would immediately trigger.`
+   * ⚠️ 2026-10-15：口径从标记价统一成**最新成交价**（跟后端触发基准 `CONTRACT_PRICE` 对齐，
+   *    见 `docs/EXCHANGE.md` §60）。取法见下面 `dragLastPrice()`。
    */
-  mark: number
+  last: number
   /** 这条持仓的数量（张） */
   amount: number
   /** 改单时：这一张的单号 + positionSide */
@@ -952,6 +954,20 @@ function orderLabel(
   }
 }
 
+/**
+ * 拖仓位线 / 挂单线时，判「止盈还是止损」用的那个价 —— **最新成交价**，拿不到退回标记价。
+ *
+ * ⚠️ 跟后端 `placeStopOrder()` 的兜底顺序**一模一样**（`basis = last || mark`）：两边用
+ *    不同的价，界面说「止损」而币安判「立即触发」（`-2021`）就回来了。
+ *    「最新成交价」这条流就是页面顶上那个会跳的价（`ticker.ts` 的 `freshLivePrice`，
+ *    由 K 线尾帧喂）；测试模式 / 切后台时它是断的 ⇒ 退回标记价。
+ */
+function dragLastPrice(mark: number): number {
+  const live = freshLivePrice.value
+  if (typeof live === 'number' && live > 0) return live
+  return mark > 0 ? mark : 0
+}
+
 /** 这张图现在该画哪几条线（数据不是这个币的一律不画） */
 function orderLineList(): OrderLine[] {
   const out: OrderLine[] = []
@@ -987,7 +1003,7 @@ function orderLineList(): OrderLine[] {
           symbol: overlaySymbol.value,
           side: p.side,
           entry: p.entryPrice,
-          mark: p.markPrice,
+          last: dragLastPrice(p.markPrice),
           amount: p.amount,
           posSide: p.side === 'long' ? 'LONG' : 'SHORT'
         },
@@ -1033,7 +1049,7 @@ function orderLineList(): OrderLine[] {
               symbol: overlaySymbol.value,
               side: target.side,
               entry: target.entryPrice,
-              mark: target.markPrice,
+              last: dragLastPrice(target.markPrice),
               amount: target.amount,
               orderId: o.id,
               posSide: o.posSide
@@ -1639,14 +1655,14 @@ function ordLabelCancel(): void {
  *     松手确认之后它就是新的那张单（后端撤旧挂新），所以"派生一条"是错的。
  *   · **仓位线** ⇒ 原来那条一动不动，`setPreview` 另画一条虚线 + 另起一枚标签。
  *
- * ⚠️ 判「止盈 / 止损」用**标记价**（拿不到才退回开仓价）—— 见 `DragRef.mark` 那段。
+ * ⚠️ 判「止盈 / 止损」用**最新成交价**（拿不到才退回开仓价）—— 见 `DragRef.last` 那段。
  */
 function drawDragPreview(): void {
   const d = drag.value
   if (!d || !refs) return
   const px = dragPrice.value
   const long = d.side === 'long'
-  const ref = d.mark > 0 ? d.mark : d.entry
+  const ref = d.last > 0 ? d.last : d.entry
   const isProfit = long ? px > ref : px < ref
   const diff = long ? px - d.entry : d.entry - px
   const pct = DEFAULT_CLOSE_PCT
@@ -3908,7 +3924,7 @@ onBeforeUnmount(() => {
       :side="stopSheet?.drag.side ?? 'long'"
       :price="stopSheet?.price ?? 0"
       :entry="stopSheet?.drag.entry ?? 0"
-      :mark="stopSheet?.drag.mark ?? 0"
+      :last="stopSheet?.drag.last ?? 0"
       :amount="stopSheet?.drag.amount ?? 0"
       :pct="stopSheet?.pct ?? 100"
       :order-id="stopSheet?.drag.orderId"

@@ -302,7 +302,7 @@ function posRef(p: FuturesPosition): PositionRef {
  *    要显示可点击修改」）。
  */
 function tpslOf(p: FuturesPosition): TpSlTarget {
-  const hit = tpSlOf(props.openOrders, p)
+  const hit = tpSlOf(props.openOrders, p, lastOf(p) ?? 0)
   return {
     symbol: p.symbol,
     raw: p.raw ?? pairOf(p.symbol),
@@ -310,7 +310,8 @@ function tpslOf(p: FuturesPosition): TpSlTarget {
     keyId: p.keyId,
     name: baseOf(p.symbol),
     entry: p.entryPrice,
-    mark: p.markPrice,
+    /* 现价：**最新成交价**优先（跟后端触发基准一个口径），拿不到退回标记价 */
+    last: lastOf(p) ?? p.markPrice,
     amount: p.amount,
     profit: hit.profit,
     stop: hit.stop
@@ -334,7 +335,7 @@ function tpSlLine(p: FuturesPosition): {
   none: boolean
   title: string
 }[] {
-  const hit = tpSlOf(props.openOrders, p)
+  const hit = tpSlOf(props.openOrders, p, lastOf(p) ?? 0)
   return (['profit', 'stop'] as const).map(kind => {
     const list = hit[kind]
     const word = kind === 'profit' ? '止盈' : '止损'
@@ -702,6 +703,9 @@ function orderEditOf(o: ExchangeOpenOrder): OrderEditTarget {
   const pair = pairOf(o.symbol)
   const p = positionOfOrder(o)
   const base = baseOf(o.symbol)
+  /* 现价：**最新成交价**优先（跟后端触发基准一个口径），拿不到退回持仓的标记价
+     （挂着的是**开仓**单、还没仓位时，那两条都没底稿就只能是 0） */
+  const last = (p ? lastOf(p) : null) ?? (Number(p?.markPrice ?? 0) || 0)
   return {
     id: o.id,
     raw: pair,
@@ -714,8 +718,7 @@ function orderEditOf(o: ExchangeOpenOrder): OrderEditTarget {
     /* ⚠️ 全平型条件单没有自己的数量 ⇒ 按持仓量带进去（弹层开出来就是 100%，见 `orderQty`） */
     amount: orderQty(o) || 0,
     held: Math.abs(Number(p?.amount ?? 0)),
-    /* 标记价：持仓上有就用它；没有（比如挂着的是**开仓**单、还没仓位）就退回最新成交价 */
-    mark: Number(p?.markPrice ?? 0) || props.lastPrice?.[pair] || 0
+    last
   }
 }
 

@@ -13,7 +13,7 @@
  * ⚠️ **改单和撤单都没有测试版**（币安这几个接口不给 test）—— 点下去就是真动作。
  *    所以：① 没改动时「保存」是灰的（免得手滑把同一张单撤了重挂一遍）；
  *    ② 撤单要**二次确认**（第一次点只是把按钮变成「再点一下撤单」）。
- * ⚠️ 触发价正好压在标记价上，币安一定回 `-2021 立即触发` ⇒ 在这儿就拦住，
+ * ⚠️ 触发价正好压在**现价（最新成交价）**上，币安一定回 `-2021 立即触发` ⇒ 在这儿就拦住，
  *    别让人提交完再看一句看不懂的英文报错（跟 `TpSlSheet` 一个口径）。
  * ⚠️ 这里**不写「真单 / 测试单」那段说明**（用户当天从止盈止损弹层里删过：
  *    「提示去掉，现在都是真的」）。要提醒就写在按钮上，别再加一整段。
@@ -62,7 +62,7 @@ watch(
 const held = computed(() => props.target?.held ?? 0)
 const name = computed(() => props.target?.name ?? '')
 const sideText = computed(() => (props.target?.side === 'buy' ? '买' : '卖'))
-const mark0 = computed(() => props.target?.mark ?? 0)
+const last0 = computed(() => props.target?.last ?? 0)
 
 /**
  * 平仓比例（%）：**只有对得上持仓时才有意义**（张数 ÷ 持仓张数）。
@@ -81,8 +81,8 @@ const pct = computed({
 const bad = computed(() => {
   if (!(price.value > 0)) return isStop.value ? '触发价要先填好' : '委托价要先填好'
   if (!(amount.value > 0)) return '数量要先填好'
-  if (isStop.value && mark0.value > 0 && Math.abs(price.value - mark0.value) < 1e-12)
-    return `触发价正好是标记价 ${fmtPrice(mark0.value)}，币安会判「立即触发」，挪一点`
+  if (isStop.value && last0.value > 0 && Math.abs(price.value - last0.value) < 1e-12)
+    return `触发价正好是现价 ${fmtPrice(last0.value)}，币安会判「立即触发」，挪一点`
   return ''
 })
 
@@ -171,14 +171,14 @@ function fmtQty(v: number): string {
       <div class="cf-row">
         <span class="cf-lb">
           {{ isStop ? '触发价' : '委托价' }}
-          <b v-if="mark0 > 0">现价 {{ fmtPrice(mark0) }}</b>
+          <b v-if="last0 > 0">现价 {{ fmtPrice(last0) }}</b>
         </span>
         <input
           class="cf-input"
           :value="price > 0 ? fmtPrice(price) : ''"
           type="text"
           inputmode="decimal"
-          :placeholder="mark0 > 0 ? `现价 ${fmtPrice(mark0)}` : '价格'"
+          :placeholder="last0 > 0 ? `现价 ${fmtPrice(last0)}` : '价格'"
           :aria-label="isStop ? '触发价' : '委托价'"
           @change="onNum(($event.target as HTMLInputElement).value, n => (price = n))"
         />

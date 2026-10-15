@@ -4960,8 +4960,12 @@ npm run candles:audit -- --symbols=BTC/USDT:USDT,ETH/USDT:USDT
 想两头都要的话，可以再叠一个 `priceProtect`（触发保护，要求条件持续满足才触发）——
 现在没开。
 
-⚠️ 前端那几处「触发价压在现价上」的拦截（`StopSheet` / `TpSlSheet` / `OrderEditSheet`）
-**还是按标记价判**的，只是**提示性**：真正发单/纠正类型以后端 `legalKind()` 为准。
+⚠️ 前端那几处「触发价压在现价上」的拦截图 / 判「止盈还是止损」的地方，**2026-10-15 当天
+也一起统一成最新价了**（同一批 commit）：`tpsl.ts`（`kindOfPrice` 的 `basis` + 排序 +
+两个 target 的 `mark` → `last`）、`KlineChart.vue`（拖出来的那条线的 `DragRef.last`，
+取 `freshLivePrice`（拿不到退回标记价，跟后端兜底一致））、`StopSheet.vue`、
+`TpSlSheet.vue`、`OrderEditSheet.vue`、`ExchangeAccountBoard.vue`（target 用 `lastOf()`）。
+判的和触发的是同一个价，就不会再出现「界面说止损、币安判立即触发」。
 
 ### 验证（测试账户 id=7，真单）
 
