@@ -760,6 +760,34 @@ sudo sh -c '. /etc/ait-alert.env
     --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=测试：上线通知"'
 ```
 
+## 应用自己发 Telegram（持久化分析，2026-10-15）
+
+「持久化分析」结论跨档时要推一条（见 [PERSIST-ANALYSIS.md](./PERSIST-ANALYSIS.md)），
+这一条是**应用后端**发的（`backend/src/notify/telegram.ts`），跟上面两个 shell 脚本不是一条路：
+
+- `deploy.sh` / `alert-watchdog.sh` 是 root 跑的，直接读 `/etc/ait-alert.env`；
+- **app 容器读的是 `/opt/crypto-advisor/.env`**（compose 里 `env_file: .env`）。
+  ⚠️ `/etc/ait-alert.env` 里有凭据**不代表容器里有** —— 得单独加一份。
+
+```bash
+# 服务器上（不回显值；从 root 那份抠出来追加进容器的 .env）
+sudo sh -c 'umask 077; . /etc/ait-alert.env
+  grep -q "^TELEGRAM_BOT_TOKEN=" /opt/crypto-advisor/.env ||
+    printf "TELEGRAM_BOT_TOKEN=%s\n" "$TELEGRAM_BOT_TOKEN" >> /opt/crypto-advisor/.env
+  grep -q "^TELEGRAM_CHAT_ID=" /opt/crypto-advisor/.env ||
+    printf "TELEGRAM_CHAT_ID=%s\n" "$TELEGRAM_CHAT_ID" >> /opt/crypto-advisor/.env'
+
+# 让容器拿到新变量（env_file 只在创建容器时读一次）
+cd /opt/crypto-advisor && sudo docker compose up -d ca-app
+
+# 验：日志里那两行应当是"已配置"，且能真发出去
+sudo docker compose logs --tail 20 ca-app | grep -i telegram
+```
+
+⚠️ **没配也照样跑**：`sendTelegram()` 是 best-effort，缺凭据只打一行日志，
+结论照常入库、页面照常显示 —— **通知不该拖累主流程**。
+⚠️ 日志里**不许出现 token**：出错时也不回显 Telegram 的响应体（里面带 bot 地址）。
+
 ## 告警（可用性看门狗 → Telegram，2026-10-14）
 
 `scripts/alert-watchdog.sh` 在服务器上每分钟跑一次：查 `/api/health`（串起 Node + Postgres）

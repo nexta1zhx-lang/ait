@@ -189,10 +189,37 @@ export function markdownToPlain(text: string, max = 90): string {
  *   「等回踩不破再做」这种句子会被算成「能做」。
  */
 export function verdictKind(text: string): 'go' | 'no' | 'wait' {
-  const head = (text ?? '').slice(0, 260)
-  if (/不能做|不该做|不要做|不建议|不开|不动手|不参与|放弃|再等|先等/.test(head))
-    return 'no'
-  if (/能做|可以做|可做|可以进|建议进|可以开|进场/.test(head)) return 'go'
-  if (/等|观望|观察|待/.test(head)) return 'wait'
+  /*
+   * ⚠️ 判据跟后端 `backend/src/analysis/verdict.ts` 的 `verdictOf()` **逐字一致**
+   *    （持久化分析的时间线用后端那一份染色、这里给结论卡染色，两处颜色必须一样）。
+   *
+   * ★ 2026-10-15 修：原来只扫**前 260 字**（假设"结论一定在最前面"）。可模型经常给一整篇
+   *    Markdown（标题 + 分节），档位那两个字在后面 ⇒ 明明"可做"却被染成"观望"。
+   *    现在：抹掉 Markdown 记号、**全文找**、取最早出现的那一类。
+   *    「不能做」比它内部包含的「能做」出现得更早，所以否定不会被误读。
+   */
+  const plain = (text ?? '').replace(/[*_`#>]/g, ' ')
+  /*
+   * ⚠️ 「再等 / 先等」**不在**否决词表里：那是观望（wait），跟 wait 同义，
+   *    混进去只会让 no ↔ wait 来回翻 —— 见 `crossedActionable()` 那段。
+   */
+  const no = plain.search(/不能做|不该做|不要做|不建议|不开|不动手|不参与|放弃/)
+  const go = plain.search(/能做|可以做|可做|可以进|建议进|可以开|进场/)
+  if (no >= 0 && (go < 0 || no <= go)) return 'no'
+  if (go >= 0) return 'go'
   return 'wait'
+}
+
+/**
+ * 值不值得提醒（站内 toast / Telegram）：**只看「可做」这一档的进出**。
+ *
+ * 不可做 ↔ 观望 不提醒 —— 这俩在"要不要动手"上是一回事，模型每次换个说法就会翻一次，
+ * 32 次能弹十几次，纯噪音。
+ *
+ * ⚠️ 跟后端 `backend/src/analysis/verdict.ts` 的 `crossedActionable()` **必须一致**，
+ *    否则会出现"页面弹了、Telegram 没弹"（同一件事两边判得不一样）。
+ */
+export function crossedActionable(prev: string | null, next: string): boolean {
+  if (!prev) return false
+  return (prev === 'go') !== (next === 'go')
 }

@@ -2512,6 +2512,79 @@ export const saveScanSettings = (input: ScanParams) =>
 export const fetchScanPicks = (at?: number) =>
   get<ScanPicks>(`/api/scan/picks${at ? `?at=${at}` : ''}`)
 
+/* ---------------- 持久化分析（2026-10-15） ---------------- */
+
+/**
+ * 一条持久化分析会话 —— **字段与后端 `db/persist.ts` 的 `PersistSession` 一一对应**。
+ *
+ * 用户 2026-10-15：「在 k 线界面顶部加入持久化分析的图标，点击图标弹窗确定要加入持久化分析，
+ * 每隔 15 分钟分析一次，最长不超过 8 小时」。
+ */
+export interface PersistSession {
+  id: number
+  symbol: string
+  ccxtSymbol: string
+  timeframe: string
+  days: number
+  startedAt: string
+  endsAt: string
+  /** 下一轮什么时候跑（对齐 :00/:15/:30/:45 + 20 秒） */
+  nextAt: string
+  /** 已经跑了几轮（最多 32） */
+  runs: number
+  failed: number
+  status: 'active' | 'ended'
+  endedReason: string | null
+  /** 最近一条结论 */
+  lastVerdict: 'go' | 'no' | 'wait' | null
+  lastLine: string | null
+  lastPrice: number | null
+  lastAt: string | null
+}
+
+/** 时间线里一条：那次结论 + 那一刻的价格 + 之后的涨跌（复盘用） */
+export interface PersistTimelineRow {
+  id: number
+  createdAt: string
+  verdict: 'go' | 'no' | 'wait' | null
+  line: string
+  price: number | null
+  after1h: number | null
+  after4h: number | null
+}
+
+export interface PersistLimits {
+  /** 同时最多几个会话 */
+  maxActive: number
+  /** 一个会话最长多久（毫秒） */
+  maxMs: number
+  /** 间隔（毫秒） */
+  intervalMs: number
+}
+
+export interface PersistState {
+  sessions: (PersistSession & {timeline: PersistTimelineRow[]})[]
+  limits: PersistLimits
+  error: string | null
+}
+
+export const fetchPersist = () => get<PersistState>('/api/persist')
+
+/** 加入：`symbol` 传基础币（BTC）或行情符号都行，后端会归一 */
+export const startPersist = (input: {
+  symbol: string
+  market?: string
+  timeframe: string
+  days: number
+}) => post<{session?: PersistSession; error: string | null}>('/api/persist', input)
+
+export const stopPersist = (id: number) =>
+  del<{ok: boolean; error: string | null}>(`/api/persist?id=${id}`)
+
+/** 立刻跑一轮（等它跑完再回来，给人手动试一次用；平时是后台每 15 分钟自己跑） */
+export const runPersistNow = (id: number) =>
+  post<{ok?: boolean; error: string | null}>(`/api/persist/run?id=${id}`, {})
+
 /* ---------------- 万能划转（2026-10-05） ---------------- */
 
 /**

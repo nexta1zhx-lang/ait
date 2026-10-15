@@ -224,6 +224,19 @@ import {fetchBalance, fetchModels, type ModelsResult} from './llm/account'
 import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
 import {bjFull, collectCase, reeditCase} from './knowledge-service'
 import {stepRecorder, type AnalyzeStep, type OnStep} from './step'
+import {runAnalysis} from './analysis/run'
+import {runPersistTick, runSessionOnce} from './analysis/persist'
+import {
+  MAX_ACTIVE_PER_USER,
+  MAX_SESSION_MS,
+  RUN_INTERVAL_MS,
+  countActive,
+  createSession as createPersistSession,
+  listSessions as listPersistSessions,
+  sessionTimeline,
+  getSession as getPersistSession,
+  stopSession as stopPersistSession
+} from './db/persist'
 import {
   TF_MS,
   computeRecentSR,
@@ -1383,61 +1396,8 @@ async function handleMarkets(
 /* 开单分析                                                            */
 /* ------------------------------------------------------------------ */
 
-/** `BTC/USDT:USDT` → `BTC`（跟知识库里的写法保持一致） */
-function baseSymbol(ccxtSymbol: string): string {
-  return (
-    ccxtSymbol
-      .split('/')[0]
-      ?.replace(/:[^:]*$/, '')
-      .toUpperCase() ?? ccxtSymbol
-  )
-}
-
-/** 分析过程中的一步，用于前端「分析过程」时间线 */
-export type {AnalyzeStep}
-
-export interface AnalyzeOutcome {
-  symbol: string
-  ccxtSymbol: string
-  exchange: string
-  marketType: string
-  /** 是不是「回到某一刻」的测试跑（不存档） */
-  testMode: boolean
-  /** 测试跑的时间点（毫秒）；实时跑是 null */
-  at: number | null
-  price: number
-  /** 每个周期的 K 线是从本地库还是交易所来的（给「分析过程」显示） */
-  sources: MarketSnapshot['sources']
-  /** 主周期（图上那个） */
-  primary: Timeframe
-  /** 行情块 —— 只有主周期一个（最近 100 根逐根） */
-  blocks: MarketSnapshot['blocks']
-  /** 主周期的 K 线（给前端画图） */
-  candles: MarketSnapshot['candles']
-  /** 主周期往前看了多少天 */
-  days: number
-  judge: JudgeResult
-  /** 本次分析走了哪几步（前端画时间线） */
-  steps: AnalyzeStep[]
-  meta: {
-    model: string
-    rules: {sources: string[]; hash: string; warnings: string[]}
-    /** 本次给了多少个可用标签 */
-    tagCount: number
-    usage: {
-      callId: number | null
-      promptTokens: number
-      completionTokens: number
-      totalTokens: number
-      cacheHitTokens: number
-      costUsd: number
-      costCny: number
-      attempts: number
-      latencyMs: number
-      text: string
-    }
-  }
-}
+/** `baseSymbol` / `AnalyzeOutcome` / `runAnalysis` 都搬去了 `analysis/run.ts`
+ *（2026-10-15：持久化分析要直接调 `runAnalysis`，不能走 HTTP 绕回自己） */
 
 function parseTimeframes(raw: string | null): Timeframe[] {
   const fallback = loadConfig().timeframes
@@ -1491,202 +1451,8 @@ function parseAt(raw: string | null): number | null {
  * 一次分析的全过程。
  * 网页（JSON）、网页（SSE 进度）、命令行都走这里，避免几份实现各写一遍。
  */
-/**
- * 「分析过程」里那句数据来源。
- *
- * `db` = 底座常驻写的本地库（毫秒级、0 上游权重）；`rest` = 交易所现拉
- * （库里没有 / 太旧 / 不在覆盖范围时的兜底）。见 `data/market.ts` 的 `seriesCandles`。
- */
-function sourceText(sources: MarketSnapshot['sources']): string {
-  const db = sources.filter(s => s.from === 'db').map(s => s.timeframe)
-  const rest = sources.filter(s => s.from === 'rest').map(s => s.timeframe)
-  if (!rest.length) return `数据：本地库（${db.join(' / ')}）`
-  if (!db.length) return `数据：交易所现拉（${rest.join(' / ')}）`
-  return `数据：本地库（${db.join(' / ')}）+ 交易所兜底（${rest.join(' / ')}）`
-}
-
-async function runAnalysis(opts: {
-  /** 谁在分析（用户系统） */
-  userId: number
-  symbol: string
-  market?: MarketType
-  /** 主周期（图上那个） */
-  timeframe: Timeframe
-  /** 主周期往前看多少天；0 = 用配置默认值 */
-  days: number
-  /** 测试时间点（毫秒）：只看到那一刻为止的数据，且不存档 */
-  at?: number | null
-  onStep?: OnStep
-}): Promise<AnalyzeOutcome> {
-  const {symbol: symbolInput, market, timeframe} = opts
-  const {steps, start: step, markFailed} = stepRecorder(opts.onStep)
-  const testAt = opts.at ?? null
-
-  // 1. 读分析预测提示词（数据库里那份 kind=predict）
-  const endRules = step('rules', '读分析预测提示词')
-  const rules = await loadRules()
-  if (rules.dbError) {
-    // 没有角色和规则的判断等于让 AI 自由发挥，宁可不开跑
-    markFailed('rules', rules.dbError)
-    throw new Error(
-      `读不到提示词文档（角色/规则），先确认数据库正常：${rules.dbError}`
-    )
-  }
-  endRules(
-    rules.bodyEnabled
-      ? `${rules.sources.join('、')} · ${rules.system.length} 字 · ${rules.hash}`
-      : '（没有启用的分析预测提示词 —— 去「我的 → AI 提示词」写一份）'
-  )
-
-  // 用哪把密钥：**默认**那把（多密钥，2026-10-04）；用量会记到它名下
-  const resolved = await resolveUserLlm(opts.userId)
-  const config = loadConfig({
-    marketType: market,
-    timeframes: [timeframe],
-    llm: resolved.llm
-  })
-  const cal = config.calibers
-  /** 主周期看多少天（前端传的是「图上那段」的天数；没传就用配置默认值） */
-  const days = Math.max(1, opts.days || config.lookbackDays)
-
-  // 2. 拉行情
-  const endFetch = step(
-    'fetch',
-    testAt
-      ? `拉取 ${symbolInput} 行情（测试：${bjFull(testAt)} 为止）`
-      : `拉取 ${symbolInput} 行情`
-  )
-  let snapshot: MarketSnapshot
-  try {
-    snapshot = await fetchSnapshot({
-      exchangeId: config.exchange,
-      symbol: symbolInput,
-      timeframe,
-      days,
-      marketType: config.marketType,
-      apiBase: config.apiBase,
-      calibers: config.calibers,
-      // 测试模式：只看得见这一刻之前已收盘的 K 线
-      at: testAt ?? undefined
-    })
-  } catch (e) {
-    markFailed('fetch', (e as Error).message)
-    throw e
-  }
-  endFetch(
-    `${snapshot.symbol} · 主周期 ${timeframe}（图上 ${days} 天）· ` +
-      `现价 ${snapshot.price}` +
-      ` · 发给 AI：${snapshot.blocks.map(b => `${b.timeframe} ${b.bars} 根`).join(' / ')}` +
-      ` · ${sourceText(snapshot.sources)}`
-  )
-
-  // 4. 构建上下文
-  const endCtx = step('context', '构建喂给 AI 的行情快照')
-  const context = buildContext(snapshot)
-  endCtx(
-    `${context.length} 字（主周期最近 ${snapshot.blocks[0]?.bars ?? 0} 根逐根，不算口径）`
-  )
-
-  // 5. 调用大模型
-  const endJudge = step('judge', `调用 ${config.llm.model} 判断`)
-  let result: JudgeResult
-  let meta: JudgeMeta
-  try {
-    ;({result, meta} = await judge({
-      snapshot,
-      context,
-      prompt: rules.system,
-      config
-    }))
-  } catch (e) {
-    markFailed('judge', (e as Error).message)
-    throw e
-  }
-  endJudge(
-    `${meta.model} · ${meta.usage.promptTokens}+${meta.usage.completionTokens} tok · 回答 ${meta.raw.length} 字` +
-      (config.llm.reasoningEffort
-        ? ` · 思考=${config.llm.reasoningEffort}`
-        : '') +
-      (meta.attempts > 1 ? ` · 重试 ${meta.attempts} 次` : '')
-  )
-
-  // 6. 记账 + 存档：历史就存这一句话（测试跑不存档）
-  const endArchive = step('archive', '记账')
-  const billed = await recordUsage({
-    userId: opts.userId,
-    llmKeyId: resolved.keyId,
-    kind: 'judge',
-    model: meta.model,
-    symbol: baseSymbol(snapshot.symbol),
-    timeframe,
-    usage: meta.usage,
-    attempts: meta.attempts,
-    latencyMs: meta.latencyMs
-  })
-  if (testAt === null && result.line.trim()) {
-    // 旁路：存档失败不该把这次分析搞挂
-    try {
-      await saveAnalysis({
-        userId: opts.userId,
-        symbol: baseSymbol(snapshot.symbol),
-        ccxtSymbol: snapshot.symbol,
-        exchange: config.exchange,
-        marketType: config.marketType,
-        timeframe,
-        line: result.line.trim(),
-        price: snapshot.price,
-        model: meta.model,
-        costUsd: billed?.costUsd ?? null,
-        llmUsageId: billed?.id ?? null,
-        latencyMs: meta.latencyMs,
-        promptTokens: meta.usage.promptTokens,
-        completionTokens: meta.usage.completionTokens
-      })
-    } catch (e) {
-      console.error('[analyses] 存档失败：', (e as Error).message)
-    }
-  }
-  endArchive(oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs))
-
-  return {
-    symbol: baseSymbol(snapshot.symbol),
-    ccxtSymbol: snapshot.symbol,
-    exchange: config.exchange,
-    marketType: config.marketType,
-    testMode: testAt !== null,
-    at: testAt,
-    price: snapshot.price,
-    sources: snapshot.sources,
-    primary: snapshot.primary,
-    blocks: snapshot.blocks,
-    candles: snapshot.candles,
-    days,
-    judge: result,
-    steps,
-    meta: {
-      model: meta.model,
-      rules: {
-        sources: rules.sources,
-        hash: rules.hash,
-        warnings: rules.warnings
-      },
-      tagCount: 0,
-      // 本次调用的 token 与花费（统计用）
-      usage: {
-        callId: billed?.id ?? null,
-        promptTokens: meta.usage.promptTokens,
-        completionTokens: meta.usage.completionTokens,
-        totalTokens: meta.usage.totalTokens,
-        cacheHitTokens: meta.usage.cacheHitTokens,
-        costUsd: billed?.costUsd ?? 0,
-        costCny: usdToCny(billed?.costUsd ?? 0),
-        attempts: meta.attempts,
-        latencyMs: meta.latencyMs,
-        text: oneLineCost(meta.usage, billed?.costUsd ?? 0, meta.latencyMs)
-      }
-    }
-  }
-}
+/* `sourceText` 与 `runAnalysis` 已搬到 `analysis/run.ts`（2026-10-15）——
+   持久化分析要直接调它，不能走 HTTP。 */
 
 async function handleAnalyze(
   url: URL,
@@ -3504,6 +3270,91 @@ async function route(
       }
     }
     return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /* ---- 持久化分析：手动把某个币加入「每 15 分钟问一次 AI」（2026-10-15） ----
+   *
+   * 用户 2026-10-15：「在 k 线界面顶部加入持久化分析的图标，点击图标弹窗确定要加入持久化分析，
+   * 每隔 15 分钟分析一次，最长不超过 8 小时」。
+   *
+   *   · `GET    /api/persist`            —— 列表（含每个会话的结论时间线）
+   *   · `POST   /api/persist`            —— 加入（body: symbol / market / timeframe / days）
+   *   · `DELETE /api/persist?id=`        —— 停止
+   *   · `POST   /api/persist/run?id=`    —— 立刻跑一轮（等结果，给人手动试一次用）
+   *
+   * ⚠️ 真正"每 15 分钟跑"的是后台 ticker（见文件末尾 `startPersistTicker`），
+   *    这些接口只管会话的增删查 —— 网页关着也照跑。
+   */
+  if (p === '/api/persist') {
+    if (method === 'GET') {
+      const sessions = await listPersistSessions(me.id)
+      const withTimeline = await Promise.all(
+        sessions.map(async s => ({...s, timeline: await sessionTimeline(s)}))
+      )
+      return sendJson(res, 200, {
+        sessions: withTimeline,
+        limits: {maxActive: MAX_ACTIVE_PER_USER, maxMs: MAX_SESSION_MS, intervalMs: RUN_INTERVAL_MS},
+        error: null
+      })
+    }
+    if (method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      const symbol = String(body.symbol ?? '').trim().toUpperCase()
+      if (!symbol) return sendJson(res, 400, {error: '缺 symbol'})
+      const marketType = String(body.market ?? 'swap')
+      const timeframe = String(body.timeframe ?? '1h')
+      const days = Math.max(1, Math.min(60, Number(body.days) || 3))
+      /*
+       * 配额：同时最多 3 个会话。满了要说清"去停一个"，别静默失败。
+       * ⚠️ 同一个币重复点：库里那条 `(user_id, symbol) WHERE status='active'` 唯一索引会挡，
+       *    这里先查一次给出人话错误。
+       */
+      const active = await countActive(me.id)
+      if (active >= MAX_ACTIVE_PER_USER)
+        return sendJson(res, 200, {
+          error: `同时最多盯 ${MAX_ACTIVE_PER_USER} 个币 —— 先去停掉一个再加`
+        })
+      const ccxt = /[/:]/.test(symbol) ? symbol : `${symbol}/USDT:${marketType === 'spot' ? 'USDT' : 'USDT'}`
+      try {
+        const created = await createPersistSession({
+          userId: me.id,
+          symbol,
+          ccxtSymbol: ccxt,
+          exchange: 'binance',
+          marketType,
+          timeframe,
+          days
+        })
+        return sendJson(res, 200, {session: created, error: null})
+      } catch (e) {
+        const msg = (e as Error).message
+        return sendJson(res, 200, {
+          error: /duplicate key|unique/i.test(msg)
+            ? `${symbol} 已经在持久化分析里了`
+            : msg
+        })
+      }
+    }
+    if (method === 'DELETE') {
+      const id = Number(url.searchParams.get('id'))
+      if (!Number.isFinite(id) || id <= 0) return sendJson(res, 400, {error: '缺 id'})
+      const ok = await stopPersistSession(me.id, id)
+      return sendJson(res, 200, {ok, error: ok ? null : '这个会话不在了（或不属于你）'})
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  if (p === '/api/persist/run') {
+    if (method !== 'POST') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const id = Number(url.searchParams.get('id'))
+    const s = Number.isFinite(id) && id > 0 ? await getPersistSession(id) : null
+    if (!s || s.userId !== me.id) return sendJson(res, 200, {error: '这个会话不在了（或不属于你）'})
+    if (s.status !== 'active') return sendJson(res, 200, {error: '这个会话已经结束了'})
+    /* 手动跑一轮：跑完把结论带回来（等价于调度器那一跳对这个会话做的事） */
+    const out = await runSessionOnce(s)
+    if (!out.ok) return sendJson(res, 200, {error: out.error ?? '这一轮失败'})
+    return sendJson(res, 200, {ok: true, result: out, error: null})
   }
 
   /* ---- 自动化预测：扫描参数 + 当前这一轮的候选（2026-10-12） ----
@@ -6136,6 +5987,46 @@ async function main(): Promise<void> {
   }
   kickSessions()
   setInterval(kickSessions, 24 * 60 * 60 * 1000).unref()
+
+  /*
+   * 持久化分析（2026-10-15 用户：「每隔 15 分钟分析一次，最长不超过 8 小时」）。
+   *
+   * 调度口径：**一个对齐到 15m 收线（+20 秒）的定时器 + 库里每个会话的 `next_at`**，
+   * 而不是给每个会话起一个 `setInterval`：
+   *   · 会话状态在库里 ⇒ 进程重启接着跑，没错过的轮次（`next_at <= now()` 才算该跑）；
+   *   · 对齐 :00/:15/:30/:45 + 20 秒 ⇒ 每次喂给 AI 的都是**刚收线**的那根，同一会话各轮口径一致；
+   *   · 失败/慢一轮也不会把后面的挤乱（每一跑自己算下一跳）。
+   *
+   * ⚠️ `runPersistTick` 里已经逐个跑（不并发）：上游权重 + 模型限流都不喜欢同时打五发。
+   *    失败只告警 —— 一条分析挂了不该影响别的会话，更不该让进程出事。
+   */
+  const kickPersist = (): void => {
+    void runPersistTick()
+      .then(rs => {
+        for (const r of rs) {
+          if (r.ok) {
+            console.log(
+              `  持久化  ${r.symbol} 第 ${r.sessionId} 号会话跑完：` +
+                `${r.verdict ?? '?'}${r.changed ? `（上一轮 ${r.previousVerdict} ⇒ 已通知）` : ''}`
+            )
+          }
+        }
+      })
+      .catch(e => console.warn(`  持久化  ⚠️  ${(e as Error).message}`))
+  }
+  const persistLoop = (): void => {
+    const step = RUN_INTERVAL_MS
+    const now = Date.now()
+    /* 下一跳 = 下一个 :00/:15/:30/:45 + 20 秒（跟 `nextRunAt` 同一口径） */
+    const aligned = Math.floor((now + 20_000) / step) * step + 20_000
+    const next = aligned > now ? aligned : aligned + step
+    const timer = setTimeout(() => {
+      kickPersist()
+      persistLoop()
+    }, next - now)
+    timer.unref()
+  }
+  persistLoop()
 
   /*
    * 交易所预热：把 `getExchange()` 里那次 `loadMarkets()` 在启动时就打掉。

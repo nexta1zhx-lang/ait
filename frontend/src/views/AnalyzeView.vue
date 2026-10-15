@@ -21,6 +21,7 @@ import SymbolCombo from '../comps/SymbolCombo.vue'
 import MarketPanel from '../comps/MarketPanel.vue'
 import KlineChart from '../comps/KlineChart.vue'
 import SettingsSheet from '../comps/SettingsSheet.vue'
+import PersistSheet from '../comps/PersistSheet.vue'
 import MarginRateBadge from '../comps/MarginRateBadge.vue'
 import SegTabs from '../comps/SegTabs.vue'
 import CollectForm from '../comps/CollectForm.vue'
@@ -45,6 +46,7 @@ import {
 } from '../blacklist'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
+import {activeSessionOf, bindPersist, leftText} from '../persist'
 import {markdownToPlain, verdictKind} from '../markdown'
 import {collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
@@ -98,6 +100,22 @@ onMounted(() =>
     showToast(`读取收藏失败：${(e as Error).message}`, 'bad')
   )
 )
+/*
+ * 持久化分析（2026-10-15 用户：「在 k 线界面顶部加入持久化分析的图标」）。
+ * 页面开着时每 30 秒拉一次会话列表（后端才是真正每 15 分钟跑的那个），
+ * 结论跨档时 store 里会弹一条站内提示 —— 这里只负责订阅和收尾。
+ */
+const persistOpen = ref(false)
+/** 当前这个币正在跑的持久化会话（null = 没加入）—— 图标染色靠它 */
+const persistNow = computed(() => activeSessionOf(symbol.value))
+let unbindPersist: (() => void) | null = null
+onMounted(() => {
+  unbindPersist = bindPersist()
+})
+onBeforeUnmount(() => {
+  unbindPersist?.()
+  unbindPersist = null
+})
 /* 黑名单也拉一次（那颗小锁的禁用态 + 右侧倒计时都靠它；拉不到就交给后端拦下单） */
 onMounted(() =>
   void ensureBlacklist().catch(() => {
@@ -978,6 +996,29 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
                   测试模式本身的状态靠「在图上那条结束线 + 预测结果里那条测试模式标识」看，
                   图标不再有「亮着」这一档（用户要的就是勾和叉，不是开关）。
                 -->
+                <!--
+                  持久化分析（2026-10-15 用户：「在 k 线界面顶部加入持久化分析的图标」）——
+                  挨着「测试」，**两端都露**。点一下开弹层（没加入就是那句确认；加入之后是状态 + 结论时间线）。
+                  亮起来（`.on`）代表这个币正在被每 15 分钟问一次（谁在跑由后端决定，网页关着也跑）。
+                -->
+                <button
+                  type="button"
+                  class="ghost tiny tk-persist"
+                  :class="{on: !!persistNow}"
+                  :title="
+                    persistNow
+                      ? `正在持久化分析：第 ${persistNow.runs} 次 · 还剩 ${leftText(persistNow.endsAt)} —— 点一下看结论时间线`
+                      : '持久化分析：每 15 分钟问一次 AI，最长 8 小时'
+                  "
+                  aria-label="持久化分析"
+                  @click="persistOpen = true"
+                >
+                  <!-- 循环箭头：一眼跟「烧瓶 / 滑块 / ＋」分得开 -->
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M19.6 12a7.6 7.6 0 1 1-2.3-5.4" />
+                    <path d="M20.2 4.4v5h-5" />
+                  </svg>
+                </button>
                 <template v-if="!testMode">
                   <button
                     type="button"
@@ -1091,6 +1132,14 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
     </div>
 
     <!-- 一次性提示由全局的 `ToastHost` 画（见 App.vue / style.css 那一节） -->
+
+    <!-- 持久化分析：从底部弹出来的那块（入口是 K 线头部那颗循环箭头） -->
+    <PersistSheet
+      :open="persistOpen"
+      :base="symbol"
+      :timeframe="chartTf"
+      @close="persistOpen = false"
+    />
 
     <!-- 配置：从底部弹出来（入口在 K 线头部最右边那颗齿轮） -->
     <SettingsSheet :open="cfgOpen" @close="cfgOpen = false" />

@@ -29,6 +29,11 @@ export interface SaveAnalysisInput {
   latencyMs: number
   promptTokens: number
   completionTokens: number
+  /**
+   * 这一跑是谁发起的（2026-10-15）：`manual` 手点的 / `persist` 后台持久化跑的。
+   * 不传按 `manual`（老调用点不用改）。
+   */
+  source?: 'manual' | 'persist'
 }
 
 /** 列表里的一行：够显示「时间 · 币种 · 一句话」就行 */
@@ -81,8 +86,8 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
     `INSERT INTO analyses (
        user_id, symbol, ccxt_symbol, exchange, market_type, timeframes,
        chart_timeframe, grade_reason, price, model, cost_usd, llm_usage_id,
-       latency_ms, prompt_tokens, completion_tokens, result
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+       latency_ms, prompt_tokens, completion_tokens, result, source
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
      RETURNING id`,
     [
       input.userId,
@@ -100,7 +105,8 @@ export async function saveAnalysis(input: SaveAnalysisInput): Promise<number> {
       input.latencyMs,
       input.promptTokens,
       input.completionTokens,
-      JSON.stringify({line: input.line})
+      JSON.stringify({line: input.line}),
+      input.source ?? 'manual'
     ]
   )
   return Number(rows[0]?.id ?? 0)

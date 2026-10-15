@@ -2467,6 +2467,162 @@ body.fixed-viewport .analyze {
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * 持久化分析弹层（`comps/PersistSheet.vue`）—— 跟 `.sheet` 一套排版，
+ * 只有「时间线」那块要自己排：6 列，价格类右对齐 + 等宽数字。
+ */
+.ps-lead {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.ps-lead b {
+  color: var(--blue);
+}
+.ps-last {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.ps-dim {
+  margin: 8px 0 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.ps-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ps-go {
+  width: 100%;
+}
+.ps-h {
+  margin: 6px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: var(--fw-mid);
+}
+/* 档位色块：可做绿 / 不可做红 / 观望灰（跟前端 `verdictKind` 那套词表一个意思） */
+.ps-v {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ps-v.go {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.ps-v.no {
+  color: var(--bad);
+  background: var(--bad-soft);
+}
+.ps-v.wait {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+}
+.ps-tl {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ps-tl-head,
+.ps-tl-row {
+  display: grid;
+  grid-template-columns: 62px 46px minmax(0, 1fr) 82px 52px 52px;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+.ps-tl-head {
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--border) 35%, transparent);
+}
+.ps-tl-row + .ps-tl-row {
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.ps-tl-row .ps-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.ps-tl .r,
+.ps-tl-head .r {
+  text-align: right;
+}
+
+/*
+ * 窄屏（手机）：六列硬塞进 390px 会把「结论」那一列挤成 "N…"，而结论正是这张表的目的。
+ * ⇒ 换成三行一条：① 时间 + 当时价 ② 结论（整行、最多 3 行）③ 档位 + 之后的涨跌。
+ *   表头跟着藏掉（错位了就没意义）。
+ */
+@media (max-width: 560px) {
+  .ps-tl-head {
+    display: none;
+  }
+  .ps-tl-row {
+    grid-template-columns: minmax(0, 1fr) 68px 68px;
+    grid-template-areas:
+      't     price price'
+      'line  line  line'
+      'v     c1    c4';
+    row-gap: 3px;
+    padding: 8px;
+  }
+  .ps-tl-row .ps-t {
+    grid-area: t;
+  }
+  .ps-tl-row .ps-v {
+    grid-area: v;
+    justify-self: start;
+  }
+  .ps-tl-row .ps-line {
+    grid-area: line;
+    /* 窄屏让摘要换行（宽屏是一行省略号）—— 3 行截断，够看清是哪一条 */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    white-space: normal;
+    line-height: 1.45;
+  }
+  .ps-tl-row .ps-price {
+    grid-area: price;
+    text-align: right;
+  }
+  .ps-tl-row .ps-price::before {
+    content: '当时价 ';
+    color: var(--muted);
+  }
+  .ps-tl-row .ps-c1 {
+    grid-area: c1;
+  }
+  .ps-tl-row .ps-c4 {
+    grid-area: c4;
+  }
+  .ps-tl-row .ps-c1,
+  .ps-tl-row .ps-c4,
+  .ps-tl-row .ps-price {
+    /* 「+1h +0.8%」不能被折成两行 */
+    white-space: nowrap;
+  }
+  .ps-tl-row .ps-c1::before {
+    content: '+1h ';
+    color: var(--muted);
+  }
+  .ps-tl-row .ps-c4::before {
+    content: '+4h ';
+    color: var(--muted);
+  }
+}
+
 /* K 线图上的「K 线到 ……」 */
 .until-tag {
   padding: 2px 8px;
@@ -3055,6 +3211,41 @@ body.fixed-viewport .split {
  */
 .tk-head .tk-test.ok,
 .tk-head .tk-test.no {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+
+/*
+ * 持久化分析那颗（2026-10-15）：跟「烧瓶 / 配置」同一个盒子、同一种线描图标。
+ * 亮着（`.on`）= 这个币正在被每 15 分钟问一次 AI —— 状态靠颜色说，不额外摆文字。
+ */
+.tk-head .tk-persist {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tk-head .tk-persist svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (hover: hover) {
+  .tk-head .tk-persist:hover {
+    color: var(--text);
+    border-color: var(--blue);
+  }
+}
+.tk-head .tk-persist.on {
   color: var(--blue);
   border-color: var(--blue);
 }

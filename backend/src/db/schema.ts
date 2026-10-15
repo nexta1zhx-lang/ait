@@ -359,6 +359,59 @@ CREATE INDEX IF NOT EXISTS analyses_symbol_idx  ON analyses (symbol, created_at 
 CREATE INDEX IF NOT EXISTS analyses_grade_idx   ON analyses (grade, verdict);
 CREATE INDEX IF NOT EXISTS analyses_model_idx   ON analyses (model);
 
+-- ---------------------------------------------------------------- 持久化分析
+-- 「手动把某个币加入持久化分析」的会话表（2026-10-15 用户：「在 k 线界面顶部加入持久化
+-- 分析的图标，点击图标弹窗确定要加入持久化分析，每隔 15 分钟分析一次，最长不超过 8 小时」）。
+--
+-- 为什么**必须有状态在库里**：这是后台定时跑的东西，网页关着、进程重启都得接着跑。
+-- 调度用一个 ticker + next_at（见 analysis/persist.ts），**不给每个会话起定时器**：
+--   ① 重启后状态还在，接着按 next_at 跑；
+--   ② 重启期间错过的轮次**不补**（补跑等于一次烧好几发，而且那时的行情已经不是"那一刻"了）。
+--
+-- ⚠️ 会话开始时**冻结口径**（symbol / timeframe / days）：同一会话的 32 条结论才是同一把
+--    尺子、能横向比。之后页面上换周期不影响它。
+CREATE TABLE IF NOT EXISTS persist_sessions (
+  id            BIGSERIAL   PRIMARY KEY,
+  user_id       BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- 基础币（BTC）与行情符号（BTC/USDT:USDT）：前者给人看、后者给 fetchSnapshot
+  symbol        TEXT        NOT NULL,
+  ccxt_symbol   TEXT        NOT NULL,
+  exchange      TEXT        NOT NULL DEFAULT 'binance',
+  market_type   TEXT        NOT NULL DEFAULT 'swap',
+  -- 冻结的分析口径
+  timeframe     TEXT        NOT NULL,
+  days          INTEGER     NOT NULL,
+  -- 生命周期
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ends_at       TIMESTAMPTZ NOT NULL,
+  next_at       TIMESTAMPTZ NOT NULL,
+  -- 跑了多少轮 / 连续失败几次（连续 3 次就暂停这一会话，别默默烧）
+  runs          INTEGER     NOT NULL DEFAULT 0,
+  failed        INTEGER     NOT NULL DEFAULT 0,
+  -- active 正在盯 / ended 停了（到点、手动停、连续失败）
+  status        TEXT        NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active', 'ended')),
+  ended_reason  TEXT,
+  ended_at      TIMESTAMPTZ,
+  -- 最近一条结论：判"是否跨档变化"就比它（前端角标 + Telegram 都用它）
+  last_analysis_id BIGINT,
+  last_verdict  TEXT,
+  last_line     TEXT,
+  last_price    NUMERIC,
+  last_at       TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 同一个用户同一个币**同时只能有一个在跑的会话**（重复点那颗图标不该开两条）
+CREATE UNIQUE INDEX IF NOT EXISTS persist_sessions_one_active_idx
+  ON persist_sessions (user_id, symbol) WHERE status = 'active';
+-- 调度器每 15 分钟扫一次「该跑的」
+CREATE INDEX IF NOT EXISTS persist_sessions_due_idx
+  ON persist_sessions (status, next_at);
+CREATE INDEX IF NOT EXISTS persist_sessions_user_idx
+  ON persist_sessions (user_id, started_at DESC);
+
 -- ---------------------------------------------------------------- 知识库
 CREATE TABLE IF NOT EXISTS knowledge (
   id           BIGSERIAL   PRIMARY KEY,
@@ -442,6 +495,14 @@ ALTER TABLE llm_usage     ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES use
 CREATE INDEX IF NOT EXISTS analyses_user_idx  ON analyses (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS knowledge_user_idx ON knowledge (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS llm_usage_user_idx ON llm_usage (user_id, created_at DESC);
+
+-- ──────────────────────────────── 分析来源（2026-10-15，幂等）
+-- 「持久化分析」（每 15 分钟自动跑一发，见 db/persist.ts）跟手动跑的结论都进这张表，
+-- 靠 source 分开：manual = 人手点的；persist = 后台定时跑的。
+-- 页面「预测历史」可以按它筛，复盘也能分开统计两边的命中率。
+-- 老行默认 manual（那时候只有手动）。
+ALTER TABLE analyses ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
+CREATE INDEX IF NOT EXISTS analyses_source_idx ON analyses (user_id, source, created_at DESC);
 
 -- 标签模板的唯一性从「全局」改成「每个用户一套」：
 -- 老库那个 name 全局唯一索引必须先拆掉，否则两个用户不能有同名标签。

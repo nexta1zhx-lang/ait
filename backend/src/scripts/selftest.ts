@@ -60,6 +60,7 @@ import type {JudgeResult} from '../llm/client'
 import {judgeSchema} from '../llm/schema'
 import {render} from '../output/render'
 import type {MarketSnapshot} from '../types'
+import {crossedActionable, verdictOf, type Verdict} from '../analysis/verdict'
 
 /* ------------------------------------------------------------------ */
 /* ① 契约防漂移                                                        */
@@ -561,6 +562,83 @@ function checkTradeBudgets(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/* ⑩ 结论档位与「该不该提醒」                                          */
+/* ------------------------------------------------------------------ */
+function checkVerdict(): boolean {
+  let ok = true
+  const bad = (msg: string): void => {
+    console.error(`❌ 档位夹具：${msg}`)
+    ok = false
+  }
+  const want = (text: string, expect: Verdict, why: string): void => {
+    const got = verdictOf(text)
+    if (got !== expect) bad(`${why}：期望 ${expect}，实际 ${got}`)
+  }
+
+  /*
+   * ① 真实形状：模型给的是一整篇 Markdown，档位那两个字**在后面**。
+   *    （旧实现只扫前 260 字，这两条都会判成 wait —— 这是 2026-10-15 修的那个 bug）
+   */
+  const longGo = [
+    '# NIL/USDT 1h 判断',
+    '',
+    '## 一、先看结构：这只币现在处在什么位置',
+    '- 大背景（10-11 → 10-13）：一路阴跌，从 0.0956 掉到 0.0831，中间没有像样的反抽。',
+    '- 近 24 根：在 0.0840~0.0895 之间横着，量能比前面那波跌的时候明显萎缩。',
+    '- 均线：1h 的 EMA20 还在 EMA60 下面，但两条之间的距离在收窄。',
+    '',
+    '## 二、关键位',
+    '- 上方：0.0956 是这一段的前高，也是 1h 那根大阴线的起点。',
+    '- 下方：0.0831 是这波低点，破了就回到下跌通道里。',
+    '- 中间这个 0.0862 附近密集成交最多，是当下多空的分界。',
+    '',
+    '## 三、结论',
+    '**可以做多**，回踩 0.0862 不破就进，止损放 0.0831 下面。'
+  ].join('\n')
+  want(longGo, 'go', '长 Markdown 里的「可以做多」要判成可做')
+  if (longGo.slice(0, 260).includes('可以做多')) {
+    bad('这条夹具得让结论落在 260 字之后，否则测不出旧 bug')
+  }
+
+  const longNo = [
+    '# NIL/USDT 1h 判断',
+    '',
+    '## 一、先看结构',
+    '骨架还是空头，反抽都是卖点。',
+    '',
+    '## 二、结论',
+    '**不能做多**，等它站回 0.0956 再说。'
+  ].join('\n')
+  want(longNo, 'no', '长 Markdown 里的「不能做多」要判成不可做')
+
+  /* ② 否定优先：「不能做」内部含「能做」，必须不被误读成可做 */
+  want('这位置不能做多', 'no', '「不能做多」不能被内部包含的「能做」骗成 go')
+  want('不建议现在开多', 'no', '「不建议」是否决')
+  /* ③ 观望：既没否决也没放行 */
+  want('现在只能观望，等下一根收线', 'wait', '纯观望')
+  /* ④ 观望不是否决：「先等回踩」不该判成 no（否则 no ↔ wait 会来回弹通知） */
+  want('先等回踩不破再看', 'wait', '「先等」属于观望，不是否决')
+  /* ⑤ 抹 Markdown：记号夹在词中间也得认出来 */
+  want('# 判断\n\n> **可做**，轻仓', 'go', '抹掉 Markdown 记号后要认出可做')
+
+  /* ⑥ 值不值得提醒：只有「可做」进出才算 */
+  const cross = (prev: string | null, next: Verdict, expect: boolean, why: string): void => {
+    if (crossedActionable(prev, next) !== expect) bad(why)
+  }
+  cross(null, 'go', false, '第一轮（还没记录）不该提醒')
+  cross('wait', 'go', true, '观望 → 可做 必须提醒')
+  cross('no', 'go', true, '不可做 → 可做 必须提醒')
+  cross('go', 'no', true, '可做 → 走弱 必须提醒')
+  cross('go', 'wait', true, '可做 → 观望 必须提醒')
+  cross('no', 'wait', false, '不可做 ↔ 观望 是噪音，不该提醒')
+  cross('wait', 'no', false, '观望 ↔ 不可做 是噪音，不该提醒')
+  cross('go', 'go', false, '同档不提醒')
+
+  if (ok) console.log('✅ 结论档位：长 Markdown 全文找 + 只在「可做」进出时提醒 夹具通过')
+  return ok
+}
+
+/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -573,6 +651,7 @@ if (!checkTierText()) failed = true
 if (!checkPartitions()) failed = true
 if (!checkWindows()) failed = true
 if (!checkTradeBudgets()) failed = true
+if (!checkVerdict()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)
