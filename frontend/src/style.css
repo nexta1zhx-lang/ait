@@ -3301,65 +3301,47 @@ body.fixed-viewport .split {
   cursor: pointer;
 }
 .chart-head .tk-persist svg {
-  /* 19px：早先 17px 时四周留白太明显（用户 2026-10-15：「随机波动不要边距」） */
-  width: 19px;
-  height: 19px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  width: 17px;
+  height: 17px;
+  /* 星芒是填充形状（见 AnalyzeView 那条注释），不走描边 */
+  fill: currentColor;
+  stroke: none;
 }
+/* ⚠️ `:not(.on)`：在跑时整颗按钮是实色的，别被 hover 那套又顶成"灰底蓝边" */
 @media (hover: hover) {
-  .chart-head .tk-persist:hover {
+  .chart-head .tk-persist:hover:not(.on) {
     color: var(--text);
     border-color: var(--blue);
   }
 }
 
 /*
- * 亮着（`.on`）= 这个币正在被每 15 分钟问一次。
+ * 在跑（`.on`）= 这个币正在被每 15 分钟问一次 ⇒ **整颗按钮实色**（跟旁边那颗闪电同一套：
+ * 主色底 + 墨色图标）。用户 2026-10-15 的最终口径：「算了还是换个图标吧，**启动就为实色**」。
  *
- * ★ 2026-10-15 当天改了三回，记在这免得下次又绕回来：
- *   ① 「激活改为转动态效果」→ 做成**无限旋转**；
- *   ② 「**不要一直转**，图标改为那种分析上下折线的那种样式」→ 换成折线 + 只染色；
- *   ③ 「折线启动要动起来，感觉**一直在滚动**的感觉」→ 折线**横向滚动**（现在这个）。
- *   所以：不是转，是滚；折线本身是**周期性锯齿波**（4 个周期，见 AnalyzeView 里那条 `d`）。
- *
- * 滚动怎么做到"无缝"（这是这段唯一的坑）：
- *   · 路径从 -24 画到 48（viewBox 只有 24 宽）= 3 个周期 ⇒ 滚到任何位置窗口里都有线，边缘不露白；
- *   · 一次动画正好挪**一个周期**（24）= 整条路径 bbox（72）的 **1/3** ⇒ 首尾完全重合，
- *     看不出接缝。⚠️ 改周期/宽度就得同步改这个百分比（现在是 -33.333%）。
- *   · 用 `transform-box: fill-box` + 百分比：这样它跟着图标尺寸走，
- *     不用写死 px（写死 px 会在不同 DPR / 尺寸下滚歪）。
- *   · 只动 `path`，不动 `svg`/按钮（动它们会把 30×28 的框一起晃）。
+ * ★ 这一格前后改了四轮，记一笔免得又绕回去：
+ *   ① 循环箭头 + 染蓝；②「激活改为转动态效果」→ 无限旋转；
+ *   ③「不要一直转，改成分析上下折线」→ 静态折线；④「折线启动要动起来，一直在滚动」→ 折线滚动；
+ *   ⑤「算了还是换个图标吧，启动就为实色」→ **AI 星芒 + 实色**（现在这个，最省事也最清楚）。
+ *   教训：这一格不需要"动效"来表达"在跑" —— 颜色深浅（灰 ↔ 实色）比动效安静得多，
+ *   而挂一整天也不吵。别再往回转/滚那两条路了。
  */
-.chart-head .tk-persist.on {
-  color: var(--blue);
-  border-color: var(--blue);
-}
-.chart-head .tk-persist.on svg path {
-  transform-box: fill-box;
-  transform-origin: 0 0;
-  /*
-   * 5s/格：周期从 12 改成 24（见 AnalyzeView 那条 `d`）之后，同样的 2.6s 会让**像素速度
-   * 翻倍**（看着发飘、发急）。5s 是照原来那个速度折回来的 —— 慢慢滚才像行情。
-   */
-  animation: tk-persist-scroll 5s linear infinite;
-}
-@keyframes tk-persist-scroll {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(-33.3333%);
-  }
-}
-/* 晕动症：宁可不动，也别让人一直盯着滚 */
-@media (prefers-reduced-motion: reduce) {
-  .chart-head .tk-persist.on svg path {
-    animation: none;
-  }
+/*
+ * ⚠️⚠️ 必须写成 `button.tk-persist.on:hover` 这种**又长又带元素名**的选择器：
+ *    全局那条 `button.ghost:hover:not(:disabled)`（见上面「button.ghost」那段）权重是
+ *    (0,4,1)，**比 `.chart-head .tk-persist.on`（0,3,0）高** —— 不压过它，
+ *    鼠标一移上去实色按钮就被顶回「透明底 + 主色字」，图标和底色同色 ⇒ 看着像没了
+ *    （用户 2026-10-15：「**启动时 hover 态颜色不对**」）。
+ *    这里把三个状态（常态 / hover / 按下）一起写死，`filter` 也归零
+ *    （全局还有一条 `button:hover { filter: brightness(1.08) }`，实色块再提亮会偏色）。
+ */
+.chart-head button.tk-persist.on,
+.chart-head button.tk-persist.on:hover,
+.chart-head button.tk-persist.on:active {
+  background: var(--blue);
+  border-color: transparent;
+  color: var(--accent-ink);
+  filter: none;
 }
 
 /* ✓：结束线定好了才能按（没点线时灰着，`disabled`） */
