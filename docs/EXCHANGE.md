@@ -5120,3 +5120,27 @@ npm run candles:audit -- --symbols=BTC/USDT:USDT,ETH/USDT:USDT
 实际下单仍由交易所校验保证金是否足够。后端按同一持仓方向核对该币的 `unRealizedProfit`
 和持仓杠杆，不能通过绕过前端来放大加仓；行情实时变化仅在浮盈预算比较上留极小同步余量，
 11 倍账户上限仍严格执行。
+
+## 65. 修 bug：`watch` 写在 computed 旁边 ⇒ 面板整块不显示（2026-10-15）
+
+§64 上线后用户立刻报「**开单界面不显示了**」。线上浏览器控制台：
+
+```text
+[Vue warn]: Unhandled error during execution of setup function  at <OrderPanel …>
+ReferenceError: Cannot access 'openNotional' before initialization
+```
+
+**根因**：§64 为了让「浮盈缩了、滑动条跟着收」加了一句 `watch(addMax, …)`，
+位置就写在 `addMax` / `addRealNotional` 旁边（文件靠前）。
+
+`watch(源)` 跟 `computed` 不一样 —— 它**注册时立刻求值一次**源。于是 setup 阶段就去读
+`addMax` → `roomByAccount` → `openNotional`，而 `openNotional` 定义在**文件更下面**
+（约 780 行）⇒ 撞上 `const` 的 **TDZ**，setup 整个抛错 ⇒ 面板**一块都渲染不出来**
+（K 线和其他部件照常，所以看起来像「只有开单界面没了」）。
+
+**改法**：把这个 `watch` 挪到文件末尾那一批 `watch` 里（`watch(opened, …)` 之后），
+那里所有 `const` 都已经初始化；注释里写明了这条顺序约束。
+
+⚠️ 教训：**`watch(某个 computed)` 的位置不是随意的** —— 它会立刻求值，必须排在
+这条链上所有依赖（`openNotional` / `positionsRows` / `info` …）之后；
+`computed` 是惰性的，所以写在前面没事，`watch` 会炸。

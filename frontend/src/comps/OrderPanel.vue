@@ -535,9 +535,6 @@ function addQty(usdt: number): number {
 /** 滑动条当前值对应的**真实**名义价值 / 保证金（取整之后可能比滑到的小一点） */
 const addQtyNum = computed(() => addQty(addValue.value))
 const addRealNotional = computed(() => addQtyNum.value * refPrice.value)
-watch(addMax, max => {
-  if (addOpen.value && addValue.value > max) addValue.value = max
-})
 const addRealMargin = computed(() =>
   lev.value > 0 ? addRealNotional.value / lev.value : 0
 )
@@ -1436,6 +1433,20 @@ watch(opened, (now, before) => {
     loadedKey = ''
     void load()
   }
+})
+
+/*
+ * 浮盈每秒在动 ⇒ 加仓额度会跟着缩。弹层开着的时候把滑动条**收回到新上限**，
+ * 不然手指停在旧的最大值上、提交时才报「额度已变化」。
+ *
+ * ⚠️ 必须挂在这儿（文件末尾那一批 `watch` 里），**不能**跟 `addMax` 写在一起：
+ *    `watch(源)` 会**立刻求值一次**，而 `addMax → roomByAccount → openNotional`
+ *    这条链上的 `openNotional` 定义在更下面 ⇒ 写在前面会踩 `const` 的 TDZ
+ *    （`Cannot access 'openNotional' before initialization`），
+ *    整个 setup 抛错、面板**整块渲染不出来**（2026-10-15 线上真踩到）。
+ */
+watch(addMax, max => {
+  if (addOpen.value && addValue.value > max) addValue.value = max
 })
 
 onMounted(async () => {
