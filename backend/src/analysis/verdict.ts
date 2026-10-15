@@ -20,7 +20,7 @@ export type Verdict = 'go' | 'no' | 'wait'
  *
  * ⚠️ 这里**只放硬否决**。像"再等等""先等回踩"那种是**观望**（wait）不是否决 ——
  *    它们跟 wait 本来就同义，混进 NO_RE 只会让 no ↔ wait 来回翻（模型换个说法就翻一次），
- *    而"是否可做"其实没变。见下面的 `crossedActionable()`。
+ *    而"是否可做"其实没变。见下面的 `enteredGo()`。
  */
 const NO_RE = /不能做|不该做|不要做|不建议|不开|不动手|不参与|放弃/
 /** 「可做」那一类（含条件式「回踩不破可以做多」—— 那也是他的可做信号） */
@@ -41,19 +41,20 @@ export function verdictOf(text: string): Verdict {
 }
 
 /**
- * 值不值得**吵醒你**（推 Telegram / 弹站内）。
+ * 值不值得**吵醒你**（推 Telegram / 弹站内）：**只在"转成可做"那一刻**。
  *
- * 判据是**「可做」这一档的进出**，不是"档位不一样"：
- *   · 观望 → 可做 ✅ 提醒（这是全部意义所在）
- *   · 可做 → 走弱 ✅ 提醒（及时收手）
- *   · 不可做 ↔ 观望 ❌ 不提醒 —— 这俩在"要不要动手"上其实是一回事，
- *     而模型每次换个说法（"不建议" / "再看看"）就会翻一次 ⇒ 32 次能弹十几次，纯噪音。
+ * ★ 2026-10-15 用户定：「只有可做才弹窗和发送 telegram」。
+ *   上一版是"进出可做都提醒"（可做 → 走弱也发一条），现在收窄成**只推可做**：
+ *   · 观望/不可做 → **可做** ✅ 提醒（这是全部意义所在）
+ *   · 第一轮就是可做（`prev` 为 null）✅ **也提醒** —— 不然最该知道的那次反而没声
+ *   · 可做 → 走弱/观望/不可做 ❌ 不提醒（"要不要动手"是另一件事，而且模型换个措辞就翻一次）
+ *   · 不可做 ↔ 观望 ❌ 不提醒（这俩是一回事，噪音）
  *
- * ⚠️ 前端那份（`frontend/src/persist.ts`）判据必须一样，否则"页面弹了 Telegram 没弹"。
+ * ⚠️ 前端那份（`frontend/src/persist.ts` 用的 `markdown.ts` 里同名函数）判据必须一样，
+ *    否则"页面弹了 Telegram 没弹"。
  */
-export function crossedActionable(prev: string | null, next: Verdict): boolean {
-  if (!prev) return false
-  return (prev === 'go') !== (next === 'go')
+export function enteredGo(prev: string | null, next: Verdict): boolean {
+  return next === 'go' && prev !== 'go'
 }
 
 /** 给 Telegram / 日志用的人话（「可做」= 他那套词里最积极的一档） */

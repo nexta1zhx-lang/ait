@@ -6054,7 +6054,7 @@ async function main(): Promise<void> {
           if (r.ok) {
             console.log(
               `  持久化  ${r.symbol} 第 ${r.sessionId} 号会话跑完：` +
-                `${r.verdict ?? '?'}${r.changed ? `（上一轮 ${r.previousVerdict} ⇒ 已通知）` : ''}`
+                `${r.verdict ?? '?'}${r.alerted ? `（上一轮 ${r.previousVerdict ?? '无'} ⇒ 转可做，已通知）` : ''}`
             )
           }
         }

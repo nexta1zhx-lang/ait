@@ -22,7 +22,7 @@ import {
   type PersistSession,
   type PersistTimelineRow
 } from './api'
-import {crossedActionable} from './markdown'
+import {enteredGo} from './markdown'
 import {showToast} from './toast'
 
 export type PersistRow = PersistSession & {timeline: PersistTimelineRow[]}
@@ -55,9 +55,9 @@ export function activeSessionOf(
 /**
  * 拉一次（页面开着时每 30 秒一次）。
  *
- * 只有**「可做」的进出**（观望 → 可做 / 可做 → 走弱）才弹一条站内提示：
- * 32 条里通常只有几条有意义，而且"不可做 ↔ 观望"本来就是一回事，每条都弹就是噪音。
- * 判据在 `markdown.ts` 的 `crossedActionable()`（跟后端同一套）。
+ * 只有**转成「可做」**那一刻才弹一条站内提示（用户 2026-10-15：「只有可做才弹窗」）：
+ * 32 条里通常只有几条有意义；"可做 → 走弱"和"不可做 ↔ 观望"都不弹（后两者是噪音）。
+ * 判据在 `markdown.ts` 的 `enteredGo()`（跟后端同一套）。
  */
 export async function refreshPersist(quiet = false): Promise<void> {
   try {
@@ -69,14 +69,14 @@ export async function refreshPersist(quiet = false): Promise<void> {
       lastSeen.set(s.id, {at: s.lastAt, verdict: s.lastVerdict})
       /* 第一次看到不算"变化"（刚打开页面就把历史变化全弹一遍是灾难） */
       if (!prev || !s.lastAt || prev.at === s.lastAt) continue
-      /* 判据跟后端一致：只有「可做」进出才弹（不可做 ↔ 观望 是噪音） */
-      if (!crossedActionable(prev.verdict, s.lastVerdict ?? '')) continue
+      /* 判据跟后端一致：只在**转成可做**时弹 */
+      if (!enteredGo(prev.verdict, s.lastVerdict ?? '')) continue
       const label = (v: string): string =>
         v === 'go' ? '可做' : v === 'no' ? '不可做' : '观望'
       showToast(
-        `${s.symbol} 结论变化：${label(prev.verdict)} → ${label(s.lastVerdict)}` +
-          `（持久化分析第 ${s.runs} 次）`,
-        s.lastVerdict === 'go' ? 'ok' : 'bad'
+        `${s.symbol} 转可做：${prev.verdict ? `${label(prev.verdict)} → ` : ''}` +
+          `可做（持久化分析第 ${s.runs} 次）`,
+        'ok'
       )
     }
     persistSessions.value = rows

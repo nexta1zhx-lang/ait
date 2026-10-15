@@ -8,7 +8,7 @@
  *     → 过期会话先收掉（满 8 小时）
  *     → 取 `next_at <= now` 的会话，逐个跑（并发上限交给调用方/库里的 limit）
  *     → 每个会话：runAnalysis({source:'persist'}) → 记结果 → 推进 next_at
- *     → 结论**跨档变化**（观望/不可做 → 可做，或反过来）才推 Telegram + 页面上提示
+ *     → 结论**转成可做**才推 Telegram + 页面上提示（用户 2026-10-15：「只有可做才弹窗和发送 telegram」）
  *
  * 为什么错过的轮次**不补**：补跑等于一次烧好几发，而且"那一刻"的行情已经过去了 ——
  * 那一轮的意义本来就是"当时问 AI 一句"。重启后直接从当前时刻接上。
@@ -18,7 +18,7 @@
  */
 import {runAnalysis} from './run'
 import {
-  crossedActionable,
+  enteredGo,
   excerptOf,
   verdictLabel,
   verdictOf,
@@ -42,8 +42,8 @@ export interface PersistRunResult {
   symbol: string
   ok: boolean
   verdict: Verdict | null
-  /** 「可做」的进出（这次要提醒） */
-  changed: boolean
+  /** 这次转成了「可做」（该提醒了） */
+  alerted: boolean
   /** 昨天那条档位（变了才有） */
   previousVerdict: string | null
   price: number | null
@@ -71,8 +71,8 @@ export async function runSessionOnce(
     })
     const line = out.judge.line.trim()
     const verdict = verdictOf(line)
-    /* "该不该提醒" ≠ "档位不一样"：只有「可做」进出才提醒（见 verdict.ts 的注释） */
-    const changed = crossedActionable(s.lastVerdict, verdict)
+    /* 只在**转成可做**时提醒（见 verdict.ts 的 `enteredGo`） */
+    const alerted = enteredGo(s.lastVerdict, verdict)
     await markRun({
       id: s.id,
       runs: s.runs + 1,
@@ -83,15 +83,15 @@ export async function runSessionOnce(
       price: out.price
     })
     /* 到点收尾（8 小时）交给 expireSessions；这里只保 32 次之后不再跑 */
-    if (changed) {
-      const arrow = s.lastVerdict === 'go' ? '走弱' : verdict === 'go' ? '转可做' : '变化'
+    if (alerted) {
       /*
        * ⚠️ 只发**一行摘要**，不发整篇：实测模型给的是一整篇 Markdown（几千字），
        *    15 分钟来一篇会把 Telegram 刷屏。完整结论在页面的时间线里看。
        */
       void sendTelegram(
         `📈 持久化分析 · ${s.symbol} ${s.timeframe}\n` +
-          `结论${arrow}：${verdictLabel(s.lastVerdict as Verdict)} → ${verdictLabel(verdict)}\n` +
+          `结论转可做：${s.lastVerdict ? `${verdictLabel(s.lastVerdict as Verdict)} → ` : ''}` +
+          `${verdictLabel(verdict)}\n` +
           `${excerptOf(line, 160)}\n` +
           `现价 ${out.price} · 第 ${s.runs + 1} 次（共最多 32 次）`
       )
@@ -101,7 +101,7 @@ export async function runSessionOnce(
       symbol: s.symbol,
       ok: true,
       verdict,
-      changed,
+      alerted,
       previousVerdict: s.lastVerdict,
       price: out.price
     }
@@ -123,7 +123,7 @@ export async function runSessionOnce(
       symbol: s.symbol,
       ok: false,
       verdict: null,
-      changed: false,
+      alerted: false,
       previousVerdict: s.lastVerdict,
       price: null,
       error: msg
@@ -149,7 +149,7 @@ export async function runPersistTick(limit = 5): Promise<PersistRunResult[]> {
   const ok = out.filter(o => o.ok).length
   console.log(
     `[persist] 这一跳跑了 ${out.length} 个会话（成功 ${ok}，失败 ${out.length - ok}）` +
-      (out.some(o => o.changed) ? ' · 有结论跨档' : '')
+      (out.some(o => o.alerted) ? ' · 有转可做（已提醒）' : '')
   )
   return out
 }

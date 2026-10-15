@@ -60,7 +60,7 @@ import type {JudgeResult} from '../llm/client'
 import {judgeSchema} from '../llm/schema'
 import {render} from '../output/render'
 import type {MarketSnapshot} from '../types'
-import {crossedActionable, verdictOf, type Verdict} from '../analysis/verdict'
+import {enteredGo, verdictOf, type Verdict} from '../analysis/verdict'
 
 /* ------------------------------------------------------------------ */
 /* ① 契约防漂移                                                        */
@@ -621,20 +621,20 @@ function checkVerdict(): boolean {
   /* ⑤ 抹 Markdown：记号夹在词中间也得认出来 */
   want('# 判断\n\n> **可做**，轻仓', 'go', '抹掉 Markdown 记号后要认出可做')
 
-  /* ⑥ 值不值得提醒：只有「可做」进出才算 */
-  const cross = (prev: string | null, next: Verdict, expect: boolean, why: string): void => {
-    if (crossedActionable(prev, next) !== expect) bad(why)
+  /* ⑥ 值不值得提醒：**只在"转成可做"那一刻**（用户 2026-10-15：「只有可做才弹窗和发 TG」） */
+  const alert = (prev: string | null, next: Verdict, expect: boolean, why: string): void => {
+    if (enteredGo(prev, next) !== expect) bad(why)
   }
-  cross(null, 'go', false, '第一轮（还没记录）不该提醒')
-  cross('wait', 'go', true, '观望 → 可做 必须提醒')
-  cross('no', 'go', true, '不可做 → 可做 必须提醒')
-  cross('go', 'no', true, '可做 → 走弱 必须提醒')
-  cross('go', 'wait', true, '可做 → 观望 必须提醒')
-  cross('no', 'wait', false, '不可做 ↔ 观望 是噪音，不该提醒')
-  cross('wait', 'no', false, '观望 ↔ 不可做 是噪音，不该提醒')
-  cross('go', 'go', false, '同档不提醒')
+  alert(null, 'go', true, '第一轮就是可做 —— 最该知道的那次，必须提醒')
+  alert('wait', 'go', true, '观望 → 可做 必须提醒')
+  alert('no', 'go', true, '不可做 → 可做 必须提醒')
+  alert('go', 'go', false, '一直可做不重复提醒')
+  alert('go', 'wait', false, '可做 → 观望 不该提醒（本轮只推可做）')
+  alert('go', 'no', false, '可做 → 走弱 不该提醒（本轮只推可做）')
+  alert('no', 'wait', false, '不可做 ↔ 观望 是噪音，不该提醒')
+  alert('wait', 'no', false, '观望 ↔ 不可做 是噪音，不该提醒')
 
-  if (ok) console.log('✅ 结论档位：长 Markdown 全文找 + 只在「可做」进出时提醒 夹具通过')
+  if (ok) console.log('✅ 结论档位：长 Markdown 全文找 + 只在「转可做」时提醒 夹具通过')
   return ok
 }
 
