@@ -84,6 +84,18 @@ export async function listPushTokens(userId: number): Promise<PushTokenRow[]> {
   return rows.map(map)
 }
 
+/**
+ * 这个用户的**全部**设备记录（含已经标死的）—— 给「我的 → 设备」那张卡看，
+ * 用来回答「为什么我手机收不到」：没上报过？被标死了？上次错在什么？
+ */
+export async function listPushDevices(userId: number): Promise<PushTokenRow[]> {
+  const rows = await query<Raw>(
+    `SELECT ${COLS} FROM push_tokens WHERE user_id = $1 ORDER BY updated_at DESC`,
+    [userId]
+  )
+  return rows.map(map)
+}
+
 /** 主动注销（App 里退出登录 / 关掉推送开关时调） */
 export async function dropPushToken(userId: number, token: string): Promise<void> {
   await query('DELETE FROM push_tokens WHERE user_id = $1 AND token = $2', [

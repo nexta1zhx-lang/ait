@@ -1137,6 +1137,52 @@ button.danger {
   overflow-wrap: anywhere;
 }
 
+/*
+ * **详情里的正文**（`.detail-body`）：比结论卡小一档。
+ *
+ * ★ 2026-10-15 用户：「详情字体太大了小一点」→「预测结果详情也小一点」。
+ *   上面那份 `.answer-body`（15.5px / 行高 1.78）是给**结论卡**调的（主阅读区，专门讲过
+ *   "故事式要顺"）；而"点开某一条看全文"是二级阅读 —— 同一套字号在里面又大又散。
+ *
+ * ⚠️ 只收敛**排版尺寸**，不动颜色和字重：所以两条详情（`预测结果` 与 `AI 分析`/K 线弹层）
+ *    看起来还是同一套东西。两处共用这一份规则（挂在容器的 class 上），别再各写一遍。
+ */
+.detail-body .answer-body {
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.detail-body .answer-body h2,
+.detail-body .answer-body h3 {
+  margin: 13px 0 6px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.detail-body .answer-body h4 {
+  margin: 11px 0 5px;
+  font-size: 13.5px;
+}
+
+.detail-body .answer-body p {
+  margin: 0 0 8px;
+}
+
+.detail-body .answer-body ul,
+.detail-body .answer-body ol {
+  margin: 0 0 8px;
+  padding-left: 17px;
+}
+
+.detail-body .answer-body li {
+  margin-bottom: 3px;
+}
+
+.detail-body .answer-body blockquote {
+  margin: 8px 0;
+  padding-left: 9px;
+}
+
 .answer-body > *:first-child {
   margin-top: 0;
 }
@@ -2557,6 +2603,24 @@ body.fixed-viewport .analyze {
 .ps-tl .r,
 .ps-tl-head .r {
   text-align: right;
+}
+
+/*
+ * 时间线那一行可以点开看全文（K 线弹层 / AI 分析两处都这么做）。
+ * 窄屏上手指按下去要给点反馈，不然不知道点着了没有。
+ */
+.ps-tl-row.clickable {
+  cursor: pointer;
+}
+
+.ps-tl-row.clickable:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+@media (hover: hover) {
+  .ps-tl-row.clickable:hover {
+    background: rgba(255, 255, 255, 0.035);
+  }
 }
 
 /*

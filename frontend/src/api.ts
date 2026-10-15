@@ -2582,6 +2582,23 @@ export const postPushToken = (input: {
   device?: string
 }) => post<{ok: boolean; error: string | null}>('/api/push/token', input)
 
+/** 推送状态 + 已上报的设备（「我的」那张卡用） */
+export interface PushStatus {
+  configured: boolean
+  detail: string
+  devices: {device: string; platform: string; disabled: boolean; lastError: string | null}[]
+  error: string | null
+}
+
+export const fetchPushStatus = () => get<PushStatus>('/api/push/status')
+
+/** 现在发一条测试推送（不然要等"转可做"，可能等一整天） */
+export const testPush = () =>
+  post<{sent: number; devices: number; configured: boolean; error: string | null}>(
+    '/api/push/test',
+    {}
+  )
+
 /** 退出登录时注销这一条（不注销的话换账号还会收到上一个人的提醒） */
 export const deletePushToken = (token: string) =>
   del<{ok: boolean; error: string | null}>(
@@ -3500,6 +3517,8 @@ export const fetchUsageCalls = (
 export interface PredictionRow {
   id: number
   symbol: string
+  /** 分析时喂给 AI 的主周期（2026-10-15：「预测结果 每条数据要带周期」） */
+  timeframe: string | null
   /** AI 给的结论原文 */
   line: string
   /** 分析那一刻的现价 */

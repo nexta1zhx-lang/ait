@@ -18,7 +18,7 @@
  *     ⇒ 参数收进底部弹层（跟 K 线页那颗「配置」同一套 `.sheet`），**一行一项、不写说明**；
  *     候选列表从卡片改成三列表格。
  *
- *   ③ **「自动 AI」那一格**（2026-10-15 用户：「在自动化预测中加入 tab，线上所有的已自动 ai 的显示」）
+ *   ③ **「AI 分析」那一格**（2026-10-15 用户：「在自动化预测中加入 tab，线上所有的已自动 ai 的显示」）
  *      —— 列出**所有**已经加入持久化分析的币（在跑的排前面，7 天内的都留着），
  *      每行是 币种 / 进度 / 最近结论，点一行**展开**：那一刻往后 1h、4h 涨了多少 + 看 K 线 / 跑一次 / 停止。
  *      数据就是 `../persist` 那个 store（跟 K 线页顶部那个图标同一份），进页时刷一次。
@@ -39,6 +39,7 @@ import {bjTime, fmt, int} from '../format'
 import {markdownToPlain} from '../markdown'
 import {showToast} from '../toast'
 import {MOBILE_MAX, leftTab, pickSymbol, prefetchSymbol} from '../analyze'
+import AnalysisDetail from '../comps/AnalysisDetail.vue'
 import {
   leftText,
   persistBusy,
@@ -157,6 +158,19 @@ function toggleAi(id: number): void {
   expandId.value = expandId.value === id ? null : id
 }
 
+/**
+ * 点**时间线里某一条** = 看那一次的全文（列表里那句是截断的，库里存的是整篇）。
+ * 这跟「预测结果」里点一行看详情是同一件事 —— 用的是同一个弹层组件。
+ */
+const detail = ref<{
+  symbol: string
+  timeframe: string
+  at: string
+  price: number | null
+  line: string
+  verdict: string | null
+} | null>(null)
+
 /** 刷新会话列表（进页 / 切格 / 点刷新都走它）；`quiet` 不走那个「读失败弹 toast」的分支 */
 async function refreshAi(): Promise<void> {
   await refreshPersist(true)
@@ -266,13 +280,13 @@ function pctClass(v: number): string {
   <div class="col auto warm-skin">
     <div v-if="error" class="error">{{ error }}</div>
 
-    <!-- 两格：筛选的币种 / 自动 AI（持久化分析那批会话） -->
+    <!-- 两格：筛选的币种 / AI 分析（持久化分析那批会话） -->
     <div class="seg auto-seg">
       <button type="button" :class="{active: tab === 'scan'}" @click="tab = 'scan'">
         筛选的币种 <span class="tag">{{ picks.length }}</span>
       </button>
       <button type="button" :class="{active: tab === 'ai'}" @click="tab = 'ai'">
-        自动 AI <span class="tag">{{ aiRows.length }}</span>
+        AI 分析 <span class="tag">{{ aiRows.length }}</span>
       </button>
     </div>
 
@@ -335,7 +349,7 @@ function pctClass(v: number): string {
     <section v-else class="panel">
       <div class="sec-head">
         <h2>
-          自动 AI 分析
+          AI 分析
           <span class="tag">{{ activeCount }} 个在跑</span>
         </h2>
         <div class="sec-actions">
@@ -394,7 +408,34 @@ function pctClass(v: number): string {
                 <span>时间</span><span>档位</span><span>结论</span>
                 <span class="ps-price">当时价</span><span class="ps-c1">+1h</span><span class="ps-c4">+4h</span>
               </div>
-              <div v-for="r in [...s.timeline].reverse()" :key="r.id" class="ps-tl-row">
+              <div
+                v-for="r in [...s.timeline].reverse()"
+                :key="r.id"
+                class="ps-tl-row clickable"
+                role="button"
+                tabindex="0"
+                title="点开看全文"
+                @click="
+                  detail = {
+                    symbol: s.symbol,
+                    timeframe: s.timeframe,
+                    at: r.createdAt,
+                    price: r.price,
+                    line: r.line,
+                    verdict: r.verdict
+                  }
+                "
+                @keydown.enter.prevent="
+                  detail = {
+                    symbol: s.symbol,
+                    timeframe: s.timeframe,
+                    at: r.createdAt,
+                    price: r.price,
+                    line: r.line,
+                    verdict: r.verdict
+                  }
+                "
+              >
                 <span class="ps-t num dim">{{ bjTime(r.createdAt).slice(5) }}</span>
                 <span class="ps-v" :class="verdictClass(r.verdict)">{{ verdictText(r.verdict) }}</span>
                 <span class="ps-line" :title="r.line">{{ lineText(r.line) }}</span>
@@ -425,6 +466,25 @@ function pctClass(v: number): string {
         </template>
       </div>
     </section>
+
+    <!-- 点时间线里某一条 → 那一次的全文（跟「预测结果」同一个详情组件） -->
+    <AnalysisDetail
+      :open="!!detail"
+      :symbol="detail?.symbol ?? ''"
+      :timeframe="detail?.timeframe"
+      :at="detail?.at ?? null"
+      :price="detail?.price ?? null"
+      :line="detail?.line ?? ''"
+      :verdict="detail?.verdict ?? null"
+      action-text="看 K 线"
+      @close="detail = null"
+      @action="
+        () => {
+          if (detail) openKline(detail.symbol)
+          detail = null
+        }
+      "
+    />
 
     <!-- 参数弹层：跟 K 线页那颗「配置」同一套（`.sheet`），一行一项、不写说明 -->
     <Teleport to="body">

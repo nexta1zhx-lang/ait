@@ -295,6 +295,9 @@ function removeFromDetail() {
       >
         <div class="meta">
           <b class="sym-name">{{ r.symbol }}</b>
+          <!-- ★ 2026-10-15 用户：「预测结果 每条数据要带周期」——
+               同一个币在 15m / 1h / 4h 上结论可能正好相反，不写周期两条记录像自相矛盾 -->
+          <span v-if="r.timeframe" class="tf">{{ r.timeframe }}</span>
           <span class="time" :title="bjTime(r.createdAt)">{{
             bjShort(r.createdAt)
           }}</span>
@@ -344,6 +347,7 @@ function removeFromDetail() {
         <header class="sheet-head">
           <b>{{ detail.symbol }}</b>
           <span class="dim pd-meta">
+            <span v-if="detail.timeframe" class="tf">{{ detail.timeframe }}</span>
             {{ bjTime(detail.createdAt) }}
             <template v-if="detail.price !== null">
               · 当时 {{ fmt(detail.price) }}
@@ -358,7 +362,7 @@ function removeFromDetail() {
             ✕
           </button>
         </header>
-        <div class="pd-body">
+        <div class="pd-body detail-body">
           <AnswerBody v-if="detail.line?.trim()" :text="detail.line" />
           <p v-else class="dim">（这条没留下结论）</p>
         </div>
@@ -534,7 +538,13 @@ function removeFromDetail() {
  */
 .meta {
   display: grid;
-  grid-template-columns: minmax(68px, max-content) minmax(76px, max-content) 1fr auto;
+  /*
+   * 五列：币种 · **周期** · 时间 · 当时价 · 删除键（2026-10-15 加的周期，见模板注释）。
+   * ⚠️ 列数跟 DOM 子元素数必须对得上 —— 少一列就会把「删除键」挤到第二行。
+   *    前两列给下限是为了行行对齐（原来的理由见上面那段）。
+   */
+  grid-template-columns:
+    minmax(68px, max-content) auto minmax(76px, max-content) 1fr auto;
   align-items: baseline;
   gap: 8px;
   font-size: 12px;
@@ -543,6 +553,16 @@ function removeFromDetail() {
 
 .meta .sym-name {
   font-size: 13px;
+}
+
+/* 周期小标：一眼能分出 15m / 1h / 4h 的记录 */
+.meta .tf,
+.pd-meta .tf {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .meta .px {
@@ -597,9 +617,12 @@ function removeFromDetail() {
 }
 
 /* 全文可能很长 —— 弹层自己滚（`.sheet` 已经 max-height: 80vh; overflow: auto） */
-.pred-detail .pd-body .answer-body {
-  font-size: 13.5px;
-}
+/*
+ * ⚠️ 正文**字号**不在这里定：`.detail-body` 那套在 `style.css` 里，
+ *    跟「AI 分析 / K 线弹层」的详情共用一份（用户 2026-10-15：「详情字体太大了」
+ *    →「预测结果详情也小一点」）。这里只管留白，
+ *    早先这里写过的 13.5px 会让两处差半号，删掉了。
+ */
 
 .pred-detail .pd-foot {
   display: flex;

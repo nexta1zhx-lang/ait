@@ -13,6 +13,7 @@
 import {computed, ref, watch} from 'vue'
 import {bjTime, fmt} from '../format'
 import {markdownToPlain} from '../markdown'
+import AnalysisDetail from './AnalysisDetail.vue'
 import {
   activeSessionOf,
   addPersist,
@@ -46,6 +47,34 @@ const latest = computed<PersistRow | null>(() => {
 })
 
 const showRow = computed(() => mine.value ?? latest.value)
+
+/** 点时间线里某一条 → 那一次的全文（跟「预测结果」「AI 分析」同一个详情组件） */
+const detail = ref<{
+  symbol: string
+  timeframe: string
+  at: string
+  price: number | null
+  line: string
+  verdict: string | null
+} | null>(null)
+
+function openDetail(row: {
+  createdAt: string
+  price: number | null
+  line: string
+  verdict: string | null
+}): void {
+  const s = showRow.value
+  if (!s) return
+  detail.value = {
+    symbol: s.symbol,
+    timeframe: s.timeframe,
+    at: row.createdAt,
+    price: row.price,
+    line: row.line,
+    verdict: row.verdict
+  }
+}
 
 /** 加入时用哪个周期：默认跟着图上那个（最常用 1h） */
 const tf = ref(props.timeframe || '1h')
@@ -164,7 +193,16 @@ function shortLine(line: string): string {
             <span>时间</span><span>档位</span><span>结论</span>
             <span class="ps-price">当时价</span><span class="ps-c1">+1h</span><span class="ps-c4">+4h</span>
           </div>
-          <div v-for="r in [...showRow.timeline].reverse()" :key="r.id" class="ps-tl-row">
+          <div
+            v-for="r in [...showRow.timeline].reverse()"
+            :key="r.id"
+            class="ps-tl-row clickable"
+            role="button"
+            tabindex="0"
+            title="点开看全文"
+            @click="openDetail(r)"
+            @keydown.enter.prevent="openDetail(r)"
+          >
             <span class="ps-t num dim">{{ bjTime(r.createdAt).slice(5) }}</span>
             <span class="ps-v" :class="vClass(r.verdict)">{{ vText(r.verdict) }}</span>
             <span class="ps-line" :title="r.line">{{ shortLine(r.line) }}</span>
@@ -182,7 +220,16 @@ function shortLine(line: string): string {
           上一次会话：{{ bjTime(latest.startedAt) }} 起，{{ latest.runs }} 次，{{ latest.endedReason || '已结束' }}。
         </p>
         <div v-if="latest.timeline.length" class="ps-tl">
-          <div v-for="r in [...latest.timeline].reverse().slice(0, 12)" :key="r.id" class="ps-tl-row">
+          <div
+            v-for="r in [...latest.timeline].reverse().slice(0, 12)"
+            :key="r.id"
+            class="ps-tl-row clickable"
+            role="button"
+            tabindex="0"
+            title="点开看全文"
+            @click="openDetail(r)"
+            @keydown.enter.prevent="openDetail(r)"
+          >
             <span class="ps-t num dim">{{ bjTime(r.createdAt).slice(5) }}</span>
             <span class="ps-v" :class="vClass(r.verdict)">{{ vText(r.verdict) }}</span>
             <span class="ps-line" :title="r.line">{{ shortLine(r.line) }}</span>
@@ -193,5 +240,16 @@ function shortLine(line: string): string {
         </div>
       </template>
     </section>
+
+    <AnalysisDetail
+      :open="!!detail"
+      :symbol="detail?.symbol ?? ''"
+      :timeframe="detail?.timeframe"
+      :at="detail?.at ?? null"
+      :price="detail?.price ?? null"
+      :line="detail?.line ?? ''"
+      :verdict="detail?.verdict ?? null"
+      @close="detail = null"
+    />
   </Teleport>
 </template>

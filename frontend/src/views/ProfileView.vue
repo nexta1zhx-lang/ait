@@ -18,8 +18,11 @@ import {
   authChangePassword,
   disableTotp,
   enableTotp,
+  fetchPushStatus,
   fetchSessions,
   fetchTotpState,
+  testPush,
+  type PushStatus,
   revokeOtherSessions,
   revokeSession,
   setupTotp,
@@ -314,7 +317,43 @@ onMounted(() => {
   void loadSessions()
   void loadTotp()
   void loadShell()
+  void loadPush()
 })
+
+/* ------------------------- 推送（FCM，2026-10-15） ------------------------- */
+
+/**
+ * 「结论转可做」会给手机推一条。这张卡是**排查用的**：
+ *   · 服务端配没配（凭据在 `.env` 里，线上配好了才发得出去）；
+ *   · 这台账号报了哪些设备（没上报过 / 被标死 / 上次错在什么）；
+ *   · 「发一条测试」—— 不然要等"转可做"才知道通不通，而模型大多数时候给的是不可做/观望。
+ */
+const pushInfo = ref<PushStatus | null>(null)
+const pushBusy = ref(false)
+const pushMsg = ref('')
+
+async function loadPush(): Promise<void> {
+  try {
+    pushInfo.value = await fetchPushStatus()
+  } catch {
+    /* 拿不到不报错给用户看（这一块只是排查用） */
+  }
+}
+
+async function sendTestPush(): Promise<void> {
+  pushBusy.value = true
+  pushMsg.value = ''
+  try {
+    const r = await testPush()
+    if (r.error) pushMsg.value = r.error
+    else pushMsg.value = `发出 ${r.sent}/${r.devices} 台 —— 手机上应该马上就弹了`
+    await loadPush()
+  } catch (e) {
+    pushMsg.value = (e as Error).message
+  } finally {
+    pushBusy.value = false
+  }
+}
 
 /* ------------------------- App 体检单 ------------------------- */
 /*
@@ -661,6 +700,33 @@ async function changePw(): Promise<void> {
           <span>系统深色模式</span><b>{{ shell.dark ? '是' : '否' }}</b>
         </li>
       </ul>
+    </section>
+
+    <section v-if="tab === 'account'" class="panel">
+      <h2>推送</h2>
+      <p class="note">
+        「持久化分析」的结论**转成可做**时，会给装了 App 的手机推一条（App 关着也能收到）。
+        <br />
+        <b>服务端</b>：{{ pushInfo ? (pushInfo.configured ? '已配置 ✓' : `没配 —— ${pushInfo.detail}`) : '读取中…' }}
+        <br />
+        设备是**新包装上、打开过一次**才会上报；旧包（没有推送功能）永远收不到。
+      </p>
+      <ul v-if="pushInfo?.devices.length" class="kvs">
+        <li v-for="(d, i) in pushInfo.devices" :key="i">
+          <span>{{ d.device }}<template v-if="d.disabled"> · 已失效</template></span>
+          <b>{{
+            d.disabled ? '需要重新打开 App 上报' : d.lastError ? `上次失败：${d.lastError}` : '正常'
+          }}</b>
+        </li>
+      </ul>
+      <p v-else-if="pushInfo" class="note">这个账号还没有设备上报过。</p>
+      <p v-if="pushMsg" class="ok">{{ pushMsg }}</p>
+      <div class="row">
+        <button class="btn" type="button" :disabled="pushBusy" @click="sendTestPush">
+          {{ pushBusy ? '发送中…' : '发一条测试推送' }}
+        </button>
+        <button class="btn" type="button" :disabled="pushBusy" @click="loadPush">刷新</button>
+      </div>
     </section>
 
     <!-- 退出：★ 2026-10-11 卡片删了（「退出字样去掉」），退出登录收成身份卡里那颗图标按钮 -->

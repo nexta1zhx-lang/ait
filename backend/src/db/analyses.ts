@@ -36,10 +36,17 @@ export interface SaveAnalysisInput {
   source?: 'manual' | 'persist'
 }
 
-/** 列表里的一行：够显示「时间 · 币种 · 一句话」就行 */
+/** 列表里的一行：够显示「时间 · 币种 · 周期 · 一句话」就行 */
 export interface PredictionRow {
   id: number
   symbol: string
+  /**
+   * 分析时喂给 AI 的**主周期**（`analyses.chart_timeframe`）。
+   *
+   * ★ 2026-10-15 用户：「预测结果 每条数据要带周期」—— 同一个币在 15m / 1h / 4h 上
+   *   结论可能正好相反，列表里不写周期，两条记录看着像自相矛盾。
+   */
+  timeframe: string | null
   /** AI 那一句话 */
   line: string
   price: number | null
@@ -59,6 +66,7 @@ export interface ListAnalysesQuery {
 function rowOf(r: {
   id: string | number
   symbol: string
+  chart_timeframe: string | null
   line: string | null
   price: string | null
   created_at: Date | string
@@ -66,6 +74,7 @@ function rowOf(r: {
   return {
     id: Number(r.id),
     symbol: r.symbol,
+    timeframe: r.chart_timeframe ?? null,
     line: r.line ?? '',
     price: r.price === null ? null : Number(r.price),
     createdAt:
@@ -127,11 +136,12 @@ export async function listAnalyses(
   const rows = await query<{
     id: string
     symbol: string
+    chart_timeframe: string | null
     line: string | null
     price: string | null
     created_at: Date
   }>(
-    `SELECT id, symbol, grade_reason AS line, price, created_at
+    `SELECT id, symbol, chart_timeframe, grade_reason AS line, price, created_at
        FROM analyses
       WHERE ${cond}
       ORDER BY created_at DESC

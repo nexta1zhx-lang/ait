@@ -111,7 +111,15 @@ import {
   type SessionMeta,
   type User
 } from './db/users'
-import {dropPushToken, savePushToken} from './db/push'
+import {
+  disablePushToken,
+  dropPushToken,
+  listPushDevices,
+  listPushTokens,
+  notePushError,
+  savePushToken
+} from './db/push'
+import {pushConfigured, pushStatus, sendPush} from './notify/push'
 import {clientIp} from './util/device'
 import {
   generateRecoveryCodes,
@@ -3413,6 +3421,59 @@ async function route(
    * ⚠️ 发通知**不在这里**：那是后台跑持久化分析时顺手发的（`analysis/persist.ts` 的 `pushAlert`），
    *    网页关着、App 没开也照发。
    */
+  /*
+   * 推送的**状态与自检**（给「我的」那张卡用）：
+   *   · `GET  /api/push/status` —— 服务端配没配 + 这台账号报了哪些设备
+   *   · `POST /api/push/test`   —— 现在发一条，用来验证整条链
+   *     （不然要等"转可做"，而模型大多数时候给的是不可做/观望，等一整天也可能没有）
+   */
+  if (p === '/api/push/status') {
+    if (method !== 'GET') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const st = pushStatus()
+    const devices = await listPushDevices(me.id)
+    return sendJson(res, 200, {
+      configured: st.ok,
+      detail: st.detail,
+      devices: devices.map(d => ({
+        device: d.device || '（没报设备名）',
+        platform: d.platform,
+        disabled: d.disabledAt !== null,
+        lastError: d.lastError
+      })),
+      error: null
+    })
+  }
+
+  if (p === '/api/push/test') {
+    if (method !== 'POST') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const tokens = await listPushTokens(me.id)
+    if (!tokens.length) {
+      return sendJson(res, 200, {
+        sent: 0,
+        devices: 0,
+        configured: pushConfigured(),
+        error: '这个账号还没有设备上报过 —— 要在 App 里打开一次（旧包没有推送功能）'
+      })
+    }
+    let sent = 0
+    for (const t of tokens) {
+      const r = await sendPush(t.token, {
+        title: 'Ait 测试推送',
+        body: `看到这条就说明通了 · 第 ${tokens.length} 台设备里的这一台`,
+        data: {symbol: '', test: '1'}
+      })
+      if (r.ok) sent++
+      else if (r.dead) await disablePushToken(t.token, r.reason).catch(() => undefined)
+      else await notePushError(t.token, r.reason).catch(() => undefined)
+    }
+    return sendJson(res, 200, {
+      sent,
+      devices: tokens.length,
+      configured: pushConfigured(),
+      error: sent ? null : '一条都没发出去 —— 看服务端日志里 [push] 那几行'
+    })
+  }
+
   if (p === '/api/push/token') {
     const body = method === 'POST' ? await readJsonBody(req).catch(() => null) : null
     const rawToken =
