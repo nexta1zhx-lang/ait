@@ -164,6 +164,21 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 ⚠️ **两个文件都不进 git**：`google-services.json` 含 API key（`.gitignore` 已加）、
 私钥更是（服务器上 `chmod 600`，只给 `ubuntu`/容器读）。
 
+### 点一遍（约 5 分钟，2026-10-15 写的）
+
+1. <https://console.firebase.google.com> → 用 Google 账号登录 → **创建项目**（名字 `ait` 随便）；
+   Google Analytics 那一步**可以关掉**，不关就跟着默认点。
+2. 项目里加 Android 应用：**包名必须一字不差 `cn.bitcoooin.advisor`**（昵称随便；
+   SHA-1 空着不填 —— 推送用不到）→ 下载 **`google-services.json`**。
+   ⚠️ 后面「添加 SDK / Gradle」那几步**全部跳过**（依赖 `android/build.gradle` 里早配好了）。
+3. 那个 json 放到 **`android/app/google-services.json`**。
+4. 项目设置（左上齿轮）→ **服务账号** → 「生成新的私钥」→ 下载得到
+   `…-firebase-adminsdk-….json`（**别放仓库里**）→ 传到服务器：
+   `/opt/crypto-advisor/firebase-sa.json`（`chmod 600`）+ `.env` 里加
+   `FCM_SERVICE_ACCOUNT_FILE=/opt/crypto-advisor/firebase-sa.json` → 重启 `ca-app`。
+5. `npm run apk` 打新包 → 装到手机 → **打开一次**（弹"允许通知"→ 允许）。
+   这一步之后 `push_tokens` 里才有你的设备 —— 服务端只认表里有的设备。
+
 代码在哪：前端 [frontend/src/push.ts]（申请权限 → 上报 token → 前台弹提示 → 点通知跳 K 线）、
 后端 [backend/src/notify/push.ts]（服务账号 → JWT → 换 access_token → `messages:send`）、
 token 仓储 `backend/src/db/push.ts` + `push_tokens` 表。
