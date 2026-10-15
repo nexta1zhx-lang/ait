@@ -1551,8 +1551,7 @@ export async function fetchIncomeHistoryAll(
  *
  * 为什么要它：条件单有个坑 —— 触发方向不对时币安直接回
  * `-2021 Order would immediately trigger.`（用户 2026-10-06 挂「保本单」撞上的）。
- * 我们显式用**标记价**当触发基准（见 `placeStopOrder` 里的 `workingType`），
- * 所以判定也得用同一个价。
+ * 判定（`legalKind`）要用哪个价，见 `placeStopOrder` 里 `workingType` 那段。
  */
 async function fetchMarkPrice(ex: any, rawSymbol: string): Promise<number> {
   try {
@@ -1567,16 +1566,39 @@ async function fetchMarkPrice(ex: any, rawSymbol: string): Promise<number> {
 }
 
 /**
+ * 取**最新成交价**（`/fapi/v1/ticker/price`，权重 1）= 币安的 `CONTRACT_PRICE` 口径。
+ * 取不到返回 0。
+ *
+ * ★ 2026-10-15 起，条件单的触发基准用的就是它（原来用标记价，见
+ *   `placeStopOrder` 里那段「为什么从标记价换成最新价」）——所以类型判定
+ *   （`legalKind`）也得用同一个价，否则 -2021 又会回来。
+ */
+async function fetchLastPrice(ex: any, rawSymbol: string): Promise<number> {
+  try {
+    if (typeof ex?.fapiPublicGetTickerPrice !== 'function') return 0
+    const r: any = await ex.fapiPublicGetTickerPrice({symbol: rawSymbol})
+    const row = Array.isArray(r) ? r[0] : r
+    const v = Number(row?.price)
+    return Number.isFinite(v) && v > 0 ? v : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
  * **这个触发价，币安只接受哪种类型**（`-2021` 的正解）。
  *
  * 触发方向是死的：
  *
+ * ⚠️ 表里的「价格」= 触发基准那个价（2026-10-15 起是**最新成交价**，见 `placeStopOrder`
+ *    里 `workingType` 那段；在那之前是标记价）。
+ *
  * | 平仓方向 | 类型 | 什么时候触发 |
  * |---|---|---|
- * | SELL（平多） | `TAKE_PROFIT_MARKET` | 标记价 **涨到 ≥** 触发价 |
- * | SELL（平多） | `STOP_MARKET` | 标记价 **跌到 ≤** 触发价 |
- * | BUY（平空） | `TAKE_PROFIT_MARKET` | 标记价 **跌到 ≤** 触发价 |
- * | BUY（平空） | `STOP_MARKET` | 标记价 **涨到 ≥** 触发价 |
+ * | SELL（平多） | `TAKE_PROFIT_MARKET` | 最新价 **涨到 ≥** 触发价 |
+ * | SELL（平多） | `STOP_MARKET` | 最新价 **跌到 ≤** 触发价 |
+ * | BUY（平空） | `TAKE_PROFIT_MARKET` | 最新价 **跌到 ≤** 触发价 |
+ * | BUY（平空） | `STOP_MARKET` | 最新价 **涨到 ≥** 触发价 |
  *
  * ⇒ 现价之上挂的是「涨到才触发」= 止盈，现价之下挂的是「跌到才触发」= 止损。
  * 反过来（拿止盈类型去挂一个已经被越过的价）**必然**报 `-2021`。
@@ -1589,10 +1611,11 @@ async function fetchMarkPrice(ex: any, rawSymbol: string): Promise<number> {
 function legalKind(
   side: 'buy' | 'sell',
   stopPrice: number,
-  mark: number
+  /** 触发基准那个价（现在是**最新成交价**；名字里的 `mark` 是按老口径留下来的） */
+  basis: number
 ): 'profit' | 'stop' {
-  if (side === 'sell') return stopPrice > mark ? 'profit' : 'stop'
-  return stopPrice < mark ? 'profit' : 'stop'
+  if (side === 'sell') return stopPrice > basis ? 'profit' : 'stop'
+  return stopPrice < basis ? 'profit' : 'stop'
 }
 
 export interface StopOrderInput {
@@ -1675,24 +1698,40 @@ export async function placeStopOrder(
   /*
    * ★ 2026-10-06 修「保本单挂不上」（用户：`-2021 Order would immediately trigger.`）。
    *
-   * 拿标记价把类型**校正**一遍：前端按开仓价判「止盈 / 止损」是给人看的说法，
+   * 拿触发基准那个价（现在是**最新成交价**）把类型**校正**一遍：前端按开仓价判「止盈 / 止损」是给人看的说法，
    * 而币安只认「相对**现价**的方向」。两边不一致时（典型：多单浮盈、触发价拖到
    * 开仓价 = 保本），必须按币安的规矩发，否则整张单被拒。
    *
    * 取不到价（网络抖）就**不校正**，让币安自己判 —— 宁可回原样的错，也别瞎改类型。
    */
   const mark = await fetchMarkPrice(ex, spec.symbol)
+  const last = await fetchLastPrice(ex, spec.symbol)
+  /*
+   * ★★ 2026-10-15 用户实盘踩到的大坑：触发基准**从标记价改成最新成交价**。
+   *
+   * 那一单（NIL 多单 5839.8，止损挂 0.08801）：08:51:11.056 标记价刚摸到 0.08801 就触发，
+   * 而**同一毫秒**成交在 0.08606 —— 触发价到成交价差了 **2.22%**，预估亏 13.9 的单实际亏 25.3。
+   * 原因：合约盘口比指数快。那一分钟（10 倍放量的暴跌）最新价 11 秒里砸了 2.9%，
+   * 标记价（跟指数/现货走）才走 0.75% ⇒ 等标记价慢吞吞到位，盘口早就在坑里了。
+   * 改成最新价触发：盘口一碰触发价就走，触发更早、滑点小得多。
+   * 代价：合约上一笔插针（哪怕现货/指数没动）也会把它打掉 —— 用户当面选的这条。
+   *
+   * ⚠️ `legalKind()` 必须**跟着换成同一个价**：判「止盈还是止损」用的价和触发用的价
+   *    不是一个数，-2021 立刻回来（这是原来写死标记价的唯一理由，现在一起换成最新价）。
+   * ⚠️ 两者都取不到（网络抖）就不校正，让币安自己判 —— 宁可回原样的错，也别瞎改类型。
+   */
+  const basis = last > 0 ? last : mark
   const wantKind = input.kind
-  const kind = mark > 0 ? legalKind(input.side, stopPrice, mark) : wantKind
-  if (mark > 0 && stopPrice === mark) {
+  const kind = basis > 0 ? legalKind(input.side, stopPrice, basis) : wantKind
+  if (basis > 0 && stopPrice === basis) {
     throw new Error(
-      `触发价正好等于当前标记价 ${stopPrice}，币安会判「立即触发」（-2021）——` +
+      `触发价正好等于当前最新价 ${stopPrice}，币安会判「立即触发」（-2021）——` +
         `往上或往下挪一点再挂`
     )
   }
   const corrected =
     kind !== wantKind
-      ? `触发价在标记价 ${mark} 的${input.side === 'sell' ? (stopPrice > mark ? '上方' : '下方') : stopPrice > mark ? '上方' : '下方'}` +
+      ? `触发价在最新价 ${basis} 的${input.side === 'sell' ? (stopPrice > basis ? '上方' : '下方') : stopPrice > basis ? '上方' : '下方'}` +
         `，类型按币安的规矩从「${wantKind === 'profit' ? '止盈' : '止损'}」` +
         `改成「${kind === 'profit' ? '止盈' : '止损'}」（不改会被回 -2021 立即触发）`
       : ''
@@ -1704,7 +1743,8 @@ export async function placeStopOrder(
    *   最后发的是哪张单」都留一行，出问题一眼能对。
    */
   console.log(
-    `[止损单] ${spec.symbol} ${input.side} 触发价 ${stopPrice} 标记价 ${mark || '?'} ` +
+    `[止损单] ${spec.symbol} ${input.side} 触发价 ${stopPrice} ` +
+      `最新价 ${last || '?'} 标记价 ${mark || '?'} ` +
       `→ ${type}（请求 ${wantKind === 'profit' ? '止盈' : '止损'}）数量 ${quantity}` +
       `${dual ? ` posSide=${input.posSide === 'SHORT' ? 'SHORT' : 'LONG'}` : ' reduceOnly'}` +
       `${input.orderId ? ` 改单 ${input.orderId}` : ''}${test ? ' [测试]' : ' [真单]'}`
@@ -1763,12 +1803,15 @@ export async function placeStopOrder(
       ? {takeProfitPrice: stopPrice}
       : {stopLossPrice: stopPrice}),
     /*
-     * 触发基准**显式写死成标记价**（币安默认是 `CONTRACT_PRICE` = 最新成交价）。
-     * 为什么：上面那个 `legalKind()` 就是按标记价判的；不显式指定的话，
-     * 遇到薄盘 / 插针，判定用的价和触发的价不是一个数，-2021 又会回来。
-     * 而且前端画的仓位线、算的盈亏本来也都是标记价口径。
+     * 触发基准：**最新成交价**（币安的 `CONTRACT_PRICE`，也是它的默认值；这里显式写死，
+     * 免得哪天默认变了又悄悄换口径）。
+     *
+     * ⚠️ 2026-10-15 从 `MARK_PRICE` 换过来的，原因见上面 `basis` 那段：
+     *    薄盘暴跌时标记价（跟指数走）比合约盘口慢约 2%，等它到位，市价单已经砸在坑里。
+     *    现在按盘口触发 —— 触发更早、滑点小得多；代价是单笔插针也会触发（用户选的）。
+     * ⚠️ 判定类型用的价（`basis`）必须跟这里是**同一个口径**，否则 -2021。
      */
-    workingType: 'MARK_PRICE',
+    workingType: 'CONTRACT_PRICE',
     ...(dual
       ? {positionSide: input.posSide === 'SHORT' ? 'SHORT' : 'LONG'}
       : {reduceOnly: true})
@@ -1955,7 +1998,7 @@ export interface ModifiedOrder {
   /** `replace` 时撤掉的那张（给人看的） */
   canceled?: string
   kind?: 'profit' | 'stop'
-  /** 后端顺手纠正过什么（比如触发价跨过标记价 ⇒ 类型改成止损），直接显示 */
+  /** 后端顺手纠正过什么（比如触发价跨过最新价 ⇒ 类型改成止损），直接显示 */
   note?: string
 }
 
@@ -2034,7 +2077,7 @@ export async function modifyTradeOrder(
 
   /*
    * 条件单：撤旧挂新。`kind` 按**它现在挂在交易所上的类型**给，
-   * `placeStopOrder` 里还会拿标记价再校一遍（触发价跨过现价时必须改类型，
+   * `placeStopOrder` 里还会拿最新价再校一遍（触发价跨过现价时必须改类型，
    * 否则币安回 `-2021`）—— 校正的结果会放在 `note` 里显示出来。
    */
   const kind: 'profit' | 'stop' = upper.includes('TAKE_PROFIT') ? 'profit' : 'stop'
