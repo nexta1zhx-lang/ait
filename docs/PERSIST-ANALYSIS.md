@@ -76,6 +76,11 @@ server.ts 启动时起一个对齐到 15m 收线（+20 秒）的定时器
   `观望/不可做 → 可做`，**第一轮就是可做也提醒**。`可做 → 走弱` 和 `不可做 ↔ 观望` 都不推
   —— 32 条里通常只有几条有意义，每条都弹就是噪音。判据 `enteredGo()`（前后端各一份，必须一致）。
 - **站内**：页面开着时 30 秒轮询一次列表，跨档弹一条 toast（`frontend/src/persist.ts`）。
+- **App 推送**（2026-10-15 用户：「加入 app 推送」）：`backend/src/notify/push.ts` 走 **FCM HTTP v1**，
+  发给这个用户在 `push_tokens` 表里的**每一台设备**（App 启动时上报 token，见 `frontend/src/push.ts`）。
+  点通知会跳到那个币的 K 线（`data.symbol`）。⚠️ **需要三样东西**（见 [MOBILE.md](./MOBILE.md)）：
+  Firebase 项目 + `android/app/google-services.json`（打包用）+ 服务账号私钥（服务端发信用，
+  `FCM_SERVICE_ACCOUNT_FILE=/opt/crypto-advisor/firebase-sa.json`）。没配就只打一行日志。
 - **Telegram**：`backend/src/notify/telegram.ts`，复用服务器上现成的
   `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`（原来只给部署脚本和看门狗用）。
   ⚠️ 消息里**只发一行摘要**（`excerptOf` 160 字）—— 模型给的是**一整篇 Markdown**，
@@ -141,8 +146,9 @@ server.ts 启动时起一个对齐到 15m 收线（+20 秒）的定时器
 
 ## 9. 还没做
 
-1. **FCM 真推送**（App 被杀也能收到）：要建 Firebase 项目 + `google-services.json` +
-   `@capacitor/push-notifications` + 服务端用服务账号发 HTTP v1 + 重打 APK。现在先用站内 + Telegram。
+1. ~~FCM 真推送~~ —— **已经做了**（2026-10-15）：`@capacitor/push-notifications` + FCM HTTP v1 +
+   `push_tokens` 表 + `frontend/src/push.ts`。剩下的只是**你去 Firebase 建项目、把两个文件放进去、
+   重打一次 APK**（步骤见 [MOBILE.md](./MOBILE.md)）。
 2. **复盘页**：把 `source='persist'` 的结论按档位/时点聚一下（"说可做之后 6h 平均涨多少"），
    时间线里那两列已经把这活的地基打好了。
 3. 「结论变化」的历史表（现在只有会话上的"最近一条"，变化过程只在 `analyses` 里）。

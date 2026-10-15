@@ -111,6 +111,7 @@ import {
   type SessionMeta,
   type User
 } from './db/users'
+import {dropPushToken, savePushToken} from './db/push'
 import {clientIp} from './util/device'
 import {
   generateRecoveryCodes,
@@ -3402,6 +3403,37 @@ async function route(
     const out = await runSessionOnce(s)
     if (!out.ok) return sendJson(res, 200, {error: out.error ?? '这一轮失败'})
     return sendJson(res, 200, {ok: true, result: out, error: null})
+  }
+
+  /* ---- App 推送 token（2026-10-15 用户：「加入 app 推送」） ----
+   *
+   *   · `POST   /api/push/token`  —— App 启动时把 FCM token 报上来（body: token / platform / device）
+   *   · `DELETE /api/push/token`  —— 退出登录时注销这一条（`?token=`）
+   *
+   * ⚠️ 发通知**不在这里**：那是后台跑持久化分析时顺手发的（`analysis/persist.ts` 的 `pushAlert`），
+   *    网页关着、App 没开也照发。
+   */
+  if (p === '/api/push/token') {
+    const body = method === 'POST' ? await readJsonBody(req).catch(() => null) : null
+    const rawToken =
+      method === 'POST'
+        ? str(body?.token)
+        : (url.searchParams.get('token') ?? '').trim()
+    if (!rawToken) return sendJson(res, 400, {error: '缺 token'})
+    if (method === 'POST') {
+      await savePushToken({
+        userId: me.id,
+        token: rawToken,
+        platform: str(body?.platform) || 'android',
+        device: str(body?.device)
+      })
+      return sendJson(res, 200, {ok: true, error: null})
+    }
+    if (method === 'DELETE') {
+      await dropPushToken(me.id, rawToken)
+      return sendJson(res, 200, {ok: true, error: null})
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
 
   /* ---- 自动化预测：扫描参数 + 当前这一轮的候选（2026-10-12） ----

@@ -2570,6 +2570,24 @@ export interface PersistState {
 
 export const fetchPersist = () => get<PersistState>('/api/persist')
 
+/* ---------------- App 推送（FCM） ---------------- */
+
+/**
+ * 把 FCM token 报给后端（2026-10-15 用户：「加入 app 推送」）。
+ * 后端存进 `push_tokens`，只在结论**转可做**时用它发通知。
+ */
+export const postPushToken = (input: {
+  token: string
+  platform?: string
+  device?: string
+}) => post<{ok: boolean; error: string | null}>('/api/push/token', input)
+
+/** 退出登录时注销这一条（不注销的话换账号还会收到上一个人的提醒） */
+export const deletePushToken = (token: string) =>
+  del<{ok: boolean; error: string | null}>(
+    `/api/push/token?token=${encodeURIComponent(token)}`
+  )
+
 /** 加入：`symbol` 传基础币（BTC）或行情符号都行，后端会归一 */
 export const startPersist = (input: {
   symbol: string

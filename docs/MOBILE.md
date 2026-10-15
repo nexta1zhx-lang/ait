@@ -151,6 +151,43 @@ VITE_API_BASE=http://192.168.1.10:8787 npm run ui:build && npx cap sync
 
 ---
 
+## 六之二、推送（FCM，2026-10-15）
+
+「持久化分析」结论**转可做**时会给手机推一条（App 被杀也能收到）。三处配合，缺一个就静默不生效：
+
+| 在哪 | 是什么 | 少了会怎样 |
+| --- | --- | --- |
+| `android/app/google-services.json` | Firebase 控制台 → 项目设置 → 添加 Android 应用（包名 **`cn.bitcoooin.advisor`**）→ 下载 | Gradle 的 `google-services` 插件被跳过（`android/app/build.gradle` 里那个 `if`），App 拿不到 token |
+| 服务器 `FCM_SERVICE_ACCOUNT_FILE` | Firebase 控制台 → 项目设置 → **服务账号** → 生成新的私钥 → 存 `/opt/crypto-advisor/firebase-sa.json` | 后端没法发；日志里一行「没配 FCM 服务账号」 |
+| `@capacitor/push-notifications` | 已在 `package.json` 里；改完跑一次 `npm run app:sync` | — |
+
+⚠️ **两个文件都不进 git**：`google-services.json` 含 API key（`.gitignore` 已加）、
+私钥更是（服务器上 `chmod 600`，只给 `ubuntu`/容器读）。
+
+代码在哪：前端 [frontend/src/push.ts]（申请权限 → 上报 token → 前台弹提示 → 点通知跳 K 线）、
+后端 [backend/src/notify/push.ts]（服务账号 → JWT → 换 access_token → `messages:send`）、
+token 仓储 `backend/src/db/push.ts` + `push_tokens` 表。
+
+流程：**改完 → `npm run apk` → 把 APK 装到手机 → 打开 App（这时才会上报 token）**。
+服务端只认 `push_tokens` 里有的设备，所以**先装新包再点「加入持久化分析」**。
+改了通知渠道（`channel_id: 'ait-alert'`）要注意：Android 的渠道是**建了就改不掉**的，
+`push.ts` 里 `createChannel()` 的参数只在第一次生效。
+
+排查顺序（从下往上）：
+
+```bash
+# ① 服务端有没有这个设备（新包打开过一次才会有）
+docker exec -it ca-postgres psql -U ca -d crypto_advisor -c "select device, disabled_at, last_error from push_tokens;"
+# ② 服务端能不能发（没配会直接说）
+docker compose -f docker-compose.prod.yml logs app | grep '\[push\]'
+# ③ 手机侧：装的是不是带 google-services 的包（旧包永远收不到）
+```
+
+⚠️ 手机上**系统级**通知权限被关掉的话，App 里申请也弹不出来（`checkPermissions` 会一直
+返回 `denied`）—— 去「设置 → 应用 → Ait → 通知」里开。
+
+---
+
 ## 七、分发与下载链接
 
 ### 线上：挂在域名下

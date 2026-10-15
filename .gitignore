@@ -13,6 +13,11 @@ frontend/dist/
 # 下载分发目录里的大文件（目录本身要留着，Caddy 会挂它）
 downloads/*.apk
 
+# Firebase 的配置文件（**含 API key，绝不进 git**）：从 Firebase 控制台下载后
+# 放到 android/app/google-services.json —— 没有它 Gradle 会跳过 google-services 插件，
+# 推送就静默不生效（android/app/build.gradle 里那段 if 就是干这个的）
+android/app/google-services.json
+
 # Capacitor 原生工程的本地产物（原生工程源码仍然提交，见 docs/MOBILE.md）
 android/app/src/main/assets/public/
 android/.gradle/

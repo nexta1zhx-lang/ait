@@ -412,6 +412,26 @@ CREATE INDEX IF NOT EXISTS persist_sessions_due_idx
 CREATE INDEX IF NOT EXISTS persist_sessions_user_idx
   ON persist_sessions (user_id, started_at DESC);
 
+-- ---------------------------------------------------------------- App 推送（FCM）
+-- 手机 App 的推送 token（2026-10-15 用户：「加入 app 推送」）。
+--
+-- 一个用户多台设备 = 多行；token 由 App 启动时上报，服务端拿它发 FCM HTTP v1。
+-- ⚠️ token 会变（重装 / 清数据 / FCM 自己轮换）⇒ 上报走 UPSERT，并且**发失败要能标死**：
+--    FCM 回 UNREGISTERED / NOT_FOUND 就说明这条 token 已经没用了，留着只会每次白发一遍。
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token       TEXT        PRIMARY KEY,
+  user_id     BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- android / ios（现在是 Android 单体，字段先留着）
+  platform    TEXT        NOT NULL DEFAULT 'android',
+  -- 设备名（Ait / Android 34 这种，只给人看）
+  device      TEXT        NOT NULL DEFAULT '',
+  disabled_at TIMESTAMPTZ,
+  last_error  TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS push_tokens_user_idx ON push_tokens (user_id);
+
 -- ---------------------------------------------------------------- 知识库
 CREATE TABLE IF NOT EXISTS knowledge (
   id           BIGSERIAL   PRIMARY KEY,

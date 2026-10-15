@@ -5,6 +5,7 @@ import {authToken, setAuthToken} from './api'
 import {setupAndroidBack} from './back-button'
 import {setupNativeShell} from './native'
 import {isNativeShell} from './platform'
+import {bindPush} from './push'
 /*
  * 自托管字体（Noto Sans SC）—— ⚠️ 必须在 `style.css` **之前** import，
  * 否则它自己的 `@font-face` 会排在后面，`--font-sans` 里的回退顺序就乱了。
@@ -151,4 +152,11 @@ async function devAutoLogin(): Promise<void> {
   }
 }
 
-void devAutoLogin().then(() => app.mount('#app'))
+void devAutoLogin().then(() => {
+  /*
+   * App 推送（FCM）：只有原生壳里才做事（Web 上是空操作）。
+   * ⚠️ 放在 mount 之后无所谓 —— 它不影响首屏渲染，权限框晚一点弹反而更好。
+   */
+  bindPush()
+  app.mount('#app')
+})

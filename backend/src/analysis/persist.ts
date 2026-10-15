@@ -24,7 +24,13 @@ import {
   verdictOf,
   type Verdict
 } from './verdict'
+import {sendPush} from '../notify/push'
 import {sendTelegram} from '../notify/telegram'
+import {
+  disablePushToken,
+  listPushTokens,
+  notePushError
+} from '../db/push'
 import {
   MAX_CONSECUTIVE_FAILURES,
   dueSessions,
@@ -88,13 +94,25 @@ export async function runSessionOnce(
        * ⚠️ 只发**一行摘要**，不发整篇：实测模型给的是一整篇 Markdown（几千字），
        *    15 分钟来一篇会把 Telegram 刷屏。完整结论在页面的时间线里看。
        */
+      const one = excerptOf(line, 160)
+      const turn = s.lastVerdict
+        ? `${verdictLabel(s.lastVerdict as Verdict)} → 可做`
+        : '可做'
       void sendTelegram(
         `📈 持久化分析 · ${s.symbol} ${s.timeframe}\n` +
-          `结论转可做：${s.lastVerdict ? `${verdictLabel(s.lastVerdict as Verdict)} → ` : ''}` +
-          `${verdictLabel(verdict)}\n` +
-          `${excerptOf(line, 160)}\n` +
+          `结论转可做：${turn}\n` +
+          `${one}\n` +
           `现价 ${out.price} · 第 ${s.runs + 1} 次（共最多 32 次）`
       )
+      /* App 推送：同一个判据（只有转可做才发），标题就是那一句 */
+      void pushAlert({
+        userId: s.userId,
+        title: `${s.symbol} ${s.timeframe} 转可做`,
+        body: one,
+        symbol: s.symbol,
+        timeframe: s.timeframe,
+        price: out.price
+      })
     }
     return {
       sessionId: s.id,
@@ -129,6 +147,53 @@ export async function runSessionOnce(
       error: msg
     }
   }
+}
+
+/**
+ * 把「转可做」推给这个用户的**所有设备**（best-effort，不 await 失败）。
+ *
+ * ⚠️ 逐条发（FCM 没有批量接口的 HTTP v1 版本；一个用户的设备数也就是个位数）：
+ *    · FCM 说这条 token 没了（`UNREGISTERED` / `NOT_FOUND`）⇒ 标死，下次不再发；
+ *    · 别的失败（额度、5xx）⇒ 只记一句，下次还发。
+ */
+async function pushAlert(input: {
+  userId: number
+  title: string
+  body: string
+  symbol: string
+  timeframe: string
+  price: number | null
+}): Promise<void> {
+  let tokens: {token: string}[] = []
+  try {
+    tokens = await listPushTokens(input.userId)
+  } catch (e) {
+    console.warn(`[push] 读 token 失败：${(e as Error).message}`)
+    return
+  }
+  if (!tokens.length) return
+  let ok = 0
+  for (const t of tokens) {
+    const r = await sendPush(t.token, {
+      title: input.title,
+      body: input.body,
+      data: {
+        symbol: input.symbol,
+        timeframe: input.timeframe,
+        price: input.price === null ? '' : String(input.price)
+      }
+    })
+    if (r.ok) {
+      ok++
+      continue
+    }
+    if (r.dead) {
+      await disablePushToken(t.token, r.reason).catch(() => undefined)
+    } else if (r.reason !== 'not-configured' && r.reason !== 'no-access-token') {
+      await notePushError(t.token, r.reason).catch(() => undefined)
+    }
+  }
+  console.log(`[push] 转可做通知：${input.symbol} 发出 ${ok}/${tokens.length} 台设备`)
 }
 
 /**

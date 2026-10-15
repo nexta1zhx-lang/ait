@@ -786,6 +786,23 @@ sudo docker compose logs --tail 20 ca-app | grep -i telegram
 
 ⚠️ **没配也照样跑**：`sendTelegram()` 是 best-effort，缺凭据只打一行日志，
 结论照常入库、页面照常显示 —— **通知不该拖累主流程**。
+
+### App 推送（FCM）的凭据也要进这个 `.env`
+
+同一个道理（2026-10-15 加的「转可做」App 推送，见 [MOBILE.md](./MOBILE.md)）：
+服务端发 FCM 要一份**服务账号私钥**（Firebase 控制台 → 项目设置 → 服务账号 → 生成新的私钥），
+放服务器上、路径写进容器 env：
+
+```bash
+# 服务器上：把私钥放好（600，只有 ubuntu 读得到），再把路径写进 .env
+sudo install -m 600 -o ubuntu -g ubuntu firebase-sa.json /opt/crypto-advisor/firebase-sa.json
+grep -q '^FCM_SERVICE_ACCOUNT_FILE=' /opt/crypto-advisor/.env ||
+  echo 'FCM_SERVICE_ACCOUNT_FILE=/opt/crypto-advisor/firebase-sa.json' | sudo tee -a /opt/crypto-advisor/.env
+cd /opt/crypto-advisor && sudo docker compose up -d ca-app
+docker compose -f docker-compose.prod.yml logs app | grep '\[push\]'   # 没有"没配"字样就对了
+```
+
+⚠️ 私钥**绝不能进 git、也不能出现在日志里**（`notify/push.ts` 出错只打状态码，不打请求体）。
 ⚠️ 日志里**不许出现 token**：出错时也不回显 Telegram 的响应体（里面带 bot 地址）。
 
 ## 告警（可用性看门狗 → Telegram，2026-10-14）

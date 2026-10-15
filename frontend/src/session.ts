@@ -90,6 +90,15 @@ export async function register(
 }
 
 export async function logout(): Promise<void> {
+  /*
+   * ⚠️ 先注销推送 token，**再**退登录 —— 反过来就没 token 可用、接口会 401，
+   * 那台手机之后还会收到上一个人的「转可做」提醒。
+   *
+   * 用**动态 import**：`push.ts` 要 router / analyze，静态 import 进来容易绕成环
+   *（这个模块被它们间接依赖），而且只有这一处用得上。
+   */
+  const {unregisterPush} = await import('./push')
+  await unregisterPush().catch(() => undefined)
   await authLogout()
   setAuthToken('')
   user.value = null
