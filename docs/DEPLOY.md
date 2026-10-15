@@ -427,6 +427,10 @@ sudo docker logs --since 24h hbbs | grep -E "update_pk|IP change"
 > 1. **不许加 `-y`**：最后那句确认必须**由人按下**（助手要用 PTY 驱动，看到 `[y/N]` 才写 `y`）；
 > 2. **不许跳过验证**：类型检查 / 构建 / 真单验证（`test: true`）该跑还得跑，跑不过就不发。
 >
+> 🤖 **助手照着发的操作手册**在 [`.github/skills/release-to-prod/SKILL.md`](../.github/skills/release-to-prod/SKILL.md)
+> —— 里面是本文没有的那几件：**没有 PTY 时确认怎么按**（FIFO 三行）、
+> **发完怎么证明上线的是这一次的包**（比对前端包哈希）、回滚怎么做。改动这个流程时两处一起改。
+>
 > 发布是有副作用的动作（重建镜像 + 重启容器 + 清 `/opt` 旧文件）。
 > 每次上线服务器会推一条 Telegram（见下面「上线通知」）—— 发没发过、发的哪一版，有据可查。
 
