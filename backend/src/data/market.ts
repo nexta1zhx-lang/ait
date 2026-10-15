@@ -443,6 +443,28 @@ export async function warmExchange(opts: {
   await exchange.fetchOHLCV(symbol, '1h', undefined, 250)
 }
 
+/**
+ * 把「基础币（`BTC`）/ 整串符号（`BTC/USDT:USDT`）」解析成**交易所当场认得的**那一个。
+ *
+ * 为什么单独开一个（2026-10-15）：持久化分析在**加入时**就要把符号定下来并冻进会话里 ——
+ * 它之后每 15 分钟跑一发，要是拿了个不存在的符号，就得等三轮失败后才暂停，
+ * 用户看到的是「加了但一直没结论」。所以加入那一步就解析一次，解析不出来**当场报错**
+ * （报错文案里带「相近的有 …」，就是 `resolveSymbol` 那套）。
+ *
+ * ⚠️ 跟取数走**同一个** `resolveWithReload`：否则会出现「加入时说没问题、取数时认不出」。
+ */
+export async function resolveTradable(opts: {
+  exchangeId: string
+  symbol: string
+  marketType?: MarketType
+  apiBase?: string
+}): Promise<string> {
+  const marketType = opts.marketType ?? 'swap'
+  const exchange = await getExchange(opts.exchangeId, marketType, opts.apiBase)
+  const mk = marketsKeyOf(opts.exchangeId, marketType, opts.apiBase || 'live')
+  return resolveWithReload(exchange, opts.symbol, marketType, mk)
+}
+
 export interface FetchCandlesOptions {
   exchangeId: string
   symbol: string

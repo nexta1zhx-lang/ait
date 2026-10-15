@@ -245,6 +245,7 @@ import {
   fetchMarketList,
   fetchSnapshot,
   fetchTickerInfo,
+  resolveTradable,
   warmExchange,
   type MarketRow,
   type TickerInfo
@@ -3302,7 +3303,13 @@ async function route(
       if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
       const symbol = String(body.symbol ?? '').trim().toUpperCase()
       if (!symbol) return sendJson(res, 400, {error: '缺 symbol'})
-      const marketType = String(body.market ?? 'swap')
+      /*
+       * ⚠️ `market` 必须收口到 `MarketType` 那三个值：从前这里是 `String(body.market ?? 'swap')`
+       *    直接透传，前端一旦漏传/传错（比如 `perp`），会安静地建出一个**永远取不到行情**的会话
+       *    —— 三轮失败后暂停，用户看到的只是「加了但一直没结论」。宁可当场落回 swap。
+       */
+      const rawMarket = String(body.market ?? 'swap').trim().toLowerCase()
+      const marketType: MarketType = rawMarket === 'spot' || rawMarket === 'coinm' ? rawMarket : 'swap'
       const timeframe = String(body.timeframe ?? '1h')
       const days = Math.max(1, Math.min(60, Number(body.days) || 3))
       /*
@@ -3315,7 +3322,16 @@ async function route(
         return sendJson(res, 200, {
           error: `同时最多盯 ${MAX_ACTIVE_PER_USER} 个币 —— 先去停掉一个再加`
         })
-      const ccxt = /[/:]/.test(symbol) ? symbol : `${symbol}/USDT:${marketType === 'spot' ? 'USDT' : 'USDT'}`
+      /*
+       * 加入时就把符号解析成交易所认得的那一个（`resolveTradable` 跟取数是同一条路）。
+       * 解析不出来**当场**报错、别建会话：持久化是「加完就不管了」，错误要在这里看得见。
+       */
+      let ccxt: string
+      try {
+        ccxt = await resolveTradable({exchangeId: 'binance', symbol, marketType})
+      } catch (e) {
+        return sendJson(res, 200, {error: (e as Error).message})
+      }
       try {
         const created = await createPersistSession({
           userId: me.id,
