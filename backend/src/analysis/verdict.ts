@@ -21,20 +21,57 @@ export type Verdict = 'go' | 'no' | 'wait'
  * ⚠️ 这里**只放硬否决**。像"再等等""先等回踩"那种是**观望**（wait）不是否决 ——
  *    它们跟 wait 本来就同义，混进 NO_RE 只会让 no ↔ wait 来回翻（模型换个说法就翻一次），
  *    而"是否可做"其实没变。见下面的 `enteredGo()`。
+ *
+ * ★ 2026-10-15 补了一批「否定式搭配」：`不可做 / 不可开 / 不能开 / 不要开 / 别做 /
+ *   不宜 / 没可做 / 没有可 …`。原因见下面 `NEG_BEFORE_RE` 那段 —— 老库里
+ *   「**没有可做**的结构」被「可做」两个字骗成"可做"，那是唯一会**误发通知**的错。
  */
-const NO_RE = /不能做|不该做|不要做|不建议|不开|不动手|不参与|放弃/
+const NO_RE =
+  /不可做|不能做|不该做|不要做|不建议|不可开|不能开|不要开|别做|不宜|没可做|没有可做|没有可|没有进|没进|不开|不动手|不参与|放弃/
 /** 「可做」那一类（含条件式「回踩不破可以做多」—— 那也是他的可做信号） */
 const GO_RE = /能做|可以做|可做|可以进|建议进|可以开|进场/
+
+/**
+ * 「可做」那几个字前面**紧挨着**否定时就**不算机会**："没有可做的结构"、"不是可以做多的位置"。
+ *
+ * ⚠️⚠️ 这里刻意**不含光秃秃的「不」**：
+ *    「**不破**可以做多」是他典型的条件式放行（回踩不破就进），
+ *    把「不」也算否定会把它一枪打死 —— 那才是真的漏掉机会。
+ *    所以只认这些**否定式搭配**：不是 / 不算 / 不再 / 不会 / 没有 / 无法 / 不能 / 不可 /
+ *    不该 / 不要 / 不用 / 不宜，以及单独的 没 / 别 / 未 / 非 / 莫。
+ * ⚠️ 距离**最多 3 个字**（"没有可做的"里「可做」前面是「没有」✓；
+ *    "没有可依据的**进场**"离得远，靠 NO_RE 里那条 `没有可` 兜 —— 见上面）。
+ */
+const NEG_BEFORE_RE =
+  /(不是|不算|不再|不会|没有|无法|不能|不可|不该|不要|不用|不宜|没|别|未|非|莫)[^，。；、！？:：\n]{0,3}$/
 
 /** 抹掉 Markdown 记号，省得它们夹在词里影响匹配 */
 export function plainOf(text: string): string {
   return (text ?? '').replace(/[*_`#>]/g, ' ')
 }
 
+/**
+ * 找第一个**没被否定**的「可做」信号，返回它的位置（找不到 -1）。
+ *
+ * 为什么要一个个找、而不是 `plain.search(GO_RE)` 一把：`search` 只会给**最早**那个，
+ * 而最早那个可能正是被否定的（"没有可做…可以做多" 这种一句话里两种都有）。
+ */
+function firstGo(plain: string): number {
+  const re = new RegExp(GO_RE.source, 'g')
+  let m: RegExpExecArray | null
+  while ((m = re.exec(plain))) {
+    const before = plain.slice(Math.max(0, m.index - 12), m.index)
+    if (!NEG_BEFORE_RE.test(before)) return m.index
+    // 这个位置被否定了：从下一个字符继续找（别用 lastIndex 直接跳，避免漏掉重叠写法）
+    re.lastIndex = m.index + 1
+  }
+  return -1
+}
+
 export function verdictOf(text: string): Verdict {
   const plain = plainOf(text)
   const no = plain.search(NO_RE)
-  const go = plain.search(GO_RE)
+  const go = firstGo(plain)
   if (no >= 0 && (go < 0 || no <= go)) return 'no'
   if (go >= 0) return 'go'
   return 'wait'

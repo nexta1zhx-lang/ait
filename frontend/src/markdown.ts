@@ -202,12 +202,39 @@ export function verdictKind(text: string): 'go' | 'no' | 'wait' {
   /*
    * ⚠️ 「再等 / 先等」**不在**否决词表里：那是观望（wait），跟 wait 同义，
    *    混进去只会让 no ↔ wait 来回翻 —— 见 `enteredGo()` 那段。
+   * ⚠️ 这批「否定式搭配」（不可做 / 没有可 …）是 2026-10-15 补的，原因见下面那句注释。
    */
-  const no = plain.search(/不能做|不该做|不要做|不建议|不开|不动手|不参与|放弃/)
-  const go = plain.search(/能做|可以做|可做|可以进|建议进|可以开|进场/)
+  const no = plain.search(
+    /不可做|不能做|不该做|不要做|不建议|不可开|不能开|不要开|别做|不宜|没可做|没有可做|没有可|没有进|没进|不开|不动手|不参与|放弃/
+  )
+  const go = firstGo(plain)
   if (no >= 0 && (go < 0 || no <= go)) return 'no'
   if (go >= 0) return 'go'
   return 'wait'
+}
+
+/**
+ * 「可做」那几个字前面**紧挨着**否定时不算机会（"没有可做的结构"不是机会）。
+ *
+ * ⚠️⚠️ 刻意**不含光秃秃的「不」**：「**不破**可以做多」是条件式放行，
+ *    把「不」算进去会把真机会一枪打死（漏掉才是大错）。
+ *
+ * ⚠️ 这一段必须跟后端 `backend/src/analysis/verdict.ts` 的 `firstGo` / `NEG_BEFORE_RE`
+ *    **逐字一致**（同一句话在页面上是绿的、Telegram 说不可做，就说明又岔了）。
+ */
+const GO_RE = /能做|可以做|可做|可以进|建议进|可以开|进场/
+const NEG_BEFORE_RE =
+  /(不是|不算|不再|不会|没有|无法|不能|不可|不该|不要|不用|不宜|没|别|未|非|莫)[^，。；、！？:：\n]{0,3}$/
+
+function firstGo(plain: string): number {
+  const re = new RegExp(GO_RE.source, 'g')
+  let m: RegExpExecArray | null
+  while ((m = re.exec(plain))) {
+    const before = plain.slice(Math.max(0, m.index - 12), m.index)
+    if (!NEG_BEFORE_RE.test(before)) return m.index
+    re.lastIndex = m.index + 1
+  }
+  return -1
 }
 
 /**
