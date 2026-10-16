@@ -55,6 +55,7 @@ import {rustDeskSnapshot, setRustDeskNote} from './rustdesk'
 import {pruneOldData} from './db/prune'
 import {
   CaseLabel,
+  CaseSource,
   MoveType,
   deleteCase,
   getCase,
@@ -234,7 +235,9 @@ import {
 import {oneLineCost, usdToCny} from './llm/pricing'
 import {fetchBalance, fetchModels, type ModelsResult} from './llm/account'
 import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
-import {bjFull, collectCase, reeditCase} from './knowledge-service'
+import {bjFull, collectCase, reeditCase, type CollectInput} from './knowledge-service'
+/* 「从仓位导入」挑哪个周期是纯规则，跟 `knowledge-service` 分开一个文件（夹具直接测它） */
+import {pickTimeframe} from './knowledge-window'
 import {stepRecorder, type AnalyzeStep, type OnStep} from './step'
 import {runAnalysis} from './analysis/run'
 import {runPersistTick, runSessionOnce} from './analysis/persist'
@@ -725,6 +728,22 @@ function readJsonBody(
 const str = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d)
 
 const num = (v: unknown): number | undefined => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : undefined
+}
+
+/**
+ * `?query` 里的**可选数字**：没给 / 给空 = `undefined`。
+ *
+ * ⚠️⚠️ **不能拿上面那个 `num()` 来读 query**（2026-10-16 踩的）：
+ *    `URLSearchParams.get('杠杆')` 对**没给的键返回 `null`**，而 `Number(null)` 是
+ *    **0**（不是 NaN）⇒ 「没给」会被读成 0：
+ *      · 没带杠杆的仓位 → 存成 `0x`、界面上显示 0 倍
+ *      · 没带开仓价的仓位 → 喂给模型的提示词里写「均价 0.000」
+ *    `body` 那条路没这个毛病（`Number(undefined)` 是 NaN），所以这条只给 query 用。
+ */
+const numQ = (v: unknown): number | undefined => {
+  if (v === null || v === undefined || v === '') return undefined
   const n = Number(v)
   return Number.isFinite(n) ? n : undefined
 }
@@ -2247,8 +2266,8 @@ function collectInput(get: (k: string) => unknown):
   const tf = str(get('timeframe'), '4h') as Timeframe
   const timeframe = (VALID_TFS as string[]).includes(tf) ? tf : '4h'
 
-  const from = num(get('from'))
-  const to = num(get('to'))
+  const from = numQ(get('from'))
+  const to = numQ(get('to'))
   if ((from && !to) || (!from && to)) {
     return {error: '时间段要同时给起止时间'}
   }
@@ -2258,11 +2277,11 @@ function collectInput(get: (k: string) => unknown):
     timeframe,
     note: str(get('note')),
     // 「点选为中心」走这条：以某个时间点为中心，前后各 N 根
-    center: num(get('center')),
-    aroundBars: num(get('aroundBars')),
+    center: numQ(get('center')),
+    aroundBars: numQ(get('aroundBars')),
     from,
     to,
-    lookbackBars: num(get('lookbackBars')),
+    lookbackBars: numQ(get('lookbackBars')),
     // 我在图上画了范围 → 就要这一段本身，前后不补
     exact: get('exact') === true || get('exact') === '1',
     // save=0（或 body 里 save:false）= 只分析不落库，调试用
@@ -2294,6 +2313,98 @@ async function handleCollectStream(
   res: http.ServerResponse,
   user: User
 ): Promise<void> {
+  /* 这里先回 200 再校验（老行为）：参数不对也走 `failed` 事件，前端一套收尾就够 */
+  await streamCollect(req, res, user, collectInput(k => url.searchParams.get(k)))
+}
+
+/**
+ * 「从一笔仓位导入」的取数参数。
+ *
+ * 窗口（开仓前 40 根 + 整段持仓 + 平仓后 6 根）和周期（按持仓时长挑）都在
+ * `collectCase` / `pickTimeframe` 里定，这里只负责**校验 + 收敛**，
+ * 顺手把「还没平完」的持仓时长换成「到现在」。
+ */
+function positionInput(get: (k: string) => unknown):
+  | {error: string}
+  | Omit<CollectInput, 'userId' | 'onStep'> {
+  const symbol = str(get('symbol')).trim().toUpperCase()
+  if (!symbol) return {error: '缺少币种'}
+
+  const side = str(get('side')).toLowerCase()
+  if (side !== 'long' && side !== 'short')
+    return {error: '方向只能是 long / short'}
+
+  const openAt = numQ(get('openAt'))
+  if (!openAt) return {error: '缺少开仓时间（这条仓位在账本里没有开仓记录）'}
+
+  const closeRaw = numQ(get('closeAt'))
+  /* 平仓时间早于开仓 = 数据不对：宁可当「还没平」，也别拿一段倒着的窗口去拉行情 */
+  const closeAt = closeRaw && closeRaw > openAt ? closeRaw : null
+  const given = numQ(get('holdSec'))
+  const holdSec = closeAt
+    ? (given ?? (closeAt - openAt) / 1000)
+    : Math.max(0, (Date.now() - openAt) / 1000)
+
+  return {
+    symbol,
+    /* 拉 K 线用交易所原始符号（`1000BONKUSDT`），存库 / 显示用上面的简称 */
+    rawSymbol: str(get('rawSymbol')).trim().toUpperCase() || undefined,
+    timeframe: pickTimeframe(holdSec),
+    note: str(get('note')),
+    position: {
+      side,
+      openAt,
+      closeAt,
+      /* ⚠️ 这些全是**可以没有**的：账本不全时开仓均价就是没有，
+             没给就老老实实 null（别变成 0.000）—— 见 `numQ` 那段 */
+      entryPrice: numQ(get('entryPrice')) ?? null,
+      exitPrice: numQ(get('exitPrice')) ?? null,
+      qty: numQ(get('qty')) ?? 0,
+      net: numQ(get('net')) ?? 0,
+      holdSec,
+      leverage: numQ(get('leverage')) ?? null,
+      keyName: str(get('keyName')).trim() || undefined
+    },
+    // save=0 只分析不落库（调试用）
+    dryRun: get('save') === false || get('save') === '0'
+  }
+}
+
+/** GET /api/knowledge/from-position/stream —— 从一笔仓位导入（带进度） */
+function handleCollectFromPositionStream(
+  url: URL,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  user: User
+): Promise<void> {
+  return streamCollect(req, res, user, positionInput(k => url.searchParams.get(k)))
+}
+
+/** POST /api/knowledge/from-position —— 同上，不带进度（命令行 / 调试用） */
+async function handleCollectFromPosition(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  user: User
+): Promise<void> {
+  const body = await readJsonBody(req)
+  const params = positionInput(k => body[k])
+  if ('error' in params) {
+    sendJson(res, 400, {error: params.error})
+    return
+  }
+  sendJson(res, 200, await collectCase({...params, userId: user.id}))
+}
+
+/**
+ * 收案例那条路（画一段 / 点一个时间 / 从仓位导入）共同的 SSE 外壳。
+ * `params` 已经校验过；是 `{error}` 就当场回一个 `failed`。
+ */
+async function streamCollect(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  user: User,
+  params: {error: string} | Omit<CollectInput, 'userId' | 'onStep'>
+): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
@@ -2306,7 +2417,6 @@ async function handleCollectStream(
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
   }
 
-  const params = collectInput(k => url.searchParams.get(k))
   if ('error' in params) {
     send('failed', {error: params.error})
     res.end()
@@ -2516,12 +2626,17 @@ async function handleListCases(
     ? (moveRaw as MoveType | 'none')
     : 'all'
   const withCandles = q.get('candles') === '1'
+  const sourceRaw = q.get('source') ?? 'all'
+  const source = (['manual', 'position'] as string[]).includes(sourceRaw)
+    ? (sourceRaw as CaseSource)
+    : 'all'
   const cases = await listCases({
     userId: user.id,
     label,
     moveType,
     tag: q.get('tag') ?? '',
     symbol: q.get('symbol') ?? '',
+    source,
     q: q.get('q') ?? '',
     // 卡片要画迷你图时才把 K 线一起带上
     withCandles
@@ -5972,6 +6087,23 @@ async function route(
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
     return handleCollectStream(url, req, res, me)
+  }
+  /*
+   * 从「持仓 / 仓位历史」那张卡上一键导入（2026-10-16）。
+   *
+   * ⚠️ 参数照样走 query（GET）：EventSource 只能发 GET，而这一串都是短数字 / 简称
+   *    （币种、方向、开平仓时间、几个价），撑不爆请求头 —— 跟 `/api/ask/stream`
+   *    那边「把多轮历史塞 URL 撞 431」不是一回事（见那段说明）。
+   */
+  if (p === '/api/knowledge/from-position') {
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    return handleCollectFromPosition(req, res, me)
+  }
+  if (p === '/api/knowledge/from-position/stream') {
+    if (method !== 'GET')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    return handleCollectFromPositionStream(url, req, res, me)
   }
   if (p.startsWith('/api/knowledge/')) {
     const m = p.match(/^\/api\/knowledge\/(\d+)(\/reedit)?$/)

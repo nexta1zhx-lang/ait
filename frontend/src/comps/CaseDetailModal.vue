@@ -8,7 +8,7 @@
 import {computed, ref, watch} from 'vue'
 import MiniKline from './MiniKline.vue'
 import {deleteCase, reeditCase, updateCase, type KnowledgeCase} from '../api'
-import {bjTime, moveCls, moveText} from '../format'
+import {bjTime, fixed, fmt, moveCls, moveText} from '../format'
 import {askConfirm} from '../confirm'
 
 const props = defineProps<{
@@ -77,6 +77,25 @@ const pickedCount = computed(
   () => tags.value.filter(t => props.templates.includes(t)).length
 )
 const atLimit = computed(() => pickedCount.value >= MAX_TAGS)
+
+/* ---------------- 从仓位导入的那条：把那笔仓的事实摆出来（2026-10-16） ---------------- */
+
+/** 净盈亏（带符号，跟账本卡片同一个写法） */
+function signed(v: number): string {
+  return `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`
+}
+
+/** 持仓多久的人话 */
+function holdText(sec: number): string {
+  const s = Math.max(0, Math.round(sec))
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} 分钟`
+  const h = Math.floor(m / 60)
+  if (h < 24) return m % 60 ? `${h} 小时 ${m % 60} 分` : `${h} 小时`
+  const d = Math.floor(h / 24)
+  return h % 24 ? `${d} 天 ${h % 24} 小时` : `${d} 天`
+}
 
 /** 点一下勾上 / 再点一下取消 */
 function toggleTag(t: string) {
@@ -209,6 +228,57 @@ async function remove() {
               }}%<template v-if="data.stats.volTrend != null">
                 · 后半段量 {{ data.stats.volTrend }} 倍</template
               >
+            </span>
+          </div>
+        </div>
+
+        <!--
+          从仓位导入的：这条经验对应的**那笔真实仓位**摆在这儿
+          （用户 2026-10-16：「要标明这个币种是从仓位导过去的」）——
+          开平仓价 / 持仓时长 / 净盈亏，跟上面那张图对照着看。
+        -->
+        <div v-if="data.pos" class="cm-pos">
+          <div class="cm-pos-h">
+            <span class="cm-pos-tag">仓位导入</span>
+            <span class="dim">
+              {{ data.pos.side === 'short' ? '空' : '多'
+              }}<template v-if="data.pos.leverage">
+                · {{ fixed(data.pos.leverage, 0) }}x</template
+              >
+            </span>
+          </div>
+          <div class="cm-pos-grid">
+            <span>
+              <i>开仓</i>
+              <b>{{ bjTime(data.pos.openAt).slice(5, 16) }}</b>
+            </span>
+            <span>
+              <i>{{ data.pos.closeAt ? '平仓' : '还没平' }}</i>
+              <b>{{
+                data.pos.closeAt ? bjTime(data.pos.closeAt).slice(5, 16) : '—'
+              }}</b>
+            </span>
+            <span>
+              <i>持仓</i>
+              <b>{{ holdText(data.pos.holdSec) }}</b>
+            </span>
+            <span>
+              <i>开仓均价</i>
+              <b>{{
+                data.pos.entryPrice == null ? '—' : fmt(data.pos.entryPrice)
+              }}</b>
+            </span>
+            <span>
+              <i>平仓均价</i>
+              <b>{{
+                data.pos.exitPrice == null ? '—' : fmt(data.pos.exitPrice)
+              }}</b>
+            </span>
+            <span>
+              <i>净盈亏</i>
+              <b :class="data.pos.net >= 0 ? 'up' : 'down'">{{
+                signed(data.pos.net)
+              }}</b>
             </span>
           </div>
         </div>
@@ -428,6 +498,53 @@ async function remove() {
   gap: 4px 12px;
   margin-top: 5px;
   font-size: 11px;
+}
+
+/* 从仓位导入那条：一颗「仓位导入」标记 + 六格事实（跟账本卡片同一个版式） */
+.cm-pos {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+.cm-pos-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.cm-pos-tag {
+  padding: 1px 7px;
+  border: 1px solid var(--border, #26282e);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--accent, #d3b583);
+}
+.cm-pos-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px 10px;
+}
+.cm-pos-grid > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.cm-pos-grid i {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted);
+}
+.cm-pos-grid b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.cm-pos-grid .up {
+  color: var(--ok, #5eba89);
+}
+.cm-pos-grid .down {
+  color: var(--bad, #e55361);
 }
 
 .cm-body {

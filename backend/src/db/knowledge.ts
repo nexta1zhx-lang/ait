@@ -5,6 +5,36 @@ export type CaseLabel = 'do' | 'dont'
 export type CaseGrade = 'A' | 'B' | 'C'
 
 /**
+ * 这条案例是从哪来的（`knowledge.source`）：
+ *   · `manual`   —— 我在 K 线图上画一段（或点一个时间点）收录的
+ *   · `position` —— 从「持仓 / 仓位历史」那张卡上一键导入的（会带 `pos`）
+ */
+export type CaseSource = 'manual' | 'position'
+
+/**
+ * 从仓位导入时留下的**那笔仓位的事实**（`knowledge.pos`）。
+ *
+ * 用途有两个：卡片上标出「这条是从我真实的一笔仓位来的」，
+ * 详情里把开平仓 / 盈亏摆出来对照 AI 说的那段行情。
+ */
+export interface CasePosition {
+  side: 'long' | 'short'
+  /** 开仓均价（账本不全时 null） */
+  entryPrice: number | null
+  /** 平仓均价（还没平完 / 账本不全时 null） */
+  exitPrice: number | null
+  qty: number
+  /** 净盈亏（已实现 − 手续费 + 资金费；还没平完就是至今的） */
+  net: number
+  holdSec: number
+  leverage: number | null
+  /** 开仓时间（ISO） */
+  openAt: string
+  /** 全平时间（ISO）；还没平完是 null */
+  closeAt: string | null
+}
+
+/**
  * 标签模板现在存数据库、由我自己在页面上维护 ——
  * 见 `db/tags.ts` 的 `listTagTemplates()` / `loadTagTemplates()`。
  * 代码里**没有任何写死的默认模板**（删空了就是空的）。
@@ -87,6 +117,10 @@ export interface KnowledgeRow {
   rallyTo: number | null
   stats: CaseStats | null
   candles: Candle[]
+  /** 这条是从哪来的（画「仓位导入」标记用） */
+  source: CaseSource
+  /** 从仓位导入时那笔仓位的事实；别的来源是 null */
+  pos: CasePosition | null
   createdAt: string
 }
 
@@ -127,6 +161,8 @@ export interface KnowledgeBrief {
   stats: CaseStats | null
   /** 只有 `withCandles: true` 时才有内容，否则是空数组 */
   candles: Candle[]
+  source: CaseSource
+  pos: CasePosition | null
   createdAt: string
 }
 
@@ -149,6 +185,8 @@ interface Raw {
   rally_to: number | null
   rally_meta: CaseStats | null
   candles: number[][] | null
+  source: string | null
+  pos: CasePosition | null
   created_at: Date
 }
 
@@ -178,7 +216,13 @@ function unpackCandles(rows: number[][] | null): Candle[] {
 
 const COLS = `id, symbol, timeframe, label, grade, move_type, tags, title, why,
   note, lesson, features, window_start, window_end, rally_from, rally_to,
-  rally_meta, candles, created_at`
+  rally_meta, candles, source, pos, created_at`
+
+/** 库里的 `pos` 是不是一笔真仓位（不是 `{}` / 半截数据） */
+function mapPos(v: CasePosition | null): CasePosition | null {
+  if (!v || typeof v !== 'object') return null
+  return v.side === 'long' || v.side === 'short' ? v : null
+}
 
 function map(r: Raw): KnowledgeRow {
   return {
@@ -200,6 +244,8 @@ function map(r: Raw): KnowledgeRow {
     rallyTo: r.rally_to,
     stats: r.rally_meta,
     candles: unpackCandles(r.candles),
+    source: r.source === 'position' ? 'position' : 'manual',
+    pos: mapPos(r.pos),
     createdAt: r.created_at.toISOString()
   }
 }
@@ -225,6 +271,10 @@ export interface CreateCaseInput {
   candles: Candle[]
   stats: CaseStats
   snapshot: Record<string, unknown>
+  /** 从哪来的；不传 = `manual`（画一段收录的） */
+  source?: CaseSource
+  /** 从仓位导入时那笔仓位的事实 */
+  pos?: CasePosition | null
 }
 
 export async function createCase(input: CreateCaseInput): Promise<number> {
@@ -232,8 +282,8 @@ export async function createCase(input: CreateCaseInput): Promise<number> {
     `INSERT INTO knowledge (
        symbol, ccxt_symbol, exchange, timeframe, label, move_type, tags,
        title, why, note, lesson, features, window_start, window_end,
-       candles, rally_meta, snapshot, user_id
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       candles, rally_meta, snapshot, user_id, source, pos
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
      RETURNING id`,
     [
       input.symbol,
@@ -254,7 +304,9 @@ export async function createCase(input: CreateCaseInput): Promise<number> {
       JSON.stringify(input.stats),
       JSON.stringify(input.snapshot),
       // user_id —— 知识库按用户隔离
-      input.userId
+      input.userId,
+      input.source ?? 'manual',
+      JSON.stringify(input.pos ?? {})
     ]
   )
   return Number(row?.id)
@@ -269,6 +321,8 @@ export interface ListCasesOptions {
   /** 只要带这个标签的 */
   tag?: string
   symbol?: string
+  /** 只看这个来源的（'all' = 不筛） */
+  source?: CaseSource | 'all'
   /** 关键词：在 lesson / why / title / note 里模糊匹配 */
   q?: string
   /** 带上 K 线（卡片要画迷你图时就开） */
@@ -307,6 +361,10 @@ export async function listCases(
     vals.push(symbol)
     where.push(`upper(symbol) = $${vals.length}`)
   }
+  if (opts.source && opts.source !== 'all') {
+    vals.push(opts.source)
+    where.push(`source = $${vals.length}`)
+  }
   const q = (opts.q ?? '').trim()
   if (q) {
     vals.push(`%${q}%`)
@@ -317,7 +375,7 @@ export async function listCases(
   vals.push(Math.min(500, Math.max(1, opts.limit ?? 200)))
   const cols = `id, symbol, timeframe, label, grade, move_type, tags, title, why,
                 note, lesson, features, window_start, window_end,
-                rally_from, rally_to, rally_meta,
+                rally_from, rally_to, rally_meta, source, pos,
                 ${opts.withCandles ? 'candles' : `'[]'::jsonb AS candles`},
                 created_at`
   const rows = await query<Raw>(

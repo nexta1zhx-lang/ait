@@ -507,6 +507,16 @@ ALTER TABLE knowledge ALTER COLUMN label DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS knowledge_tags_idx      ON knowledge USING GIN (tags);
 CREATE INDEX IF NOT EXISTS knowledge_move_type_idx ON knowledge (move_type);
 
+-- ──────────────────────────────── 案例来源（2026-10-16，幂等）
+-- manual = 我在 K 线上画一段收录的；position = 从「持仓 / 仓位历史」一键导入的。
+-- 老记录一律算 manual（那时候还没有别的来源）。
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
+-- 从仓位导入时那笔仓位的事实（方向 / 开平仓价 / 净盈亏 / 持仓时长 / 杠杆）。
+-- 见 db/knowledge.ts 的 CasePosition；不是从仓位来的记录是空对象，前端不画那一块。
+ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS pos JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- 卡片上的「来源」筛选按 (user_id, source) 走
+CREATE INDEX IF NOT EXISTS knowledge_source_idx ON knowledge (user_id, source);
+
 -- ---------------------------------------------------------- 币种表（合约列表）
 -- 整份币种清单存一行（id=1）：只有「整体读 / 整体换」的需求，不按行查，
 -- 存一份 JSONB 最省事，也不会出现半新半旧。

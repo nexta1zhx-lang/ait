@@ -76,6 +76,27 @@ export interface ExtractInput {
    * 只用那一刻之前的 K 线算的，不含之后的数据。
    */
   sr?: ExtractSR[]
+  /**
+   * 从一笔仓位导入时，那笔仓位的事实（用户 2026-10-16）。
+   *
+   * 给了就在提示词里明说「这是我自己做过的一笔真实仓位」，让模型把
+   * 「当时是什么样的结构」和「我实际怎么做、结果如何」对上 —— 光看 K 线
+   * 只能总结形状，看不出我是在哪儿进出的。
+   * ⚠️ 它只进提示词，**不落库**：库里存的是 `knowledge.pos`（见 `db/knowledge.ts`）。
+   */
+  position?: {
+    side: 'long' | 'short'
+    /** 开仓时间（毫秒） */
+    openAt: number
+    closeAt: number | null
+    entryPrice: number | null
+    exitPrice: number | null
+    qty: number
+    net: number
+    holdSec: number
+    leverage: number | null
+    keyName?: string
+  }
 }
 
 export interface ExtractResult {
@@ -90,13 +111,68 @@ export interface ExtractResult {
   tags: string[]
 }
 
-/** 价格：大数字不拖小数，小数字保留有效位 */
-function fmtPrice(n: number): string {
-  if (!Number.isFinite(n)) return '—'
+/** 价格：大数字不拖小数，小数字保留有效位（没有值给 `—`，别编一个） */
+function fmtPrice(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return '—'
   const abs = Math.abs(n)
   if (abs >= 1000) return n.toLocaleString('en-US', {maximumFractionDigits: 1})
   if (abs >= 1) return n.toFixed(3)
   return n.toPrecision(6)
+}
+
+/** 北京时间 yyyy-mm-dd hh:mm（⚠️ 一定要带年份：仓位可能是去年的事） */
+function bjFull(ms: number): string {
+  const p: Record<string, string> = {}
+  for (const x of new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date(ms)))
+    p[x.type] = x.value
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`
+}
+
+/** 持仓多久（给模型看的人话：`1天3小时` / `42 分钟`） */
+function holdText(sec: number): string {
+  const s = Math.max(0, Math.round(sec))
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} 分钟`
+  const h = Math.floor(m / 60)
+  if (h < 24) return m % 60 ? `${h} 小时 ${m % 60} 分` : `${h} 小时`
+  const d = Math.floor(h / 24)
+  return h % 24 ? `${d} 天 ${h % 24} 小时` : `${d} 天`
+}
+
+/**
+ * 从仓位导入时：我那笔仓位的事实 → 提示词里的一段。
+ *
+ * ⚠️ 时间也要用**北京时间**（跟 `knowledge-service.ts` 的 `bjFull` 同一套），
+ *    别用 `toISOString()` —— 差 8 小时会让「我什么时候开的仓」跟 K 线上那根对不上。
+ *    （那个函数在本文件里 import 不进来：`knowledge-service` 反过来 import 本文件，
+ *     会成环，所以这里留一份小的。）
+ */
+function positionBlock(p: NonNullable<ExtractInput['position']>): string {
+  const hold = holdText(p.holdSec)
+  const side = p.side === 'short' ? '空' : '多'
+  const money = (n: number) => `${n >= 0 ? '+' : '−'}${Math.abs(n).toFixed(2)}`
+  return `【这是我自己的一笔真实仓位】
+- 方向：${side}${p.leverage ? ` · ${p.leverage}x` : ''}${
+    p.keyName ? ` · 账户 ${p.keyName}` : ''
+  }
+- 开仓：${bjFull(p.openAt)} 均价 ${fmtPrice(p.entryPrice)}${
+    p.closeAt === null
+      ? '（**还没平**，下面那段走势一直到此刻）'
+      : ` → 平仓：${bjFull(p.closeAt)} 均价 ${fmtPrice(p.exitPrice)}`
+  }
+- 持仓：${hold} · 数量 ${p.qty}
+- 净盈亏：${p.closeAt === null ? `${money(p.net)}（至今）` : money(p.net)} USDT（已含手续费 / 资金费）
+（上面的行情就是这一段：开仓前那几十根是**我开仓那一刻看到的结构**，中间是我持仓期间，
+ 最后几根是平仓之后怎么走的。请照上面的要求提炼这段行情，别去评价我该不该这么做。）`
 }
 
 function buildUser(input: ExtractInput): string {
@@ -112,7 +188,7 @@ function buildUser(input: ExtractInput): string {
   return `【币种 / 周期】${input.symbol} · ${input.timeframe}
 
 ${input.note.trim() ? `【我的备注】${input.note.trim()}` : '【我的备注】（没写）'}
-
+${input.position ? `\n${positionBlock(input.position)}\n` : ''}
 【整段速览】
 - 共 ${s.bars} 根，${s.changePct >= 0 ? '+' : ''}${s.changePct.toFixed(2)}%，振幅 ${s.rangePct.toFixed(2)}%，最大回撤 -${s.maxDrawdownPct.toFixed(2)}%
 - 最高点在整段 ${Math.round(s.highAtPct)}% 处，最低点在 ${Math.round(s.lowAtPct)}% 处${
@@ -122,7 +198,9 @@ ${input.note.trim() ? `【我的备注】${input.note.trim()}` : '【我的备�
   }
 ${
   srText
-    ? `\n【这段结束时的大周期压力 / 支撑】\n${srText}\n（只用那一刻之前的 K 线算的，不含之后的数据）`
+    ? `\n【${
+        input.position ? '我开仓那一刻' : '这段结束时'
+      }的大周期压力 / 支撑】\n${srText}\n（只用那一刻之前的 K 线算的，不含之后的数据）`
     : ''
 }
 

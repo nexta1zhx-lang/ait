@@ -3178,6 +3178,26 @@ export function analyzeStream(
 
 /* ---------------- 知识库 ---------------- */
 
+/** 这条案例从哪来：画一段收录的 / 从一笔仓位导入的 */
+export type CaseSource = 'manual' | 'position'
+
+/** 从仓位导入时那笔仓位的事实（后端 `knowledge.pos`） */
+export interface CasePosition {
+  side: 'long' | 'short'
+  entryPrice: number | null
+  exitPrice: number | null
+  qty: number
+  /** 净盈亏（已实现 − 手续费 + 资金费） */
+  net: number
+  /** 持仓秒数 */
+  holdSec: number
+  leverage: number | null
+  /** 开仓时间（ISO） */
+  openAt: string
+  /** 全平时间；还没平完是 null */
+  closeAt: string | null
+}
+
 export interface KnowledgeCase {
   id: number
   symbol: string
@@ -3206,6 +3226,10 @@ export interface KnowledgeCase {
   stats: CaseStats | null
   /** 只有请求时带 candles=1 才有内容 */
   candles: Candle[]
+  /** 从哪来的（卡片上给「仓位导入」那类打标） */
+  source: CaseSource
+  /** 从仓位导入时那笔仓位的事实；别的来源是 null */
+  pos: CasePosition | null
   createdAt: string
 }
 
@@ -3228,6 +3252,8 @@ export interface CollectResult {
   caseId: number | null
   symbol: string
   timeframe: string
+  /** 这条案例从哪来的（画一段 = manual / 从仓位导入 = position） */
+  source: CaseSource
   /** @deprecated 已经不再分「该做 / 不该做」，固定为 null */
   label: 'do' | 'dont' | null
   moveType: MoveType
@@ -3279,6 +3305,8 @@ export interface ListCasesParams {
   /** 只要带这个标签的 */
   tag?: string
   symbol?: string
+  /** 只看这个来源的（不传 = 全部） */
+  source?: CaseSource
   q?: string
   /** 卡片要画迷你图时打开 */
   candles?: boolean
@@ -3290,6 +3318,7 @@ export const listCases = (p: ListCasesParams = {}) => {
   if (p.moveType && p.moveType !== 'all') qs.set('moveType', p.moveType)
   if (p.tag) qs.set('tag', p.tag)
   if (p.symbol) qs.set('symbol', p.symbol)
+  if (p.source) qs.set('source', p.source)
   if (p.q) qs.set('q', p.q)
   if (p.candles) qs.set('candles', '1')
   return get<{cases: KnowledgeCase[]; total: number}>(`/api/knowledge?${qs}`)
@@ -3342,31 +3371,16 @@ export interface CollectParams {
   exact?: boolean
 }
 
-/**
- * 带进度的案例提炼（SSE）。
- * 跟开单分析一样，一路上推 `step`，最后推 `done`。
- * 返回值是「取消」函数。
- */
-export function collectStream(
-  params: CollectParams,
+/** 收案例那条路（画一段 / 从仓位导入）共用的收尾 —— 事件名和收尾动作完全一样 */
+function collectSse(
+  path: string,
   handlers: {
     onStep: (step: AnalyzeStep) => void
     onDone: (result: CollectResult) => void
     onError: (message: string) => void
   }
 ): () => void {
-  const qs = new URLSearchParams({symbol: params.symbol})
-  qs.set('timeframe', params.timeframe)
-  if (params.note) qs.set('note', params.note)
-  if (params.center) qs.set('center', String(params.center))
-  if (params.aroundBars) qs.set('aroundBars', String(params.aroundBars))
-  if (params.from && params.to) {
-    qs.set('from', String(params.from))
-    qs.set('to', String(params.to))
-  }
-  if (params.exact) qs.set('exact', '1')
-
-  const es = openSse('/api/knowledge/stream?' + qs.toString())
+  const es = openSse(path)
   let finished = false
 
   const stop = () => {
@@ -3405,6 +3419,113 @@ export function collectStream(
   }
 
   return stop
+}
+
+/**
+ * 带进度的案例提炼（SSE）。
+ * 跟开单分析一样，一路上推 `step`，最后推 `done`。
+ * 返回值是「取消」函数。
+ */
+export function collectStream(
+  params: CollectParams,
+  handlers: {
+    onStep: (step: AnalyzeStep) => void
+    onDone: (result: CollectResult) => void
+    onError: (message: string) => void
+  }
+): () => void {
+  const qs = new URLSearchParams({symbol: params.symbol})
+  qs.set('timeframe', params.timeframe)
+  if (params.note) qs.set('note', params.note)
+  if (params.center) qs.set('center', String(params.center))
+  if (params.aroundBars) qs.set('aroundBars', String(params.aroundBars))
+  if (params.from && params.to) {
+    qs.set('from', String(params.from))
+    qs.set('to', String(params.to))
+  }
+  if (params.exact) qs.set('exact', '1')
+
+  return collectSse('/api/knowledge/stream?' + qs.toString(), handlers)
+}
+
+/**
+ * 一笔要导入知识库的仓位（`collectFromPositionStream` 的参数）。
+ *
+ * 只有「那笔仓位是什么」这些事实 —— **窗口不由前端定**：
+ * 取哪一段（开仓前 40 根 + 整段持仓 + 平仓后 6 根）和用哪个周期（按持仓时长换档）
+ * 都在后端（`knowledge-service.ts` 的 `collectCase` / `pickTimeframe`）。
+ */
+export interface PositionCollectParams {
+  /** 币种简称（存库 / 显示用，`1000BONK`） */
+  symbol: string
+  /** 交易所原始符号（拉 K 线用，`1000BONKUSDT`） */
+  rawSymbol?: string
+  side: 'long' | 'short'
+  /** 开仓时间（毫秒） */
+  openAt: number
+  /** 全平时间（毫秒）；还没平完不传 */
+  closeAt?: number | null
+  entryPrice?: number | null
+  exitPrice?: number | null
+  qty?: number
+  net?: number
+  /** 持仓秒数（后端会按「还没平完 = 到现在」自己校一遍） */
+  holdSec?: number
+  leverage?: number | null
+  keyName?: string
+  note?: string
+}
+
+/**
+ * 卡片上点「收录」→ 外层 → 导入弹层，一路传的那一份。
+ *
+ * 放在这里是因为它横跨三个文件（`ExchangeAccountBoard` 发出来、
+ * `ExchangeAccountLivePanel` 接住、`PositionImportSheet` 收进去）——
+ * 塞进任何一个 `.vue` 都得让另外两个去 import 组件里的类型。
+ */
+export interface PositionImportTarget {
+  /** 卡片上那个名字（`BONK` / `1000BONK`）—— 弹层标题用 */
+  name: string
+  /** 还没平完的持仓（弹层里那句「还在持仓中」的文案） */
+  open: boolean
+  params: PositionCollectParams
+}
+
+/**
+ * 从一笔仓位导入知识库（SSE，带进度）。
+ *
+ * ⚠️ 参数走 query：`EventSource` 只能发 GET，而这一串都是短数字 / 简称，
+ *    撑不爆请求头（跟 `/api/ask/stream` 那边把长历史塞 URL 撞 431 不是一回事）。
+ */
+export function collectFromPositionStream(
+  params: PositionCollectParams,
+  handlers: {
+    onStep: (step: AnalyzeStep) => void
+    onDone: (result: CollectResult) => void
+    onError: (message: string) => void
+  }
+): () => void {
+  const qs = new URLSearchParams({symbol: params.symbol, side: params.side})
+  qs.set('openAt', String(params.openAt))
+  if (params.rawSymbol) qs.set('rawSymbol', params.rawSymbol)
+  if (params.closeAt) qs.set('closeAt', String(params.closeAt))
+  if (typeof params.entryPrice === 'number')
+    qs.set('entryPrice', String(params.entryPrice))
+  if (typeof params.exitPrice === 'number')
+    qs.set('exitPrice', String(params.exitPrice))
+  if (typeof params.qty === 'number') qs.set('qty', String(params.qty))
+  if (typeof params.net === 'number') qs.set('net', String(params.net))
+  if (typeof params.holdSec === 'number')
+    qs.set('holdSec', String(params.holdSec))
+  if (typeof params.leverage === 'number')
+    qs.set('leverage', String(params.leverage))
+  if (params.keyName) qs.set('keyName', params.keyName)
+  if (params.note) qs.set('note', params.note)
+
+  return collectSse(
+    '/api/knowledge/from-position/stream?' + qs.toString(),
+    handlers
+  )
 }
 
 /** 只改文案，K 线不动 */

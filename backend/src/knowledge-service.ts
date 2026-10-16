@@ -5,6 +5,7 @@ import {fetchCandles, fetchCandlesRange, fetchSRAt} from './data/market'
 import {
   CaseFeatures,
   CaseLabel,
+  CaseSource,
   CaseStats,
   createCase,
   getCase,
@@ -21,6 +22,11 @@ import {extractCase, type ExtractSR} from './llm/extract'
 import {oneLineCost, usdToCny} from './llm/pricing'
 import {TF_MS as MARKET_TF_MS} from './data/market'
 import {stepRecorder, type AnalyzeStep, type OnStep} from './step'
+import {
+  POSITION_PRE_BARS,
+  POSITION_POST_BARS,
+  positionWindowMs
+} from './knowledge-window'
 import {Timeframe} from './types'
 
 /** 保留两位小数 */
@@ -35,6 +41,8 @@ const TF_MS: Record<Timeframe, number> = MARKET_TF_MS
  *
  * 用「这段行情结束时」那一刻的 4H / 日线高低点 —— 只吃那一刻之前的 K 线，
  * 相当于 AI 当时抬头能看到的箱体上沿 / 下沿。
+ * ⚠️ 从仓位导入时改成「**开仓那一刻**」：那才是做决定的时候，
+ *    用平仓那一刻的箱体去解释当时为什么开仓是错的。
  */
 const SR_INPUT: {timeframe: Timeframe; bars: number}[] = [
   {timeframe: '4h', bars: 30},
@@ -63,10 +71,46 @@ export interface CollectInput {
   lookbackBars?: number
   /** 画了范围就要这一段本身 —— 前后都不补，一根不多一根不少 */
   exact?: boolean
+  /**
+   * 取行情用的**交易所原始符号**（`1000BONKUSDT`）。
+   *
+   * 只有从仓位导入时才给：那条路上的 `symbol` 是给人看的币种简称
+   * （`1000BONK`，跟卡片上显示的一致），拉 K 线要用交易所id（见
+   * `market.ts` 的 `resolveSymbol` 那段）。不传就说明两个是同一个。
+   */
+  rawSymbol?: string
+  /** 后置多少根（默认 60）—— 从仓位导入时按「平仓后再看几根」给 */
+  forwardBars?: number
+  /** 从「持仓 / 仓位历史」一键导入：那笔仓位的事实（见 `PositionInput`） */
+  position?: PositionInput
   /** 只分析不落库 */
   dryRun?: boolean
   /** 一步步往外报进度（前端画「分析过程」时间线） */
   onStep?: OnStep
+}
+
+/**
+ * 一笔要导入知识库的仓位（前端在持仓卡 / 仓位历史卡上点「收录」时给的那几个数）。
+ *
+ * ⚠️ 时间用毫秒（前端 `Date.parse` 过一道）：`closeAt` 为 `null` = 还没平完，
+ *    窗口右端就取「现在」（拉不到未来）。
+ */
+export interface PositionInput {
+  side: 'long' | 'short'
+  /** 开仓时间（毫秒） */
+  openAt: number
+  /** 全平时间（毫秒）；还没平完是 null */
+  closeAt: number | null
+  entryPrice: number | null
+  exitPrice: number | null
+  qty: number
+  /** 净盈亏（已实现 − 手续费 + 资金费） */
+  net: number
+  /** 持仓秒数（还没平完 = 开仓到现在） */
+  holdSec: number
+  leverage: number | null
+  /** 那套 API Key 的名字（「全部」账户视图下才知道是哪套） */
+  keyName?: string
 }
 
 /** 「点选一个时间」默认前后各拉多少根 */
@@ -76,6 +120,8 @@ export interface CollectResult {
   caseId: number | null
   symbol: string
   timeframe: Timeframe
+  /** 这条案例从哪来的（从仓位导入 = `position`） */
+  source: CaseSource
   /** @deprecated 已经不再分「该做 / 不该做」，固定为 null */
   label: CaseLabel | null
   /** 这段行情是什么：拉升 / 下跌 / 横盘 */
@@ -146,8 +192,13 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
   const {steps, start, markFailed} = stepRecorder(input.onStep)
 
   const tfMs = TF_MS[input.timeframe]
-  const lookback = (input.lookbackBars ?? 120) * tfMs
-  const forward = 60 * tfMs
+  const pos = input.position
+  const preBars = input.lookbackBars ?? (pos ? POSITION_PRE_BARS : 120)
+  const forwardBars = input.forwardBars ?? (pos ? POSITION_POST_BARS : 60)
+  const lookback = preBars * tfMs
+  const forward = forwardBars * tfMs
+  /* 拉行情可能要用交易所原始符号（`1000BONKUSDT`），存库 / 显示用简称 */
+  const fetchSymbol = input.rawSymbol ?? input.symbol
 
   /* ---- 1. 拉行情 ---- */
   const exactRange = !!(input.exact && input.from && input.to)
@@ -159,11 +210,30 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
   let candles
   let windowNote = ''
   try {
-    if (exactRange) {
+    if (pos) {
+      /*
+       * 从一笔仓位导入（用户 2026-10-16）：
+       *   开仓前 40 根 + **整段持仓** + 平仓后 6 根。
+       * 这样一段里能同时看见「我是在什么结构下开的」「持了多久怎么走的」
+       * 「平掉之后又走了几根」。
+       * ⚠️ 还没平完的仓位右端取「现在」—— 往未来拉只会拿到空。
+       */
+      const win = positionWindowMs(pos, tfMs, Date.now())
+      candles = await fetchCandlesRange({
+        exchangeId: config.exchange,
+        symbol: fetchSymbol,
+        timeframe: input.timeframe,
+        from: win.from,
+        to: win.to,
+        marketType: config.marketType,
+        apiBase: config.apiBase
+      })
+      windowNote = `（开仓前 ${preBars} 根 + 整段持仓 + 平仓后 ${forwardBars} 根）`
+    } else if (exactRange) {
       // 我在图上画的范围：就要这一段本身，前后不补
       candles = await fetchCandlesRange({
         exchangeId: config.exchange,
-        symbol: input.symbol,
+        symbol: fetchSymbol,
         timeframe: input.timeframe,
         from: input.from as number,
         to: input.to as number,
@@ -181,7 +251,7 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
       const to = input.center + bars * tfMs
       candles = await fetchCandlesRange({
         exchangeId: config.exchange,
-        symbol: input.symbol,
+        symbol: fetchSymbol,
         timeframe: input.timeframe,
         from,
         to,
@@ -196,18 +266,18 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
       const to = input.to + forward
       candles = await fetchCandlesRange({
         exchangeId: config.exchange,
-        symbol: input.symbol,
+        symbol: fetchSymbol,
         timeframe: input.timeframe,
         from,
         to,
         marketType: config.marketType,
         apiBase: config.apiBase
       })
-      windowNote = `（你给的区间 + 前置 ${input.lookbackBars ?? 120} 根 + 后置 60 根）`
+      windowNote = `（你给的区间 + 前置 ${preBars} 根 + 后置 ${forwardBars} 根）`
     } else {
       candles = await fetchCandles({
         exchangeId: config.exchange,
-        symbol: input.symbol,
+        symbol: fetchSymbol,
         timeframe: input.timeframe,
         limit: 500,
         marketType: config.marketType,
@@ -239,8 +309,15 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
   const windowEndMs = windowCandles[windowCandles.length - 1].timestamp
 
   /* ---- 2. 那一刻的 4H / 日线压力支撑 ---- */
-  const endSR = start('sr', '算这一刻的 4H / 日线压力支撑')
-  const sr = await loadSRAt(windowEndMs, input, config)
+  /* 从仓位导入看的是**开仓那一刻**（做决定的时候）；其它路看这段行情的末尾 */
+  const srAt = pos?.openAt ?? windowEndMs
+  const endSR = start(
+    'sr',
+    pos
+      ? '算开仓那一刻的 4H / 日线压力支撑'
+      : '算这一刻的 4H / 日线压力支撑'
+  )
+  const sr = await loadSRAt(srAt, {...input, symbol: fetchSymbol}, config)
   endSR(
     sr.length
       ? sr
@@ -284,7 +361,9 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
         seriesText,
         segments,
         stats,
-        sr
+        sr,
+        /* 从仓位导入：把我自己那笔仓的事实一并交给模型（开平仓价、持了多久、赚亏） */
+        position: pos
       },
       config,
       templates,
@@ -348,7 +427,22 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
       windowEnd: windowEndMs,
       candles: windowCandles,
       stats: caseStats,
-      snapshot: {}
+      snapshot: {},
+      source: pos ? 'position' : 'manual',
+      /* 那笔仓位的事实照原样存下来（卡片上标「仓位导入」、详情里摆开平仓对照） */
+      pos: pos
+        ? {
+            side: pos.side,
+            entryPrice: pos.entryPrice,
+            exitPrice: pos.exitPrice,
+            qty: pos.qty,
+            net: pos.net,
+            holdSec: pos.holdSec,
+            leverage: pos.leverage,
+            openAt: new Date(pos.openAt).toISOString(),
+            closeAt: pos.closeAt === null ? null : new Date(pos.closeAt).toISOString()
+          }
+        : null
     })
   }
   endSave(
@@ -364,6 +458,7 @@ export async function collectCase(input: CollectInput): Promise<CollectResult> {
     caseId,
     symbol: input.symbol.toUpperCase(),
     timeframe: input.timeframe,
+    source: pos ? 'position' : 'manual',
     label: null,
     moveType: extracted.moveType,
     title: extracted.title,
@@ -614,6 +709,8 @@ export async function reeditCase(
     caseId: id,
     symbol: row.symbol,
     timeframe: row.timeframe as Timeframe,
+    /* 重提炼不改来源：从仓位导进来的那条，重提炼之后还是「仓位导入」 */
+    source: row.source,
     label: row.label,
     moveType: extracted.moveType,
     title: extracted.title,

@@ -5,9 +5,12 @@
  * ★ 2026-10-11：「预测历史」搬去 `comps/PredictHistory.vue` 了 ——
  *   旧的那半页（筛选项、三张饼图、7 列表格、详情抽屉）跟着整块删掉。
  *   这里只剩知识库这一块，`pane` 这个 prop 也就不需要了。
+ *
+ * ★ 2026-10-16：标题「已记录的案例」+ 下面那段说明**整块删掉** ——
+ *   用户「和下面的介绍都删掉，太占位置了」。这一格本来就是「看卡片的」，
+ *   标题和「去添加案例」那套说明常看就成了噪音（上面那排 tab 已经说明这是哪一格）。
  */
 import {ref} from 'vue'
-import {RouterLink} from 'vue-router'
 import KnowledgePanel from '../comps/KnowledgePanel.vue'
 import TagTemplatesPanel from '../comps/TagTemplatesPanel.vue'
 
@@ -24,14 +27,6 @@ const panel = ref<InstanceType<typeof KnowledgePanel> | null>(null)
     -->
     <div class="pane-kb">
       <section class="panel">
-        <h2>已记录的案例 <span class="tag">卡片</span></h2>
-        <p class="hint" style="margin-bottom: 10px">
-          这里只放已经记下来的。要加新案例，去
-          <RouterLink to="/analyze">开单分析</RouterLink>
-          的「添加案例」tab —— 点「画范围」再在右边 K
-          线上拖一段，就只提炼那一段。 点卡片看经验、为什么这样走、勾标签。
-        </p>
-
         <!-- 标签模板我自己维护，改完直接生效 -->
         <TagTemplatesPanel @changed="panel?.loadTags()" />
 

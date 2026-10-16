@@ -8,13 +8,18 @@
  * AI 只客观说这是拉升 / 下跌 / 横盘，**不套我的 A/B/C 档**；
  * 也不再分「该做 / 不该做」，一个案例就是「一种形状 + 一句经验」。
  */
-import {onMounted, ref, watch} from 'vue'
+import {computed, onMounted, ref, watch} from 'vue'
 import MiniKline from './MiniKline.vue'
 import SegTabs from './SegTabs.vue'
 import CaseDetailModal from './CaseDetailModal.vue'
-import {fetchTags, listCases, type KnowledgeCase} from '../api'
+import {
+  fetchTags,
+  listCases,
+  type CaseSource,
+  type KnowledgeCase
+} from '../api'
 import {refreshConfig} from '../store'
-import {moveCls, moveText} from '../format'
+import {bjTime, moveCls, moveText} from '../format'
 
 const props = defineProps<{compact?: boolean}>()
 
@@ -26,6 +31,15 @@ const MOVE_OPTIONS = [
 ]
 
 const moveType = ref<'all' | 'up' | 'down' | 'range'>('all')
+/**
+ * 只看「从仓位导入」的那些（用户 2026-10-16：「这个币种是我从仓位导过去的，要标明」）。
+ *
+ * 卡片上本来就打了标（见下面 `.kb-src` 那颗药丸），这个开关是「一次性只看这一批」。
+ */
+const posOnly = ref(false)
+const source = computed<CaseSource | undefined>(() =>
+  posOnly.value ? 'position' : undefined
+)
 const activeTag = ref('')
 const keyword = ref('')
 const symbolQ = ref('')
@@ -48,6 +62,7 @@ async function load() {
   try {
     const d = await listCases({
       moveType: moveType.value,
+      source: source.value,
       tag: activeTag.value,
       q: keyword.value.trim(),
       symbol: symbolQ.value.trim(),
@@ -73,7 +88,7 @@ async function loadTags() {
   }
 }
 
-watch([moveType, activeTag], load)
+watch([moveType, activeTag, posOnly], load)
 watch([keyword, symbolQ], debounceLoad)
 
 function toggleTag(tag: string) {
@@ -86,6 +101,27 @@ const editing = ref(0)
 const draftLesson = ref('')
 const draftNote = ref('')
 const saving = ref(false)
+
+/** 净盈亏（带符号，跟账本卡片同一个写法） */
+function signedMoney(v: number): string {
+  return `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`
+}
+
+/** 那颗药丸的悬停文案：那笔仓位的完整事实 */
+function posTitle(c: KnowledgeCase): string {
+  const p = c.pos
+  if (!p) return ''
+  const hold = p.holdSec < 3600
+    ? `${Math.round(p.holdSec / 60)} 分钟`
+    : p.holdSec < 86400
+      ? `${(p.holdSec / 3600).toFixed(1)} 小时`
+      : `${(p.holdSec / 86400).toFixed(1)} 天`
+  return (
+    `这是从我的一笔真实仓位导入的：${p.side === 'short' ? '空' : '多'}` +
+    `${p.leverage ? ` ${p.leverage}x` : ''} · 持仓 ${hold} · 净盈亏 ${signedMoney(p.net)} USDT\n` +
+    `${bjTime(p.openAt)} → ${p.closeAt ? bjTime(p.closeAt) : '还没平'}`
+  )
+}
 
 /** 点开哪一条看详情（0 = 没开） */
 const detail = ref<KnowledgeCase | null>(null)
@@ -143,6 +179,16 @@ defineExpose({load, loadTags})
       >
         {{ t.tag }}<em>{{ t.n }}</em>
       </button>
+      <!-- 「只看仓位导入」（跟标签 chip 同一套样子，右边那颗是清除） -->
+      <button
+        type="button"
+        class="tag-chip"
+        :class="{on: posOnly}"
+        title="只看从「持仓 / 仓位历史」导入的那些案例"
+        @click="posOnly = !posOnly"
+      >
+        仓位导入
+      </button>
       <button
         v-if="activeTag"
         type="button"
@@ -161,7 +207,11 @@ defineExpose({load, loadTags})
       没有匹配的案例。
       <template
         v-if="
-          moveType === 'all' && !activeTag && !keyword.trim() && !symbolQ.trim()
+          moveType === 'all' &&
+          !activeTag &&
+          !posOnly &&
+          !keyword.trim() &&
+          !symbolQ.trim()
         "
       >
         去「知识库」收录一条试试 —— 在 K 线上画一段就行。
@@ -182,6 +232,19 @@ defineExpose({load, loadTags})
           <span class="kb-tf">{{ c.timeframe }}</span>
           <span class="kb-move" :class="moveCls(c.moveType)">
             {{ moveText(c.moveType) }}
+          </span>
+          <!--
+            从一笔真实仓位导入的（用户 2026-10-16）：打一颗药丸，顺带那笔的方向 + 净盈亏 ——
+            一眼就知道「这条经验是哪一笔记下来的」。悬停里是完整事实。
+          -->
+          <span
+            v-if="c.pos"
+            class="kb-src"
+            :class="(c.pos.net ?? 0) >= 0 ? 'up' : 'down'"
+            :title="posTitle(c)"
+          >
+            仓位 · {{ c.pos.side === 'short' ? '空' : '多' }}
+            {{ signedMoney(c.pos.net) }}
           </span>
         </header>
 
@@ -407,6 +470,21 @@ defineExpose({load, loadTags})
   white-space: nowrap;
 }
 
+.kb-src {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border, #26282e);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.kb-src.up {
+  color: var(--ok, #5eba89);
+}
+.kb-src.down {
+  color: var(--bad, #e55361);
+}
 .kb-move.up {
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 55%, transparent);
