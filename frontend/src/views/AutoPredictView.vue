@@ -43,6 +43,8 @@ import AnalysisDetail from '../comps/AnalysisDetail.vue'
 import {
   afterCell,
   leftText,
+  persistLimits,
+  type PersistCadence,
   persistBusy,
   persistSessions,
   refreshPersist,
@@ -137,6 +139,15 @@ const expandId = ref<number | null>(null)
 const aiRows = computed<PersistRow[]>(() => persistSessions.value)
 
 const activeCount = computed(() => aiRows.value.filter(s => s.status === 'active').length)
+
+/**
+ * 某个周期对应的节奏（模板里显示「每 15 分钟一次 / 最多 32 次」）。
+ * 真源在后端 `CADENCES`，这里只是照着显示；认不出来按第一个算（老会话里可能存着 4h）。
+ */
+function cadOf(timeframe: string): PersistCadence {
+  const list = persistLimits.value.cadences
+  return list.find(c => c.timeframe === timeframe) ?? list[0]!
+}
 
 function verdictText(v: string | null | undefined): string {
   return v === 'go' ? '可做' : v === 'no' ? '不可做' : '观望'
@@ -359,7 +370,8 @@ function pctClass(v: number): string {
       </div>
 
       <p class="meta-line">
-        每 15 分钟自动问一次 AI、最长 8 小时；只有「可做」这一档进出时才提醒（站内 + Telegram）。
+        选了哪个周期就按那个节奏问 AI（15m ⇒ 每 15 分钟 / 8 小时；1h ⇒ 每小时 / 16 小时）；
+        只在结论**转成「可做」**时提醒（站内 + Telegram + App 推送）。
         点一行展开看时间线和当时的结论。
       </p>
 
@@ -379,6 +391,7 @@ function pctClass(v: number): string {
                 {{ s.status === 'active' ? '在跑' : '已结束' }}
               </span>
               <span class="dim">第 {{ s.runs }} 次</span>
+              <span class="dim">每 {{ cadOf(s.timeframe).label }}一次</span>
               <span v-if="s.status === 'active'" class="dim">剩 {{ leftText(s.endsAt) }}</span>
             </div>
             <div class="ai-last">
@@ -393,14 +406,15 @@ function pctClass(v: number): string {
           <div v-if="expandId === s.id" class="ai-detail">
             <p class="dim ai-next">
               <span v-if="s.status === 'active'">下一次 {{ bjTime(s.nextAt) }} · </span>
-              {{ bjTime(s.startedAt) }} 起 · 回看 {{ s.days }} 天
+              {{ bjTime(s.startedAt) }} 起 · 每 {{ cadOf(s.timeframe).label }}一次 ·
+              最多 {{ cadOf(s.timeframe).maxRuns }} 次
               <span v-if="s.endedReason"> · {{ s.endedReason }}</span>
             </p>
 
             <div v-if="s.timeline.length" class="ps-tl">
               <div class="ps-tl-head">
                 <span>时间</span><span>档位</span><span>结论</span>
-                <span class="ps-price">当时价</span><span class="ps-c1">+1h</span><span class="ps-c4">+4h</span>
+                <span class="ps-price">当时价</span><span class="ps-c1">+15分</span><span class="ps-c4">+1时</span>
               </div>
               <div
                 v-for="r in [...s.timeline].reverse()"
@@ -434,8 +448,8 @@ function pctClass(v: number): string {
                 <span class="ps-v" :class="verdictClass(r.verdict)">{{ verdictText(r.verdict) }}</span>
                 <span class="ps-line" :title="r.line">{{ lineText(r.line) }}</span>
                 <span class="ps-price num">{{ r.price === null ? '—' : fmt(r.price, 6) }}</span>
-                <span class="ps-c1 num" :class="afterCell(r, 1).cls">{{ afterCell(r, 1).text }}</span>
-                <span class="ps-c4 num" :class="afterCell(r, 4).cls">{{ afterCell(r, 4).text }}</span>
+                <span class="ps-c1 num" :class="afterCell(r, 15).cls">{{ afterCell(r, 15).text }}</span>
+                <span class="ps-c4 num" :class="afterCell(r, 60).cls">{{ afterCell(r, 60).text }}</span>
               </div>
             </div>
             <p v-else class="dim">还没跑出结论 —— 15 分钟内会出第一条，也可以点「跑一次」。</p>

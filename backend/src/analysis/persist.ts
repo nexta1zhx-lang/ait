@@ -5,6 +5,7 @@
  * 调度长这样（**一个 ticker + 库里的 `next_at`**，不给每个会话起定时器）：
  *
  *   server.ts 每 15 分钟（对齐 :00/:15/:30/:45 后 20 秒）调 `runPersistTick()`
+ *     —— 15m 会话和 1h 会话都从这一跳里被 `next_at` 捞出来（1h 的 next_at 永远落在整点 +20 秒）
  *     → 过期会话先收掉（满 8 小时）
  *     → 取 `next_at <= now` 的会话，逐个跑（并发上限交给调用方/库里的 limit）
  *     → 每个会话：runAnalysis({source:'persist'}) → 记结果 → 推进 next_at
@@ -33,6 +34,7 @@ import {
 } from '../db/push'
 import {
   MAX_CONSECUTIVE_FAILURES,
+  cadenceOf,
   dueSessions,
   expireSessions,
   markFailure,
@@ -75,6 +77,7 @@ export async function runSessionOnce(
       // 不带 at：问的就是"到现在为止"。测试点只属于人工测试跑。
       source: 'persist'
     })
+    const cad = cadenceOf(s.timeframe)
     const line = out.judge.line.trim()
     const verdict = verdictOf(line)
     /* 只在**转成可做**时提醒（见 verdict.ts 的 `enteredGo`） */
@@ -82,7 +85,7 @@ export async function runSessionOnce(
     await markRun({
       id: s.id,
       runs: s.runs + 1,
-      nextAt: nextRunAt(),
+      nextAt: nextRunAt(cad.intervalMs),
       analysisId: null,
       verdict,
       line,
@@ -102,7 +105,7 @@ export async function runSessionOnce(
         `📈 持久化分析 · ${s.symbol} ${s.timeframe}\n` +
           `结论转可做：${turn}\n` +
           `${one}\n` +
-          `现价 ${out.price} · 第 ${s.runs + 1} 次（共最多 32 次）`
+          `现价 ${out.price} · 第 ${s.runs + 1} 次（共最多 ${cad.maxRuns} 次）`
       )
       /* App 推送：同一个判据（只有转可做才发），标题就是那一句 */
       void pushAlert({
@@ -125,7 +128,11 @@ export async function runSessionOnce(
     }
   } catch (e) {
     const failed = s.failed + 1
-    const state = await markFailure({id: s.id, failed})
+    const state = await markFailure({
+      id: s.id,
+      failed,
+      intervalMs: cadenceOf(s.timeframe).intervalMs
+    })
     const msg = (e as Error).message
     console.warn(
       `[persist] ${s.symbol} 第 ${s.runs + 1} 轮失败（连续 ${failed}/${MAX_CONSECUTIVE_FAILURES}）：${msg}`

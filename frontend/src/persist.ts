@@ -18,6 +18,7 @@ import {
   startPersist,
   stopPersist,
   runPersistNow,
+  type PersistCadence,
   type PersistLimits,
   type PersistSession,
   type PersistTimelineRow
@@ -26,13 +27,17 @@ import {enteredGo} from './markdown'
 import {showToast} from './toast'
 
 export type PersistRow = PersistSession & {timeline: PersistTimelineRow[]}
+export type {PersistCadence}
 
 /** 会话列表（在跑的在前，后端已经排好） */
 export const persistSessions = ref<PersistRow[]>([])
 export const persistLimits = ref<PersistLimits>({
   maxActive: 3,
-  maxMs: 8 * 60 * 60_000,
-  intervalMs: 15 * 60_000
+  /* 兜底一份，跟后端 `CADENCES` 对齐（真值由 `GET /api/persist` 给） */
+  cadences: [
+    {timeframe: '15m', intervalMs: 15 * 60_000, maxMs: 8 * 3600_000, maxRuns: 32, label: '15 分钟'},
+    {timeframe: '1h', intervalMs: 60 * 60_000, maxMs: 16 * 3600_000, maxRuns: 16, label: '1 小时'}
+  ]
 })
 export const persistBusy = ref(false)
 export const persistError = ref('')
@@ -117,10 +122,15 @@ export function bindPersist(): () => void {
 }
 
 /** 加入（弹层里那颗确认按钮） */
+/**
+ * 加入（弹层里那颗确认按钮）。
+ *
+ * ⚠️ 不再传「回看天数」（2026-10-16 用户：「回看几天的去掉」）—— 后端固定默认值，
+ *    反正根数有 200 的下限兜着，喂给 AI 的永远是最近 100 根。
+ */
 export async function addPersist(input: {
   base: string
   timeframe: string
-  days: number
 }): Promise<boolean> {
   persistBusy.value = true
   persistError.value = ''
@@ -128,12 +138,14 @@ export async function addPersist(input: {
     const r = await startPersist({
       symbol: input.base,
       market: 'swap',
-      timeframe: input.timeframe,
-      days: input.days
+      timeframe: input.timeframe
     })
     if (r.error) throw new Error(r.error)
     await refreshPersist(true)
-    showToast(`${input.base} 已加入持久化分析（每 15 分钟一次，最长 8 小时）`)
+    const c = persistLimits.value.cadences.find(x => x.timeframe === input.timeframe)
+    showToast(
+      `${input.base} 已加入持久化分析（每 ${c?.label ?? input.timeframe}一次，${c?.maxRuns ?? 0} 次）`
+    )
     return true
   } catch (e) {
     persistError.value = (e as Error).message
@@ -191,11 +203,11 @@ export function chgClass(v: number | null): string {
   return v === null ? '' : v >= 0 ? 'up' : 'down'
 }
 
-/** 离「那一刻 + `hours` 小时」还剩多久（人话）；已经过了就返回空串 */
-export function untilText(createdAt: string, hours: number, now = Date.now()): string {
+/** 离「那一刻 + `minutes` 分钟」还剩多久（人话）；已经过了就返回空串 */
+export function untilText(createdAt: string, minutes: number, now = Date.now()): string {
   const at = new Date(createdAt).getTime()
   if (!Number.isFinite(at)) return ''
-  const ms = at + hours * 3600_000 - now
+  const ms = at + minutes * 60_000 - now
   if (!(ms > 0)) return ''
   const min = Math.ceil(ms / 60_000)
   if (min >= 120) {
@@ -210,7 +222,7 @@ export function untilText(createdAt: string, hours: number, now = Date.now()): s
  *
  * 行都长这样：`{createdAt, after1h, after4h}`（后端现算的）。
  *   · 有数        → `+0.8%`（`cls` = up/down）
- *   · 还没到点    → `43m后`（`cls` = pending，灰字倒计时）
+ *   · 还没到点    → `13m后`（`cls` = pending，灰字倒计时）
  *   · 过了点还空  → `—`（`cls` 空；那才是真缺那根 K 线）
  *
  * ⚠️ 别写成「还剩 43m」：窄屏那两列只有 68px，长这样会被右边缘切掉
@@ -222,12 +234,12 @@ export interface AfterCell {
 }
 
 export function afterCell(
-  row: {createdAt: string; after1h: number | null; after4h: number | null},
-  hours: 1 | 4
+  row: {createdAt: string; after15m: number | null; after1h: number | null},
+  minutes: 15 | 60
 ): AfterCell {
-  const v = hours === 1 ? row.after1h : row.after4h
+  const v = minutes === 15 ? row.after15m : row.after1h
   if (v !== null) return {text: chgText(v), cls: chgClass(v)}
-  const left = untilText(row.createdAt, hours)
+  const left = untilText(row.createdAt, minutes)
   return left ? {text: `${left}后`, cls: 'pending'} : {text: '—', cls: ''}
 }
 

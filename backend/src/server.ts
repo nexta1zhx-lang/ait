@@ -239,8 +239,9 @@ import {runAnalysis} from './analysis/run'
 import {runPersistTick, runSessionOnce} from './analysis/persist'
 import {
   MAX_ACTIVE_PER_USER,
-  MAX_SESSION_MS,
-  RUN_INTERVAL_MS,
+  CADENCES,
+  DEFAULT_DAYS,
+  cadenceOf,
   countActive,
   createSession as createPersistSession,
   listSessions as listPersistSessions,
@@ -3321,7 +3322,9 @@ async function route(
    * 每隔 15 分钟分析一次，最长不超过 8 小时」。
    *
    *   · `GET    /api/persist`            —— 列表（含每个会话的结论时间线）
-   *   · `POST   /api/persist`            —— 加入（body: symbol / market / timeframe / days）
+   *   · `POST   /api/persist`            —— 加入（body: symbol / market / timeframe；
+   *                                        **周期同时决定频率**：15m ⇒ 每 15 分钟 / 8 小时，
+   *                                        1h ⇒ 每小时 / 16 小时，见 `db/persist.ts` 的 `CADENCES`）
    *   · `DELETE /api/persist?id=`        —— 停止
    *   · `POST   /api/persist/run?id=`    —— 立刻跑一轮（等结果，给人手动试一次用）
    *
@@ -3336,7 +3339,8 @@ async function route(
       )
       return sendJson(res, 200, {
         sessions: withTimeline,
-        limits: {maxActive: MAX_ACTIVE_PER_USER, maxMs: MAX_SESSION_MS, intervalMs: RUN_INTERVAL_MS},
+        /* 节奏表直接给前端（界面上要显示"每 N 分钟一次 / 最长 N 小时 / ≈N 次"） */
+        limits: {maxActive: MAX_ACTIVE_PER_USER, cadences: CADENCES},
         error: null
       })
     }
@@ -3352,8 +3356,18 @@ async function route(
        */
       const rawMarket = String(body.market ?? 'swap').trim().toLowerCase()
       const marketType: MarketType = rawMarket === 'spot' || rawMarket === 'coinm' ? rawMarket : 'swap'
-      const timeframe = String(body.timeframe ?? '1h')
-      const days = Math.max(1, Math.min(60, Number(body.days) || 3))
+      /*
+       * ⚠️ 周期**必须**是 `CADENCES` 里那两个（15m / 1h）：它同时决定"多久问一次"和"盯多久"，
+       *    传个别的过来（比如 4h）会让整个会话的节奏对不上，所以直接挡掉、别默默落回默认。
+       */
+      const timeframe = String(body.timeframe ?? '15m')
+      if (!CADENCES.some(c => c.timeframe === timeframe)) {
+        return sendJson(res, 200, {
+          error: `只支持 ${CADENCES.map(c => c.timeframe).join(' / ')} 两个周期`
+        })
+      }
+      /* 「回看天数」不再让人选（2026-10-16 用户：「回看几天的去掉」）—— 固定默认，不读 body */
+      const days = DEFAULT_DAYS
       /*
        * 配额：同时最多 3 个会话。满了要说清"去停一个"，别静默失败。
        * ⚠️ 同一个币重复点：库里那条 `(user_id, symbol) WHERE status='active'` 唯一索引会挡，
@@ -6325,7 +6339,8 @@ async function main(): Promise<void> {
       .catch(e => console.warn(`  持久化  ⚠️  ${(e as Error).message}`))
   }
   const persistLoop = (): void => {
-    const step = RUN_INTERVAL_MS
+    /* 按**最小**的间隔起跳（15m）：1h 的会话 next_at 永远落在整点 +20 秒，从这一跳里也会被捞到 */
+    const step = Math.min(...CADENCES.map(c => c.intervalMs))
     const now = Date.now()
     /* 下一跳 = 下一个 :00/:15/:30/:45 + 20 秒（跟 `nextRunAt` 同一口径） */
     const aligned = Math.floor((now + 20_000) / step) * step + 20_000

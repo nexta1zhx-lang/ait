@@ -2549,17 +2549,33 @@ export interface PersistTimelineRow {
   verdict: 'go' | 'no' | 'wait' | null
   line: string
   price: number | null
+  /** 那一刻之后 15 分钟 / 1 小时的价格变化（%）；还没到点或取不到是 null */
+  after15m: number | null
   after1h: number | null
-  after4h: number | null
+}
+
+/**
+ * 一个周期的节奏（**后端 `db/persist.ts` 的 `CADENCES` 就是真源**，这里只是照着声明）。
+ *
+ * ★ 2026-10-16 用户：「选择周期要和调用次数匹配」—— 周期同时决定"多久问一次"和"盯多久"。
+ */
+export interface PersistCadence {
+  timeframe: string
+  /** 每轮间隔（毫秒） */
+  intervalMs: number
+  /** 会话最长多久（毫秒） */
+  maxMs: number
+  /** 最多几轮 */
+  maxRuns: number
+  /** 人话（「15 分钟」/「1 小时」） */
+  label: string
 }
 
 export interface PersistLimits {
   /** 同时最多几个会话 */
   maxActive: number
-  /** 一个会话最长多久（毫秒） */
-  maxMs: number
-  /** 间隔（毫秒） */
-  intervalMs: number
+  /** 支持的周期 + 各自的节奏（15m：每 15 分钟 / 8 小时；1h：每小时 / 16 小时） */
+  cadences: PersistCadence[]
 }
 
 export interface PersistState {
@@ -2605,12 +2621,16 @@ export const deletePushToken = (token: string) =>
     `/api/push/token?token=${encodeURIComponent(token)}`
   )
 
-/** 加入：`symbol` 传基础币（BTC）或行情符号都行，后端会归一 */
+/**
+ * 加入：`symbol` 传基础币（BTC）或行情符号都行，后端会归一。
+ *
+ * ⚠️ **只有 `15m` / `1h` 两个周期**，而且周期同时决定"多久问一次"和"盯多久"
+ *   （见 `PersistCadence`）；`days` 已去掉（后端固定默认值）。
+ */
 export const startPersist = (input: {
   symbol: string
   market?: string
   timeframe: string
-  days: number
 }) => post<{session?: PersistSession; error: string | null}>('/api/persist', input)
 
 export const stopPersist = (id: number) =>

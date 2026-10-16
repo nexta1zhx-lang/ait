@@ -2580,7 +2580,8 @@ body.fixed-viewport .analyze {
 .ps-tl-head,
 .ps-tl-row {
   display: grid;
-  grid-template-columns: 62px 46px minmax(0, 1fr) 82px 52px 52px;
+  /* 后两列是「+15分 / +1时」（2026-10-16 从 +1h/+4h 改过来的，标签短了，格子跟着收） */
+  grid-template-columns: 62px 46px minmax(0, 1fr) 82px 56px 56px;
   gap: 6px;
   align-items: center;
   padding: 6px 8px;
@@ -2684,11 +2685,11 @@ body.fixed-viewport .analyze {
     white-space: nowrap;
   }
   .ps-tl-row .ps-c1::before {
-    content: '+1h ';
+    content: '+15分 ';
     color: var(--muted);
   }
   .ps-tl-row .ps-c4::before {
-    content: '+4h ';
+    content: '+1时 ';
     color: var(--muted);
   }
 }
