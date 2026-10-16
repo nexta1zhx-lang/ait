@@ -194,6 +194,21 @@ export async function registerPush(): Promise<void> {
       void router.push('/analyze').catch(() => undefined)
     })
     await p.register()
+    /*
+     * ⚠️ 注册**可能永远不回调**（没有谷歌服务的机器上就是这样：不报错、也不给 token）。
+     *    所以 10 秒还没拿到 token 就自己给个结论 —— 否则用户看到的永远是"还没拿到"，
+     *    根本不知道是坏了还是没到点。2026-10-16 就在华为上遇到这个（用户：「收不到」）。
+     */
+    setTimeout(() => {
+      if (!pushLocal.value.token && !pushLocal.value.error) {
+        pushLocal.value = {
+          ...pushLocal.value,
+          error:
+            '10 秒还没拿到 FCM token —— 这台手机多半**没有谷歌服务（GMS）**，App 推送用不了；' +
+            '用 Telegram 那条（在「持久化分析」弹层里写的「和 Telegram 各发一条」）就够。'
+        }
+      }
+    }, 10_000)
   } catch (e) {
     console.warn('[push] 初始化出错：', (e as Error).message)
   } finally {
