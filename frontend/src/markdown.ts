@@ -182,59 +182,42 @@ export function markdownToPlain(text: string, max = 90): string {
 }
 
 /**
- * 「它到底说能做还是不能做」—— **只看开头那一段**，纯给卡片定个颜色用。
+ * 那一句话的档位 —— 跟后端 `backend/src/analysis/verdict.ts` 的 `verdictOf()`
+ * **逐字一致**（同一句话在页面上是绿的、Telegram 说不可做，就说明又岔了）。
  *
- * ⚠️ 这是个**展示**用的粗判，不参与任何判断；判错了只是颜色不对。
- *   顺序要紧：先找「不做」类词，再找「能做」类词 —— 否则
- *   「等回踩不破再做」这种句子会被算成「能做」。
+ * 口径（2026-10-16 用户定的）：
+ *   ① 只看「结论」往后一小段（最多 20 字，遇到句读就停）；
+ *   ② 那段里有「不」 ⇒ 不可做（一票否决，用户原话：「带不的都把它归为不做」）；
+ *   ③ 否则 观望/观察 ⇒ 观望；开多/做多/可以做/能做/进场 ⇒ 可做；都没有 ⇒ 观望。
+ *
+ * ⚠️ 「不」一票否决的代价是条件式放行被压掉（"回踩不破可以做多" ⇒ 不可做）——
+ *    这是**安全**方向：少发一条通知，而不是误发一条假警报。
  */
-export function verdictKind(text: string): 'go' | 'no' | 'wait' {
-  /*
-   * ⚠️ 判据跟后端 `backend/src/analysis/verdict.ts` 的 `verdictOf()` **逐字一致**
-   *    （持久化分析的时间线用后端那一份染色、这里给结论卡染色，两处颜色必须一样）。
-   *
-   * ★ 2026-10-15 修：原来只扫**前 260 字**（假设"结论一定在最前面"）。可模型经常给一整篇
-   *    Markdown（标题 + 分节），档位那两个字在后面 ⇒ 明明"可做"却被染成"观望"。
-   *    现在：抹掉 Markdown 记号、**全文找**、取最早出现的那一类。
-   *    「不能做」比它内部包含的「能做」出现得更早，所以否定不会被误读。
-   */
-  const plain = (text ?? '').replace(/[*_`#>]/g, ' ')
-  /*
-   * ⚠️ 「再等 / 先等」**不在**否决词表里：那是观望（wait），跟 wait 同义，
-   *    混进去只会让 no ↔ wait 来回翻 —— 见 `enteredGo()` 那段。
-   * ⚠️ 这批「否定式搭配」（不可做 / 没有可 …）是 2026-10-15 补的，原因见下面那句注释。
-   */
-  const no = plain.search(
-    /不可做|不能做|不该做|不要做|不建议|不可开|不能开|不要开|别做|不宜|没可做|没有可做|没有可|没有进|没进|不开|不动手|不参与|放弃/
-  )
-  const go = firstGo(plain)
-  if (no >= 0 && (go < 0 || no <= go)) return 'no'
-  if (go >= 0) return 'go'
-  return 'wait'
+const VERDICT_WINDOW = 20
+const VERDICT_STOP = /[。！？；，,;]/
+const GO_RE = /开多|做多|可以做|能做|可以进|建议进|可以开|进场/
+const WAIT_RE = /观望|观察/
+
+/** 「结论」往后那一小段（取不到「结论」就退回开头） */
+function verdictWindow(text: string): string {
+  const plain = (text ?? '')
+    .replace(/[*_`#>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const i = plain.indexOf('结论')
+  const seg = (i >= 0 ? plain.slice(i + 2) : plain).replace(/^[：:，,、\s]+/, '')
+  const cap = seg.slice(0, VERDICT_WINDOW)
+  const stop = cap.search(VERDICT_STOP)
+  return (stop >= 0 ? cap.slice(0, stop) : cap).trim()
 }
 
-/**
- * 「可做」那几个字前面**紧挨着**否定时不算机会（"没有可做的结构"不是机会）。
- *
- * ⚠️⚠️ 刻意**不含光秃秃的「不」**：「**不破**可以做多」是条件式放行，
- *    把「不」算进去会把真机会一枪打死（漏掉才是大错）。
- *
- * ⚠️ 这一段必须跟后端 `backend/src/analysis/verdict.ts` 的 `firstGo` / `NEG_BEFORE_RE`
- *    **逐字一致**（同一句话在页面上是绿的、Telegram 说不可做，就说明又岔了）。
- */
-const GO_RE = /能做|可以做|可做|可以进|建议进|可以开|进场/
-const NEG_BEFORE_RE =
-  /(不是|不算|不再|不会|没有|无法|不能|不可|不该|不要|不用|不宜|没|别|未|非|莫)[^，。；、！？:：\n]{0,3}$/
-
-function firstGo(plain: string): number {
-  const re = new RegExp(GO_RE.source, 'g')
-  let m: RegExpExecArray | null
-  while ((m = re.exec(plain))) {
-    const before = plain.slice(Math.max(0, m.index - 12), m.index)
-    if (!NEG_BEFORE_RE.test(before)) return m.index
-    re.lastIndex = m.index + 1
-  }
-  return -1
+export function verdictKind(text: string): 'go' | 'no' | 'wait' {
+  const w = verdictWindow(text)
+  /* ⚠️「没」也算（跟后端同一份）：`没有可做的结构` 里没有「不」那个字 */
+  if (/不|没/.test(w)) return 'no'
+  if (WAIT_RE.test(w)) return 'wait'
+  if (GO_RE.test(w)) return 'go'
+  return 'wait'
 }
 
 /**
