@@ -29,6 +29,8 @@ import {
   type DeviceSession
 } from '../api'
 import {logout, rename, user} from '../session'
+import {isNativeShell} from '../platform'
+import {pushLocal} from '../push'
 import {bjTime} from '../format'
 import {askConfirm} from '../confirm'
 import {shellInfo, type ShellInfo} from '../native'
@@ -318,6 +320,8 @@ onMounted(() => {
   void loadTotp()
   void loadShell()
   void loadPush()
+  /* 不在原生壳里那几行不显示；是壳里就顺手让它把本机状态刷一遍 */
+  if (isNativeShell()) void import('../push').then(m => m.registerPush())
 })
 
 /* ------------------------- 推送（FCM，2026-10-15） ------------------------- */
@@ -719,7 +723,39 @@ async function changePw(): Promise<void> {
           }}</b>
         </li>
       </ul>
-      <p v-else-if="pushInfo" class="note">这个账号还没有设备上报过。</p>
+      <p v-else-if="pushInfo" class="note">
+        这个账号还没有设备上报过 —— 要在**新包**（0.2.13+）里**打开一次 App** 才会注册。
+      </p>
+
+      <!--
+        **本机（这台手机）的状态** —— 2026-10-16 加的，起因是用户在华为手机上问「收不到」：
+        服务端只能说"有没有设备上报过"，手机上真正发生的事（插件、权限、注册报错）
+        得在手机自己的界面上看得见，否则永远只能猜。
+      -->
+      <ul v-if="pushLocal.native" class="kvs">
+        <li>
+          <span>本机推送插件</span>
+          <b>{{ pushLocal.hasPlugin ? '有' : '没有（旧包，换 0.2.13+）' }}</b>
+        </li>
+        <li>
+          <span>本机通知权限</span>
+          <b>{{
+            pushLocal.permission === 'granted'
+              ? '已允许'
+              : pushLocal.permission === 'denied'
+                ? '被拒绝'
+                : pushLocal.permission
+          }}</b>
+        </li>
+        <li>
+          <span>本机 FCM token</span>
+          <b>{{ pushLocal.token ? pushLocal.token.slice(0, 12) + '…' : '还没拿到' }}</b>
+        </li>
+        <li>
+          <span>已上报服务器</span><b>{{ pushLocal.reported ? '是' : '否' }}</b>
+        </li>
+      </ul>
+      <p v-if="pushLocal.error" class="err">{{ pushLocal.error }}</p>
       <p v-if="pushMsg" class="ok">{{ pushMsg }}</p>
       <div class="row">
         <button class="btn" type="button" :disabled="pushBusy" @click="sendTestPush">

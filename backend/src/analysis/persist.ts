@@ -106,7 +106,11 @@ export async function runSessionOnce(
           `结论转可做：${turn}\n` +
           `${one}\n` +
           `现价 ${out.price} · 第 ${s.runs + 1} 次（共最多 ${cad.maxRuns} 次）`
-      )
+      ).then(ok => {
+        /* ⚠️ 留一行"成没成"：不然日志里只有「已通知」那句我们自己的话，
+           出了事没法判断到底是没发出去还是他没收到（2026-10-16 就为这个查了一轮） */
+        console.log(`[notify] 转可做通知 ${s.symbol}：Telegram ${ok ? '已发出' : '没发出去（看上面那行警告）'}`)
+      })
       /* App 推送：同一个判据（只有转可做才发），标题就是那一句 */
       void pushAlert({
         userId: s.userId,

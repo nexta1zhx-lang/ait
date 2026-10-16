@@ -14,7 +14,7 @@
  *    所以策略是：登录后就注册（token 只是为了让**服务端以后能发**），真正的打扰由
  *    后端把控（只有"转可做"才发一条）。第一次申请权限时系统会弹框，用户点了拒绝就拉倒。
  */
-import {watch} from 'vue'
+import {ref, watch} from 'vue'
 import {authToken, deletePushToken, postPushToken} from './api'
 import {pickSymbol} from './analyze'
 import {router} from './router'
@@ -77,17 +77,59 @@ function deviceName(): string {
 let reportedFor: string | null = null
 let registering = false
 
+/**
+ * **本机（这台手机）的推送状态** —— 给「我的 → 推送」那张卡显示。
+ *
+ * ★ 2026-10-16 加：用户在华为手机上问「为什么收不到」。这种事只靠服务端日志看不出来
+ *   （服务端只知道"有没有设备上报过"），而手机上发生的事（插件有没有、权限给没给、
+ *   注册时报了什么错）必须在**手机自己的界面上**看得见 —— 否则永远只能猜。
+ */
+export interface PushLocalState {
+  /** 是不是原生壳（网页上这份状态没意义） */
+  native: boolean
+  /** 有没有 `PushNotifications` 插件（旧 APK 里没有 —— 那就永远注册不了） */
+  hasPlugin: boolean
+  /** 通知权限：granted / denied / prompt / 还没问 */
+  permission: string
+  /** 从 FCM 拿到的 token（只显示前 12 位，够对账又不至于把它抄走） */
+  token: string
+  /** 上报给后端成功了没 */
+  reported: boolean
+  /** 注册/上报失败的原因（人话） */
+  error: string
+}
+
+export const pushLocal = ref<PushLocalState>({
+  native: false,
+  hasPlugin: false,
+  permission: 'unknown',
+  token: '',
+  reported: false,
+  error: ''
+})
+
 /** 确保注册 + 上报（幂等：同一个登录态调多少次都只注册一次） */
 export async function registerPush(): Promise<void> {
+  const native = isNativeShell()
+  pushLocal.value = {...pushLocal.value, native, hasPlugin: !!plugin()}
   const p = plugin()
-  if (!isNativeShell() || !p || registering) return
+  if (!native || !p) {
+    if (native && !p) {
+      pushLocal.value.error =
+        '这个 App 里没有推送插件（装的是 0.2.13 之前的包）—— 换新包才会注册'
+    }
+    return
+  }
+  if (registering) return
   if (!authToken.value) return
   registering = true
   try {
     let perm = await p.checkPermissions()
     if (perm.receive !== 'granted') perm = await p.requestPermissions()
+    pushLocal.value = {...pushLocal.value, permission: perm.receive ?? 'unknown'}
     if (perm.receive !== 'granted') {
       // 用户拒绝了：不再纠缠（后端那边也不会发，因为没 token）
+      pushLocal.value.error = '系统里没给通知权限 —— 去「设置 → 应用 → Ait → 通知」打开'
       return
     }
     /*
@@ -109,6 +151,7 @@ export async function registerPush(): Promise<void> {
     await p.addListener('registration', payload => {
       const token = (payload as {value?: string})?.value ?? ''
       if (!token) return
+      pushLocal.value = {...pushLocal.value, token, error: ''}
       void postPushToken({
         token,
         platform: shellPlatform(),
@@ -116,11 +159,26 @@ export async function registerPush(): Promise<void> {
       })
         .then(() => {
           reportedFor = authToken.value
+          pushLocal.value = {...pushLocal.value, reported: true}
         })
-        .catch(() => undefined)
+        .catch(() => {
+          pushLocal.value = {
+            ...pushLocal.value,
+            error: '拿到 token 了，但上报给服务器失败（网络？）'
+          }
+        })
     })
     await p.addListener('registrationError', e => {
-      console.warn('[push] 注册失败：', (e as {error?: string})?.error ?? e)
+      const raw = String((e as {error?: string})?.error ?? e)
+      /* ⚠️ 华为这类**没有谷歌服务**的机器就卡在这儿：一句人话，别让人对着
+         "MISSING_INSTANCEID_SERVICE" 发懵 */
+      pushLocal.value = {
+        ...pushLocal.value,
+        error: /MISSING_INSTANCEID_SERVICE|SERVICE_NOT_AVAILABLE|Google/i.test(raw)
+          ? `这台手机没有谷歌服务（GMS），FCM 推送用不了 —— ${raw}`
+          : raw
+      }
+      console.warn('[push] 注册失败：', raw)
     })
     /* 前台收到：系统通知栏不一定响，弹一条站内提示（点开就是 K 线） */
     await p.addListener('pushNotificationReceived', payload => {
