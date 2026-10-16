@@ -120,6 +120,7 @@ import {
   notePushError,
   savePushToken
 } from './db/push'
+import {latestAlertId, listAlerts} from './db/persist'
 import {pushConfigured, pushStatus, sendPush} from './notify/push'
 import {clientIp} from './util/device'
 import {
@@ -3427,6 +3428,31 @@ async function route(
     const out = await runSessionOnce(s)
     if (!out.ok) return sendJson(res, 200, {error: out.error ?? '这一轮失败'})
     return sendJson(res, 200, {ok: true, result: out, error: null})
+  }
+
+  /* ---- 提醒流水（给 App 里那个前台服务轮询；2026-10-16） ----
+   *
+   * `GET /api/persist/alerts?since=<id>` —— 比 `since` 新的「转可做」提醒（老的在前）。
+   *
+   * 为什么要这个接口：手机上**没有谷歌服务**时 FCM 用不了（华为），改成 App 自己跑一个
+   * 前台服务定时问一句"有没有新提醒"。所以 `since` 这个锚点必须由服务端给，
+   * 而且**第一次不带 since** 时返回 `latest`（当前最大 id）让人从"现在"开始 —— 否则
+   * 一打开就把历史提醒全弹一遍。
+   */
+  if (p === '/api/persist/alerts') {
+    if (method !== 'GET') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const raw = url.searchParams.get('since')
+    /* 不带 since ⇒ 只回锚点（客户端从"现在"开始看） */
+    if (raw === null) {
+      return sendJson(res, 200, {alerts: [], latest: await latestAlertId(me.id), error: null})
+    }
+    const since = Number(raw)
+    const alerts = await listAlerts(me.id, Number.isFinite(since) && since > 0 ? since : 0)
+    return sendJson(res, 200, {
+      alerts,
+      latest: alerts.length ? alerts[alerts.length - 1]!.id : Math.max(0, since),
+      error: null
+    })
   }
 
   /* ---- App 推送 token（2026-10-15 用户：「加入 app 推送」） ----

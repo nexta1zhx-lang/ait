@@ -36,6 +36,7 @@ import {
   MAX_CONSECUTIVE_FAILURES,
   cadenceOf,
   dueSessions,
+  insertAlert,
   expireSessions,
   markFailure,
   markRun,
@@ -93,6 +94,20 @@ export async function runSessionOnce(
     })
     /* 到点收尾（8 小时）交给 expireSessions；这里只保 32 次之后不再跑 */
     if (alerted) {
+      /*
+       * **先落一条流水**（App 那个前台服务靠它轮询；见 `schema.ts` 的 `persist_alerts`）。
+       * 落库失败不影响后面的通知 —— 那两条通道是独立的。
+       */
+      await insertAlert({
+        userId: s.userId,
+        sessionId: s.id,
+        symbol: s.symbol,
+        timeframe: s.timeframe,
+        verdict,
+        line,
+        price: out.price
+      }).catch(e => console.warn(`[persist] 记提醒流水失败：${(e as Error).message}`))
+
       /*
        * ⚠️ 只发**一行摘要**，不发整篇：实测模型给的是一整篇 Markdown（几千字），
        *    15 分钟来一篇会把 Telegram 刷屏。完整结论在页面的时间线里看。

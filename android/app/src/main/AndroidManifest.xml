@@ -24,6 +24,15 @@
 
         </activity>
 
+        <!--
+          App 后台提醒（2026-10-16）：没有谷歌服务的机器上 FCM 用不了，
+          改成 App 自己跑一个前台服务轮询 + 发本地通知。见 AlertWatchService.java。
+        -->
+        <service
+            android:name=".AlertWatchService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -38,4 +47,13 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- App 后台提醒 -->
+    <!-- 前台服务：必须自己声明类型；Android 14+ 起还要对应的 FOREGROUND_SERVICE_* 权限 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+ 的通知权限：**不申请的话通知会被静默丢掉**（代码不报错、用户看不到） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 重启后能自己接着盯（可选，但没它的话重启就得手动开一次） -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 </manifest>

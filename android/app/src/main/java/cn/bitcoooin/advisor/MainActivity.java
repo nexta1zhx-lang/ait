@@ -33,6 +33,15 @@ public class MainActivity extends BridgeActivity {
          * 和窄屏页面主背景（--panel #121316）一致。
          */
         SplashScreen splash = SplashScreen.installSplashScreen(this);
+
+        /*
+         * ⚠️ 注册自定义插件**必须在 `super.onCreate` 之前**（Capacitor 的约定：
+         *    BridgeActivity 在 super 里就去捞插件表了，晚注册等于没注册）。
+         *    `AlertWatch` = 「App 后台提醒」（前台服务 + 本地通知），
+         *    给没有谷歌服务、FCM 用不了的手机用的（见 AlertWatchService.java）。
+         */
+        registerPlugin(AlertWatchPlugin.class);
+
         super.onCreate(savedInstanceState);
 
         /*

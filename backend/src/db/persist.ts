@@ -298,6 +298,78 @@ export async function expireSessions(): Promise<number> {
   return rows.length
 }
 
+/**
+ * 记一条提醒（「转成可做」）。
+ *
+ * 用途见 `schema.ts` 里 `persist_alerts` 那段：**给 App 那个前台服务轮询用的锚点**
+ *（手机上没谷歌服务时 FCM 用不了，改成 App 自己轮询），顺带当提醒的账本。
+ */
+export async function insertAlert(input: {
+  userId: number
+  sessionId: number
+  symbol: string
+  timeframe: string
+  verdict: string
+  line: string
+  price: number | null
+}): Promise<void> {
+  await query(
+    `INSERT INTO persist_alerts (user_id, session_id, symbol, timeframe, verdict, line, price)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [
+      input.userId,
+      input.sessionId,
+      input.symbol,
+      input.timeframe,
+      input.verdict,
+      input.line,
+      input.price
+    ]
+  )
+}
+
+/** 提醒流水（`since` 之后的新条目，老的在前） */
+export async function listAlerts(
+  userId: number,
+  since: number,
+  limit = 20
+): Promise<{id: number; symbol: string; timeframe: string; verdict: string; line: string; price: number | null; createdAt: string}[]> {
+  const rows = await query<{
+    id: string
+    symbol: string
+    timeframe: string
+    verdict: string | null
+    line: string | null
+    price: string | null
+    created_at: Date
+  }>(
+    `SELECT id, symbol, timeframe, verdict, line, price, created_at
+       FROM persist_alerts
+      WHERE user_id = $1 AND id > $2
+      ORDER BY id
+      LIMIT $3`,
+    [userId, since, limit]
+  )
+  return rows.map(r => ({
+    id: Number(r.id),
+    symbol: r.symbol,
+    timeframe: r.timeframe,
+    verdict: r.verdict ?? 'go',
+    line: r.line ?? '',
+    price: r.price === null ? null : Number(r.price),
+    createdAt: iso(r.created_at)!
+  }))
+}
+
+/** 这个用户最新那条提醒的 id（App 第一次拉的时候拿它当起点，免得把历史全弹一遍） */
+export async function latestAlertId(userId: number): Promise<number> {
+  const row = await queryOne<{id: string | null}>(
+    `SELECT max(id) AS id FROM persist_alerts WHERE user_id = $1`,
+    [userId]
+  )
+  return row?.id === null || row?.id === undefined ? 0 : Number(row.id)
+}
+
 /** 用户手动停（只能停自己的） */
 export async function stopSession(userId: number, id: number): Promise<boolean> {
   const rows = await query<{id: string}>(

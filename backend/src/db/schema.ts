@@ -412,6 +412,26 @@ CREATE INDEX IF NOT EXISTS persist_sessions_due_idx
 CREATE INDEX IF NOT EXISTS persist_sessions_user_idx
   ON persist_sessions (user_id, started_at DESC);
 
+-- ---------------------------------------------------------------- 提醒流水（App 后台提醒用）
+-- 「转成可做」这件事**落一条记录**（2026-10-16 加的）。
+--
+-- 为什么要落库：手机上没有谷歌服务时 FCM 用不了，改成**App 自己跑一个前台服务轮询**。
+-- 轮询就得有个"上次看到哪了"的锚点 —— 而这个锚点必须**在服务端**（App 被杀、重装、
+-- 换手机都得接着），光靠 FCM 那条推送是拿不到历史的。
+-- 顺带它也是"这套提醒到底发过几条"的唯一账本。
+CREATE TABLE IF NOT EXISTS persist_alerts (
+  id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  session_id BIGINT,
+  symbol     TEXT        NOT NULL,
+  timeframe  TEXT        NOT NULL,
+  verdict    TEXT,
+  line       TEXT,
+  price      NUMERIC,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS persist_alerts_user_idx ON persist_alerts (user_id, id DESC);
+
 -- ---------------------------------------------------------------- App 推送（FCM）
 -- 手机 App 的推送 token（2026-10-15 用户：「加入 app 推送」）。
 --

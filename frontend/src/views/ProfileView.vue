@@ -31,6 +31,16 @@ import {
 import {logout, rename, user} from '../session'
 import {isNativeShell} from '../platform'
 import {pushLocal} from '../push'
+import {
+  disableWatch,
+  enableWatch,
+  refreshWatch,
+  testNotify,
+  watchBusy,
+  watchError,
+  watchStatus,
+  watchSupported as watchSupportedValue
+} from '../watch'
 import {bjTime} from '../format'
 import {askConfirm} from '../confirm'
 import {shellInfo, type ShellInfo} from '../native'
@@ -320,6 +330,7 @@ onMounted(() => {
   void loadTotp()
   void loadShell()
   void loadPush()
+  void refreshWatch()
   /* 不在原生壳里那几行不显示；是壳里就顺手让它把本机状态刷一遍 */
   if (isNativeShell()) void import('../push').then(m => m.registerPush())
 })
@@ -332,6 +343,22 @@ onMounted(() => {
  *   · 这台账号报了哪些设备（没上报过 / 被标死 / 上次错在什么）；
  *   · 「发一条测试」—— 不然要等"转可做"才知道通不通，而模型大多数时候给的是不可做/观望。
  */
+/**
+ * 「App 后台提醒」那一段（2026-10-16 用户选的方案）——**不依赖谷歌服务的推送**。
+ * 详见 `frontend/src/watch.ts` 与原生 `AlertWatchService.java`。
+ */
+const watchInfo = watchStatus
+const watchOn = computed(() => !!watchInfo.value?.enabled)
+const watchOk = watchSupportedValue
+const watchErr = watchError
+const watchIsBusy = watchBusy
+
+async function toggleWatch(): Promise<void> {
+  if (!watchOk.value) return
+  if (watchOn.value) await disableWatch()
+  else await enableWatch()
+}
+
 const pushInfo = ref<PushStatus | null>(null)
 const pushBusy = ref(false)
 const pushMsg = ref('')
@@ -732,6 +759,54 @@ async function changePw(): Promise<void> {
         服务端只能说"有没有设备上报过"，手机上真正发生的事（插件、权限、注册报错）
         得在手机自己的界面上看得见，否则永远只能猜。
       -->
+      <!--
+        ★ 「App 后台提醒」= **不依赖谷歌服务**的那条路（2026-10-16 用户选的）。
+        华为这类没有 GMS 的机器 FCM 用不了，只能让 App 自己跑个前台服务轮询 + 发本地通知。
+        这一段在原生的 `AlertWatchService.java` / `frontend/src/watch.ts`。
+      -->
+      <div v-if="watchOk" class="watch-box">
+        <div class="row">
+          <button
+            class="btn"
+            type="button"
+            :disabled="watchIsBusy"
+            @click="toggleWatch"
+          >
+            {{ watchIsBusy ? '…' : watchOn ? '关掉后台提醒' : '打开后台提醒（推荐）' }}
+          </button>
+          <button class="btn" type="button" :disabled="watchIsBusy" @click="refreshWatch">
+            刷新
+          </button>
+        </div>
+        <ul class="kvs">
+          <li>
+            <span>后台提醒</span>
+            <b>{{ watchOn ? '已打开' : '没打开' }}</b>
+          </li>
+          <li>
+            <span>登录凭据已交给后台</span>
+            <b>{{ watchInfo?.hasToken ? '是' : '否（打开 App 会自己补上）' }}</b>
+          </li>
+          <li>
+            <span>通知权限</span>
+            <b>{{ watchInfo?.notificationsGranted ? '已允许' : '没允许（通知会被系统丢掉）' }}</b>
+          </li>
+        </ul>
+        <p class="note">
+          打开后：通知栏会挂一条**不显眼**的「Ait 正在盯着」（前台服务必须有它），
+          App 关掉也照跑；结论转「可做」时弹一条通知，点它进 App。
+          <br />
+          ⚠️ **华为/小米这类要手动放行**：设置 → 应用启动管理 → 允许「Ait」**自启动 + 后台运行**，
+          并把「电池优化」设为**不允许优化** —— 不然系统会在几十分钟后把它清掉。
+        </p>
+        <div class="row">
+          <button class="btn" type="button" :disabled="watchIsBusy" @click="testNotify">
+            发一条测试提醒
+          </button>
+        </div>
+        <p v-if="watchErr" class="err">{{ watchErr }}</p>
+      </div>
+
       <ul v-if="pushLocal.native" class="kvs">
         <li>
           <span>本机推送插件</span>
@@ -994,6 +1069,21 @@ input.code {
  * 左标签 / 右值，值用等宽字体 —— 版本号、像素数这种一眼要比对的东西，
  * 等宽更好读。窄屏也不折行（min-width:0 + 右对齐）。
  */
+.watch-box {
+  margin: 4px 0 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.watch-box .note {
+  margin: 8px 0;
+}
+
+.watch-box .row {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .kvs {
   list-style: none;
   margin: 8px 0 0;
