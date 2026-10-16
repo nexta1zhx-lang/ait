@@ -113,7 +113,13 @@ export interface NormalizedRange {
 export function normalizeRange(
   from: unknown,
   to: unknown,
-  today: string = bjToday()
+  today: string = bjToday(),
+  /**
+   * 跨度上限（天）。默认 `MAX_DAYS`（400）—— 那个数是给「分析历史 / 用量」这类
+   * 按天攒的流水定的。**K 线要另算**：能往前看多久取决于「这个周期最多读多少根」
+   * （1d 能看 1500 天，5m 只能 5 天），所以调用方传自己的上限进来。
+   */
+  maxDays: number = MAX_DAYS
 ): NormalizedRange {
   const notes: string[] = []
   let end = normalizeDay(to)
@@ -136,10 +142,11 @@ export function normalizeRange(
     notes.push('起止写反了，已对调')
   }
 
-  const earliest = dayShift(end, -(MAX_DAYS - 1))
+  const cap = Math.max(1, Math.round(maxDays))
+  const earliest = dayShift(end, -(cap - 1))
   if (start < earliest) {
     start = earliest
-    notes.push(`跨度超过 ${MAX_DAYS} 天，已截到最近 ${MAX_DAYS} 天`)
+    notes.push(`跨度超过 ${cap} 天，已截到最近 ${cap} 天`)
   }
   return {
     from: start,

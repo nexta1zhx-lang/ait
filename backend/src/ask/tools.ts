@@ -15,7 +15,7 @@ import {query, queryOne} from '../db/client'
 import {listCases} from '../db/knowledge'
 import {listSessions} from '../db/persist'
 import {usageSummary} from '../db/usage'
-import {dailyCloses, unifiedPerpSymbol} from '../db/candle-store'
+import {unifiedPerpSymbol} from '../db/candle-store'
 import {getDefaultExchangeKey} from '../db/exchange-keys'
 import {
   incomeTotals,
@@ -44,6 +44,26 @@ import {
   normalizeRange,
   normalizeSymbol
 } from './range'
+
+/** 周期 → 一根多少毫秒（算「这个范围要多少根 K 线」用） */
+const TF_MS: Record<string, number> = {
+  '5m': 5 * 60_000,
+  '15m': 15 * 60_000,
+  '1h': 60 * 60_000,
+  '4h': 4 * 60 * 60_000,
+  '1d': 24 * 60 * 60_000
+}
+/** 能查的周期（跟底座灌的档一致，见 `candle-store.ts` 的 `HIGH_INTERVALS`） */
+const INTERVALS = Object.keys(TF_MS)
+/**
+ * 一次最多读多少根 —— 跟 `config/calibers.yaml` 的「最多根数」一致。
+ *
+ * ⚠️ 这**不是**数据库限制，是「喂给模型的东西要有个头」：1500 根明细的 JSON
+ *    能把上下文撑爆（所以才只给最近 N 根明细、汇总用 SQL 算）。
+ */
+const MAX_BARS = 1500
+/** 明细一次给多少根（汇总不受这个限制） */
+const MAX_BAR_ROWS = 200
 
 /* ------------------------------------------------------------------ */
 /* 给模型看的工具描述                                                  */
@@ -119,16 +139,28 @@ export const TOOL_SPECS: AskToolSpec[] = [
     }
   },
   {
-    name: 'market_daily',
-    label: '读日线行情',
+    name: 'market_klines',
+    label: '读 K 线行情',
     description:
-      '读某个币的**日线收盘**（底座库里的 U 本位永续），给出最新收盘、1/7/30 天涨跌幅、' +
-      '区间高低点和最近 10 根收盘。问「最近涨了多少」「现在什么价」用它。',
+      '读某个币的 **K 线**（底座库里的 U 本位永续），**任意周期**：' +
+      INTERVALS.join(' / ') +
+      '，`interval: all` 则每个周期给一份概览（最近 30 根的收盘与涨跌）。\n' +
+      '返回：区间汇总（根数 / 首根开盘 / 末根收盘 / 涨跌幅 / 最高最低 / 振幅 / 成交额）' +
+      '+ `明细` 最近 N 根（每根 = [时间, 开, 高, 低, 收, 成交量, 成交额]，默认 30 根、上限 200）。\n' +
+      '问「最近涨了多少」「什么价」「各周期什么情况」「这段行情怎么走的」用它。\n' +
+      '⚠️ 各周期保留期不同（5m/15m 只留几天到 30 天、1h 400 天、4h 与 1d 永久）；' +
+      '查不到时返回里的「库里覆盖」会告诉你其实有哪一段，别当成"这个币没数据"。',
     parameters: {
       type: 'object',
       properties: {
         symbol: {type: 'string', description: '币种，如 BTC'},
-        days: {type: 'number', description: `看最近多少根日线，默认 60，上限 ${MAX_DAYS}`}
+        interval: {
+          type: 'string',
+          enum: [...INTERVALS, 'all'],
+          description: 'K 线周期；不填 = 1d（日线）；all = 所有周期各给一份概览'
+        },
+        ...rangeProps,
+        limit: {type: 'number', description: `明细最多几根，默认 30，上限 ${MAX_BAR_ROWS}`}
       },
       required: ['symbol']
     }
@@ -390,8 +422,8 @@ export async function runTool(
       return recentAnalyses(args, ctx, today)
     case 'knowledge_search':
       return knowledgeSearch(args, ctx)
-    case 'market_daily':
-      return marketDaily(args, ctx)
+    case 'market_klines':
+      return marketKlines(args, ctx, today)
     case 'usage_cost':
       return usageCost(args, ctx, today)
     case 'persist_status':
@@ -609,55 +641,199 @@ async function knowledgeSearch(
   }
 }
 
-async function marketDaily(
+async function marketKlines(
   args: Record<string, unknown>,
-  ctx: AskToolContext
+  ctx: AskToolContext,
+  today: string
 ): Promise<AskToolResult> {
   const symbol = normalizeSymbol(args.symbol)
   if (!symbol)
     throw new ToolInputError(
       `币种认不出：「${String(args.symbol ?? '').slice(0, 20)}」——只能是字母数字，比如 BTC`
     )
-  const days = clampInt(args.days, 60, MAX_DAYS)
+  const pair = unifiedPerpSymbol(symbol)
 
-  const closes = await dailyCloses(
-    ctx.exchange,
-    ctx.marketType,
-    unifiedPerpSymbol(symbol),
-    days
+  /* `interval: 'all'` = 每个周期都给一份概览（问「各周期什么情况」用它） */
+  const want = String(args.interval ?? '1d').trim()
+  if (want === 'all') return klineAllIntervals(pair, symbol, ctx, today)
+  if (!INTERVALS.includes(want))
+    throw new ToolInputError(`interval 只能是 ${INTERVALS.join(' / ')} 或 all`)
+  const interval = want
+
+  /* 范围：天数上限按「这个周期最多 1500 根」换算（1d 能看 1500 天，5m 只能 5.2 天） */
+  const maxDays = Math.max(1, Math.floor((MAX_BARS * TF_MS[interval]) / 86_400_000))
+  const {from, to, days, note} = normalizeRange(
+    args.from,
+    args.to,
+    today,
+    /* `normalizeRange` 默认夹 400 天（给分析历史那类用的），K 线按根数夹更准 */
+    maxDays
   )
-  if (!closes.length) {
+  const limit = clampInt(args.limit, 30, MAX_BAR_ROWS)
+  const fromMs = bjDayStartMs(from)
+  const toMs = bjDayEndMs(to)
+  const scope: [string, string] = [ctx.exchange, ctx.marketType]
+
+  const [sum, cover, bars] = await Promise.all([
+    queryOne<Record<string, unknown>>(
+      `SELECT count(*)::int                              AS n,
+              min(open_time)                             AS first_t,
+              max(open_time)                             AS last_t,
+              (array_agg(open ORDER BY open_time ASC))[1]  AS first_open,
+              (array_agg(close ORDER BY open_time DESC))[1] AS last_close,
+              max(high)                                  AS hi,
+              min(low)                                   AS lo,
+              COALESCE(sum(volume), 0)                   AS vol,
+              COALESCE(sum(quote_volume), 0)             AS qv
+         FROM candles
+        WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = $4
+          AND open_time >= $5 AND open_time <= $6`,
+      [...scope, pair, interval, new Date(fromMs), new Date(toMs)]
+    ),
+    /* 库里这个档**一共有**多少（用来回答"为什么这段没有数据"） */
+    queryOne<Record<string, unknown>>(
+      `SELECT count(*)::int AS n, min(open_time) AS first_t, max(open_time) AS last_t
+         FROM candles
+        WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = $4`,
+      [...scope, pair, interval]
+    ),
+    query<Record<string, unknown>>(
+      `SELECT open_time, open, high, low, close, volume, quote_volume
+         FROM candles
+        WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = $4
+          AND open_time >= $5 AND open_time <= $6
+        ORDER BY open_time DESC
+        LIMIT $7`,
+      [...scope, pair, interval, new Date(fromMs), new Date(toMs), limit]
+    )
+  ])
+
+  const n = Number(sum?.n ?? 0) || 0
+  const coverFrom = cover?.first_t ? bjStamp(String(cover.first_t)) : null
+  const coverTo = cover?.last_t ? bjStamp(String(cover.last_t)) : null
+
+  if (!n) {
     return {
-      data: {币种: symbol, 说明: '底座库里没有这个币的日线（只覆盖 U 本位永续）'},
+      data: {
+        币种: symbol,
+        周期: interval,
+        区间: `${from} ~ ${to}`,
+        说明:
+          '这个区间里没有 K 线。' +
+          (coverTo ? `库里这个周期**有**数据，但只覆盖 ${coverFrom} ~ ${coverTo}。` : '') +
+          '（底座只记 U 本位永续；各档保留期不同：5m/15m 短、1h 400 天、4h 与 1d 永久）',
+        库里覆盖: coverFrom && coverTo ? {起: coverFrom, 止: coverTo} : null
+      },
       rows: 0,
-      detail: `${symbol} · 库里没有日线`
+      detail: `${symbol} ${interval} · ${from} ~ ${to} 没有数据` + (coverTo ? `（库里只有 ${coverFrom} ~ ${coverTo}）` : '')
     }
   }
 
-  // ⚠️ `dailyCloses` 是按时间**倒序**回来的（最新在最前），下标越大越早
-  const latest = closes[0]
-  const pct = (back: number): number | null => {
-    const base = closes[back - 1]
-    if (!base || !base.close) return null
-    return num2(((latest.close - base.close) / base.close) * 100)
-  }
-  const values = closes.map(c => c.close)
-
+  const firstOpen = num2(sum?.first_open) ?? 0
+  const lastClose = num2(sum?.last_close) ?? 0
+  const hi = num2(sum?.hi) ?? 0
+  const lo = num2(sum?.lo) ?? 0
   const data = {
     币种: symbol,
-    最新收盘日: bjToday(latest.at),
-    最新收盘: num2(latest.close),
-    涨跌幅: {'1天': pct(2), '7天': pct(8), '30天': pct(31)},
-    区间最高收盘: num2(Math.max(...values)),
-    区间最低收盘: num2(Math.min(...values)),
-    最近10根: closes.slice(0, 10).map(c => ({日: bjToday(c.at), 收: num2(c.close)}))
+    周期: interval,
+    区间: `${from} ~ ${to}（${days} 天）`,
+    根数: n,
+    首根: {时间: sum?.first_t ? bjStamp(String(sum.first_t)) : null, 开: firstOpen},
+    末根: {时间: sum?.last_t ? bjStamp(String(sum.last_t)) : null, 收: lastClose},
+    区间涨跌幅: firstOpen ? num2(((lastClose - firstOpen) / firstOpen) * 100) : null,
+    区间最高: hi,
+    区间最低: lo,
+    振幅: lo ? num2(((hi - lo) / lo) * 100) : null,
+    成交额合计: num2(sum?.qv),
+    成交量合计: num2(sum?.vol),
+    库里覆盖: coverFrom && coverTo ? {起: coverFrom, 止: coverTo, 共: Number(cover?.n ?? 0)} : null,
+    明细: {
+      条数: bars.length,
+      说明:
+        `最近 ${bars.length} 根（区间内共 ${n} 根）；每根 = ` +
+        '[开, 高, 低, 收, 成交量, 成交额]',
+      /*
+       * ⚠️ 日线只给**日期**：币安的 1d 是 UTC 00:00 对齐，翻成北京就成了 `08:00` ——
+       *    显示成「2026-10-15 08:00」会让人（和模型）以为那是某个 8 点的时刻。
+       */
+      数据: bars.map(b => [
+        interval === '1d' ? bjDayOf(new Date(String(b.open_time)).getTime()) : bjStamp(String(b.open_time)),
+        num2(b.open),
+        num2(b.high),
+        num2(b.low),
+        num2(b.close),
+        num2(b.volume),
+        num2(b.quote_volume)
+      ])
+    }
   }
   return {
     data,
-    rows: closes.length,
+    rows: n,
     detail:
-      `${symbol} · ${closes.length} 根日线` +
-      ` · 最新收盘 ${num2(latest.close)}（${bjToday(latest.at)}）`
+      `${symbol} ${interval} · ${from} ~ ${to} · ${n} 根` +
+      ` · 区间 ${firstOpen} → ${lastClose}` +
+      (firstOpen ? `（${num2(((lastClose - firstOpen) / firstOpen) * 100)}%）` : '') +
+      ` · 最高 ${hi} / 最低 ${lo}` +
+      (note ? ` · ${note}` : '')
+  }
+}
+
+/**
+ * 每个周期一份概览（`interval: 'all'`）。
+ *
+ * 用来回答「各周期现在什么情况」—— 一次问清，比让模型一个个周期去调省好几轮。
+ * 每档只给「最近 30 根」的汇总，不返明细（明细用单周期那一路）。
+ */
+async function klineAllIntervals(
+  pair: string,
+  symbol: string,
+  ctx: AskToolContext,
+  today: string
+): Promise<AskToolResult> {
+  const scope: [string, string] = [ctx.exchange, ctx.marketType]
+  const rows = await query<Record<string, unknown>>(
+    `SELECT interval,
+            count(*)::int AS n,
+            max(open_time) AS last_t,
+            (array_agg(close ORDER BY open_time DESC))[1] AS last_close,
+            (array_agg(open ORDER BY open_time DESC))[1]  AS last_open,
+            max(high) AS hi,
+            min(low)  AS lo
+       FROM (
+         SELECT interval, open_time, open, high, low, close,
+                row_number() OVER (PARTITION BY interval ORDER BY open_time DESC) AS rn
+           FROM candles
+          WHERE exchange = $1 AND market_type = $2 AND symbol = $3
+            AND interval = ANY($4::text[])
+       ) t
+      WHERE rn <= 30
+      GROUP BY interval`,
+    [...scope, pair, INTERVALS]
+  )
+
+  const byInterval = new Map(rows.map(r => [String(r.interval), r]))
+  const data = INTERVALS.map(it => {
+    const r = byInterval.get(it)
+    if (!r || !Number(r.n))
+      return {周期: it, 说明: '这个档库里没有数据'}
+    const open = num2(r.last_open) ?? 0
+    const close = num2(r.last_close) ?? 0
+    return {
+      周期: it,
+      最近30根: Number(r.n),
+      最新时间: r.last_t ? bjStamp(String(r.last_t)) : null,
+      最新收盘: close,
+      最近30根涨跌: open ? num2(((close - open) / open) * 100) : null,
+      '30根最高': num2(r.hi),
+      '30根最低': num2(r.lo)
+    }
+  })
+  const have = data.filter(d => !('说明' in d))
+  return {
+    data: {币种: symbol, 各周期: data},
+    rows: have.length,
+    detail: `${symbol} · ${have.length}/${INTERVALS.length} 个周期有数据（各看最近 30 根）`
   }
 }
 
