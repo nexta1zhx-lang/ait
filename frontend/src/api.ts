@@ -3634,98 +3634,139 @@ export function askStream(
     onError: (message: string) => void
   }
 ): () => void {
-  const q = new URLSearchParams({q: question})
-  // 历史：只带 role + content（后端还会再过一遍形状）
-  if (history.length) q.set('h', JSON.stringify(history))
-  const es = openSse('/api/ask/stream?' + q.toString())
+  const ac = new AbortController()
   let finished = false
 
+  const finish = (): void => {
+    finished = true
+    window.clearInterval(watchdog)
+    ac.abort()
+  }
+
   /**
-   * 看门狗 —— **治"卡住"的那个东西**。
+   * 看门狗 —— 治「一直转」的那个东西。
    *
-   * ⚠️ 没有它就会真的卡死（2026-10-16 用户：「聊天界面有时候会卡住，正在调数据库」）：
-   *    后端断了 / 卡住时，浏览器**自己会静默重连**（`readyState = CONNECTING`），
-   *    而 `onerror` 那种「CONNECTING 就先不管」的写法等于把这件事咽下去 ——
-   *    界面永远停在「正在查库」，**而且重连还会把那个查询重跑一遍**。
-   *
-   * 判据：后端每 20 秒推一次 `heartbeat`。**120 秒**没收到任何东西 = 死了
-   * （一轮大模型调用实测十几秒，三轮也够；真慢到 120 秒那种，让用户重问比干等好）。
+   * 后端每 20 秒推一次 `heartbeat`；**120 秒**没收到任何东西 = 死了
+   *（一轮大模型调用实测十几秒，三轮也够）。真慢到 120 秒那种，让用户重问比干等好。
    */
   let lastAt = Date.now()
   const WATCHDOG_MS = 120_000
   const watchdog = window.setInterval(() => {
     if (finished) return
     if (Date.now() - lastAt <= WATCHDOG_MS) return
-    stop()
+    finish()
     handlers.onError(
       '连接断了（两分钟没收到响应）。可能是这次查询太重或网络断了 —— 再问一次试试。'
     )
   }, 5_000)
 
-  const stop = (): void => {
-    finished = true
-    window.clearInterval(watchdog)
-    es.close()
-  }
-  const parse = (e: Event): Record<string, any> | null => {
+  /** 一帧 SSE（`event: X\ndata: {...}`） */
+  const frame = (raw: string): void => {
+    let name = ''
+    let data = ''
+    for (const line of raw.split('\n')) {
+      if (line.startsWith('event:')) name = line.slice(6).trim()
+      else if (line.startsWith('data:')) data += line.slice(5).trim()
+    }
+    if (!name) return
+    lastAt = Date.now()
+    let d: Record<string, any> | null = null
     try {
-      const d = JSON.parse((e as MessageEvent).data)
-      lastAt = Date.now()
-      return d
+      d = data ? JSON.parse(data) : null
     } catch {
-      return null
+      d = null
     }
+    if (name === 'round') handlers.onRound?.(Number(d?.round) || 1, Number(d?.max) || 1)
+    else if (name === 'step' && d?.step) handlers.onStep?.(d.step as AskStep)
+    else if (name === 'delta' && d?.text) handlers.onDelta?.(String(d.text))
+    else if (name === 'drop') handlers.onDrop?.()
+    else if (name === 'done') {
+      finish()
+      if (d) handlers.onDone(d as unknown as AskReply)
+      else handlers.onError('结果是空的（解析失败）')
+    } else if (name === 'failed') {
+      finish()
+      handlers.onError(String(d?.error ?? '问答失败'))
+    }
+    // `heartbeat` 只用来喂看门狗（上面已经刷了 `lastAt`）
   }
 
-  es.addEventListener('round', e => {
-    const d = parse(e)
-    if (d) handlers.onRound?.(Number(d.round) || 1, Number(d.max) || 1)
-  })
-  es.addEventListener('step', e => {
-    const d = parse(e)
-    if (d?.step) handlers.onStep?.(d.step as AskStep)
-  })
-  es.addEventListener('delta', e => {
-    const d = parse(e)
-    if (d?.text) handlers.onDelta?.(String(d.text))
-  })
-  // 这一轮只是旁白（它要去调工具）→ 前端把这段临时文字撤掉
-  es.addEventListener('drop', () => handlers.onDrop?.())
-  es.addEventListener('done', e => {
-    const out = parse(e) as AskReply | null
-    stop()
-    if (out) handlers.onDone(out)
-    else handlers.onError('结果是空的（解析失败）')
-  })
-  es.addEventListener('failed', e => {
-    const out = parse(e) as {error?: string} | null
-    stop()
-    handlers.onError(out?.error ?? '问答失败')
-  })
-
-  // 服务端正常结束时也会触发 error —— 已经收过 done/failed 就忽略
-  es.onerror = () => {
-    if (finished) return
-    if (es.readyState === EventSource.CLOSED) {
-      stop()
-      handlers.onError('连接中断，请重试')
-    }
-    /*
-     * ⚠️ `CONNECTING`（浏览器在自己重连）**不能不管**：这正是"卡住"的来源。
-     *    这里什么都不做，交给上面那个看门狗兜底 —— 它会在 120 秒后收场。
-     *    （别在这里立刻报错：网络抖一下、几秒内连回来是正常的。）
-     */
-  }
-
-  /**
-   * 对外返回的「终止」：关流 + 停看门狗。
-   *
-   * ⚠️ 「谁按的终止」由**调用方**记（`ask.ts` 里的 `userStopped`）—— 这里只是一个
-   *    取消函数，`stopAsk()` 分不出是用户按的还是内部收尾，硬在这里打标记会写反。
+  /*
+   * ⚠️⚠️ 为什么用 `fetch` 手搓 SSE，而不是 `EventSource`（2026-10-16 修）：
+   *   `EventSource` 只能 GET，于是**问题和多轮历史只能塞进 URL** ——
+   *   中文经 URL 编码每个字变 9 个字符，上一轮那篇长回答一编码就是几十 KB，
+   *   直接顶爆服务端 16KB 的请求头上限 ⇒ **431** ⇒ 界面"卡在正在查库"。
+   *   `fetch` 能 POST（body 无上限），还能带 `Authorization` 头（token 不必进 URL）。
+   * ⚠️ 代价：得自己解 SSE 帧、自己做看门狗 —— 但 `EventSource` 那套自动重连
+   *   对**任务型**的流本来就不能用（重连 = 后端从头再跑一遍，白花钱）。
    */
-  return stop
-}
+  void (async () => {
+    try {
+      const res = await fetch(apiUrl('/api/ask/stream'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(authToken.value
+            ? {Authorization: `Bearer ${authToken.value}`}
+            : {})
+        },
+        body: JSON.stringify({question, history}),
+        signal: ac.signal
+      })
+      if (!res.ok) {
+        // 4xx / 5xx：服务端一般是 JSON 错误（401 会顺手清本地 token，跟别的接口一致）
+        const msg =
+          ((await res.json().catch(() => null)) as {error?: string} | null)?.error ??
+          `请求失败（HTTP ${res.status}）`
+        if (res.status === 401) setAuthToken('')
+        finish()
+        handlers.onError(msg)
+        return
+      }
+      if (!res.body) {
+        finish()
+        handlers.onError('这个浏览器不支持流式响应')
+        return
+      }
 
+      const reader = res.body.getReader()
+      const dec = new TextDecoder()
+      let buf = ''
+      for (;;) {
+        const {done, value} = await reader.read()
+        if (done) break
+        buf += dec.decode(value, {stream: true})
+        // 帧之间用空行分隔（后端 `res.write('event: x\ndata: {}\n\n')`）
+        let i: number
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, i)
+          buf = buf.slice(i + 2)
+          if (raw.trim()) frame(raw)
+        }
+      }
+      /*
+       * 流关了却没收到 `done` / `failed`：后端被重启 / 崩了。
+       * ⚠️ 这里必须报错收场 —— 不报的话 `askBusy` 和 `streaming` 就一直挂着，
+       *    界面永远停在「正在查库」（这正是用户报的那个"卡住"）。
+       */
+      if (!finished) {
+        finish()
+        handlers.onError('连接中断（后端可能重启了）。再问一次试试。')
+      }
+    } catch (e) {
+      if (finished) return
+      finish()
+      handlers.onError(
+        (e as Error)?.name === 'AbortError'
+          ? '已取消'
+          : `请求失败：${(e as Error)?.message ?? '网络不通'}`
+      )
+    }
+  })()
+
+  /** 对外返回的「终止」：断掉这次 fetch（后端会跟着 `res.close` → abort） */
+  return finish
+}
 /**
  * 问一句（**非流式**的老路，POST /api/ask）。
  *

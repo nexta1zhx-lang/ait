@@ -5885,13 +5885,16 @@ async function route(
   }
 
   /*
-   * 流式版：`GET /api/ask/stream?q=问题&h=<历史 JSON>`。
-   * SSE 带不了请求头，所以 token 走 `?token=`（鉴权那层两种都认）。
+   * 流式版。
+   *
+   * ★ 2026-10-16：主力改成 **`POST /api/ask/stream`**（问题 + 历史走 body）——
+   *   原来只有 GET，历史塞在 URL 里，中文一编码就把请求头顶爆（431），
+   *   见 `handleAskStream` 那段说明。GET（`?q=`）留着兼容命令行 / 老页面。
    */
   if (p === '/api/ask/stream') {
-    if (method !== 'GET')
+    if (method !== 'GET' && method !== 'POST')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
-    await handleAskStream(url, res, me)
+    await handleAskStream(req, url, res, me)
     return
   }
 
@@ -6045,8 +6048,17 @@ function askHistory(raw: unknown): {role: 'user' | 'assistant'; content: string}
  *
  * ⚠️ 跟 `handleAnalyzeStream` 一样：这是**任务型**的流，断了不重连
  *    （重连等于再问一遍、再花一次钱）。所以前端那边也该这么对待它。
+ *
+ * ⚠️⚠️ **多轮历史必须走 POST body，不能塞 URL**（2026-10-16 修的一个真 bug）：
+ *    原来前端用 `EventSource` 发 GET，把历史放在 `?h=<JSON>` 里 ——
+ *    中文经 URL 编码**每个字变 9 个字符**，上一轮那篇长回答（4KB+）一编码就是几十 KB，
+ *    直接顶爆 Node 默认的 **16KB 请求头上限** ⇒ **431 Request Header Fields Too Large**
+ *    ⇒ 流根本建不起来，界面就"卡在正在查库"。POST body 没这个上限。
+ *    顺带：POST 还能带 `Authorization` 头，**token 不用再出现在 URL 里**。
+ *    GET 那条留着（`?q=`）—— 命令行 / 老页面还能用。
  */
 async function handleAskStream(
+  req: http.IncomingMessage,
   url: URL,
   res: http.ServerResponse,
   user: User
@@ -6063,9 +6075,29 @@ async function handleAskStream(
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
   }
 
-  const question = (url.searchParams.get('q') ?? '').trim()
+  /* 问题与历史：POST 从 body 取（正常路径），GET 从 query 取（命令行 / 老页面） */
+  let question = ''
+  let history: unknown = []
+  if (req.method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) {
+      send('failed', {error: '请求体不是合法 JSON'})
+      res.end()
+      return
+    }
+    question = str(body.question).trim()
+    history = body.history
+  } else {
+    question = (url.searchParams.get('q') ?? '').trim()
+    try {
+      history = JSON.parse(url.searchParams.get('h') ?? '[]')
+    } catch {
+      history = []
+    }
+  }
+
   if (!question) {
-    send('failed', {error: '缺少 q（问题）'})
+    send('failed', {error: '缺少问题'})
     res.end()
     return
   }
@@ -6073,13 +6105,6 @@ async function handleAskStream(
     send('failed', {error: `问题太长了（上限 ${MAX_QUESTION_CHARS} 字）`})
     res.end()
     return
-  }
-
-  let history: unknown = []
-  try {
-    history = JSON.parse(url.searchParams.get('h') ?? '[]')
-  } catch {
-    history = []
   }
 
   /*

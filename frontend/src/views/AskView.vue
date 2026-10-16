@@ -18,7 +18,7 @@
  *     数据类问答的信任成本全在这儿 —— 藏起来用户没法判断结论是不是真查出来的。
  *  ② **没查库就答要标出来**（`unverified`）：后端判的，那多半是模型在编。
  */
-import {computed, nextTick, onMounted, ref, watch} from 'vue'
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import AnswerBody from '../comps/AnswerBody.vue'
 import {
   ask,
@@ -48,6 +48,34 @@ const SUGGEST = [
 ]
 
 const draft = ref('')
+
+/**
+ * 这一跑已经跑了多少秒。
+ *
+ * 为什么值得加：用户分不清「它在慢慢查」和「它卡住了」——
+ * 秒数在动就说明后端还在干活（每轮的空档可能有十几秒）。
+ */
+const elapsed = ref(0)
+let elapsedTimer: number | null = null
+watch(
+  askBusy,
+  busy => {
+    if (elapsedTimer) {
+      window.clearInterval(elapsedTimer)
+      elapsedTimer = null
+    }
+    elapsed.value = 0
+    if (!busy) return
+    const t0 = Date.now()
+    elapsedTimer = window.setInterval(() => {
+      elapsed.value = Math.round((Date.now() - t0) / 1000)
+    }, 1000)
+  },
+  {immediate: true}
+)
+onBeforeUnmount(() => {
+  if (elapsedTimer) window.clearInterval(elapsedTimer)
+})
 /** 哪几轮摊开了「取值过程」（key = 会话 id + 轮次下标） */
 const open = ref<Set<string>>(new Set())
 const msgs = ref<HTMLElement | null>(null)
@@ -283,11 +311,15 @@ const title = computed(() => activeThread.value?.title || '数据问答')
             <div v-if="t.streaming && !t.answer && !t.error" class="live">
               <span class="dot" />
               正在查库{{ t.round ? `…第 ${t.round}/${t.roundMax} 轮` : '…' }}
+              <span v-if="elapsed" class="live-sec">{{ elapsed }}s</span>
             </div>
 
             <AnswerBody v-if="t.answer" :text="t.answer" />
             <!-- 逐字长出来的那段末尾挂个光标，一眼看出还在写 -->
             <div v-if="t.streaming && t.answer" class="caret" />
+            <div v-if="t.streaming && t.answer && elapsed" class="live-sec">
+              还在跑 · {{ elapsed }}s
+            </div>
             <div v-if="t.error" class="error box">{{ t.error }}</div>
             <!-- 用户自己按的终止：半截回答留住，标一句（不是错误） -->
             <div v-if="t.stopped" class="stopped">已终止（下面是已经查到的部分）</div>
@@ -662,6 +694,12 @@ const title = computed(() => activeThread.value?.title || '数据问答')
   margin-top: 8px;
   font-size: 11.5px;
   color: var(--muted);
+}
+/* 已跑秒数：在动 = 后端还在干活（好区分"慢"和"卡"） */
+.live-sec {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── 轮次内部（跟之前一样的那些小块） ── */

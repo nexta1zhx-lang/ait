@@ -280,18 +280,31 @@ let stopStream: (() => void) | null = null
 let userStopped = false
 
 /**
+ * 当前那一跑的**收尾函数**。
+ *
+ * ⚠️⚠️ 这个是 2026-10-16 补的，补之前「终止」按了像没反应 —— 原因是：
+ *    终止 = 关掉 SSE 连接，而**关了之后 `onDone` / `onError` 一个都不会再来**，
+ *    于是收尾那几行（`streaming=false` / `askBusy=false` / 存盘）永远不执行：
+ *    界面一直停在「正在查库」、输入框一直禁用，再按一次终止也没用（`stopStream` 已置空）。
+ *    所以终止必须**自己**把这一轮收掉，不能指望那条流再回话。
+ */
+let currentFinish: (() => void) | null = null
+
+/**
  * 终止当前这一跑（用户按的按钮、或者离开 / 清空时顺手收掉）。
  *
  * ⚠️ 前端的「终止」= **关掉 SSE 连接**。后端那边的取数循环会跟着结束 ——
  *    它听的是 `res.close`（见 `server.ts` 的 `handleAskStream`）：
  *    连接一断就 `AbortController.abort()`，正在等的大模型请求和剩下的工具调用都停。
  *    所以这里不用再单独发一个"取消"请求。
+ * ⚠️ 但**前端自己也要收尾**（见 `currentFinish` 那段）：关连接不会带回任何回调。
  */
 export function stopAsk(): void {
-  if (!stopStream) return
+  if (!stopStream && !currentFinish) return
   userStopped = true
-  stopStream()
+  stopStream?.()
   stopStream = null
+  currentFinish?.()
 }
 
 /**
@@ -347,6 +360,7 @@ export async function ask(question: string): Promise<void> {
 
   await new Promise<void>(resolve => {
     const finish = (): void => {
+      currentFinish = null
       entry.streaming = false
       /*
        * 用户按了终止：把半截回答留住并标出来。
@@ -358,6 +372,10 @@ export async function ask(question: string): Promise<void> {
       if (userStopped) {
         entry.stopped = true
         entry.ok = false
+        /*
+         * 一个字都没出来（还在第一轮取数）→ 留一句人话，别让气泡是空的；
+         * 已经有半截回答的**留着**（他可能正是靠那半截看出来它在瞎查）。
+         */
         if (!entry.error && !entry.answer) entry.error = '已终止'
       }
       stopStream = null
@@ -366,6 +384,7 @@ export async function ask(question: string): Promise<void> {
       save()
       resolve()
     }
+    currentFinish = finish
     stopStream = askStream(q, history, {
       onRound: (round, max) => {
         entry.round = round
