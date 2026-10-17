@@ -9,8 +9,7 @@
  * 数据来自「../ticker」（15 秒刷一次），拿不到就显示「—」，不挡页面。
  */
 import {computed, onBeforeUnmount, ref, watch} from 'vue'
-import {bjTime, fixed, fmt, price} from '../format'
-import {lockLeftMs, lockText, lockUntilOf} from '../blacklist'
+import {fixed, fmt, price} from '../format'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
 import {priceDigitsOf} from '../store'
 
@@ -168,24 +167,6 @@ const rows = computed(() => {
   return [{k: '24h成交额', v: big(d?.quoteVolume24h)}]
 })
 
-/**
- * **黑名单倒计时**（用户 2026-10-10）：「加入黑名单后 24 小时不得开单，**右侧显示倒计时**」
- * —— 2026-10-17 起锁 8 小时（`blacklistHours`，以后端回的为准）。
- *
- * 就摆在价格那一行的右端（MM 徽章那一排）—— 在 K 线上看盘时一眼能看到还剩多久。
- *
- * ⚠️ 跟着 `nowTick`（每秒跳）走：在这里直接读 `Date.now()` 的话模板不会重算，
- *    那串数字会定住不动。
- */
-const lockLeft = computed(() => lockLeftMs(props.symbol, nowTick.value))
-const lockLabel = computed(() => lockText(lockLeft.value))
-const lockTitle = computed(() => {
-  const until = lockUntilOf(props.symbol)
-  return (
-    `${props.symbol.toUpperCase()} 在黑名单里：还有 ${lockLabel.value} 才能开单` +
-    (until > 0 ? `（约 ${bjTime(until)} 解锁）` : '')
-  )
-})
 </script>
 
 <template>
@@ -216,34 +197,6 @@ const lockTitle = computed(() => {
           </svg>
           <span class="tk-delta">{{ changeAbs }}</span>
           <b>{{ changePct }}</b>
-        </span>
-        <!--
-          **黑名单倒计时**（用户 2026-10-10）：「加入黑名单后 24 小时不得开单，右侧显示倒计时」
-          —— 2026-10-17 起锁 8 小时。
-          跟 MM 徽章同一排（价格那一行的右端）—— 看盘时一眼看到还剩多久。
-          ⚠️ 秒表跟着 `nowTick` 走（见上面 `lockLeft`），别改成自己读 `Date.now()`。
-        -->
-        <span v-if="lockLeft > 0" class="tk-lock" :title="lockTitle">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M7.5 10V7.2a4.5 4.5 0 0 1 9 0V10"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-            />
-            <rect
-              x="4.5"
-              y="10"
-              width="15"
-              height="10.5"
-              rx="2.2"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            />
-          </svg>
-          <b class="num">{{ lockLabel }}</b>
         </span>
         <!--
           价格这一行的**最右边**（谁给内容由外层插槽决定，这个组件本身不认得具体徽章）——

@@ -353,26 +353,42 @@ export const togglePin = (base: string) =>
 
 /* ---------------- 黑名单（每用户，2026-10-10） ---------------- */
 
-/**
- * 锁着的币 + 各自解锁时刻（用户 2026-10-10：「加入黑名单后 24 小时不得开单」→ 2026-10-17 改 8 小时）。
- *
- * ⚠️ 只有**读**和**锁**，没有「解锁」：这是给自己上锁用的，到期自动失效
- *    （留个解锁按钮就等于没锁）。`hours` 是后端定的时长（24）。
- */
-export const fetchBlacklist = () =>
-  get<{entries: {base: string; until: string}[]; hours: number}>('/api/blacklist')
+/** 黑名单列表的形状（`hours` = 默认时长，`maxHours` = 上限，前端那片选择器照着画） */
+export interface BlacklistPayload {
+  entries: {base: string; until: string}[]
+  hours: number
+  maxHours: number
+}
 
-/** 把一个币关进去；回来的是**锁完之后的完整列表**（跟前端那份对齐） */
-export const lockBase = (base: string) =>
+/**
+ * 锁着的币 + 各自解锁时刻（用户 2026-10-10）。2026-10-18 起时长每次自己选（1 – 24 小时）。
+ */
+export const fetchBlacklist = () => get<BlacklistPayload>('/api/blacklist')
+
+/** 把一个币关进去 `hours` 小时；回来的是**锁完之后的完整列表**（跟前端那份对齐） */
+export const lockBase = (base: string, hours: number) =>
+  post<
+    BlacklistPayload & {
+      /** 本来就在锁里（没续期） */
+      already: boolean
+      /** 这一条的解锁时刻 */
+      until: string
+      error: string | null
+    }
+  >('/api/blacklist', {base, hours})
+
+/**
+ * 提前解除（2026-10-18）。
+ *
+ * ⚠️ 只给「连点那颗 🚫 八下」的手势用 —— 界面上没有解锁按钮，这是给自己上的锁。
+ */
+export const unlockBase = (base: string) =>
   post<{
     entries: {base: string; until: string}[]
-    hours: number
-    /** 本来就在锁里（没续期） */
-    already: boolean
-    /** 这一条的解锁时刻 */
-    until: string
+    /** 之前真的锁着（`false` = 本来就没锁 / 已经过期） */
+    removed: boolean
     error: string | null
-  }>('/api/blacklist', {base})
+  }>('/api/blacklist/unlock', {base})
 
 /* ---------------- 通用 ---------------- */
 

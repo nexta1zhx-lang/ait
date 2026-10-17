@@ -126,7 +126,14 @@ import {
   verifyTotp
 } from './util/totp'
 import {MAX_PINS, listPins, togglePin} from './db/pins'
-import {BLACKLIST_HOURS, listBlacklist, lockBase, lockedUntil} from './db/blacklist'
+import {
+  BLACKLIST_DEFAULT_HOURS,
+  BLACKLIST_MAX_HOURS,
+  listBlacklist,
+  lockBase,
+  lockedUntil,
+  unlockBase
+} from './db/blacklist'
 import {getStatsSettings, saveStatsSettings} from './db/stats-settings'
 import {getScanParams, saveScanParams} from './db/scan-settings'
 import {
@@ -3005,28 +3012,54 @@ async function route(
   /* ---- 黑名单（每用户，2026-10-10）---- */
   /*
    * 用户：「在 k 线界面收藏按钮旁加个图标，点击后弹窗确认，加入黑名单后 24 小时不得开单」
-   * → 2026-10-17「黑名单机制改为 8 小时」（时长见 `db/blacklist.ts` 的 `BLACKLIST_HOURS`，
-   *   接口把它一起回给前端，所以前端文案/倒计时会自己跟着变）。
+   * → 2026-10-17「黑名单机制改为 8 小时」
+   * → 2026-10-18「可选择封禁时间，最大 24 小时……点击 8 次可取消封禁」：
+   *   时长改成**每次自己选**（`hours`，1 – 24，见 `db/blacklist.ts` 的 `clampHours`）。
    *
-   * ⚠️ **没有「解锁」接口** —— 到期自己失效（`until > now()` 才算锁着）。
-   *    这是给自己上锁用的，留个按钮就等于没锁（要强行解开得直接改库，有摩擦就够了）。
+   * `hours` / `maxHours` 一起回给前端：那是「默认值」和「上限」，前端那颗选择器照着画。
    */
   if (p === '/api/blacklist' && method === 'GET') {
     const entries = await listBlacklist(me.id)
-    return sendJson(res, 200, {entries, hours: BLACKLIST_HOURS})
+    return sendJson(res, 200, {
+      entries,
+      hours: BLACKLIST_DEFAULT_HOURS,
+      maxHours: BLACKLIST_MAX_HOURS
+    })
   }
 
-  /** 关进去 `BLACKLIST_HOURS` 小时（用户 2026-10-17 定的是 8）—— 前端那颗小锁按一下才走到这儿 */
+  /** 关进去 `hours` 小时（默认 8、上限 24），前端那颗 🚫 按一下才走到这儿 */
   if (p === '/api/blacklist' && method === 'POST') {
     const body = await readJsonBody(req).catch(() => null)
     if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
     try {
-      const r = await lockBase(me.id, str(body.base))
+      const r = await lockBase(me.id, str(body.base), Number(body.hours))
       return sendJson(res, 200, {
         entries: await listBlacklist(me.id),
-        hours: BLACKLIST_HOURS,
+        hours: BLACKLIST_DEFAULT_HOURS,
+        maxHours: BLACKLIST_MAX_HOURS,
         already: r.already,
         until: r.entry.until,
+        error: null
+      })
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  /**
+   * 提前解除 —— **只服务前端那个「连点 8 下」的手势**（用户 2026-10-18）。
+   *
+   * ⚠️ 别在页面上给它加按钮入口：这个锁是给自己上的，随手能解开就等于没锁；
+   *    连点 8 下 + 一次性确认，是刻意留的那点摩擦。
+   */
+  if (p === '/api/blacklist/unlock' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const had = await unlockBase(me.id, str(body.base))
+      return sendJson(res, 200, {
+        entries: await listBlacklist(me.id),
+        removed: had,
         error: null
       })
     } catch (e) {

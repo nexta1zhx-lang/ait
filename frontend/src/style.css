@@ -4799,7 +4799,8 @@ body.fixed-viewport .split {
 
 /*
  * 黑名单那颗小锁（挨着收藏那颗星，用户 2026-10-10）：
- * 点一下 → 确认框 → 这个币 24 小时不能开单。锁着的时候**染成警示色**。
+ * 点一下 → 选时长（1 – 24 小时）→ 这个币这段时间不能开单；锁着的时候**染成警示色**，
+ * 右边紧跟着倒计时（见下面 `.tk-ban-left`）。
  */
 .tk-head .tk-ban {
   flex: 0 0 auto;
@@ -4821,8 +4822,8 @@ body.fixed-viewport .split {
 }
 
 /*
- * ⚠️ 锁着时这颗是 `disabled`（不让重复点、也没法解锁），但**不能灰掉** ——
- *    它表示「锁生效中」，灰掉会被读成「这功能不可用」。所以把 disabled 的透明度顶回来。
+ * 锁着时这颗**仍然可点**（2026-10-18 起：连点八下 = 提前解除，见 `AnalyzeView` 的
+ * `onBanTap`），所以只是染成警示色，别灰掉 —— 灰掉会被读成「这功能不可用」。
  */
 .tk-head .tk-ban.on,
 .tk-head .tk-ban.on:disabled {
@@ -4831,32 +4832,25 @@ body.fixed-viewport .split {
 }
 
 /*
- * 右上角那枚**黑名单倒计时**（用户 2026-10-10：「右侧显示倒计时」）——
- * 摆在价格那一行的右端，跟 MM 徽章同一排。
+ * **黑名单倒计时**（用户 2026-10-10 要的倒计时；2026-10-18 位置改到「图标旁」）——
+ * 就贴在币种行那颗 🚫 的右边，不是一个单独的胶囊（原来在价格行右端，离图标太远，
+ * 看到倒计时还得回头找是哪个币锁着）。
+ *
+ * 尺寸跟着那颗小图标走：11px、不换行、数字等宽 —— 秒表每秒跳，不等宽会左右抖。
  */
-.tk-head .tk-lock {
+.tk-ban-wrap {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: 8px;
-  padding: 1px 7px;
-  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bad) 14%, transparent);
-  color: color-mix(in srgb, var(--bad) 88%, var(--text));
+  min-width: 0;
+}
+.tk-ban-left {
   font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.tk-head .tk-lock svg {
-  flex: 0 0 auto;
-  width: 11px;
-  height: 11px;
-}
-
-.tk-head .tk-lock b {
+  line-height: 1;
   font-weight: var(--fw-mid, 500);
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--bad) 88%, var(--text));
+  white-space: nowrap;
 }
 
 /*

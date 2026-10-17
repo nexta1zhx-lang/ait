@@ -3,11 +3,16 @@
  *
  * 用户原话：「在 k 线界面收藏按钮旁加个图标，点击后弹窗确认，加入黑名单后 24 小时
  * 不得开单，右侧显示倒计时，做单按钮禁用」。
- * ★ 2026-10-17 用户改口：「黑名单机制改为 8 小时」——时长就是下面那个常量，只改这里。
+ * ★ 2026-10-17 用户改口：「黑名单机制改为 8 小时」。
+ * ★ 2026-10-18 用户：「黑名单机制修改，可选择封禁时间，最大 24 小时……
+ *   点击 8 次可取消封禁，需弹窗，像进入开发者模式那样」
+ *   ⇒ 时长变成**每次自己选**（1 – 24 小时，默认 `BLACKLIST_DEFAULT_HOURS`）；
+ *     另外多了一个 `unlockBase()`：只给前端那个「连点 8 下」的手势用，
+ *     页面上**没有**解锁按钮 —— 摩擦还在，只是从「改库」变成「连点 8 下 + 再确认一次」。
  *
  * 用途是**给自己上锁**（防手痒、报复性开单），所以三条口径：
  *   · **只锁开单**，不锁平仓 —— 手里有仓还得能跑（锁住不让出是要出事的）；
- *   · **不能提前解除**：到期自动失效，接口里没有「解锁」（要改就得改库，从而有摩擦）；
+ *   · 默认**不能提前解除**（界面上那颗图标是禁用的样子），到期自动失效；
  *   · 按 `user_id` + `base` 存库，换设备也带着（跟 `user_pins` 一个路数）。
  *
  * 有效性判定一律用数据库的 `now()`（`until > now()`）—— 前端那份倒计时只是显示。
@@ -15,11 +20,23 @@
 import {query, queryOne} from './client'
 import {normalizeBase} from './pins'
 
+/** 没选时长时锁多久（小时）—— 2026-10-17 用户定的 8（原来是写死 24） */
+export const BLACKLIST_DEFAULT_HOURS = 8
+
+/** 一次最多锁多久（小时）—— 用户 2026-10-18：「可选择封禁时间，最大 24 小时」 */
+export const BLACKLIST_MAX_HOURS = 24
+
 /**
- * 锁多久（小时）—— 用户 2026-10-17：「黑名单机制改为 8 小时」（原来是 24）。
- * 写死，别做成可配：前端那份文案 / 倒计时都跟着这个数走（接口把它一起回给前端）。
+ * 把外面传进来的小时数收敛成合法值。
+ *
+ * 前端给的是滑条 / 档位，正常不会越界；但接口是公开的（同一账号的任何客户端都能调），
+ * 所以这里必须自己夹一遍 —— 不夹的话 `hours: 0` 等于没锁、`hours: 9999` 等于永久封。
  */
-export const BLACKLIST_HOURS = 8
+export function clampHours(v: unknown): number {
+  const n = Math.round(Number(v))
+  if (!Number.isFinite(n) || n < 1) return BLACKLIST_DEFAULT_HOURS
+  return Math.min(BLACKLIST_MAX_HOURS, n)
+}
 
 export interface BlacklistEntry {
   /** 币种简称（`BTC`） */
@@ -44,16 +61,17 @@ export async function listBlacklist(userId: number | null): Promise<BlacklistEnt
 }
 
 /**
- * 把一个币关进去 `BLACKLIST_HOURS` 小时。
+ * 把一个币关进去 `hours` 小时（不传就用默认 8；上限 24，见 `clampHours`）。
  *
- * ⚠️ **已经在锁里的不续期**（不把 until 往后推）：前台那颗图标在锁着的时候是禁用的，
- *    能走到这儿说明是（比如）另一个设备刚点过 —— 那种情况下把时间越推越远不合适，
- *    用户看到的就是「我明明只锁了 8 小时，怎么越锁越久」。
+ * ⚠️ **已经在锁里的不续期**（不把 until 往后推）：前台那颗图标锁着的时候就不往「加锁」
+ *    这条路上走了，能走到这儿说明是（比如）另一个设备刚点过 —— 那种情况下把时间越推越远
+ *    不合适，用户看到的就是「我明明只锁了 8 小时，怎么越锁越久」。
  * @returns 这一条最后的解锁时刻 + 是不是本来就在锁里
  */
 export async function lockBase(
   userId: number,
-  rawBase: string
+  rawBase: string,
+  hours: number = BLACKLIST_DEFAULT_HOURS
 ): Promise<{entry: BlacklistEntry; already: boolean}> {
   const base = normalizeBase(rawBase)
   const now = await queryOne<{until: Date}>(
@@ -75,16 +93,35 @@ export async function lockBase(
   }
   const rows = await query<{until: Date}>(
     `INSERT INTO user_blacklist (user_id, base, until)
-     VALUES ($1, $2, now() + interval '${BLACKLIST_HOURS} hours')
+     VALUES ($1, $2, now() + make_interval(hours => $3::int))
      ON CONFLICT (user_id, base)
-       DO UPDATE SET until = now() + interval '${BLACKLIST_HOURS} hours'
+       DO UPDATE SET until = now() + make_interval(hours => $3::int)
      RETURNING until`,
-    [userId, base]
+    [userId, base, clampHours(hours)]
   )
   return {
     entry: {base, until: new Date(String(rows[0]!.until)).toISOString()},
     already: false
   }
+}
+
+/**
+ * 提前解除（用户 2026-10-18：「点击 8 次可取消封禁，需弹窗，像进入开发者模式那样」）。
+ *
+ * ⚠️ 这个函数**只给那个连点手势用**：页面上没有「解锁」按钮，接口也不在导航里露出。
+ *    连点 8 下 + 再确认一次，是「明知道自己在干什么」的代价，不是随手一点。
+ * @returns 之前是否真的锁着（`false` = 本来就没锁 / 已经过期）
+ */
+export async function unlockBase(
+  userId: number,
+  rawBase: string
+): Promise<boolean> {
+  const base = normalizeBase(rawBase)
+  const rows = await query<{base: string}>(
+    'DELETE FROM user_blacklist WHERE user_id = $1 AND base = $2 RETURNING base',
+    [userId, base]
+  )
+  return rows.length > 0
 }
 
 /**

@@ -27,6 +27,7 @@ import SegTabs from '../comps/SegTabs.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import JournalView from './JournalView.vue'
+import BanSheet from '../comps/BanSheet.vue'
 import AutoPredictView from './AutoPredictView.vue'
 import {
   ensurePins,
@@ -36,9 +37,13 @@ import {
 } from '../pins'
 import {
   blacklistHours,
+  blacklistMaxHours,
   ensureBlacklist,
   lockCurrentBase,
-  lockLeftMs
+  lockLeftMs,
+  lockText,
+  lockUntilOf,
+  unlockCurrentBase
 } from '../blacklist'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
@@ -414,34 +419,105 @@ const currentSymbolLocked = computed(
 )
 const banBusy = ref(false)
 
-/**
- * 「加入黑名单」——**必须二次确认**，而且把话说全。
- *
- * 这是给自己上锁：点下去 `blacklistHours` 小时（后端定的，2026-10-17 起是 8）内
- * 开不了这个币的单，**而且没有提前解锁**。
- * 所以确认框里三件事都要写清楚（锁多久 / 平仓不受影响 / 不能提前解除），
- * 别让人以为跟收藏一样点错了再点一下就能回来。
- */
-async function confirmBlacklist(): Promise<void> {
+/** 倒计时那串字（跟 `nowTick` 每秒跳，别改成读 `Date.now()`） */
+const currentLockLeft = computed(() =>
+  lockLeftMs(symbol.value.trim().toUpperCase(), nowTick.value)
+)
+const currentLockLabel = computed(() => lockText(currentLockLeft.value))
+const currentLockTitle = computed(() => {
   const base = symbol.value.trim().toUpperCase()
-  if (!base || banBusy.value || currentSymbolLocked.value) return
+  const until = lockUntilOf(base)
+  return (
+    `${base} 在黑名单里：还有 ${currentLockLabel.value} 才能开单` +
+    (until > 0 ? `（约 ${bjTime(until)} 解除）` : '') +
+    ' · 连点这颗八下可提前解除'
+  )
+})
+
+/**
+ * 「加入黑名单」弹层（2026-10-18 用户：「可选择封禁时间，最大 24 小时」）。
+ *
+ * 以前是个 `askConfirm`，时长写死在后端；现在时长要选，而确认框的正文只能放文字，
+ * 所以换成 `BanSheet`（里面一次说清后果 + 选时长 + 确认）。
+ */
+const banOpen = ref(false)
+
+async function doLock(hours: number): Promise<void> {
+  const base = symbol.value.trim().toUpperCase()
+  if (!base || banBusy.value) return
+  banBusy.value = true
+  try {
+    const until = await lockCurrentBase(base, hours)
+    banOpen.value = false
+    showToast(`已把 ${base} 关进黑名单：${bjTime(until)} 才能开单`, 'ok')
+  } catch (e) {
+    showToast((e as Error).message, 'bad')
+  } finally {
+    banBusy.value = false
+  }
+}
+
+/* ---------------- 连点八下解锁（用户 2026-10-18） ---------------- */
+
+/**
+ * 「点击 8 次可取消封禁，需弹窗，像进入开发者模式那样」。
+ *
+ * 所以那颗 🚫 锁着的时候**不再是禁用态**：点一下记一次，攒够 8 次再弹确认框。
+ * 这是刻意留的摩擦（这锁就是给自己上的），所以：
+ *   · 每点一下给一句「再点 N 次」——不告诉进度的话没人知道能解开；
+ *   · 停手 2 秒、或者换了币，计数就清零（免得零散点着点着突然弹窗）；
+ *   · 攒够 8 次之后仍然要**点确认**才真的解。
+ */
+const BAN_TAPS = 8
+const BAN_TAP_RESET_MS = 2000
+const banTaps = ref(0)
+let banTapTimer: number | null = null
+
+function resetBanTaps(): void {
+  banTaps.value = 0
+  if (banTapTimer !== null) {
+    window.clearTimeout(banTapTimer)
+    banTapTimer = null
+  }
+}
+
+watch(symbol, () => resetBanTaps())
+
+async function onBanTap(): Promise<void> {
+  const base = symbol.value.trim().toUpperCase()
+  if (!base || banBusy.value) return
+  /* 没锁：弹那个选时长的弹层 */
+  if (!currentSymbolLocked.value) {
+    resetBanTaps()
+    banOpen.value = true
+    return
+  }
+  /* 锁着：攒连点 */
+  if (banTapTimer !== null) window.clearTimeout(banTapTimer)
+  banTapTimer = window.setTimeout(resetBanTaps, BAN_TAP_RESET_MS)
+  banTaps.value += 1
+  const left = BAN_TAPS - banTaps.value
+  if (left > 0) {
+    showToast(`再点 ${left} 次解除封禁（${banTaps.value}/${BAN_TAPS}）`)
+    return
+  }
+  resetBanTaps()
   const ok = await askConfirm({
-    title: `把 ${base} 加入黑名单？`,
+    title: `解除 ${base} 的黑名单？`,
     body: [
-      {t: `加入后 ${blacklistHours.value} 小时内不能开 ${base} 的单。`, tone: 'warn'},
-      {t: '减仓 / 平仓不受影响 —— 手里有仓随时能跑。', tone: 'num'},
-      {t: '⚠️ 这期间不能提前解除，到点自动失效。', tone: 'warn'}
+      {t: `解开之后立刻就能开 ${base} 的单。`, tone: 'warn'},
+      '这个锁本来是为了防手痒 —— 确定现在就要解开？'
     ],
-    okText: '加入黑名单',
+    okText: '解除封禁',
     danger: true
   })
   if (!ok) return
   banBusy.value = true
   try {
-    const until = await lockCurrentBase(base)
+    const had = await unlockCurrentBase(base)
     showToast(
-      `已把 ${base} 关进黑名单：${bjTime(until)} 才能开单`,
-      'ok'
+      had ? `已解除 ${base} 的黑名单` : `${base} 本来就不在黑名单里`,
+      had ? 'ok' : undefined
     )
   } catch (e) {
     showToast((e as Error).message, 'bad')
@@ -679,46 +755,55 @@ onDeactivated(() => {
                 </button>
                 <!--
                   黑名单（用户 2026-10-10）：挨着收藏那颗星。
-                  点一下 → 确认框 → 这个币 8 小时不能开单（**后端也拦**，不是只禁按钮；
-                  时长以后端 `BLACKLIST_HOURS` 为准，2026-10-17 从 24 缩到 8）。
-                  ⚠️ 已经在黑名单里就**禁用**：解锁只能等时间到（没有「点一下出来」这回事，
-                     不然就成了「点错再点回来」，那这锁就没意义了）。
+                  ★ 2026-10-18：时长自己选（`BanSheet`，1 – 24 小时），
+                    倒计时就贴在**这颗图标旁边**（用户：「封禁时间放在图标旁」），
+                    锁着的时候点它不再禁用 —— **连点八下**弹确认框可以提前解。
+                  ⚠️ 真正拦下单的是后端那一道闸，这里只是显示与入口。
                 -->
-                <button
-                  type="button"
-                  class="ghost tiny tk-ban"
-                  :class="{on: currentSymbolLocked}"
-                  :disabled="banBusy || currentSymbolLocked || !symbol.trim()"
-                  :aria-label="
-                    currentSymbolLocked
-                      ? `${symbol.toUpperCase()} 在黑名单里`
-                      : `把 ${symbol.toUpperCase()} 加入黑名单`
-                  "
-                  :title="
-                    currentSymbolLocked
-                      ? `${symbol.toUpperCase()} 已在黑名单（倒计时见右侧），到点自动解除`
-                      : `加入黑名单：${blacklistHours} 小时内不能开这个币的单`
-                  "
-                  @click="confirmBlacklist"
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <circle
-                      cx="12"
-                      cy="12"
-                      r="8.6"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                    />
-                    <path
-                      d="M6.2 17.8L17.8 6.2"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      stroke-linecap="round"
-                    />
-                  </svg>
-                </button>
+                <span class="tk-ban-wrap">
+                  <button
+                    type="button"
+                    class="ghost tiny tk-ban"
+                    :class="{on: currentSymbolLocked}"
+                    :disabled="banBusy || !symbol.trim()"
+                    :aria-label="
+                      currentSymbolLocked
+                        ? `${symbol.toUpperCase()} 在黑名单里，还有 ${currentLockLabel}`
+                        : `把 ${symbol.toUpperCase()} 加入黑名单`
+                    "
+                    :title="
+                      currentSymbolLocked
+                        ? currentLockTitle
+                        : `加入黑名单：选一个时长（最多 ${blacklistMaxHours} 小时），这期间不能开这个币的单`
+                    "
+                    @click="onBanTap"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="8.6"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                      />
+                      <path
+                        d="M6.2 17.8L17.8 6.2"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                      />
+                    </svg>
+                  </button>
+                  <!-- 倒计时（锁着才有）：紧挨着图标，看盘时一眼看到还剩多久 -->
+                  <b
+                    v-if="currentSymbolLocked"
+                    class="tk-ban-left"
+                    :title="currentLockTitle"
+                    >{{ currentLockLabel }}</b
+                  >
+                </span>
               </template>
               <!--
                 大字价格那一行的最右端（用户 2026-10-07：「mm放在 下面最右侧和价格那一排」）——
@@ -898,5 +983,15 @@ onDeactivated(() => {
 
     <!-- 配置：从底部弹出来（入口在 K 线头部最右边那颗齿轮） -->
     <SettingsSheet :open="cfgOpen" @close="cfgOpen = false" />
+
+    <!-- 加入黑名单：选时长 + 确认（2026-10-18） -->
+    <BanSheet
+      :open="banOpen"
+      :base="symbol.trim().toUpperCase()"
+      :default-hours="blacklistHours"
+      :busy="banBusy"
+      @close="banOpen = false"
+      @confirm="doLock"
+    />
   </div>
 </template>
