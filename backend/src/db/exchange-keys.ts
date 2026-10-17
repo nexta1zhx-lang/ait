@@ -44,6 +44,11 @@ export interface ExchangeKey {
   marketType: string
   sandbox: boolean
   isDefault: boolean
+  /**
+   * 被隐藏了（用户 2026-10-18：「添加隐藏按钮，隐藏后不再渲染」）。
+   * 隐藏 ≠ 删除：Key 还在、列表里点「显示」就能恢复，但**别的页面一概不渲染**它。
+   */
+  hidden: boolean
   createdAt: string
   updatedAt: string
 }
@@ -58,6 +63,7 @@ interface Raw {
   market_type: string
   sandbox: boolean
   is_default: boolean
+  hidden: boolean
   created_at: Date
   updated_at: Date
 }
@@ -72,12 +78,13 @@ const map = (r: Raw): ExchangeKey => ({
   marketType: r.market_type,
   sandbox: Boolean(r.sandbox),
   isDefault: Boolean(r.is_default),
+  hidden: Boolean(r.hidden),
   createdAt: r.created_at.toISOString(),
   updatedAt: r.updated_at.toISOString()
 })
 
 const COLS = `id, exchange, name, api_key, secret, password, market_type,
-  sandbox, is_default, created_at, updated_at`
+  sandbox, is_default, hidden, created_at, updated_at`
 
 /** 掩码：`abcd1234wxyz` → `abcd****wxyz`（够认出是哪把，又偷不走） */
 export function maskCred(v: string): string {
@@ -135,24 +142,40 @@ function cleanCred(v: unknown): string {
  * **一套都没有就自动建一套「默认」** —— 前端永远有东西可编辑。
  */
 export async function listExchangeKeys(
-  userId: number
+  userId: number,
+  opts: {
+    /**
+     * 连**被隐藏**的一起列（只有「我的 → 个人信息 → 交易所」那个管理列表要，
+     * 别处一律不带 —— 用户 2026-10-18：「隐藏后不再渲染」）。
+     */
+    all?: boolean
+  } = {}
 ): Promise<ExchangeKey[]> {
-  let rows = await query<Raw>(
-    `SELECT ${COLS} FROM user_exchange_keys
-      WHERE user_id = $1
-      ORDER BY sort, id`,
-    [userId]
-  )
-  if (!rows.length) {
-    await query(
-      `INSERT INTO user_exchange_keys (user_id, exchange, name, is_default)
-       VALUES ($1, 'binance', $2, true)`,
-      [userId, DEFAULT_EXCHANGE_KEY_NAME]
-    )
-    rows = await query<Raw>(
-      `SELECT ${COLS} FROM user_exchange_keys WHERE user_id = $1 ORDER BY sort, id`,
+  const sql = `SELECT ${COLS} FROM user_exchange_keys
+      WHERE user_id = $1${opts.all ? '' : ' AND NOT hidden'}
+      ORDER BY sort, id`
+  let rows = await query<Raw>(sql, [userId])
+  if (!rows.length && !opts.all) {
+    /*
+     * 一套可见的都没有（新用户，或者**每一套都被隐藏了**）——
+     * 只在**真空**（一行都没有）时自动建一套；全被隐藏就照实返回空，
+     * 管理列表里还能把某套点「显示」恢复出来。
+     */
+    const total = await query<{n: string}>(
+      'SELECT count(*)::text AS n FROM user_exchange_keys WHERE user_id = $1',
       [userId]
     )
+    if (!Number(total[0]?.n ?? 0)) {
+      await query(
+        `INSERT INTO user_exchange_keys (user_id, exchange, name, is_default)
+         VALUES ($1, 'binance', $2, true)`,
+        [userId, DEFAULT_EXCHANGE_KEY_NAME]
+      )
+      rows = await query<Raw>(
+        `SELECT ${COLS} FROM user_exchange_keys WHERE user_id = $1 ORDER BY sort, id`,
+        [userId]
+      )
+    }
   }
   return rows.map(map)
 }
@@ -357,6 +380,53 @@ export async function deleteExchangeKey(
     await query(
       `UPDATE user_exchange_keys SET is_default = true
         WHERE id = (SELECT id FROM user_exchange_keys WHERE user_id = $1 ORDER BY id LIMIT 1)`,
+      [userId]
+    )
+  }
+  return true
+}
+
+/**
+ * 隐藏 / 显示一套（用户 2026-10-18：「添加隐藏按钮，隐藏后不再渲染」）。
+ *
+ * 规则：
+ *   · **不能把最后一套可见的也隐藏掉** —— 那样各页一个账户都没有，等于自己把自己锁死；
+ *     要清空请直接删。
+ *   · 隐藏的是**默认那套**时，顺手把默认挪给另一套可见的（不然下单 / 账户页
+ *     默认解析到一个看不见的账户上，人会莫名其妙）。
+ */
+export async function setExchangeKeyHidden(
+  userId: number,
+  id: number,
+  hidden: boolean
+): Promise<boolean> {
+  const current = await getExchangeKey(userId, id)
+  if (!current) return false
+  if (hidden) {
+    const others = await query<{n: string}>(
+      `SELECT count(*)::text AS n FROM user_exchange_keys
+        WHERE user_id = $1 AND NOT hidden AND id <> $2`,
+      [userId, id]
+    )
+    if (!Number(others[0]?.n ?? 0))
+      throw new Error('至少留一套不隐藏的账户（要清空请直接删）')
+  }
+  await query(
+    `UPDATE user_exchange_keys SET hidden = $3, updated_at = now()
+      WHERE user_id = $1 AND id = $2`,
+    [userId, id, hidden]
+  )
+  if (hidden && current.isDefault) {
+    await query(
+      `UPDATE user_exchange_keys SET is_default = false
+        WHERE user_id = $1 AND id = $2`,
+      [userId, id]
+    )
+    await query(
+      `UPDATE user_exchange_keys SET is_default = true
+        WHERE id = (SELECT id FROM user_exchange_keys
+                     WHERE user_id = $1 AND NOT hidden
+                     ORDER BY sort, id LIMIT 1)`,
       [userId]
     )
   }

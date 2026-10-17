@@ -170,6 +170,7 @@ import {
   maskCred,
   reorderExchangeKeys,
   setDefaultExchangeKey,
+  setExchangeKeyHidden,
   updateExchangeKey,
   type ExchangeKey
 } from './db/exchange-keys'
@@ -785,6 +786,8 @@ const publicExchangeKey = (k: ExchangeKey) => ({
   marketType: k.marketType,
   sandbox: k.sandbox,
   isDefault: k.isDefault,
+  /** 被隐藏了（只在「个人信息 → 交易所」那个管理列表里出现） */
+  hidden: k.hidden,
   createdAt: k.createdAt,
   updatedAt: k.updatedAt
 })
@@ -3790,9 +3793,15 @@ async function route(
     const cred = (v: unknown): string | undefined =>
       typeof v === 'string' ? v : undefined
 
-    // 列表（一套都没有时会自动建一套「默认」，见 db/exchange-keys.ts）
+    /*
+     * 列表（一套都没有时会自动建一套「默认」，见 db/exchange-keys.ts）。
+     * `?all=1` = 连**被隐藏**的一起给（只有「个人信息 → 交易所」那个管理列表会带；
+     * 其余页面走默认值 ⇒ 隐藏的账户一概不渲染，用户 2026-10-18）。
+     */
     if (p === '/api/exchange-keys' && method === 'GET') {
-      const keys = await listExchangeKeys(me.id)
+      const keys = await listExchangeKeys(me.id, {
+        all: url.searchParams.get('all') === '1'
+      })
       return sendJson(res, 200, {
         keys: keys.map(publicExchangeKey),
         exchanges: EXCHANGE_CATALOG,
@@ -3841,9 +3850,30 @@ async function route(
       }
     }
 
-    const m = p.match(/^\/api\/exchange-keys\/(\d+)(\/default)?$/)
+    const m = p.match(/^\/api\/exchange-keys\/(\d+)(\/default|\/hidden)?$/)
     if (!m) return sendJson(res, 404, {error: 'Not Found'})
     const id = Number(m[1])
+
+    /*
+     * 隐藏 / 显示（用户 2026-10-18：「添加隐藏按钮，隐藏后不再渲染」）。
+     * body: `{hidden: true|false}` —— 隐藏后各页（我的账户 tab / 账户统计 /
+     * 下单账户 / K 线顶栏）都拿不到这一套，只有本管理列表 `?all=1` 还看得到。
+     */
+    if (m[2] === '/hidden') {
+      if (method !== 'POST')
+        return sendJson(res, 405, {error: 'Method Not Allowed'})
+      try {
+        const body = await bodyOf()
+        const ok = await setExchangeKeyHidden(me.id, id, body.hidden !== false)
+        return sendJson(
+          res,
+          ok ? 200 : 404,
+          ok ? {ok: true} : {error: '这一套不存在'}
+        )
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
 
     // 设为默认
     if (m[2] === '/default') {

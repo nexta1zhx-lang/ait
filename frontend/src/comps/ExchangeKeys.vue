@@ -22,6 +22,7 @@ import {
   fetchExchangeKeys,
   reorderExchangeKeys,
   setDefaultExchangeKey,
+  setExchangeKeyHidden,
   updateExchangeKey,
   type ExchangeCatalogEntry,
   type ExchangeKey
@@ -66,7 +67,8 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = ''
   try {
-    const r = await fetchExchangeKeys()
+    // 管理列表要连**被隐藏**的一起拉（别的页面不传 `true`，隐藏的一律不渲染）
+    const r = await fetchExchangeKeys(true)
     keys.value = r.keys
     catalog.value = r.exchanges
     if (r.max) max.value = r.max
@@ -236,6 +238,26 @@ async function makeDefault(k: ExchangeKey): Promise<void> {
   }
 }
 
+/**
+ * 隐藏 / 显示这一套（用户 2026-10-18：「添加隐藏按钮，隐藏后不再渲染」）。
+ *
+ * 隐藏 ≠ 删除：Key 还留着，随时能点「显示」恢复；隐藏期间**别的页面一概不渲染**它
+ * （我的账户 tab / 账户统计 / 下单账户 / K 线顶栏）。后端还会顺手做两件事：
+ * 不许把最后一套可见的也隐藏、隐藏的是默认那套时把默认挪给另一套。
+ */
+async function toggleHidden(k: ExchangeKey): Promise<void> {
+  error.value = ''
+  try {
+    await setExchangeKeyHidden(k.id, !k.hidden)
+    flash(k.hidden ? '已显示' : '已隐藏（其他页面不再出现）')
+    await load()
+    // 别的页面（下单账户 / 账户 tab）读的是同一份缓存，顺手刷掉
+    void loadTradeKeys(true)
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
 async function remove(k: ExchangeKey): Promise<void> {
   const ok = await askConfirm({
     title: `删除「${k.name || labelOf(k.exchange)}」这套账户？`,
@@ -270,6 +292,9 @@ onMounted(load)
       得再勾上<b>合约交易</b>权限、并把服务器出口 IP 加进「API 限制 IP」。
       <br />
       最多绑 {{ max }} 套；<b>按住右边的 ⠿ 拖动</b>可以调顺序，各页的账户 tab 都按这个顺序排。
+      <br />
+      点<b>隐藏</b>可以把它从各页藏起来（Key 留着，随时点<b>显示</b>恢复）——
+      隐藏后「我的 → 交易所账户」「账户统计」「配置 → 下单账户」都不再出现它。
     </p>
 
     <p v-if="loading" class="dim">载入中…</p>
@@ -278,7 +303,7 @@ onMounted(load)
       <li
         v-for="(k, i) in keys"
         :key="k.id"
-        :class="{on: k.isDefault, dragging: dragFrom === i}"
+        :class="{on: k.isDefault, dragging: dragFrom === i, hidden: k.hidden}"
       >
         <div class="r-main">
           <b>{{ k.name || '（未命名）' }}</b>
@@ -288,6 +313,7 @@ onMounted(load)
           </span>
           <span v-if="k.sandbox" class="badge soft">沙盒</span>
           <span v-if="k.isDefault" class="badge me">默认</span>
+          <span v-if="k.hidden" class="badge soft">已隐藏</span>
         </div>
         <div class="r-sub">
           <code v-if="k.apiKeySet">Key {{ k.apiKey }}</code>
@@ -302,6 +328,22 @@ onMounted(load)
             @click="makeDefault(k)"
           >
             设为默认
+          </button>
+          <!--
+            隐藏 / 显示（用户 2026-10-18）：「隐藏后不再渲染」——
+            别的页面（账户 tab / 账户统计 / 下单账户）都看不到它，只有这一页还列着。
+          -->
+          <button
+            class="mini"
+            type="button"
+            :title="
+              k.hidden
+                ? '重新显示这一套（各页的账户 tab 会再出现它）'
+                : '隐藏这一套：Key 留着，但其他页面不再显示它'
+            "
+            @click="toggleHidden(k)"
+          >
+            {{ k.hidden ? '显示' : '隐藏' }}
           </button>
           <button class="mini" type="button" @click="openEdit(k)">编辑</button>
           <button class="mini danger" type="button" @click="remove(k)">
@@ -471,6 +513,10 @@ h2 small {
 }
 .rows li.on {
   border-color: var(--blue);
+}
+/* 隐藏的那一套：整行压暗，一眼看出「它这会儿不参与渲染」 */
+.rows li.hidden {
+  opacity: 0.55;
 }
 /* 正在拖的那一行：给个明显的落点反馈 */
 .rows li.dragging {

@@ -688,6 +688,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS user_exchange_keys_default_idx
 -- 渲染都按此顺序排列」）。各页的账户 tab 一律按 sort, id 排。
 -- ⚠️ 老数据全是 0 ⇒ 自然退回「按 id」那套老顺序，不用回填。
 ALTER TABLE user_exchange_keys ADD COLUMN IF NOT EXISTS sort INTEGER NOT NULL DEFAULT 0;
+-- 隐藏这一套（用户 2026-10-18：「交易所账户配置，添加隐藏按钮，隐藏后不再渲染」）。
+-- 隐藏 ≠ 删除：Key 还在、在这个列表里点「显示」就能恢复，但**其他页面一律不渲染**
+-- （我的账户 tab / 账户统计 / 下单账户 / K 线顶栏那排），列表接口默认不带出来。
+ALTER TABLE user_exchange_keys ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false;
 
 -- ──────────────────────────────── 交易所资产（2026-10-05）
 -- 只统计「USDT 合约 + C2C」两个钱包（现货不参与），方案见 docs/EXCHANGE.md。

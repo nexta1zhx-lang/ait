@@ -1294,6 +1294,12 @@ export interface ExchangeKey {
   marketType: string
   sandbox: boolean
   isDefault: boolean
+  /**
+   * 被隐藏了（用户 2026-10-18：「添加隐藏按钮，隐藏后不再渲染」）。
+   * 只有「个人信息 → 交易所」那个管理列表（`fetchExchangeKeys(true)`）才看得到；
+   * 别的页面拿到的列表里根本没有这一套。
+   */
+  hidden?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -1369,8 +1375,13 @@ export interface ExchangeIncomeRow {
   keyName?: string
 }
 
-export const fetchExchangeKeys = () =>
-  get<ExchangeKeysResult>('/api/exchange-keys')
+/**
+ * 交易所 Key 列表。
+ * `all` = 连**被隐藏**的一起拉（只有「个人信息 → 交易所」那个管理列表要，
+ * 别处一律不传 ⇒ 隐藏的账户不再渲染）。
+ */
+export const fetchExchangeKeys = (all = false) =>
+  get<ExchangeKeysResult>(all ? '/api/exchange-keys?all=1' : '/api/exchange-keys')
 
 export const createExchangeKey = (body: ExchangeKeyInput) =>
   post<{ok: boolean; id: number; key: ExchangeKey}>('/api/exchange-keys', body)
@@ -1386,6 +1397,10 @@ export const deleteExchangeKey = (id: number) =>
 
 export const setDefaultExchangeKey = (id: number) =>
   post<{ok: boolean}>(`/api/exchange-keys/${id}/default`, {})
+
+/** 隐藏 / 显示一套（隐藏后各页都不再渲染它，只剩管理列表看得到） */
+export const setExchangeKeyHidden = (id: number, hidden: boolean) =>
+  post<{ok: boolean}>(`/api/exchange-keys/${id}/hidden`, {hidden})
 
 /**
  * 拖拽排序：传**拖完之后的完整顺序**（用户 2026-10-10）。
