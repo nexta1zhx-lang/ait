@@ -30,8 +30,11 @@
  */
 import {computed, ref, watch} from 'vue'
 import {
+  CHART_H_MAX,
+  CHART_H_MIN,
   autoStopOn,
   autoStopPct,
+  chartHeightPx,
   chartShowHistory,
   chartShowLiq,
   chartShowOrders,
@@ -61,10 +64,54 @@ const emit = defineEmits<{(e: 'close'): void}>()
 watch(
   () => props.open,
   on => {
-    if (on) void loadTradeKeys()
+    if (on) {
+      void loadTradeKeys()
+      readChartNow()
+    }
   },
   {immediate: true}
 )
+
+/* ---------------- 图表高度（用户 2026-10-18） ---------------- */
+
+/**
+ * 这一页上有没有 K 线图。
+ *
+ * 这个弹层有两处入口：K 线头部那颗齿轮、以及「我的 → 交易所账户」的配置。
+ * 后者没有图，「图表高度」那一条就没意义 —— 打开时探一下有没有 `.chart-wrap`，
+ * 没有就整条不画（省得在那页留一条拖了没反应的滑条）。
+ */
+const hasChart = ref(false)
+
+/** 自动时的实际高度（px）—— 滑条没设值时停在这儿，拖起来不会「跳」一下 */
+const nowHeight = ref(320)
+
+function readChartNow(): void {
+  const el = document.querySelector('.chart-wrap')
+  hasChart.value = Boolean(el)
+  const h = Math.round(el?.getBoundingClientRect().height ?? 0)
+  /* 归到滑条的步长上（10px）—— 不然滑条会把它吸到最近的刻度、显示成 280 而不是 276 */
+  if (h > 0) {
+    const snapped = Math.round(h / 10) * 10
+    nowHeight.value = Math.min(CHART_H_MAX, Math.max(CHART_H_MIN, snapped))
+  }
+}
+
+/** 滑条显示的位置：设了就是那个值，没设（自动）就是当前实际高度 */
+const sliderH = computed(() =>
+  chartHeightPx.value > 0 ? chartHeightPx.value : nowHeight.value
+)
+
+/** 拖动 → 立刻落到配置里（图就在弹层后面跟着变） */
+function setChartHeight(v: unknown): void {
+  const n = Math.round(Number(v) || 0)
+  chartHeightPx.value = Math.min(CHART_H_MAX, Math.max(CHART_H_MIN, n))
+}
+
+/** 回到自动（把那套断点高度还回去） */
+function resetChartHeight(): void {
+  chartHeightPx.value = 0
+}
 
 /**
  * 行情过滤的输入框。
@@ -409,6 +456,40 @@ function offsetLabel(min: number): string {
       </div>
 
       <!--
+        图表高度（用户 2026-10-18）：「k 线配置中加图表高度，一个拖拽条可以配置高度」。
+        拖一下立刻生效（图就在弹层后面）；右边那颗「自动」把断点那套高度还回去。
+        ⚠️ 默认是**自动**：没摸过这条的人看到的跟以前一模一样（见 `chartHeightPx`）。
+      -->
+      <div v-if="hasChart" class="sheet-row">
+        <span class="rk">图表高度</span>
+        <div class="ctl ch-h">
+          <input
+            class="ch-range"
+            type="range"
+            :min="CHART_H_MIN"
+            :max="CHART_H_MAX"
+            step="10"
+            :value="sliderH"
+            aria-label="K 线图高度（像素）"
+            :title="`拖着调 K 线图的高度：${CHART_H_MIN} – ${CHART_H_MAX} px`"
+            @input="setChartHeight(($event.target as HTMLInputElement).value)"
+          />
+          <span class="ch-val" :class="{auto: !chartHeightPx}">
+            {{ chartHeightPx ? chartHeightPx + 'px' : '自动' }}
+          </span>
+          <button
+            v-if="chartHeightPx"
+            type="button"
+            class="ghost tiny"
+            title="回到自动（按屏幕高度那套）"
+            @click="resetChartHeight"
+          >
+            自动
+          </button>
+        </div>
+      </div>
+
+      <!--
         订单设置 —— 用户 2026-10-07 改了两次，**现在这一版是终点**：
           ① 「选项样式修改 一个边框包住，被选择的右上角有勾」→ 做过一版 2×2 的大框；
           ② 「不要加下滑线」/「分割线不要加」→ 框里那几条格子线撤了；
@@ -571,6 +652,73 @@ function offsetLabel(min: number): string {
   padding: 4px 7px;
   font-size: 11px;
 }
+/*
+ * 图表高度那一行：滑条 + 当前值 + 一颗「自动」。
+ *
+ * 滑条样式照下单那边 `.ord-bar input[type=range]` 的样子来（4px 轨道 + 空心圆滑块），
+ * 但**不共用那条选择器** —— 那条是全局的、不想让这一层去改别的弹层。
+ * ⚠️ `flex: 1 1 auto; min-width: 0` 必须给：不给的话 range 自带 129px 宽度，
+ *    这一行就撑成「标签 + 一小截滑条 + 数字」挤在右边。
+ */
+.ch-h {
+  flex: 1 1 auto;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+.ch-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  height: 22px;
+  padding: 0;
+  /* Chrome 给 range 自带 2px 左右外边距，不去掉的话两端的滑块行程对不上 */
+  margin: 0;
+  border: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.ch-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+}
+.ch-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  /* (4px 轨道 − 14px 圆) / 2 —— 圆正好骑在轨道上 */
+  margin-top: -5px;
+  border: 2px solid var(--blue);
+  border-radius: 50%;
+  background: var(--panel);
+}
+.ch-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+}
+.ch-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--blue);
+  border-radius: 50%;
+  background: var(--panel);
+}
+/* 当前值：定宽，拖动时数字变宽变窄也不让滑条跟着抽 */
+.ch-val {
+  flex: 0 0 auto;
+  min-width: 42px;
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.ch-val.auto {
+  color: var(--muted);
+}
+
 /*
  * 「订单设置」四个选项：**四个分开的小按钮、排成一行**（用户 2026-10-07：
  * 「订单四个按钮分开一行显示」）—— 不再是共用一个边框的大框，也不再有格子线；

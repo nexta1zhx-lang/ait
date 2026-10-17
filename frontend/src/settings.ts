@@ -4,6 +4,7 @@
  * 现在这几条：
  *  · `marketMinVolM` —— 行情过滤：24h 成交额低于这个数的合约不显示
  *  · `rankBase`    —— 合约行情排行榜的基准时间（24h / 某时区日切 / 任意时刻）
+ *  · `chartHeightPx` —— K 线图高度（0 = 自动，见下面那段）
  *
  * ⚠️ 2026-10-04 **删掉了「K 线缩放记忆」那套**（用户：「k 线保持样式缩放逻辑全部删掉」）：
  *    原来有 `keepChartZoom`（保持缩放开关）+ `chartBars`（全局共用的显示根数），
@@ -49,6 +50,8 @@ interface Stored {
   posSortDir?: 'asc' | 'desc'
   /** 排行榜的基准时间；缺省 = 滚动 24h —— 见 `rankBase` */
   rankBase?: StoredRankBase
+  /** K 线图高度（**px**）；缺省 / 0 = 自动（各断点原来那套）—— 见 `chartHeightPx` */
+  chartHeightPx?: number
 }
 
 function read(): Stored {
@@ -75,6 +78,7 @@ function read(): Stored {
             ? v.posSort
             : 'symbol',
         posSortDir: v.posSortDir === 'asc' || v.posSortDir === 'desc' ? v.posSortDir : undefined,
+        chartHeightPx: Number.isFinite(v.chartHeightPx) ? Number(v.chartHeightPx) : undefined,
         rankBase:
           v.rankBase && Number.isFinite(v.rankBase.v)
             ? {k: v.rankBase.k === 'at' ? 'at' : 'tz', v: v.rankBase.v}
@@ -265,6 +269,27 @@ export const chartShowOrders = ref(saved.chartShowOrders !== false)
 export const chartShowHistory = ref(saved.chartShowHistory !== false)
 
 /**
+ * K 线图的高度（**px**），0 = 自动。
+ *
+ * 用户 2026-10-18：「k 线配置中加图表高度，一个拖拽条可以配置高度」。
+ * 以前高度全写死在各断点的 CSS 里（桌面填满右栏 / ≤1040 是 50vh /
+ * 手机「K 线」那格是 `100dvh - 576px`，好让图 + 下单模块一屏放得下）；
+ * 现在给了拖拽条，人自己定 — 设了就一路盖掉那几条（见 style.css 的 `--chart-h`）。
+ *
+ * ⚠️ 默认必须是 **0（自动）**：没摸过这条的人看到的仍是原来那套高度，
+ *    不然一升级图就莫名其妙变高 / 变矮。
+ */
+export const CHART_H_MIN = 160
+export const CHART_H_MAX = 900
+
+export const chartHeightPx = ref(
+  Math.min(
+    CHART_H_MAX,
+    Math.max(0, Math.round(Number(saved.chartHeightPx) || 0))
+  )
+)
+
+/**
  * 持仓那种「价值 / 数量」的那一格显示哪个数（用户 2026-10-07：
  * 「数量和价值放一块可切换显示……切换放配置里」）。
  *
@@ -326,7 +351,8 @@ watch(
     posShowValue,
     posSort,
     posSortDir,
-    rankBase
+    rankBase,
+    chartHeightPx
   ],
   () => {
     try {
@@ -347,6 +373,7 @@ watch(
           posShowValue: posShowValue.value,
           posSort: posSort.value,
           posSortDir: posSortDir.value,
+          chartHeightPx: chartHeightPx.value || undefined,
           rankBase:
             rankBase.value.kind === 'off'
               ? undefined

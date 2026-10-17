@@ -2912,9 +2912,14 @@ body.fixed-viewport .split {
 }
 
 .chart-side .chart-wrap {
-  flex: 1 1 auto;
-  height: auto;
-  min-height: 260px;
+  /*
+   * ⚠️ 这三个值都要走 `--chart-*`：配置里那条「图表高度」一旦设了值
+   *    （`AnalyzeView` 把变量挂在 `.analyze` 上），不管哪个断点都按它来。
+   *    fallback 就是原来写死的值，没设的人看到的跟以前一模一样。
+   */
+  flex: var(--chart-flex, 1 1 auto);
+  height: var(--chart-h, auto);
+  min-height: var(--chart-minh, 260px);
   /*
    * 画布**贴卡片边**（用户 2026-10-06：「去掉左右 padding 让图贴卡片边」）——
    * 把卡片那 8px 左右内边距用负 margin 吃掉，价格轴 / 现价标签 / 右轴百分比
@@ -3782,8 +3787,8 @@ body.fixed-viewport .split {
  */
 .chart-wrap {
   position: relative;
-  height: 56vh;
-  min-height: 320px;
+  height: var(--chart-h, 56vh);
+  min-height: var(--chart-minh, 320px);
   display: flex;
 }
 
@@ -6914,7 +6919,7 @@ body.bare.fixed-viewport #app {
     grid-template-columns: 1fr;
   }
   .chart-wrap {
-    height: 50vh;
+    height: var(--chart-h, 50vh);
   }
 }
 
@@ -7528,7 +7533,7 @@ button.badge:disabled {
   }
   .split.m-chart .chart-side .chart-wrap {
     flex: 0 0 auto;
-    height: calc(100dvh - 576px);
+    height: var(--chart-h, calc(100dvh - 576px));
   }
   .split.m-chart .ord {
     flex: 1 1 auto;
@@ -7790,10 +7795,10 @@ button.badge:disabled {
     max-width: none;
   }
   .chart-side .chart-wrap {
-    flex: 1 1 auto;
-    height: auto;
+    flex: var(--chart-flex, 1 1 auto);
+    height: var(--chart-h, auto);
     /* 窄屏上限低一点：头顶有行情条、脚下是下单模块，别把它们顶出面板 */
-    min-height: 150px;
+    min-height: var(--chart-minh, 150px);
     /* 窄屏卡片本来就是通栏（左右 padding 0），别再用桌面那对负 margin 往外顶 */
     margin-left: 0;
     margin-right: 0;

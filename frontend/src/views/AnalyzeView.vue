@@ -78,6 +78,7 @@ import {
   refreshingBalance
 } from '../store'
 import {nowTick, stopTicker, watchTicker} from '../ticker'
+import {chartHeightPx} from '../settings'
 import {bjShort, bjTime} from '../format'
 
 // 结论、分析过程、报错都在 ../analyze 的模块作用域里，
@@ -476,6 +477,23 @@ const chartActive = computed(
  */
 const pageAlive = ref(true)
 
+/**
+ * 配置里那条「图表高度」（用户 2026-10-18）—— 设了就把三个 CSS 变量挂到这一页上，
+ * 盖掉各断点原来那套高度（见 style.css 里 `var(--chart-h, …)` 那几处）。
+ * 没设（0 = 自动）时返回 `undefined`，变量不出现、fallback 生效，跟以前一样。
+ */
+const chartStyle = computed(() => {
+  const px = chartHeightPx.value
+  if (!(px > 0)) return undefined
+  return {
+    '--chart-h': `${px}px`,
+    /* 设了就固定这么高：`flex: 1 1 auto` 会把它再撑开 / 压扁 */
+    '--chart-flex': '0 0 auto',
+    /* 同时清掉 min-height 的地板，不然拖到 200px 也压不下去 */
+    '--chart-minh': '0px'
+  }
+})
+
 /** 整页根节点：给「滚动位置记忆」用（见 `../scroll`） */
 const rootRef = ref<HTMLElement | null>(null)
 /*
@@ -505,7 +523,7 @@ onDeactivated(() => {
 </script>
 
 <template>
-  <div ref="rootRef" class="analyze">
+  <div ref="rootRef" class="analyze" :style="chartStyle">
     <!-- ============ 查询 ============ -->
     <!-- 币种下拉与「AI 分析」按钮都移到右边 K 线的头部了（2026-10-03 用户要求） -->
 
