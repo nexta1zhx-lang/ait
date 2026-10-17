@@ -3819,6 +3819,7 @@ async function route(
       const list = await listJournalEntries(me.id, {
         coin: str(url.searchParams.get('coin') ?? ''),
         q: str(url.searchParams.get('q') ?? ''),
+        month: str(url.searchParams.get('month') ?? ''),
         limit: Number(url.searchParams.get('limit') ?? 0) || undefined,
         offset: Number(url.searchParams.get('offset') ?? 0) || 0
       })

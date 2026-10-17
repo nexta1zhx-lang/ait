@@ -51,6 +51,15 @@ const openId = ref<number | null>(null)
 
 const q = ref('')
 const coin = ref('')
+/**
+ * 只看某个月（`YYYY-MM`，空 = 全部）。
+ * 用户 2026-10-18：「整体年月分割日记，顶部添加日历图标，筛选某个月份的」。
+ */
+const month = ref('')
+/** 日历那个小面板开着没有 */
+const calOpen = ref(false)
+/** 面板里翻到哪一年 */
+const calYear = ref(new Date().getFullYear())
 
 /** 筛选下拉要 `Contract[]`，这里只有币名 —— 补一个 `symbol` 就行（下拉只认 `base`） */
 const coinOptions = computed<Contract[]>(() =>
@@ -70,6 +79,7 @@ async function load(reset = true): Promise<void> {
     const r = await fetchJournal({
       coin: coin.value || undefined,
       q: q.value.trim() || undefined,
+      month: month.value || undefined,
       limit: PAGE,
       offset
     })
@@ -86,8 +96,52 @@ async function load(reset = true): Promise<void> {
 
 const more = computed(() => entries.value.length < total.value)
 
-/* 币种筛选：立刻重拉 */
+/** 条目按「最后改动时间」已经倒序了 —— 这里只是切段，段之间插一条「2026 年 10 月」 */
+const groups = computed(() => {
+  const out: {key: string; label: string; items: JournalEntry[]}[] = []
+  for (const e of entries.value) {
+    const key = (e.at || '').slice(0, 7)
+    const last = out[out.length - 1]
+    if (last && last.key === key) last.items.push(e)
+    else out.push({key, label: monthLabel(key), items: [e]})
+  }
+  return out
+})
+
+/** `2026-10` → `2026 年 10 月` */
+function monthLabel(key: string): string {
+  const [y, m] = key.split('-')
+  if (!y || !m) return '更早'
+  return `${y} 年 ${Number(m)} 月`
+}
+
+/** 日历面板里的 12 个月 */
+const MONTHS = Array.from({length: 12}, (_, i) => i + 1)
+
+function shiftCalYear(delta: number): void {
+  calYear.value += delta
+}
+
+function pickMonth(m: number | ''): void {
+  if (m === '') {
+    month.value = ''
+  } else {
+    month.value = `${calYear.value}-${String(m).padStart(2, '0')}`
+  }
+  calOpen.value = false
+}
+
+/** 当前筛选的那个月（显示在图标旁边） */
+const monthChip = computed(() => (month.value ? monthLabel(month.value) : ''))
+
+function toggleCal(): void {
+  calOpen.value = !calOpen.value
+  if (calOpen.value && month.value) calYear.value = Number(month.value.slice(0, 4))
+}
+
+/* 币种 / 月份筛选：立刻重拉 */
 watch(coin, () => void load())
+watch(month, () => void load())
 
 /* 关键词：等一下再发（边打边搜，但别一个字一发） */
 let qTimer: ReturnType<typeof setTimeout> | null = null
@@ -299,6 +353,47 @@ async function remove(e: JournalEntry): Promise<void> {
           ✕
         </button>
       </div>
+      <!-- 日历：只看某个月 -->
+      <div class="j-cal-wrap">
+        <button
+          type="button"
+          class="ghost tiny j-cal"
+          :class="{on: !!month}"
+          :title="month ? `只看 ${monthChip}（点一下换）` : '按月份看'"
+          @click="toggleCal"
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="5" width="18" height="15.5" rx="2.5" />
+            <path d="M3 10h18M8 3.2v3.6M16 3.2v3.6" />
+          </svg>
+        </button>
+
+        <div v-if="calOpen" class="j-cal-mask" @click="calOpen = false" />
+        <div v-if="calOpen" class="j-cal-panel">
+          <div class="j-cal-head">
+            <button type="button" class="j-cal-nav" title="上一年" @click="shiftCalYear(-1)">◀</button>
+            <b>{{ calYear }}</b>
+            <button type="button" class="j-cal-nav" title="下一年" @click="shiftCalYear(1)">▶</button>
+          </div>
+          <div class="j-cal-grid">
+            <button
+              v-for="m in MONTHS"
+              :key="m"
+              type="button"
+              class="j-cal-m"
+              :class="{sel: month === `${calYear}-${String(m).padStart(2, '0')}`}"
+              @click="pickMonth(m)"
+            >
+              {{ m }} 月
+            </button>
+          </div>
+          <button type="button" class="ghost tiny j-cal-all" @click="pickMonth('')">
+            看全部
+          </button>
+        </div>
+      </div>
+
       <button type="button" class="ghost tiny j-new" title="写一条（时间就是现在）" @click="startNew">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -311,54 +406,61 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <!-- 条目：最近改动的在上，时间精确到分钟 -->
     <div v-if="entries.length" class="j-list">
-      <article v-for="e in entries" :key="e.id" class="j-entry" :class="{open: openId === e.id}">
-        <div class="j-head" :class="{open: openId === e.id}" @click="toggle(e)">
-          <i class="j-dot" :class="{on: openId === e.id}" />
-          <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
-          <span class="j-time">{{ timeLabel(e.at) }}</span>
-          <span class="j-caret dim" :class="{up: openId === e.id}">▾</span>
-          <!--
-            币放在**第二行**，不跟标题抢宽度 —— 手机上一行塞两三个长币名，
-            标题就被挤成「按…」（展开后下面本来就逐条列着所有币）。
-          -->
-          <span v-if="e.coins.length" class="j-badges">
-            <span v-for="c in e.coins" :key="c.base" class="j-badge">{{ c.base }}</span>
-          </span>
-        </div>
-
-        <div v-if="openId === e.id" class="j-body-wrap">
-          <AnswerBody v-if="e.body" class="j-body" :text="e.body" soft-breaks />
-          <ul v-if="e.coins.length" class="j-notes">
-            <li v-for="c in e.coins" :key="c.base">
-              <button
-                type="button"
-                class="j-coin"
-                :title="c.at ? `看 ${c.base} 在 ${c.at} 的 K 线` : `看 ${c.base} 的 K 线（这条的时间）`"
-                @click="goCoin(c.base, c.at, e.at)"
-              >
-                {{ c.base }}
-              </button>
-              <span v-if="c.at" class="j-at dim">{{ c.at }}</span>
-            </li>
-          </ul>
-          <div class="j-acts">
-            <button type="button" class="ghost tiny j-act" title="编辑这一条" @click="startEdit(e)">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M4 20h4l10-10-4-4L4 16v4Z" />
-                <path d="M13.5 6.5l4 4" />
-              </svg>
-            </button>
-            <button type="button" class="ghost tiny j-act j-del" title="删掉这一条" @click="remove(e)">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M4 7h16M9.5 7V4.6h5V7M6.5 7l1 13h9l1-13" />
-                <path d="M10.5 10.5v6M13.5 10.5v6" />
-              </svg>
-            </button>
+      <template v-for="g in groups" :key="g.key">
+        <h4 class="j-group">{{ g.label }}</h4>
+        <article v-for="e in g.items" :key="e.id" class="j-entry" :class="{open: openId === e.id}">
+          <div class="j-head" @click="toggle(e)">
+            <i class="j-dot" :class="{on: openId === e.id}" />
+            <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
+            <span class="j-time">{{ timeLabel(e.at) }}</span>
+            <span class="j-caret dim" :class="{up: openId === e.id}">▾</span>
+            <span v-if="e.coins.length" class="j-badges">
+              <span v-for="c in e.coins" :key="c.base" class="j-badge">{{ c.base }}</span>
+            </span>
           </div>
-        </div>
-      </article>
+
+          <!--
+            展开用 `grid-template-rows: 0fr → 1fr` 做高度动画（用户 2026-10-18：
+            「动画改为展开动画」）。所以内容得**一直在 DOM 里**（v-show，不是 v-if）。
+          -->
+          <div class="j-collapse" :class="{show: openId === e.id}">
+            <div class="j-collapse-in">
+              <div class="j-body-wrap">
+                <AnswerBody v-if="e.body" class="j-body" :text="e.body" soft-breaks />
+                <ul v-if="e.coins.length" class="j-notes">
+                  <li v-for="c in e.coins" :key="c.base">
+                    <button
+                      type="button"
+                      class="j-coin"
+                      :title="c.at ? `看 ${c.base} 在 ${c.at} 的 K 线` : `看 ${c.base} 的 K 线（这条的时间）`"
+                      @click="goCoin(c.base, c.at, e.at)"
+                    >
+                      {{ c.base }}
+                    </button>
+                    <span v-if="c.at" class="j-at dim">{{ c.at }}</span>
+                  </li>
+                </ul>
+                <div class="j-acts">
+                  <button type="button" class="ghost tiny j-act" title="编辑这一条" @click="startEdit(e)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M4 20h4l10-10-4-4L4 16v4Z" />
+                      <path d="M13.5 6.5l4 4" />
+                    </svg>
+                  </button>
+                  <button type="button" class="ghost tiny j-act j-del" title="删掉这一条" @click="remove(e)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M4 7h16M9.5 7V4.6h5V7M6.5 7l1 13h9l1-13" />
+                      <path d="M10.5 10.5v6M13.5 10.5v6" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
+      </template>
 
       <button v-if="more" type="button" class="ghost tiny j-more" :disabled="loading" @click="load(false)">
         {{ loading ? '读…' : `还有 ${total - entries.length} 条` }}
@@ -367,8 +469,8 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <p v-else-if="!loading" class="j-empty dim">
       {{
-        q || coin
-          ? '这个筛选下没有日记。'
+        q || coin || month
+          ? `这个${month && !q && !coin ? '月份' : '筛选'}下没有日记。`
           : '还没有日记。点右边那颗加号记一条 —— 不用天天写，想到就记。'
       }}
     </p>
@@ -474,13 +576,13 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin-bottom: 10px;
 }
 .j-search {
   position: relative;
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 56px;
 }
 .j-search input {
   width: 100%;
@@ -510,6 +612,8 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-flt :deep(.combo-plain) {
   font-size: 12px;
   padding: 5px 7px;
+  /* 一行放不下也不能把「全部」折成两行（加了日历图标之后挤过） */
+  white-space: nowrap;
 }
 .j-flt :deep(.combo-plain-t) {
   font-size: 12px;
@@ -571,7 +675,9 @@ async function remove(e: JournalEntry): Promise<void> {
   margin: 5px 0;
   padding: 5px 0;
   border-radius: 14px;
-  animation: j-card-in 0.16s ease-out;
+  transition:
+    background 0.18s ease,
+    box-shadow 0.18s ease;
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--panel-2) 92%, transparent),
@@ -604,26 +710,22 @@ async function remove(e: JournalEntry): Promise<void> {
   opacity: 1;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
 }
-/* 展开的正文滑进来；卡片本身也淡入一下（用户 2026-10-18：「加入动画」） */
-@keyframes j-card-in {
-  from {
-    opacity: 0.35;
-    transform: translateY(-2px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+/*
+ * 展开动画（用户 2026-10-18：「动画改为展开动画」）：高度从 0 涨到内容高度。
+ * `grid-template-rows: 0fr → 1fr` 是唯一不用量高度、又不用写死 max-height 的写法；
+ * 里面那层必须 `overflow: hidden; min-height: 0`，否则 0fr 也撑得住内容。
+ */
+.j-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s cubic-bezier(0.4, 0, 0.2, 1);
 }
-@keyframes j-body-in {
-  from {
-    opacity: 0;
-    transform: translateY(-5px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+.j-collapse.show {
+  grid-template-rows: 1fr;
+}
+.j-collapse-in {
+  min-height: 0;
+  overflow: hidden;
 }
 .j-time {
   flex: none;
@@ -674,7 +776,99 @@ async function remove(e: JournalEntry): Promise<void> {
  */
 .j-body-wrap {
   padding: 2px 10px 12px 10px;
-  animation: j-body-in 0.18s ease-out;
+}
+
+/* 年月分割的小标题 */
+.j-group {
+  margin: 16px 0 4px;
+  padding-left: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.j-group:first-child {
+  margin-top: 2px;
+}
+
+/* 顶部那颗日历 + 它的小面板 */
+.j-cal-wrap {
+  position: relative;
+  flex: none;
+}
+.j-cal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+}
+.j-cal.on {
+  color: var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+}
+.j-cal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+.j-cal-panel {
+  position: absolute;
+  z-index: 21;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 212px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+.j-cal-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.j-cal-head b {
+  flex: 1 1 auto;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.j-cal-nav {
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+}
+.j-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+.j-cal-m {
+  padding: 7px 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid transparent;
+  border-radius: 7px;
+}
+.j-cal-m:hover {
+  border-color: var(--border);
+}
+.j-cal-m.sel {
+  color: #1a1a1a;
+  background: var(--blue);
+  font-weight: 600;
+}
+.j-cal-all {
+  width: 100%;
+  margin-top: 8px;
+  font-size: 12px;
 }
 /*
  * Markdown 的默认间距是给**结论卡**调的（段落 11px、列表 12px、条目 5px），

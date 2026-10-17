@@ -125,15 +125,34 @@ const ENTRY_COLUMNS = `
  * ⚠️ `q` 用 `$3 = ''` 短路，不能靠 `ILIKE '%'`：`title` 是可空列，
  *    空关键词时 `NULL ILIKE '%'` 还是 NULL，没写标题的条目会被漏掉。
  */
+/**
+ * `YYYY-MM` → 那个月的 `[起, 止)`（北京时间）。给「只看某个月」用。
+ * 用时间范围而不是 `to_char(...) = ?`，这样能吃到 `(user_id, updated_at DESC)` 那条索引。
+ */
+function monthRange(month: string): {from: string; to: string} | null {
+  const m = /^(\d{4})-(\d{2})$/.exec(month)
+  if (!m) return null
+  const y = Number(m[1])
+  const mo = Number(m[2])
+  if (mo < 1 || mo > 12) return null
+  const ny = mo === 12 ? y + 1 : y
+  const nm = mo === 12 ? 1 : mo + 1
+  return {
+    from: `${m[1]}-${m[2]}-01T00:00:00+08:00`,
+    to: `${ny}-${String(nm).padStart(2, '0')}-01T00:00:00+08:00`
+  }
+}
+
 export async function listJournalEntries(
   userId: number,
-  opts: {coin?: string; q?: string; limit?: number; offset?: number} = {}
+  opts: {coin?: string; q?: string; month?: string; limit?: number; offset?: number} = {}
 ): Promise<JournalList> {
   const coin = opts.coin ? normalizeBase(opts.coin) : ''
   const q = String(opts.q ?? '').trim().slice(0, 80)
   const like = q ? `%${q.replace(/[%_\\]/g, m => `\\${m}`)}%` : ''
   const limit = Math.min(Math.max(Number(opts.limit) || JOURNAL_PAGE, 1), 200)
   const offset = Math.max(Number(opts.offset) || 0, 0)
+  const range = monthRange(String(opts.month ?? '').trim())
 
   const rows = await query<EntryRow>(
     `SELECT ${ENTRY_COLUMNS}, count(*) OVER () AS total
@@ -142,9 +161,11 @@ export async function listJournalEntries(
         AND ($2::text = '' OR EXISTS (
               SELECT 1 FROM journal_coins c WHERE c.entry_id = e.id AND c.base = $2))
         AND ($3::text = '' OR e.title ILIKE $3 ESCAPE '\\' OR e.body ILIKE $3 ESCAPE '\\')
+        AND ($6::timestamptz IS NULL OR e.updated_at >= $6::timestamptz)
+        AND ($7::timestamptz IS NULL OR e.updated_at < $7::timestamptz)
       ORDER BY e.updated_at DESC, e.id DESC
       LIMIT $4 OFFSET $5`,
-    [userId, coin, like, limit, offset]
+    [userId, coin, like, limit, offset, range?.from ?? null, range?.to ?? null]
   )
 
   const coinRows = await query<{base: string}>(

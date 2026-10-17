@@ -2610,10 +2610,13 @@ export interface JournalList {
 }
 
 /** 倒序列出（`coin` / `q` 可空，两个一起给就是「同时满足」） */
-export const fetchJournal = (opts: {coin?: string; q?: string; limit?: number; offset?: number} = {}) => {
+export const fetchJournal = (
+  opts: {coin?: string; q?: string; month?: string; limit?: number; offset?: number} = {}
+) => {
   const qs = new URLSearchParams()
   if (opts.coin) qs.set('coin', opts.coin)
   if (opts.q) qs.set('q', opts.q)
+  if (opts.month) qs.set('month', opts.month)
   if (opts.limit) qs.set('limit', String(opts.limit))
   if (opts.offset) qs.set('offset', String(opts.offset))
   const q = qs.toString()
