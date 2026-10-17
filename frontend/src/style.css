@@ -5757,10 +5757,14 @@ body.fixed-viewport .split {
 }
 
 /* 「仓位价值」这个标签：小、灰、不抢戏 —— 真正的主角是下面那个数 */
-/* 价值卡里那行小字：`数量 0.081 BTC`（用户 2026-10-14：「用小字放在下面就行」） */
+/*
+ * 价值卡里那行小字：`数量 0.081 BTC`（用户 2026-10-14：「用小字放在下面就行」）。
+ * ⚠️ 不要上边距 —— 它要和右栏「所需保证金」那一行**同一条基线**
+ *    （用户 2026-10-18：「**四个小字要对齐**」）。
+ */
 .ord-quota-sub {
   display: block;
-  margin-top: 1px;
+  margin-top: 0;
   font-size: 11px;
   line-height: 1.45;
   color: var(--muted);
@@ -5793,9 +5797,15 @@ body.fixed-viewport .split {
   margin-top: 3px;
 }
 
-/* 左栏：数量 / 当前可开价值（都要能在窄屏上缩，缩了就省略号） */
+/*
+ * 左栏：数量 / 当前可开价值（都要能在窄屏上缩，缩了就省略号）。
+ * ⚠️ 行距 4px 跟右栏 `.ord-read` 一致 —— 改一处必须改另一处，否则四个小字错行。
+ */
 .ord-quota-left {
   flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -5834,17 +5844,34 @@ body.fixed-viewport .split {
   color: var(--muted);
 }
 
-/* 大号数字 + 右边那排快捷比例（用户 2026-10-18：「快捷…放在可开价值后面」） */
+/*
+ * 大号数字 + 右边那排快捷比例（用户 2026-10-18：「快捷…放在可开价值后面」）。
+ * ⚠️ 用 `center` 不用 `baseline`：baseline 对齐时按钮的盒子比数字低约 2px
+ *    （用户 2026-10-18：「**百分比可以上一点**」）。
+ */
 .ord-quota-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   min-width: 0;
 }
 
-/* 这一卡的左半边：标签 + 大号数字 + 数量小字（竖着三行，宽的那一边） */
+/*
+ * 「仓位价值」那一行：左边是「标签 + 大号数字」整格，右边是快捷比例。
+ * ⚠️ `align-items: center` 让快捷那排对**整格**（两行）居中
+ *    （用户 2026-10-18：「仓位价值整体要和百分比横向居中对齐」）。
+ */
 .ord-quota-main {
-  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 左整格：标签压在大号数字上面，两行当一个整体去跟右边的快捷居中 */
+.ord-quota-id {
+  display: block;
   min-width: 0;
 }
 
@@ -5983,24 +6010,31 @@ body.fixed-viewport .split {
   flex: 0 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  /* 行距和左栏**必须一模一样**（同样 16px 行盒 + 同样间距），
+     四个小字才能落在同两条水平线上（用户 2026-10-18：「四个小字要对齐」）。 */
+  gap: 4px;
   margin: 0;
 }
 
 .ord-read .ord-r {
   display: flex;
   /* 一行里「标签在左、数值在右」，两端对齐 —— 两行叠起来就是一张小表 */
-  align-items: baseline;
+  /* ⚠️ 用 `center` 不用 `baseline`：数值那个 `b` 带 `overflow: hidden`，
+     baseline 会落到它底边，行盒被撑到 18px，右栏两行就比左栏矮不下去 */
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  padding: 1px 0;
-  line-height: 1.4;
+  padding: 0;
+  /* 定死 16px：跟左栏小字的行高对齐，四个小字才能落在同两条水平线上 */
+  line-height: 16px;
 }
 
 .ord-read .ord-r em {
   font-style: normal;
   font-size: 11px;
+  /* 行高跟着行盒走（16px）—— 数值那侧字号是 13px，字号一变行盒不能跟着长 */
+  line-height: 16px;
   color: var(--muted);
 }
 
@@ -6009,6 +6043,9 @@ body.fixed-viewport .split {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 定死 16px：13px 的字若按 1.4 行高会撑到 18px，两行就是 36px，
+     右栏比左栏高 4px ⇒ 四个小字对不齐（用户 2026-10-18：「四个小字要对齐」） */
+  line-height: 16px;
   font-size: 13px;
   font-weight: var(--fw-mid);
   font-family: var(--mono);
@@ -6020,6 +6057,10 @@ body.fixed-viewport .split {
   margin-left: 3px;
   font-style: normal;
   font-size: 9.5px;
+  /* ⚠️ 必须收窄行高：13px 的数字 + 9.5px 的单位混在一行时，单位那截的
+     行盒会把整行顶到 17.5px，右栏两行就跟左栏「数量 / 当前可开价值」错开 2~3px
+     （用户 2026-10-18：「四个小字要对齐」）。12px 正好让整行回到 16px。 */
+  line-height: 12px;
   font-weight: 400;
   color: var(--muted);
 }

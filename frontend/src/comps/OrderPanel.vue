@@ -1667,34 +1667,38 @@ onMounted(async () => {
           -->
           <div class="ord-quota-main">
             <!--
-              大号数字改叫**仓位价值**（用户 2026-10-18：「原有的改为仓位价值根据开仓
-              百分比实时计算」）—— 它跟着滑条实时变，原来那个「还能开多少」挪到下面小字。
+              「仓位价值」标签 + 大号数字捆成一格（`.ord-quota-id`）—— 这样快捷比例
+              那排才可以对**整格**（标签 + 数字）居中，而不是只对着数字那行
+              （用户 2026-10-18：「仓位价值整体要和百分比横向居中对齐」）。
             -->
-            <span class="ord-quota-lb">仓位价值</span>
-            <span class="ord-quota-row">
+            <span class="ord-quota-id">
+              <!--
+                大号数字改叫**仓位价值**（用户 2026-10-18：「原有的改为仓位价值根据开仓
+                百分比实时计算」）—— 它跟着滑条实时变，原来那个「还能开多少」挪到下面小字。
+              -->
+              <span class="ord-quota-lb">仓位价值</span>
               <b class="ord-quota-num" :style="{fontSize: posValueFont + 'px'}"
                 >{{ posValueText }}<i>USDT</i></b
               >
-              <!--
-                快捷比例放在**可开价值后面**（用户 2026-10-18：「原有的百分比不动，
-                坏单挑放在可开价值后面」→ 按「快捷挑选」理解）：跟大号数字同一行、靠右，
-                滑条那行不动。
-              -->
-              <span
-                class="ord-pos-quick"
-                :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
+            </span>
+            <!--
+              快捷比例放在**可开价值后面**（用户 2026-10-18：「原有的百分比不动，
+              坏单挑放在可开价值后面」→ 按「快捷挑选」理解）：靠右，跟左边整格垂直居中。
+            -->
+            <span
+              class="ord-pos-quick"
+              :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
+            >
+              <button
+                v-for="v in POS_PCTS"
+                :key="v"
+                type="button"
+                :class="{on: v === posPct}"
+                :title="`用掉可用额度的 ${v}%`"
+                @click="posPct = v"
               >
-                <button
-                  v-for="v in POS_PCTS"
-                  :key="v"
-                  type="button"
-                  :class="{on: v === posPct}"
-                  :title="`用掉可用额度的 ${v}%`"
-                  @click="posPct = v"
-                >
-                  {{ v }}%
-                </button>
-              </span>
+                {{ v }}%
+              </button>
             </span>
           </div>
 
