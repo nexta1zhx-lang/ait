@@ -687,6 +687,22 @@ const curNotionalText = computed(() =>
 /** 面板中间那个**大数字**：还能开多少（开满时就是 `0.00`，用户要的就是这个） */
 const roomText = computed(() => fmt(Math.max(0, roomNotional.value), 2))
 
+/**
+ * 大数字那行的字号 —— 按**字符数**往下缩。
+ *
+ * 用户 2026-10-18：「测试大数字会不会超出」。右边被「滑条 + 快捷」占掉一多半之后，
+ * 左边这格只剩 ~125px：`12,345.67 USDT` 在 19px 下要 132px，会顶穿那条分隔线。
+ * 所以 6 个字符以内维持 19px（`96.76` / `470.00` 这些日常值一点没变），
+ * 再长就 17 / 15 / 13 一路缩下去（单位 `USDT` 跟着 `em` 一起缩）。
+ */
+const roomFont = computed(() => {
+  const n = roomText.value.length
+  if (n <= 6) return 19
+  if (n <= 8) return 17
+  if (n <= 10) return 15
+  return 13
+})
+
 
 /* ---------------- 顶部：已开的币种（点一下切过去） ---------------- */
 
@@ -1618,7 +1634,9 @@ onMounted(async () => {
             <!-- 用户 2026-10-14：「价值那一行…加上文字，**当前可开价值**」 -->
             <span class="ord-quota-lb">当前可开价值</span>
             <span class="ord-quota-row">
-              <b class="ord-quota-num">{{ roomText }}<i>USDT</i></b>
+              <b class="ord-quota-num" :style="{fontSize: roomFont + 'px'}"
+                >{{ roomText }}<i>USDT</i></b
+              >
             </span>
             <!--
               数量当**一行小字**贴在价值下面（用户 2026-10-14：「数量不用单独一个，
@@ -1639,8 +1657,6 @@ onMounted(async () => {
             class="ord-pos-side"
             :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
           >
-            <!-- 左边那一个字（用户 2026-10-18：「…左侧加『仓位』」）—— 两行共用一个标签 -->
-            <span class="ord-pos-lb">仓位</span>
             <div class="ord-pos-body">
               <div class="ord-pos-row">
                 <span class="ord-bar">

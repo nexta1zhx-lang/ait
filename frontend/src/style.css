@@ -5814,13 +5814,12 @@ body.fixed-viewport .split {
  * ⚠️ 高度固定（滑条 22px 命中区不撑高它）——用户 2026-10-05 定的「下单区域高度固定」。
  */
 /*
- * 右边这一块（用户 2026-10-18：先「**滑动条和快捷两行布局放右侧**」，
- * 再「滚动条要大于下面的快捷比例」、「**快捷区往里面去一点**，左侧加『仓位』」）：
- *   `仓位 │ ——o———— 100%`
- *   `     │ [25%][50%][75%][100%]`
- * 左边一个「仓位」标签（两行共用），里面是 body 两行。
- *
- * ⚠️ 滑条要比下面那排快捷**明显宽**：快捷不再平分整列，各自定宽、靠右对齐。
+ * 右边这一块（用户 2026-10-18：「**滑动条和快捷两行布局放右侧**」「快捷区加大左对齐到
+ * 滑动条结束的位置」，最后「**仓位字去掉，左右加区分**」）：
+ *   `——o———— 100%`
+ *   `[25%][50%][75%][100%]`
+ * 左边那条竖线就是「左右加区分」——把「能开多少 / 数量」和「仓位百分比」分成两块。
+ * ⚠️ 那条线是 `border-left` + `padding-left`，不是再塞一个字符（别用 `│` / `|`）。
  */
 .ord-pos-side {
   flex: 0 0 auto;
@@ -5829,12 +5828,8 @@ body.fixed-viewport .split {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-/* 那一个字：竖着跟两行居中对齐 */
-.ord-pos-lb {
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--muted);
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
 }
 /* 里面两行（滑条一行、快捷一行） */
 .ord-pos-body {
@@ -5906,9 +5901,13 @@ body.fixed-viewport .split {
 
 .ord-quota-num {
   display: block;
+  /* 长度由模板按字符数给（`roomFont`）：长数字缩一档，别顶穿右边那条分隔线 */
   font-family: var(--mono);
+  white-space: nowrap;
   font-size: 19px;
-  line-height: 1.25;
+  /* 行高**定死**：字号缩了这行还是 24px 高 —— 否则数字一变长整张卡就矮 3~8px，
+     上面那块「下单区域高度固定」就破了（用户 2026-10-05 定的）。 */
+  line-height: 24px;
   font-weight: var(--fw-bold);
   color: var(--text);
   font-variant-numeric: tabular-nums;
@@ -5917,7 +5916,8 @@ body.fixed-viewport .split {
 .ord-quota-num i {
   margin-left: 5px;
   font-style: normal;
-  font-size: 11.5px;
+  /* 跟着大数字一起缩（19px 时 ≈ 11.4px，跟原来一样） */
+  font-size: 0.6em;
   font-weight: 400;
   color: var(--muted);
 }
