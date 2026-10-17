@@ -73,11 +73,14 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
 
 /*
  * 选中：**只换字体颜色**（用户 2026-10-18：「只要字体，不要背景」）。
- * 亮度压到 `--accent` 之下一点（用户同一天：「选中太亮了」）：
- * 比未选中的 `--muted` 亮、但不再发光，靠字重 + 色相区分。
+ *
+ * 颜色跟一级 tab 的选中态**完全一致**（用户同一天：「字体颜色选中和一级一样」）：
+ * 一级那边是 `var(--blue)`，在页面全局 = `:root` 的 `--accent`（#d3b583）。
+ * ⚠️ 这里不能写 `var(--accent)`：这一格在 `.warm-skin` 里，
+ *    那个皮肤把 `--accent` 改成了更亮的 #ffc16b（就是用户说「太亮了」的那档）。
  */
 .sub-tabs button.on {
-  color: #b8894f;
+  color: #d3b583;
   font-weight: var(--fw-mid);
 }
 
