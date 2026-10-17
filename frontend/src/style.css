@@ -3166,14 +3166,18 @@ body.fixed-viewport .split {
 }
 
 /*
- * 一级 tab 的字比 `.seg` 默认那档（12px，给周期 / 榜单那种小控件用的）大一档：
- * 用户 2026-10-18「是不是一级 tab 字太小了」—— 桌面 13px、手机 15px（见窄屏那一节），
- * 二级 tab（内容区里那排）13px，这样主次才拉得开。
+ * 一级 tab = **页面级导航**，得压过内容区那排二级 tab（`comps/SlideTabs.vue`）一头。
+ *
+ * 用户 2026-10-18 连改几轮后定的分工：
+ *   · 一级：桌面 14px / 手机 16px、字重 600、选中染蓝 + 底下 22px 粗横线（导航）
+ *   · 二级：桌面 12px / 手机 13px、字重 400、选中只换琥珀色 + 一条细滑条（页内切换）
+ * 字号差 2~3px + 字重差 + 两种不同的选中形态 ⇒ 一眼分得清谁是谁。
  * ⚠️ 只动 `.tab-row` 里的，别去改全局 `.seg`（周期行、榜单、二级 tab 都会跟着变）。
  */
 .tab-row .seg button {
-  font-size: 13px;
-  padding: 6px 11px;
+  font-size: 14px;
+  padding: 7px 12px;
+  letter-spacing: 0.2px;
 }
 
 /*
@@ -7294,19 +7298,15 @@ button.badge:disabled {
     padding: 4px 2px 9px;
     border: 0;
     border-radius: 0;
-    /*
-     * 手机上一级 tab 14px —— 跟二级 tab（`comps/SlideTabs.vue`）**同一档**：
-     * 用户 2026-10-18 先嫌 13 太小、后来又说「一级和二级字体大小再统一协调一下」，
-     * 于是两边都定 14px，主次靠**字重**分（一级 600，二级 400）而不是靠字号差。
-     */
-    font-size: 14px;
+    /* 手机上 16px（二级那排 13px，见 `comps/SlideTabs.vue`） */
+    font-size: 16px;
     font-weight: var(--fw-mid);
     text-align: left;
     background: transparent;
     color: var(--muted);
   }
   .tab-row .seg button + button {
-    margin-left: 16px;
+    margin-left: 18px;
   }
   /* 这一块原来是实心亮蓝（全屏最刺眼的一处）→ 淡底纹 → 现在什么都不铺 */
   .tab-row .seg button.active {
@@ -7319,7 +7319,7 @@ button.badge:disabled {
     position: absolute;
     left: 50%;
     bottom: 0;
-    width: 20px;
+    width: 22px;
     height: 2px;
     border-radius: 999px;
     background: var(--blue);

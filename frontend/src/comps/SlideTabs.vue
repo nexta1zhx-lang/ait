@@ -32,7 +32,7 @@ const box = ref({left: 0, width: 0, ready: false})
 
 /** 细滑条：比那一格窄 16px（左右各留 8px），居中，太短的格子保底 18px */
 const bar = computed(() => {
-  const w = Math.max(18, box.value.width - 16)
+  const w = Math.max(16, box.value.width - 16)
   return {
     left: box.value.left + (box.value.width - w) / 2,
     width: w,
@@ -154,19 +154,19 @@ onBeforeUnmount(() => {
   border-radius: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 400;
   white-space: nowrap;
   transition: color 0.18s ease;
 }
 
 /*
- * 手机：跟一级 tab 同档 14px（用户 2026-10-18：「一级和二级字体大小再统一协调一下」）。
- * 一级靠 600 的字重压过这一排，所以这里保持 400，选中只换颜色。
+ * 手机 13px（一级那排 16px）—— 二级永远比一级小一号，主次才立得住；
+ * 字重固定 400、选中只换颜色，不给底色块，免得跟一级抢。
  */
 @media (max-width: 900px) {
   .slide-tabs button {
-    font-size: 14px;
+    font-size: 13px;
   }
 }
 
