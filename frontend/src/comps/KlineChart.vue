@@ -3856,13 +3856,30 @@ function removeDrawing(id: string): void {
   scheduleSaveDrawings()
 }
 
-function clearDrawings(): void {
+/**
+ * 清掉这个币上所有的线。
+ *
+ * ⚠️ 问一次走**全站那个确认框**（`askConfirm`，App 里那份 `ConfirmDialog`）——
+ *    用户 2026-10-17：「清掉用自己弹窗，不要系统级」：`window.confirm` 改不了样式，
+ *    手机上还会被浏览器弹成一条横幅，跟这套皮肤完全不搭。
+ */
+async function clearDrawings(): Promise<void> {
   if (!drawings.value.length) return
-  if (!window.confirm(`清掉 ${props.symbol} 上的 ${drawings.value.length} 条线？（提醒不受影响）`))
-    return
+  const n = drawings.value.length
+  const ok = await askConfirm({
+    title: `清掉 ${props.symbol} 上的 ${n} 条线？`,
+    body: [
+      {t: `${n} 条线（水平线 / 趋势线 / 矩形）会一起没了`, tone: 'num'},
+      {t: '挂在上面的提醒不会被删，但线本身找不回来。', tone: 'warn'}
+    ],
+    okText: '清掉',
+    danger: true
+  })
+  if (!ok) return
   drawings.value = []
   drawSelected.value = null
   lineMenu.value = null
+  colorOpen.value = false
   renderDrawings()
   scheduleSaveDrawings()
 }
