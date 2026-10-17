@@ -183,7 +183,10 @@ export function dayStartMs(
 /**
  * 基准时刻（毫秒）；`off` 返回 `null`。
  *
- * `tz` **每次现算** —— 跨零点之后自动就跟着走到新的一天（不用重开页面）。
+ * ⚠️ 这里的 `now` **不是响应式的**：谁把它包进 computed，就得自己给一个会变的时间源，
+ *    否则跨过零点那个值不会自己走到新的一天 —— 2026-10-18 的 bug 就是这么来的
+ *    （用户：「选择北京时间，但是晚上 12 点过了，没有及时刷新合约行情涨跌幅数据」）。
+ *    现在 `MarketPanel` 传的是它自己那个到点就推进的 `dayClock`。
  */
 export function rankSinceMs(base: RankBase, now = Date.now()): number | null {
   if (base.kind === 'off') return null

@@ -4071,9 +4071,14 @@ App 的「我的 → 个人信息 → 账户信息 → App 信息」那张体检
 
 挂在新的**库内**查询上（`backend/src/db/candle-store.ts` 的 `closesAtOrBefore`）：
 
-* 基准时刻由前端算：时区档 = 「该时区当天 00:00」（`settings.ts` 的 `dayStartMs`，
-  每次现算 ⇒ 跨零点自动走到新的一天），任意档 = 用户挑的那个毫秒（`rankSinceMs`）；
-  经 `GET /api/markets?since=<ms>` 传下来。
+* 基准时刻由前端算：时区档 = 「该时区当天 00:00」（`settings.ts` 的 `dayStartMs`
+  / `rankSinceMs`），经 `GET /api/markets?since=<ms>` 传下来。
+  ⚠️ 2026-10-18 修：原来 `rankSinceMs()` 里的 `Date.now()` **不是响应式的**，包进
+  `computed` 之后只在「换基准」时算一次 —— 零点过了它还是昨天那个时刻，整列涨跌幅
+  既不归零也不重取（用户：「选择北京时间，但是晚上 12 点过了，没有及时刷新」）。
+  现在 `MarketPanel` 有个 `dayClock` ref，用**一次性定时器**排到下一个日切点主动推进，
+  `watch(baseSince)` 一变就只重取那一列（`/api/markets/base`，≈10KB）；
+  后台被节流 / 电脑睡眠回来的情况由 `sync()` 对一次表兜底。
 * 后端按基准时刻**离现在多远**挑够用的最细一档（1m / 15m / 1h / 1d），
   取「该档上已收盘、且开盘时间 ≤ 基准时刻」的最后一根 → `MarketRow.baseClose`；
 * 前端拿 `baseClose` + 每秒都在刷新的 `last` **现算**（跟头部「1 天 / 3 天…」同一套路），

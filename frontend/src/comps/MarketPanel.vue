@@ -353,6 +353,12 @@ function sync(): void {
   void ensureBlacklist().catch(e =>
     console.warn(`[行情] 读取黑名单失败：${(e as Error).message}`)
   )
+  /*
+   * 后台标签页的定时器会被节流到分钟级 ⇒ 回来时那个日切定时器可能早该跳了却没跳。
+   * 这里先按真实时间对一次表：跨过零点的话 `baseSince` 会跟着变，下面（或那个
+   * `watch(baseSince)`）就会去重取 `baseClose`。
+   */
+  if (baseActive.value && Date.now() - dayClock.value > 1000) dayClock.value = Date.now()
   if (shouldRun()) {
     // 回来先补一次全表：中间漏掉的增量不追了，直接拿最新的
     if (Date.now() - lastSnapshotAt > SNAPSHOT_FRESH_MS) void loadSnapshot()
@@ -391,6 +397,7 @@ let offResume: (() => void) | null = null
 
 onMounted(() => {
   sync()
+  scheduleDayFlip()
   /*
    * 前后台翻转就重新对齐。
    *
@@ -412,6 +419,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopped = true
+  if (dayTimer !== null) {
+    window.clearTimeout(dayTimer)
+    dayTimer = null
+  }
   stop() // 里面会取消排队的刷新 / 清掉缓冲
   offForeground?.()
   offForeground = null
@@ -602,10 +613,69 @@ const visible = computed(() => shown.value.slice(0, MAX_ROWS))
 const baseActive = computed(() => rankBase.value.kind !== 'off')
 
 /**
- * 基准时刻（毫秒）；`off` 是 `null`。
- * `tz` 那一档每次现算「该时区当天 00:00」—— 跨零点之后自动走到新的一天。
+ * **日切用的本地时钟**（2026-10-18 修 bug）。
+ *
+ * 用户报的：「涨跌幅基准时间 bug，选择北京时间，但是晚上 12 点过了，没有及时刷新合约行情
+ * 涨跌幅数据」。原因是 `baseSince` 原来直接 `rankSinceMs(rankBase.value)` —— 里面的
+ * `Date.now()` **不是响应式的**，这个 computed 只在 `rankBase` 变化时才算一次；
+ * 零点（北京 00:00）过后它仍停在**昨天那个时刻** ⇒ `baseClose` 一直是昨天的收盘价，
+ * 整列涨跌幅既不归零也不重取，得等换基准或重进页面才"忽然对了"。
+ *
+ * 现在把"现在是几点"提成一个 ref，并在**下一个日切点**主动推进它（`scheduleDayFlip`）。
  */
-const baseSince = computed(() => rankSinceMs(rankBase.value))
+const dayClock = ref(Date.now())
+
+/**
+ * 基准时刻（毫秒）；`off` 是 `null`。
+ * `tz` 那一档 = 「该时区当天 00:00」；跨零点那一刻 `dayClock` 一推进，这个值就真的变了。
+ */
+const baseSince = computed(() => rankSinceMs(rankBase.value, dayClock.value))
+
+/** 距离下一个日切点还有多少毫秒（不是 `tz` 口径就返回 0） */
+function msToDayFlip(): number {
+  const since = baseSince.value
+  if (since === null) return 0
+  const ms = since + 86_400_000 - Date.now()
+  return ms > 0 ? ms : 0
+}
+
+let dayTimer: number | null = null
+
+/**
+ * 排一个「到点就推进 `dayClock`」的定时器（一天一次，不是轮询）。
+ *
+ * ⚠️ 多等 1 秒：正好卡在边界上算的话可能还是「昨天」，白跑一趟。
+ * ⚠️ 浏览器会把后台标签页的定时器节流到分钟级 —— 那种情况靠 `sync()` 里的兜底
+ *    （切回来先对一次表），别指望这里准时。
+ */
+function scheduleDayFlip(): void {
+  if (dayTimer !== null) {
+    window.clearTimeout(dayTimer)
+    dayTimer = null
+  }
+  if (!baseActive.value) return
+  const wait = msToDayFlip()
+  dayTimer = window.setTimeout(
+    () => {
+      dayTimer = null
+      dayClock.value = Date.now()
+      scheduleDayFlip()
+    },
+    Math.min(wait + 1000, 2 ** 31 - 1)
+  )
+}
+
+/**
+ * 跨过日切点就把那一列**重新取一遍**（`baseClose` 是基准时刻的死数，零点必须换新）。
+ *
+ * 在后台（`shouldRun()` 为 false）时不发请求 —— 切回来时 `sync()` 会发现
+ * `loadedBaseSince !== baseSince` 自己补。
+ */
+watch(baseSince, (next, prev) => {
+  if (next === prev || next === null) return
+  if (!shouldRun()) return
+  void loadBase()
+})
 
 /**
  * 表里那份 `baseClose` 是**按哪个基准时刻**补的（没换基准时是 `null`）。
@@ -682,6 +752,8 @@ watch(rankBase, (next, prev) => {
     next.kind === prev.kind &&
     (next.kind !== 'tz' || prev.kind !== 'tz' || next.min === prev.min)
   if (same) return
+  /* 换了基准 ⇒ 日切点也换了（`off` 干脆不用排），重排一次 */
+  scheduleDayFlip()
   sortKey.value = 'change'
   sortDir.value = 'desc'
   if (!shouldRun()) return
