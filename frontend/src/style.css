@@ -6295,7 +6295,9 @@ body.fixed-viewport .split {
  *   这是颗 `<button>`（点一下开「配置」），所以按钮那几条默认样要自己清掉。
  */
 .ord-head .head-acct {
-  margin-left: auto;
+  /* 不再顶到右边：2026-10-18 用户要「测试标签和杠杆固定放最左侧，杠杆在后面」
+     ⇒ 账户那颗排最前，靠左（占位靠 `.ord-syms` 的 `flex: 1` 把后面的推右） */
+  flex: 0 0 auto;
   padding: 4px 9px;
   border: 0;
   cursor: pointer;
@@ -6317,6 +6319,7 @@ body.fixed-viewport .split {
 }
 /* 杠杆小标签：跟在「市价 / 限价」后面那颗（点开是选档位的弹层） */
 .ord-head .ord-lev {
+  flex: 0 0 auto;
   padding: 4px 9px;
   font-family: var(--mono);
   font-size: 11px;

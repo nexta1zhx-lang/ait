@@ -1463,6 +1463,34 @@ onMounted(async () => {
     -->
     <div class="ord-head">
       <!--
+        ⚠️ 这一行**固定从左往右**（用户 2026-10-18：「测试标签和杠杆固定放最左侧，杠杆在后面」）：
+        ① 下单账户（`测试` 那颗）② 杠杆 ③ 已开的币种（占满中间，多了自己横滚）④ 返回。
+      -->
+      <!--
+        当前**下单账户**：这一格用的是哪套交易所 Key。**点一下**开「配置」（那里能换，
+        走 `config` 事件给外层页面）。名字是用户自己起的，可能挺长
+        ⇒ `.ktag` 自带 `max-width` + 省略号。
+      -->
+      <button
+        v-if="tradeKey"
+        type="button"
+        class="ktag head-acct"
+        :title="`下单账户：${tradeKey.name} —— 点一下换（配置 → 下单账户）`"
+        @click="emit('config')"
+      >
+        {{ tradeKey.name }}
+      </button>
+      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-14 默认 10 倍、最高也是 10 倍；2026-10-18 仍是点击切换） -->
+      <button
+        type="button"
+        class="ghost tiny ord-lev"
+        :class="{set: levConfirmed}"
+        :title="`杠杆 ${lev}x —— 点一下改（最高 ${maxLev}x）`"
+        @click="levOpen = true"
+      >
+        {{ lev }}x
+      </button>
+      <!--
         **已开的币种**（用户 2026-10-14：「顶部加上已开的币种，点击可切换」，
         后面又补一句「**币种切换和杠杆一行**」⇒ 就跟杠杆 / 账户挤在同一行里）。
         点一枚切到那只币的 K 线（跟「合约」页点一行同一条路）；当前这只高亮、带浮盈小字。
@@ -1484,35 +1512,11 @@ onMounted(async () => {
           <i :class="s.pnl >= 0 ? 'up' : 'down'">{{ pnlShort(s.pnl) }}</i>
         </button>
       </div>
-      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-14 默认 10 倍、最高也是 10 倍；2026-10-18 仍是点击切换） -->
-      <button
-        type="button"
-        class="ghost tiny ord-lev"
-        :class="{set: levConfirmed}"
-        :title="`杠杆 ${lev}x —— 点一下改（最高 ${maxLev}x）`"
-        @click="levOpen = true"
-      >
-        {{ lev }}x
-      </button>
       <!--
         ⚠️ 这里原来挂着一枚常驻的「真单」章（只在「配置 → 测试下单」关掉时出现）。
         用户 2026-10-07：「**提示层真单的那种去掉，都是真单**」「也去掉，那个章现在
         只是噪音」⇒ 整颗删掉。测试单那一档的标记照旧（只有真·测试单才标）。
       -->
-      <!--
-        当前**下单账户**：这一格用的是哪套交易所 Key。**点一下**开「配置」（那里能换，
-        走 `config` 事件给外层页面）。名字是用户自己起的，可能挺长
-        ⇒ `.ktag` 自带 `max-width` + 省略号。
-      -->
-      <button
-        v-if="tradeKey"
-        type="button"
-        class="ktag head-acct"
-        :title="`下单账户：${tradeKey.name} —— 点一下换（配置 → 下单账户）`"
-        @click="emit('config')"
-      >
-        {{ tradeKey.name }}
-      </button>
       <!--
         返回（用户 2026-10-18：「顶部右侧仓位界面添加返回键，当我点击正在持仓的币种，
         我需要返回我跳转前的币种」）—— 只在**刚点过顶部那排仓位币种**时出现，
