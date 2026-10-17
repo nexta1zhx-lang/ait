@@ -5838,6 +5838,12 @@ body.fixed-viewport .split {
 }
 /* 里面两行（滑条一行、快捷一行） */
 .ord-pos-body {
+  /*
+   * 两行共用一个 `--pos-num-w`：上面那格 `100%` 的宽度就是下面快捷要空出来的右边距，
+   * 这样快捷那一排正好**从滑条起点铺到滑条终点**（用户 2026-10-18：「快捷区加大，
+   * 左对齐到滑动条结束的位置」）。
+   */
+  --pos-num-w: 34px;
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
@@ -5859,7 +5865,7 @@ body.fixed-viewport .split {
 }
 .ord-pos-num {
   flex: 0 0 auto;
-  min-width: 32px;
+  min-width: var(--pos-num-w, 34px);
   font-family: var(--mono);
   font-size: 11.5px;
   font-weight: var(--fw-mid);
@@ -5867,24 +5873,27 @@ body.fixed-viewport .split {
   text-align: right;
   color: var(--text);
 }
-/* 快捷比例那一排：靠右，右边跟上面那个 `100%` 对齐（滑条因此比它宽） */
+/*
+ * 快捷比例那一排：**从滑条起点铺到滑条终点**（右边让出 `100%` 那格 + 间距），
+ * 四颗平分这一段的宽度 —— 比之前大一圈，左边缘跟滑条对齐。
+ */
 .ord-pos-quick {
   display: flex;
-  justify-content: flex-end;
   gap: 4px;
+  margin-right: calc(var(--pos-num-w, 34px) + 5px);
 }
 /* 快捷比例：小胶囊，各自定宽不再平分；选中的那颗用主色边（跟「订单设置」那几格一个语言） */
 .ord-pos-quick button {
-  flex: 0 0 auto;
+  flex: 1 1 0;
   min-width: 0;
-  padding: 1px 3px;
+  padding: 2px 0;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 9px;
-  line-height: 16px;
+  font-size: 10px;
+  line-height: 15px;
   font-variant-numeric: tabular-nums;
   text-align: center;
   cursor: pointer;
