@@ -3389,7 +3389,9 @@ async function route(
 
   /* ---- 黑名单（每用户，2026-10-10）---- */
   /*
-   * 用户：「在 k 线界面收藏按钮旁加个图标，点击后弹窗确认，加入黑名单后 24 小时不得开单」。
+   * 用户：「在 k 线界面收藏按钮旁加个图标，点击后弹窗确认，加入黑名单后 24 小时不得开单」
+   * → 2026-10-17「黑名单机制改为 8 小时」（时长见 `db/blacklist.ts` 的 `BLACKLIST_HOURS`，
+   *   接口把它一起回给前端，所以前端文案/倒计时会自己跟着变）。
    *
    * ⚠️ **没有「解锁」接口** —— 到期自己失效（`until > now()` 才算锁着）。
    *    这是给自己上锁用的，留个按钮就等于没锁（要强行解开得直接改库，有摩擦就够了）。
@@ -3399,7 +3401,7 @@ async function route(
     return sendJson(res, 200, {entries, hours: BLACKLIST_HOURS})
   }
 
-  /** 关进去 24 小时（前端那颗小锁按一下、确认框点「加入黑名单」之后才走到这儿） */
+  /** 关进去 `BLACKLIST_HOURS` 小时（用户 2026-10-17 定的是 8）—— 前端那颗小锁按一下才走到这儿 */
   if (p === '/api/blacklist' && method === 'POST') {
     const body = await readJsonBody(req).catch(() => null)
     if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})

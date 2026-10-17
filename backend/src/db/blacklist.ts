@@ -3,6 +3,7 @@
  *
  * 用户原话：「在 k 线界面收藏按钮旁加个图标，点击后弹窗确认，加入黑名单后 24 小时
  * 不得开单，右侧显示倒计时，做单按钮禁用」。
+ * ★ 2026-10-17 用户改口：「黑名单机制改为 8 小时」——时长就是下面那个常量，只改这里。
  *
  * 用途是**给自己上锁**（防手痒、报复性开单），所以三条口径：
  *   · **只锁开单**，不锁平仓 —— 手里有仓还得能跑（锁住不让出是要出事的）；
@@ -14,8 +15,11 @@
 import {query, queryOne} from './client'
 import {normalizeBase} from './pins'
 
-/** 锁多久（小时）。用户要的就是 24 —— 写死，别做成可配。 */
-export const BLACKLIST_HOURS = 24
+/**
+ * 锁多久（小时）—— 用户 2026-10-17：「黑名单机制改为 8 小时」（原来是 24）。
+ * 写死，别做成可配：前端那份文案 / 倒计时都跟着这个数走（接口把它一起回给前端）。
+ */
+export const BLACKLIST_HOURS = 8
 
 export interface BlacklistEntry {
   /** 币种简称（`BTC`） */
@@ -40,11 +44,11 @@ export async function listBlacklist(userId: number | null): Promise<BlacklistEnt
 }
 
 /**
- * 把一个币关进去 24 小时。
+ * 把一个币关进去 `BLACKLIST_HOURS` 小时。
  *
  * ⚠️ **已经在锁里的不续期**（不把 until 往后推）：前台那颗图标在锁着的时候是禁用的，
  *    能走到这儿说明是（比如）另一个设备刚点过 —— 那种情况下把时间越推越远不合适，
- *    用户看到的就是「我明明只锁了 24 小时，怎么越锁越久」。
+ *    用户看到的就是「我明明只锁了 8 小时，怎么越锁越久」。
  * @returns 这一条最后的解锁时刻 + 是不是本来就在锁里
  */
 export async function lockBase(

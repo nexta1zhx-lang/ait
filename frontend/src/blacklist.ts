@@ -2,7 +2,9 @@
  * 黑名单的**前端那份状态**（用户 2026-10-10）。
  *
  * 用户：「在 k 线界面收藏按钮旁加个图标，点击后弹窗确认，加入黑名单后 24 小时不得开单，
- * 右侧显示倒计时，做单按钮禁用」。
+ * 右侧显示倒计时，做单按钮禁用」→ 2026-10-17：「黑名单机制改为 8 小时」。
+ * ⚠️ 时长是**后端**定的（`BLACKLIST_HOURS`），接口把它一起回过来；下面那个 `8` 只是
+ *    还没拿到接口时的兜底（改时长改后端那一处就行）。
  *
  * 跟 `pins.ts` 一个路数：消息放模块作用域（切页不丢），拉回来按 revision 防串。
  *
@@ -15,8 +17,8 @@ import {fetchBlacklist, lockBase} from './api'
 
 /** base（大写）→ 解锁时刻（毫秒）。到点自己就不算了，不用等接口 */
 export const blacklistUntil = ref<Record<string, number>>({})
-/** 锁多久（小时，后端定的 24）—— 只用来写文案 */
-export const blacklistHours = ref(24)
+/** 锁多久（小时）—— 只用来写文案；兜底 8，真值以后端回的为准 */
+export const blacklistHours = ref(8)
 
 const FRESH_MS = 20_000
 let loadedAt = 0
@@ -41,7 +43,7 @@ export async function ensureBlacklist(): Promise<void> {
     /* 中间有人锁过一个（revision 变了）⇒ 这份回来得比它晚，扔掉，别把新的盖回去 */
     if (revision !== mine) return
     apply(r.entries ?? [])
-    blacklistHours.value = r.hours || 24
+    blacklistHours.value = r.hours || 8
     loadedAt = Date.now()
   })
   inFlight = req
@@ -62,7 +64,7 @@ export async function lockCurrentBase(base: string): Promise<number> {
   if (r.error) throw new Error(r.error)
   revision++
   apply(r.entries ?? [])
-  blacklistHours.value = r.hours || 24
+  blacklistHours.value = r.hours || 8
   loadedAt = Date.now()
   return Date.parse(r.until)
 }
