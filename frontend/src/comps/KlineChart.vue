@@ -3662,6 +3662,8 @@ const drawings = ref<DrawingItem[]>([])
 const drawSelected = ref<string | null>(null)
 /** 选中一条线之后的面板（坐标是 `.chart-wrap` 里的像素；`price` = 点中那一处的价） */
 const lineMenu = ref<{id: string; price: number; x: number; y: number} | null>(null)
+/** 面板上那颗颜色点被点开了 —— 调色盘在它下面展开（用户：「颜色只显示一个，点击下方出现多个选项」） */
+const colorOpen = ref(false)
 /** 正在画的那条（松手才落进 `drawings`） */
 const draft = ref<{kind: 'hline' | 'trend' | 'rect'; a: DrawPoint; b: DrawPoint} | null>(null)
 /** 正在拖的那条（按住线 ⇒ 整条挪：横线改价，斜线/方块两点一起挪） */
@@ -3699,6 +3701,12 @@ function isDrawingItem(v: unknown): v is DrawingItem {
 function colorOf(d: DrawingItem): string {
   return d.color || DRAW_COLOR
 }
+
+/** 调色盘往哪边开：面板在下半屏就往上翻，免得掉出图外 */
+const paletteUp = computed(() => {
+  const h = chartEl.value?.clientHeight ?? 400
+  return (lineMenu.value?.y ?? 0) > h * 0.55
+})
 
 /** 面板里当前这条线（颜色 / 提醒状态都从它读） */
 const menuItem = computed<DrawingItem | null>(
@@ -3824,6 +3832,7 @@ function pickTool(t: 'hline' | 'trend' | 'rect'): void {
 }
 
 function closeLineMenu(): void {
+  colorOpen.value = false
   if (lineMenu.value) lineMenu.value = null
   if (drawSelected.value) {
     drawSelected.value = null
@@ -3834,6 +3843,7 @@ function closeLineMenu(): void {
 /** 改颜色（`chart-drawings` 那边下一帧就按新颜色画） */
 function setLineColor(id: string, color: string): void {
   drawings.value = drawings.value.map(d => (d.id === id ? {...d, color} : d))
+  colorOpen.value = false
   renderDrawings()
   scheduleSaveDrawings()
 }
@@ -4386,23 +4396,38 @@ onBeforeUnmount(() => {
         class="draw-pop"
         :style="{left: lineMenu.x + 'px', top: lineMenu.y + 'px'}"
       >
+        <!--
+          颜色平时**只显示当前这一个**（用户 2026-10-17：「颜色只显示一个，点击下方出现多个选项」），
+          点它才在下面展开调色盘。
+        -->
         <button
-          v-for="c in DRAW_COLORS"
-          :key="c"
           type="button"
-          class="dp-swatch"
-          :class="{sel: colorOf(menuItem) === c}"
-          :style="{background: c}"
-          :title="`用这个颜色 ${c}`"
-          @click="setLineColor(menuItem.id, c)"
+          class="dp-color"
+          :class="{open: colorOpen}"
+          :style="{background: colorOf(menuItem)}"
+          :title="`颜色 ${colorOf(menuItem)} —— 点开换色`"
+          aria-label="换颜色"
+          @click="colorOpen = !colorOpen"
         />
-        <label class="dp-swatch dp-custom" title="自定义颜色">
-          <input
-            type="color"
-            :value="colorOf(menuItem)"
-            @input="setLineColor(menuItem.id, ($event.target as HTMLInputElement).value)"
+        <div v-if="colorOpen" class="dp-palette" :class="{'flip-up': paletteUp}">
+          <button
+            v-for="c in DRAW_COLORS"
+            :key="c"
+            type="button"
+            class="dp-swatch"
+            :class="{sel: colorOf(menuItem) === c}"
+            :style="{background: c}"
+            :title="c"
+            @click="setLineColor(menuItem.id, c)"
           />
-        </label>
+          <label class="dp-swatch dp-custom" :style="{borderColor: 'rgba(255,255,255,.45)'}" title="自定义颜色">
+            <input
+              type="color"
+              :value="colorOf(menuItem)"
+              @input="setLineColor(menuItem.id, ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+        </div>
         <span class="draw-sep" />
 
         <!-- 没提醒：上穿 / 下穿两颗箭头；已经有提醒：同一格变成「取消」 -->
