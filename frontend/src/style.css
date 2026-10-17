@@ -5933,12 +5933,13 @@ body.fixed-viewport .split {
  *   有没有「—」，这一块高度都一样，上面的 K 线不会被挤上挤下。
  */
 .ord-read {
-  display: grid;
-  /* 两列：数量已经单独一块了，这里只剩「所需保证金 / 账户可用」 */
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  /* 2026-10-18 用户：「**靠右侧显示**」—— 两格的标签和数值都贴到自己那列的右边 */
-  justify-items: end;
+  /*
+   * 2026-10-18 用户：「**两行，整体布局协调一点**」——
+   * 从「两列并排」改成**上下两行**，每行占满整卡宽（标签在左、数值在右）。
+   */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   /*
    * 2026-10-18 用户：「所需和账户可用放在**快捷选择下面**」⇒ 这块挪进了
    * 「当前可开价值」那张卡里（不再是卡外单独一行）：上边留一行间隔、去掉外边距。
@@ -5948,17 +5949,13 @@ body.fixed-viewport .split {
 
 .ord-read .ord-r {
   display: flex;
-  /* 横向：标签和数值**同一行**（用户 2026-10-18：「标题文字横向显示」） */
-  flex-direction: row;
+  /* 一行里「标签在左、数值在右」，两端对齐 —— 两行叠起来就是一张小表 */
   align-items: baseline;
-  gap: 5px;
-  /* 靠右：整对贴右边（用户 2026-10-18：「靠右侧显示」） */
-  justify-content: flex-end;
-  text-align: right;
-  gap: 0;
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
-  padding: 5px 9px;
-  line-height: 1.35;
+  padding: 1px 0;
+  line-height: 1.4;
 }
 
 .ord-read .ord-r em {
