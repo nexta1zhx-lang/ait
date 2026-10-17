@@ -553,6 +553,13 @@ CREATE TABLE IF NOT EXISTS push_tokens (
 );
 CREATE INDEX IF NOT EXISTS push_tokens_user_idx ON push_tokens (user_id);
 
+-- -------------------------------------- 删掉知识库那两张老表（2026-10-18）
+-- 用户：「知识库模块整个去掉，其他的数据库表……全部去掉」。建表语句早在
+-- 2026-10-18 就从本文件删了；老库里还留着那两张表和里面的数据，这里一次性清掉
+-- （幂等：表没了就是空操作）。**提示词数据不在这两张表里**，在「ai_docs」，不动。
+DROP TABLE IF EXISTS knowledge;
+DROP TABLE IF EXISTS tag_templates;
+
 -- ------------------------------------------------- 数据问答的会话（2026-10-17）
 -- 用户：「现在服务器数据问答的数据有保存在数据库吗」→ 要存（多设备能续上）。
 -- 以前问题 / 回答只在浏览器 localStorage 里，服务端只记了一条 llm_usage。
