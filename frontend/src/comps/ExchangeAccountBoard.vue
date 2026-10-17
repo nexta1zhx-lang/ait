@@ -3533,7 +3533,35 @@ const RANGES = [
  *    ⚠️ 因为没框没底，`.p-h` 整行的 `cursor: pointer` 会盖过它 —— 图标颜色压暗一档，
  *       至少看得出"这里还有个东西"，别跟 PnL 抢注意力。
  *    ⚠️ SVG 必须显式给 `width/height` —— 只写 `viewBox` 会被 flex 撑成大块。
+ *
+ * ⚠️ 2026-10-18 补回：删「知识库」时，这段样式跟 `.col-btn`（收录到知识库那颗）
+ *    写在同一组选择器里，一起被删掉了 —— 剩下按「分享」那颗就变成一个**空橙块**
+ *    （没有 26px 命中区、没有描边色，SVG 只有 `viewBox` 被撑成 0×0）。
+ *    持仓卡（`.p-h`）和仓位历史卡（`.cyc-h`）都吃这一份。
  */
+.p-h .sh-btn,
+.cyc-h .sh-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.p-h .sh-btn svg,
+.cyc-h .sh-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
 /*
  * ⚠️ **只留键盘焦点**，不给悬浮态（用户 2026-10-07：「不需要 hover 效果」）——
  *    手机 WebView 里悬停本来就是虚的，安卓还会在**点完之后把 `:hover` 粘住**，
