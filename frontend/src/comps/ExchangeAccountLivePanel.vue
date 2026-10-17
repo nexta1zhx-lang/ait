@@ -1671,7 +1671,11 @@ function startStreams(): void {
          */
         health: d => {
           deaf.value = {...deaf.value, [k.id]: d}
-          if (d && keyIsActive(k.id)) void doRefresh()
+          /*
+           * ⚠️ 这里**不要** `doRefresh()`：它走「手动刷新」那条路（非 auto），
+           *    除 25 权重外还会唤醒常驻流（补成交 + 挂单 + 钱账本 ≈200 权重）。
+           *    交给 20 秒兜底定时器用 `doRefresh(true)`（25 权重、不唤醒）。
+           */
         },
         reject: r => {
           /*

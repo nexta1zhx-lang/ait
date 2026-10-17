@@ -773,6 +773,8 @@ export class KeyStream {
   private lastForcedAt = 0
   /** 上一次因为 `ACCOUNT_UPDATE` 去问 REST 快照的时间（**真的拦请求**，见那个常量） */
   private lastWsSnapshotAt = 0
+  /** 最近一次**真的打了 REST** 的完整快照时刻（`minGapSec` 现在连请求一起拦，见 `snapshot()`） */
+  private lastRestSnapshotAt = 0
   /**
    * 事件触发的快照：打了几发 / 因为什么跳过 —— **一分钟一行摘要**。
    *
@@ -957,7 +959,8 @@ export class KeyStream {
    *   那一轮才轮到（用户看到的就是「还是会有没补上的」）。
    */
   private async reconcile(source: 'boot' | 'ws'): Promise<void> {
-    await this.snapshot(source, WS_SNAPSHOT_GAP_SEC)
+    /* 重连后手上这份可能已经过期 ⇒ 这一发必须真打；boot 那次 `lastRestSnapshotAt` 本来就是 0 */
+    await this.snapshot(source, WS_SNAPSHOT_GAP_SEC, {forceRest: source === 'ws'})
     /*
      * ★ 起流那一发**顺带把「盈亏」那本账也拉一次**。
      *   income 只有 30 权重、每个进程每套 key 一次；不拉的话新账户的「盈亏」tab 会空着，
@@ -1450,11 +1453,14 @@ export class KeyStream {
         const watching = listenerCount(this.row.id) > 0
         const due = Date.now() - this.lastWsSnapshotAt > WS_SNAPSHOT_GAP_SEC * 1000
         if (newSymbols.length || (due && watching)) {
-          this.lastWsSnapshotAt = Date.now()
-          /* 本地已经更新过了 ⇒ 顺手把采样时钟也推一下，别让 5 分钟采样立刻再来一发 */
-          this.lastSampleAt = Date.now()
-          this.noteEvSnap('taken')
-          await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+          const forceRest = newSymbols.length > 0
+          /* 时钟 / 计数只在**真打 REST** 时推 —— 被 `minGapSec` 拦下时不能虚报 */
+          if (this.restSnapshotDue(WS_SNAPSHOT_GAP_SEC, forceRest)) {
+            this.lastWsSnapshotAt = Date.now()
+            this.lastSampleAt = Date.now()
+            this.noteEvSnap('taken')
+          }
+          await this.snapshot('ws', WS_SNAPSHOT_GAP_SEC, {forceRest})
         } else if (!newSymbols.length) {
           /*
            * 跳过也要留痕（见 `noteEvSnap`）：`due=false` = 刚问过（180 秒内），
@@ -1797,9 +1803,8 @@ export class KeyStream {
        */
       if (!o.skipSnapshot) {
         /*
-         * `minGapSec` 只管**要不要把这一份写进库**（`saveSnapshot`），请求和推送给前端
-         * 那两步不受它约束。`force`（写操作）要的就是「这一笔之后」的一行 ⇒ 不节流，
-         * 曲线在平仓那一刻有个点；非 `force`（SSE 反复重连那种）20 秒内别刷同样的行。
+         * `force`（写操作）= 这一笔之后必须有一行，不节流；
+         * 非 `force`（SSE 反复重连那种）按 `WS_SNAPSHOT_GAP_SEC` 节流。
          */
         await this.snapshot('poll', o.force ? 0 : WS_SNAPSHOT_GAP_SEC)
       }
@@ -1947,21 +1952,16 @@ export class KeyStream {
   }
 
   /**
-   * 有成交落地 ⇒ 持仓集合可能变了 ⇒ 顺手对齐一次。
+   * 有成交落地 ⇒ 持仓集合可能变了 ⇒ 对齐标记价 + 推前端（两件都 0 权重）。
+   * ⚠️ `ACCOUNT_UPDATE` 通常盖得住，但它会丢，所以用「有成交」当触发器兜一下。
    *
-   * ★ 2026-10-06 加：
-   *   ⚠️ 原来 `syncMarks()` **只在 `snapshot()` 里调**，而快照是 **5 分钟**一次。
-   *   所以「开了一个新仓」之后，那 5 分钟里**没有给这个币订标记价** ——
-   *   未实现盈亏就一直停在开仓那一刻的数（有人看还是没人看都一样）。
-   *   `ACCOUNT_UPDATE` 本来盖得住（币安开仓会推它），但它也会丢（跟成交事件
-   *   同一类问题），丢了就没人补 → 所以这里用「有成交」当触发器。
-   *
-   * ⚠️ 走 `snapshot('ws')` 自带 **20 秒节流**（`WS_SNAPSHOT_GAP_SEC`）：
-   *   一笔一笔成交连着来也只打一发，权重 25，不会失控。
+   * ⚠️ 以前这里调 `snapshot('ws')`，而它的 `minGapSec` 只节流写库、REST 照打 25 权重
+   *    ⇒ 一笔平仓被拆成 10+ 笔成交就能把 1200/分钟打满（2026-10-17 实测）。
    */
   private resyncAfterFill(): void {
     if (this.stopped) return
-    void this.snapshot('ws', WS_SNAPSHOT_GAP_SEC)
+    this.syncMarks()
+    this.pushLive(false)
   }
 
   /** 最近一次替某个币撤残留单的时刻（去抖用，见 `ORPHAN_SWEEP_GAP_MS`） */
@@ -2477,7 +2477,8 @@ export class KeyStream {
     const ov = this.lastOverview
     const wsLive = !this.deaf && this.wsOpen()
     if (!ov || !wsLive) {
-      await this.snapshot('poll', WS_SNAPSHOT_GAP_SEC)
+      /* 曲线不能拿旧数画点 ⇒ 这一发必须真打（见 `snapshot()` 的 `forceRest`） */
+      await this.snapshot('poll', WS_SNAPSHOT_GAP_SEC, {forceRest: true})
       return
     }
     try {
@@ -2548,12 +2549,9 @@ export class KeyStream {
   /**
    * 事件触发的快照计数 +**一分钟一行摘要**（见 `evSnap` 的说明）。
    *
-   * ⚠️「打」= REST 那一发**确实发出去了**；它到了 `snapshot()` 里还可能因为
-   *    「180 秒内刚写过库」而不落库（那种情况不会打 `快照已写`，但权重已经花了）。
-   *    所以这一行 + `快照已写` 两行合起来才是完整故事：
-   *    · 只看到这一行 ⇒ 打了 REST、没写库（数据仍然推给前端了）；
-   *    · 两行都有 ⇒ 打了也写了；
-   *    · 只有「跳过」⇒ 一发都没打。
+   * `taken` = 这一发 REST 真发出去了（先过 `snapshot()` 的 `minGapSec` 闸）；
+   * 到了里面仍可能因 20 秒去重**不落库**，那就只有这一行、没有 `快照已写`。
+   * `skip*` = 一发都没打。
    */
   private noteEvSnap(kind: 'taken' | 'skipNoViewer' | 'skipFresh'): void {
     const c = this.evSnap
@@ -2801,6 +2799,12 @@ export class KeyStream {
     this.marks.clear()
   }
 
+  /** 这一发 REST 会不会被 `minGapSec` 拦掉（`snapshot()` 和「事件快照」计数共用） */
+  private restSnapshotDue(minGapSec: number, forceRest = false): boolean {
+    if (forceRest || minGapSec <= 0 || !this.lastOverview) return true
+    return Date.now() - this.lastRestSnapshotAt >= minGapSec * 1000
+  }
+
   /**
    * 拉一次完整快照写库。
    * ⚠️ **失败就只记日志、不写库** —— 绝不能把「拉不到」写成一条 0 的快照，
@@ -2808,10 +2812,23 @@ export class KeyStream {
    */
   async snapshot(
     source: 'boot' | 'ws' | 'poll' | 'shutdown',
-    minGapSec = 0
+    minGapSec = 0,
+    /** `forceRest`：净值曲线 / 出现新仓（缺杠杆、强平价）—— 这两种必须真打 */
+    opts: {forceRest?: boolean} = {}
   ): Promise<ExchangeOverview | null> {
+    /*
+     * ⚠️ `minGapSec` **连请求一起拦**，不只是写库：间隔内回内存那份（WS 事件已经把
+     *    持仓/钱包/浮盈改对了）。只节流写库的话「每笔成交一发 25 权重」能把窗口打满。
+     *    被拦时**不 emit** `snapshot` 事件 —— 旧值会把前端刚更新的实时数字盖回去。
+     */
+    if (!this.restSnapshotDue(minGapSec, opts.forceRest)) {
+      this.syncMarks()
+      this.pushLive(false)
+      return this.lastOverview
+    }
     try {
       const ov = await fetchExchangeOverview(credsOf(this.row))
+      this.lastRestSnapshotAt = Date.now()
       const wrote = await saveSnapshot(this.row.user_id, this.row.id, ov, {
         source,
         minGapSec
