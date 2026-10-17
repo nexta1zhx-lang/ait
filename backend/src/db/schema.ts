@@ -495,9 +495,14 @@ CREATE TABLE IF NOT EXISTS journal_coins (
   base     TEXT   NOT NULL,
   -- 这条日记里对这个币的一句话
   note     TEXT   NOT NULL DEFAULT '',
+  -- 这个币在这一篇里**定住的那一刻**（北京时间 HH:mm，空 = 没定）。
+  -- 点它跳 K 线时就定在这一刻（用户 2026-10-18：「可以固定一个时间，点击就显示该段时间」）。
+  at_time  TEXT   NOT NULL DEFAULT '',
   sort     INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (entry_id, base)
 );
+-- 老库补列（上面的 CREATE 只对全新的库生效）
+ALTER TABLE journal_coins ADD COLUMN IF NOT EXISTS at_time TEXT NOT NULL DEFAULT '';
 -- 「这个币在历次日记里被怎么说的」走这条
 CREATE INDEX IF NOT EXISTS journal_coins_base_idx ON journal_coins (base);
 

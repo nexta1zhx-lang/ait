@@ -29,6 +29,11 @@ export interface JournalCoin {
   base: string
   /** 这个币在这篇里的一句话（可空） */
   note: string
+  /**
+   * 这个币在这一篇里**定住的那一刻**（北京时间 `HH:mm`，空串 = 没定）。
+   * 点它跳 K 线时就定在这一刻 —— 用户 2026-10-18：「可以固定一个时间，点击就显示该段时间」。
+   */
+  at: string
 }
 
 export interface JournalEntry {
@@ -78,14 +83,25 @@ function dayOf(v: string | Date): string {
   return String(v).slice(0, 10)
 }
 
+/** `HH:mm` 校验 —— 只认 00:00 ~ 23:59，别的一律当没定 */
+function atOf(v: unknown): string {
+  const t = String(v ?? '').trim()
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t)
+  if (!m) return ''
+  const h = Number(m[1])
+  const mi = Number(m[2])
+  if (h > 23 || mi > 59) return ''
+  return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`
+}
+
 function coinsOf(v: unknown): JournalCoin[] {
   if (!Array.isArray(v)) return []
   const out: JournalCoin[] = []
   for (const raw of v) {
-    const o = raw as {base?: unknown; note?: unknown}
+    const o = raw as {base?: unknown; note?: unknown; at?: unknown}
     const base = String(o?.base ?? '').toUpperCase()
     if (!/^[A-Z0-9]{1,20}$/.test(base)) continue
-    out.push({base, note: String(o?.note ?? '').slice(0, MAX_NOTE)})
+    out.push({base, note: String(o?.note ?? '').slice(0, MAX_NOTE), at: atOf(o?.at)})
   }
   return out
 }
@@ -105,7 +121,8 @@ function mapEntry(r: EntryRow): JournalEntry {
 /** 单篇的取数片段（`coins` 直接聚合成 JSON，省一次往返） */
 const ENTRY_COLUMNS = `
   e.id, e.day, e.title, e.body, e.created_at, e.updated_at,
-  COALESCE((SELECT jsonb_agg(jsonb_build_object('base', c.base, 'note', c.note)
+  COALESCE((SELECT jsonb_agg(jsonb_build_object('base', c.base, 'note', c.note,
+                                                'at', c.at_time)
                              ORDER BY c.sort, c.base)
               FROM journal_coins c WHERE c.entry_id = e.id), '[]'::jsonb) AS coins`
 
@@ -166,7 +183,7 @@ export async function saveJournalEntry(
   const coins: JournalCoin[] = []
   const seen = new Set<string>()
   for (const raw of Array.isArray(input.coins) ? input.coins : []) {
-    const o = raw as {base?: unknown; note?: unknown}
+    const o = raw as {base?: unknown; note?: unknown; at?: unknown}
     let base: string
     try {
       base = normalizeBase(o?.base)
@@ -175,7 +192,7 @@ export async function saveJournalEntry(
     }
     if (seen.has(base)) continue
     seen.add(base)
-    coins.push({base, note: String(o?.note ?? '').trim().slice(0, MAX_NOTE)})
+    coins.push({base, note: String(o?.note ?? '').trim().slice(0, MAX_NOTE), at: atOf(o?.at)})
     if (coins.length >= MAX_JOURNAL_COINS) break
   }
 
@@ -205,8 +222,8 @@ export async function saveJournalEntry(
   for (let i = 0; i < coins.length; i++) {
     const c = coins[i]!
     await query(
-      'INSERT INTO journal_coins (entry_id, base, note, sort) VALUES ($1, $2, $3, $4)',
-      [id, c.base, c.note, i]
+      'INSERT INTO journal_coins (entry_id, base, note, at_time, sort) VALUES ($1, $2, $3, $4, $5)',
+      [id, c.base, c.note, c.at, i]
     )
   }
 

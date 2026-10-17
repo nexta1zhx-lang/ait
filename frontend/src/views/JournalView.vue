@@ -29,6 +29,7 @@ import {showToast} from '../toast'
 import {contracts} from '../store'
 import {leftTab, prefetchSymbol, pickSymbol, chartFrom, MOBILE_MAX} from '../analyze'
 import SymbolCombo from '../comps/SymbolCombo.vue'
+import DateTimePick from '../comps/DateTimePick.vue'
 
 /** 「今天」是哪一天（北京时间，`YYYY-MM-DD`）—— 跟后端 `bjDayNow()` 同一口径 */
 function today(): string {
@@ -114,10 +115,14 @@ function dayLabel(day: string): string {
 
 /* ---------------- 跳转：币 → K 线（定在那一天） ---------------- */
 
-function goCoin(base: string, day?: string): void {
+/**
+ * 点一个币 → 去 K 线看它，并且**定在这一刻**（条目那天 + 这个币自己定的 `HH:mm`）。
+ * 没定时间就退回当天 12:00（原来就是这个口径）。
+ */
+function goCoin(base: string, day?: string, at?: string): void {
   prefetchSymbol(base)
   pickSymbol(base)
-  if (day) chartFrom.value = `${day}T12:00`
+  if (day) chartFrom.value = `${day}T${at || '12:00'}`
   if (window.innerWidth <= MOBILE_MAX) leftTab.value = 'chart'
 }
 
@@ -148,7 +153,7 @@ function startEdit(e: JournalEntry): void {
     day: e.day,
     title: e.title,
     body: e.body,
-    coins: e.coins.map(c => ({...c}))
+    coins: e.coins.map(c => ({...c, at: c.at ?? ''}))
   }
   comboPick.value = ''
 }
@@ -169,7 +174,7 @@ function addCoin(v: string): void {
     showToast('一篇最多挂 20 个币', 'bad')
     return
   }
-  ed.coins.push({base, note: ''})
+  ed.coins.push({base, note: '', at: ''})
   comboPick.value = ''
 }
 
@@ -231,7 +236,11 @@ async function remove(e: JournalEntry): Promise<void> {
 
 <template>
   <div class="col journal">
-    <!-- 一行：搜 + 币种筛选 + 写 -->
+    <!--
+      第一行：搜索 + 「写一篇」（图标）。
+      第二行：币种筛选 —— 用户 2026-10-18：「币种筛选显示不全… 加入币种放到下」，
+      跟搜索挤一行时被压得只剩几个字，所以单独占一行。
+    -->
     <div class="j-bar">
       <div class="j-search">
         <input v-model="q" type="text" placeholder="搜日记…（标题或正文）" />
@@ -239,6 +248,16 @@ async function remove(e: JournalEntry): Promise<void> {
           ✕
         </button>
       </div>
+      <button type="button" class="ghost tiny j-new" title="写一篇" @click="startNew">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 20h4l10-10-4-4L4 16v4Z" />
+          <path d="M13.5 6.5l4 4" />
+        </svg>
+      </button>
+    </div>
+
+    <div class="j-flt-row">
       <SymbolCombo
         plain
         class="j-flt"
@@ -248,7 +267,6 @@ async function remove(e: JournalEntry): Promise<void> {
         :contracts="coinOptions"
         @pick="v => (coin = v)"
       />
-      <button class="ghost tiny j-new" title="写一篇（今天）" @click="startNew">写一篇</button>
     </div>
 
     <div v-if="error" class="error">{{ error }}</div>
@@ -273,16 +291,29 @@ async function remove(e: JournalEntry): Promise<void> {
                 type="button"
                 class="j-coin"
                 :title="`看 ${c.base} 的 K 线`"
-                @click="goCoin(c.base, e.day)"
+                @click="goCoin(c.base, e.day, c.at)"
               >
                 {{ c.base }}
               </button>
               <span v-if="c.note" class="dim">{{ c.note }}</span>
+              <span v-if="c.at" class="j-at dim">{{ c.at }}</span>
             </li>
           </ul>
           <div class="j-acts">
-            <button class="ghost tiny" @click="startEdit(e)">编辑</button>
-            <button class="ghost tiny" @click="remove(e)">删除</button>
+            <button type="button" class="ghost tiny j-act" title="编辑这一篇" @click="startEdit(e)">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 20h4l10-10-4-4L4 16v4Z" />
+                <path d="M13.5 6.5l4 4" />
+              </svg>
+            </button>
+            <button type="button" class="ghost tiny j-act j-del" title="删掉这一篇" @click="remove(e)">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 7h16M9.5 7V4.6h5V7M6.5 7l1 13h9l1-13" />
+                <path d="M10.5 10.5v6M13.5 10.5v6" />
+              </svg>
+            </button>
           </div>
         </div>
       </article>
@@ -311,7 +342,7 @@ async function remove(e: JournalEntry): Promise<void> {
       <div class="sheet-row">
         <span class="rk">日期</span>
         <div class="ctl">
-          <input v-model="editing.day" type="date" :max="todayStr" />
+          <DateTimePick v-model="editing.day" mode="date" :max="todayStr" />
         </div>
       </div>
 
@@ -358,6 +389,12 @@ async function remove(e: JournalEntry): Promise<void> {
             class="j-note-input"
             maxlength="200"
             :placeholder="`对 ${c.base} 的一句话（可不填）`"
+          />
+          <DateTimePick
+            v-model="c.at"
+            mode="time"
+            placeholder="定时刻"
+            :title="`定了时刻，点 ${c.base} 就跳到那一刻的 K 线`"
           />
           <button type="button" class="ghost tiny" title="移出这篇" @click="dropCoin(c.base)">
             ✕
@@ -406,11 +443,24 @@ async function remove(e: JournalEntry): Promise<void> {
   transform: translateY(-50%);
   padding: 2px 5px;
 }
-.j-flt {
-  flex: 0 0 auto;
-}
 .j-new {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+}
+/* 筛选单独一行：给足宽度，别把「全部 / 币名」榨成省略号 */
+.j-flt-row {
+  display: flex;
+  align-items: center;
+  margin: -2px 0 10px;
+}
+.j-flt {
+  /* 独占一行、最多吃满 —— 币名再长也不截断（用户：「币种筛选显示不全」） */
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 260px;
 }
 
 /* 条目 */
@@ -490,6 +540,22 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-acts {
   display: flex;
   gap: 6px;
+}
+.j-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+}
+.j-act.j-del:hover {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+/* 币后面那个定住的时刻 */
+.j-at {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 .j-more {
   align-self: center;

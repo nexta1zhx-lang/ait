@@ -2587,6 +2587,8 @@ export interface JournalCoin {
   base: string
   /** 这个币在我这篇里的一句话 */
   note: string
+  /** 这个币定住的时刻 `HH:mm`（空串 = 没定，跳 K 线时用当天 12:00） */
+  at: string
 }
 
 export interface JournalEntry {
