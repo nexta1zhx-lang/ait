@@ -4658,11 +4658,30 @@ onBeforeUnmount(() => {
     </div>
 
     <!--
-      图表下面那行：**划线工具**（常驻的两颗图标）+ 指标开关。
-      用户 2026-10-17：「编辑图标放在底部」「隐藏放在底部常驻用图标」「划线的线用图标表示」。
+      图表下面那行：指标开关在左，**划线工具**（常驻那两颗图标）在**最右侧**
+      （用户 2026-10-17：「划线和隐藏的图标放在最右侧」）。
       A / L 在坐标轴右下角（`axis-tools`），不在这行。
     -->
     <div class="chart-foot">
+      <!-- 挂单读不到 / 只拿到快照时的提示（正常不渲染） -->
+      <span v-if="ordNote" class="ord-note" :title="ordNote.title">{{
+        ordNote.text
+      }}</span>
+
+      <!-- 指标开关（点一下显示 / 隐藏） -->
+      <div ref="legendEl" class="legend">
+        <span
+          v-for="l in LEGEND"
+          :key="l.key"
+          :data-toggle="l.key"
+          :class="{off: !VISIBLE[l.key]}"
+          :title="l.tip"
+          @click="toggleLegend(l.key)"
+        >
+          <i class="dot" :class="l.dot" />{{ l.label }}
+        </span>
+      </div>
+
       <div class="draw-tools">
         <button
           type="button"
@@ -4694,25 +4713,6 @@ onBeforeUnmount(() => {
             <path d="M4 20 20 4" />
           </svg>
         </button>
-      </div>
-
-      <!-- 挂单读不到 / 只拿到快照时的提示（正常不渲染） -->
-      <span v-if="ordNote" class="ord-note" :title="ordNote.title">{{
-        ordNote.text
-      }}</span>
-
-      <!-- 指标开关（点一下显示 / 隐藏） -->
-      <div ref="legendEl" class="legend">
-        <span
-          v-for="l in LEGEND"
-          :key="l.key"
-          :data-toggle="l.key"
-          :class="{off: !VISIBLE[l.key]}"
-          :title="l.tip"
-          @click="toggleLegend(l.key)"
-        >
-          <i class="dot" :class="l.dot" />{{ l.label }}
-        </span>
       </div>
     </div>
 

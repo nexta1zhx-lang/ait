@@ -4406,12 +4406,13 @@ body.fixed-viewport .split {
  *   · 「提醒图标换个 svg 那种简单的」——铃铛是画布上手画的线稿（见 `chart-drawings.ts`）。
  */
 
-/* 图下面那行（常驻：编辑 / 显示隐藏） */
+/* 图下面那行最右端（常驻：编辑 / 显示隐藏）—— `margin-left:auto` 把它顶到最右 */
 .draw-tools {
   display: flex;
   align-items: center;
   gap: 4px;
   flex: none;
+  margin-left: auto;
 }
 
 /*
@@ -4427,12 +4428,23 @@ body.fixed-viewport .split {
   z-index: 6;
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 4px;
+  gap: 5px;
+  padding: 4px 5px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 9px;
   background: rgba(12, 16, 22, 0.86);
   backdrop-filter: blur(3px);
+}
+
+/* 顶上那排比底部那两颗**大一档**（用户 2026-10-17：「弹出的划线图标放大一点」） */
+.draw-top .dt-ico {
+  width: 34px;
+  height: 32px;
+}
+.draw-top .dt-ico svg {
+  width: 21px;
+  height: 21px;
+  stroke-width: 1.7;
 }
 
 /* 两处共用的图标按钮 */
