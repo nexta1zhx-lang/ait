@@ -233,16 +233,10 @@ async function remove(e: JournalEntry): Promise<void> {
 <template>
   <div class="col journal">
     <!--
-      一行：小搜索框 + 币种 + 加号（用户 2026-10-18：「全部在搜索旁边，搜索框小一点
-      要能放在币种，笔改为加号图标」）。
+      一行：币种（左边、字号小一档）+ 搜索框（吃掉剩下的宽度）+ 加号。
+      用户 2026-10-18：「币种选择在左边字体放小，搜日记占剩余位置」。
     -->
     <div class="j-bar">
-      <div class="j-search">
-        <input v-model="q" type="text" placeholder="搜日记" />
-        <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
-          ✕
-        </button>
-      </div>
       <SymbolCombo
         plain
         class="j-flt"
@@ -252,6 +246,12 @@ async function remove(e: JournalEntry): Promise<void> {
         :contracts="coinOptions"
         @pick="v => (coin = v)"
       />
+      <div class="j-search">
+        <input v-model="q" type="text" placeholder="搜日记" />
+        <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
+          ✕
+        </button>
+      </div>
       <button type="button" class="ghost tiny j-new" title="写一条（时间就是现在）" @click="startNew">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -388,7 +388,7 @@ async function remove(e: JournalEntry): Promise<void> {
 </template>
 
 <style scoped>
-/* 顶上一行：小搜索框 / 币种 / 加号 */
+/* 顶上一行：币种（左、小字）/ 搜索（吃满剩余）/ 加号 */
 .j-bar {
   display: flex;
   align-items: center;
@@ -397,8 +397,8 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 .j-search {
   position: relative;
-  flex: 0 1 128px;
-  min-width: 84px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .j-search input {
   width: 100%;
@@ -418,10 +418,19 @@ async function remove(e: JournalEntry): Promise<void> {
   transform: translateY(-50%);
   padding: 2px 4px;
 }
-/* 币种吃掉剩下的宽度，币名再长也不截断 */
+/* 币种固定在最左、字号比正文小一档；币名长了自己截断（搜索框才是让位那个） */
 .j-flt {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 40%;
+  font-size: 12px;
+}
+.j-flt :deep(.combo-plain) {
+  font-size: 12px;
+  padding: 5px 7px;
+}
+.j-flt :deep(.combo-plain-t) {
+  font-size: 12px;
 }
 .j-new {
   flex: 0 0 auto;
