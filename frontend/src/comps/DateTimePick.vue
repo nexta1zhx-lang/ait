@@ -88,6 +88,22 @@ function shiftMonth(delta: number): void {
   viewM.value = d.getMonth() + 1
 }
 
+/**
+ * 「今」：跟点日历里今天那一格**完全一样**（`datetime` 模式下要接着去选时分，
+ * 以前这里直接 emit 一个只有日期的值就收起了 —— 用户 2026-10-18：「点击今天没有跳转时间」）。
+ */
+function pickToday(): void {
+  if (props.mode === 'datetime') {
+    const t = hour.value && minute.value ? `${hour.value}:${minute.value}` : '12:00'
+    emit('update:modelValue', `${todayStr()} ${t}`)
+    stage.value = 'time'
+    void nextTick(scrollToPicked)
+    return
+  }
+  emit('update:modelValue', todayStr())
+  open.value = false
+}
+
 function pickDay(c: Cell): void {
   if (c.disabled) return
   if (props.mode === 'datetime') {
@@ -231,20 +247,12 @@ const label = computed(() => {
         <button type="button" class="dtp-nav" title="上个月" @click="shiftMonth(-1)">◀</button>
         <b>{{ viewY }} 年 {{ viewM }} 月</b>
         <button type="button" class="dtp-nav" title="下个月" @click="shiftMonth(1)">▶</button>
-        <button
-          type="button"
-          class="dtp-nav dtp-today"
-          title="今天"
-          @click="emit('update:modelValue', todayStr()), (open = false)"
-        >
+        <button type="button" class="dtp-nav dtp-today" title="今天" @click="pickToday">
           今
         </button>
       </div>
       <div class="dtp-wd">
         <span v-for="w in WD" :key="w">{{ w }}</span>
-      </div>
-      <div v-if="mode === 'datetime'" class="dtp-picked">
-        定在 <b>{{ modelValue || '—' }}</b>（选完日期再点时分）
       </div>
       <div class="dtp-grid">
         <button
@@ -390,6 +398,16 @@ const label = computed(() => {
   padding-bottom: 2px;
 }
 .dtp-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * ⚠️ 必须自己把 padding 清掉：全站 button 默认 `padding: 9px 20px`，
+   *   7 列格子每格撑到 55px，整张日历比面板还宽 —— 右边三列直接被裁掉，
+   *   看着就是「字没居中」（2026-10-18 用户报的）。
+   */
+  min-width: 0;
+  padding: 0;
   height: 26px;
   font: inherit;
   font-size: 11.5px;
@@ -438,6 +456,11 @@ const label = computed(() => {
 }
 .dtp-num {
   flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 0;
   height: 28px;
   font: inherit;
   font-size: 12px;
@@ -475,16 +498,5 @@ const label = computed(() => {
 }
 .dtp-back {
   color: var(--blue);
-}
-.dtp-picked {
-  margin: 0 0 6px;
-  font-size: 11px;
-  color: var(--muted);
-  text-align: center;
-}
-.dtp-picked b {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
 }
 </style>
