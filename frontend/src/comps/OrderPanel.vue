@@ -301,9 +301,10 @@ function fitLeverage(l: number): number {
  * **买入仓位的百分比**（用户 2026-10-18：「这个是买入仓位的百分比放在顶部」）。
  *
  * 就是「这次用掉多少可用额度」：数量 = 能开的名义价值 × pct%。
- * 100% = 把可用保证金用满（跟以前一模一样），所以默认 100 不改变原有行为。
+ * 默认 **50%**（用户 2026-10-18：「默认 50%」）—— 一进来就是半仓，
+ * 手滑直接点「做多」也不会把可用额度一次用满。
  */
-const posPct = ref(100)
+const posPct = ref(50)
 /** 快捷比例（右边那几颗） */
 const POS_PCTS = [25, 50, 75, 100]
 /** 滑条填充比例（`--fill` 那个 CSS 变量） */
@@ -1448,6 +1449,29 @@ onMounted(async () => {
         {{ lev }}x
       </button>
       <!--
+        **仓位百分比滑条**（用户 2026-10-18：「滑动条放在杠杆旁」）—— 就挨着那颗 `10x`。
+        只在「没持仓」（= 开单那一块）时有意义，仓位那块不显示它。
+        `flex: 1 1 auto` + `min-width: 0`：这一行挤的时候它先让位（币种多 / 账户名长）。
+      -->
+      <label
+        v-if="!opened"
+        class="ord-pos-head"
+        :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
+      >
+        <span class="ord-bar">
+          <input
+            v-model.number="posPct"
+            type="range"
+            min="1"
+            max="100"
+            step="1"
+            :style="{'--fill': posFillPct + '%'}"
+            aria-label="买入仓位百分比"
+          />
+        </span>
+        <b class="ord-pos-head-num">{{ posPct }}%</b>
+      </label>
+      <!--
         ⚠️ 这里原来挂着一枚常驻的「真单」章（只在「配置 → 测试下单」关掉时出现）。
         用户 2026-10-07：「**提示层真单的那种去掉，都是真单**」「也去掉，那个章现在
         只是噪音」⇒ 整颗删掉。测试单那一档的标记照旧（只有真·测试单才标）。
@@ -1658,20 +1682,6 @@ onMounted(async () => {
             :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
           >
             <div class="ord-pos-body">
-              <div class="ord-pos-row">
-                <span class="ord-bar">
-                  <input
-                    v-model.number="posPct"
-                    type="range"
-                    min="1"
-                    max="100"
-                    step="1"
-                    :style="{'--fill': posFillPct + '%'}"
-                    aria-label="买入仓位百分比"
-                  />
-                </span>
-                <b class="ord-pos-num">{{ posPct }}%</b>
-              </div>
               <div class="ord-pos-quick">
                 <button
                   v-for="v in POS_PCTS"
