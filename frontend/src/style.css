@@ -5744,6 +5744,10 @@ body.fixed-viewport .split {
  */
 .ord-quota {
   position: relative;
+  /* ★ 2026-10-18：左边文字、右边「滑条 + 快捷」两行竖排（用户：「滑动条和快捷两行布局放右侧」） */
+  display: flex;
+  align-items: center;
+  gap: 10px;
   /* 2026-10-15 用户：「可开的数字小一点，空间整体都需要小一点」⇒ 这一卡整体收紧 */
   margin-bottom: 6px;
   padding: 7px 10px;
@@ -5786,43 +5790,84 @@ body.fixed-viewport .split {
   color: var(--muted);
 }
 
-/* 大号数字 + 右侧实时杠杆，同一行 */
+/* 大号数字那一行（2026-10-18 起右边不再挂「实时杠杆」） */
 .ord-quota-row {
   display: flex;
   align-items: baseline;
   gap: 10px;
 }
 
-/* 右侧那枚「实时杠杆 4.3x」（额度被可用保证金卡住时会不到 5.0x） */
-.ord-lev-live {
+/* 这一卡的左半边：标签 + 大号数字 + 数量小字（竖着三行，宽的那一边） */
+.ord-quota-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * **买入仓位百分比**（2026-10-18 用户：「这个是买入仓位的百分比放在顶部」，
+ * 随后：「**滑动条和快捷两行布局放右侧**」）—— 摆在这一卡的**右半边**，竖着两行：
+ *   ① `——o———— 100%`（滑条 + 当前百分比）
+ *   ② `[25%][50%][75%][100%]`（快捷比例，四颗平分右边这一列）
+ *
+ * ⚠️ 宽度是**百分比 + 上限**：右边这一列在 390px 上大约 150–170px，
+ *    再宽左边的「97.57USDT」就被挤到换行了。
+ * ⚠️ 高度固定（滑条 22px 命中区不撑高它）——用户 2026-10-05 定的「下单区域高度固定」。
+ */
+.ord-pos-side {
   flex: 0 0 auto;
-  margin-left: auto;
-  padding: 0 9px;
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  width: 46%;
+  max-width: 170px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ord-pos-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+/* 滑条吃掉这一行剩下的宽度（`.ord-bar` 那套轨道 / 空心圆滑块照旧生效） */
+.ord-pos-row .ord-bar {
+  flex: 1 1 auto;
+  min-width: 40px;
+  display: flex;
+  align-items: center;
+}
+.ord-pos-num {
+  flex: 0 0 auto;
+  min-width: 32px;
   font-family: var(--mono);
   font-size: 11.5px;
-  line-height: 20px;
   font-weight: var(--fw-mid);
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text);
 }
-
-.ord-lev-live em {
-  margin-right: 5px;
-  font-style: normal;
-  font-family: var(--font-sans);
-  font-size: 10.5px;
-  font-weight: 400;
-  opacity: 0.85;
+.ord-pos-quick {
+  display: flex;
+  gap: 4px;
 }
-
-/* 顶到 11x 那条账户上限：转成警示色 */
-.ord-lev-live.warn {
-  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
-  background: color-mix(in srgb, var(--warn) 14%, transparent);
-  color: var(--warn);
+/* 快捷比例：小胶囊，四颗平分这一列；选中的那颗用主色边（跟「订单设置」那几格一个语言） */
+.ord-pos-quick button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 2px 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  cursor: pointer;
+}
+.ord-pos-quick button.on {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .ord-quota-num {
@@ -6119,7 +6164,7 @@ body.fixed-viewport .split {
     filter: brightness(1.12);
   }
 }
-/* 杠杆小标签：跟在「市价 / 限价」后面那颗 */
+/* 杠杆小标签：跟在「市价 / 限价」后面那颗（点开是选档位的弹层） */
 .ord-head .ord-lev {
   padding: 4px 9px;
   font-family: var(--mono);

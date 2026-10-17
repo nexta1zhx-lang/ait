@@ -602,23 +602,20 @@ export async function isDualSide(ex: any, cacheKey: number | string): Promise<bo
 }
 
 /**
- * 开单的三条硬上限（用户 2026-10-14 定，**当天改过两次口径，以最后一次为准**）：
- *   · **单笔开单的名义金额 ≤ 5 × 账户权益**（权益 = 钱包余额 + 未实现盈亏）；
- *   · **账户总杠杆 ≤ 11 倍** = (Σ各币持仓名义价值 + 本单名义价值) ÷ 账户权益；
- *   · **单币杠杆 ≤ 10 倍**（`MAX_SYMBOL_LEVERAGE`）。
+ * 开单的硬上限 —— **2026-10-18 起只剩一条**（用户：「合约杠杆功能修复，不再设置单币
+ * 5 倍杠杆，总共 11 倍限制」）：
  *
- * ⚠️ 用户原话：「走个脚本将我交易所的所有币种的杠杆设置为 10 倍，**是开单的金额不能
- *    超出 5 倍**」—— 所以 5 倍管的是**金额**，不是杠杆。当天早上曾按「单币杠杆 ≤5x」
- *    做过一版、随后撤掉（用户：「是开单的金额不能超出 5 倍」），**别按 5x 理解**。
+ *   · ~~单笔 / 单币累计名义 ≤ 5 × 账户权益~~ —— **删掉了**（`MAX_ORDER_EQUITY_RATIO`）；
+ *   · ~~账户总杠杆 ≤ 11 倍~~ —— **删掉了**（`MAX_ACCOUNT_LEVERAGE`）；
+ *   · **同向加仓 ≤ 该币浮盈 × 持仓杠杆** —— 留着（`positionProfitAddBudget`）：
+ *     那是「别拿没赚到的钱去加仓」，不是倍数上限；
+ *   · **单币杠杆 ≤ 10 倍**（`MAX_SYMBOL_LEVERAGE`）—— 留着（用户 2026-10-14 定的
+ *     「杠杆设置最大只能设 10 倍」，这次的改动没提它）。
  *
- * ⚠️ 杠杆上限是**第二版**加的：用户重构 K 线面板时明确「杠杆设置最大只能设 10 倍」，
- *    所以 `setSymbolLeverage` 现在会拦 >10 的请求（脚本批量设 10x 正好在上限上）。
- *
- * 三条都是**硬上限**：下单 / 改杠杆接口里拦，绕开界面直接打接口也拦得住。
- * ⚠️ 前端 `OrderPanel.vue` 里那几个常量是**显示**用的，要和这里对齐。
+ * 剩下真正兜底的是**交易所自己的保证金校验**：钱不够就开不出来，这块不归我们管。
+ * ⚠️ 前端 `OrderPanel.vue` 里关于「能开多少」的算法要和这里对齐 —— 现在就是
+ *    「可用保证金 × 杠杆」，别再按 5 倍权益 / 11 倍总杠杆去算。
  */
-export const MAX_ORDER_EQUITY_RATIO = 5
-export const MAX_ACCOUNT_LEVERAGE = 11
 export const MAX_SYMBOL_LEVERAGE = 10
 
 /**
@@ -652,41 +649,6 @@ export async function setSymbolLeverage(
   return {symbol: spec.symbol, leverage: n(r?.leverage) || lev}
 }
 
-/**
- * 一个交易对的**额度账**（纯函数，`_verify` 那类临时脚本直接打它）。
- *
- *   · `cap`      = 5 × 权益 —— **这个币的总额度**（不是「每一单各自 5 倍」）；
- *   · `existing` = 这个币**已经开着**的名义价值；
- *   · `add`      = 这一单要加的名义价值；
- *   · `overflow` = 放不放行（`false` = 放行）。
- *
- * ★ 为什么是「总额度」（用户 2026-10-14）：用户开了仓之后发现界面还在说「还能开 5 倍」，
- *   原话是「**我都已经开仓了，剩余开仓应该是 0**」—— 所以 5 倍按**这个币的累计名义**
- *   算才对得上（早先那句「开单的金额不能超出 5 倍」也按总额度理解才自洽）。
- *
- * ★ 这个函数只校验**非加仓开仓**的 5 倍累计额度；同向加仓另按「该币浮盈 × 持仓杠杆」
- *   校验单笔额度，见 `assertOrderLimits`。
- *
- * @returns 权益读不到（≤ 0）时 `overflow` 恒为 `false`：那种单子交易所自己会因保证金不足拒掉
- */
-export function symbolBudget(
-  equity: number,
-  existingNotional: number,
-  addNotional: number
-): {
-  cap: number
-  existing: number
-  add: number
-  overflow: boolean
-} {
-  const cap = equity > 0 ? equity * MAX_ORDER_EQUITY_RATIO : 0
-  const existing = Math.abs(Number(existingNotional) || 0)
-  const add = Math.max(0, Number(addNotional) || 0)
-  if (!(cap > 0)) return {cap: 0, existing, add, overflow: false}
-  /* 浮盈每秒在动 ⇒ 卡死在等号上会被行情抖一下拒掉，留一丁点余量（5 倍那条主规则没放松） */
-  return {cap, existing, add, overflow: !(existing + add <= cap * 1.002 + 0.5)}
-}
-
 /** 同向加仓的单笔名义额度 = 该币正浮盈 × 杠杆（杠杆最高按 10x 计）。 */
 export function positionProfitAddBudget(unrealizedProfit: number, leverage: number): number {
   const profit = Number.isFinite(unrealizedProfit) ? Math.max(0, unrealizedProfit) : 0
@@ -700,18 +662,14 @@ export function isWithinPositionProfitAddBudget(addNotional: number, budget: num
 }
 
 /**
- * 开单前的体检（三条上限）。**只拦开仓** —— 减仓 / 平仓不走这里。
+ * 开单前的体检。**只拦开仓** —— 减仓 / 平仓不走这里。
  *
- * ① **非加仓单笔名义金额 ≤ 5 × 权益**：这一单的名义价值 ÷ 账户权益；
- * ② **非加仓单币累计名义 ≤ 5 × 权益**（`symbolBudget`）；
- * ③ **账户总杠杆 ≤ 11 倍**：(现有持仓名义 + 这一单) ÷ 账户权益。
+ * ★ 2026-10-18 只剩一条（用户：「合约杠杆功能修复，不再设置单币 5 倍杠杆，总共 11 倍
+ *   限制」）：**同向加仓 ≤ 该币浮盈 × 持仓杠杆**（`positionProfitAddBudget`）。
+ *   原来的「单笔 / 单币 ≤ 5 × 权益」和「账户总杠杆 ≤ 11 倍」两道闸**已删**，
+ *   钱不够由交易所自己的保证金校验兜底。
  *
- * ★★ 2026-10-15 用户最后定的口径：「**加仓额度按该币浮盈 × 10，其他币开仓仍按 5 倍，
- *   全账户总杠杆最多 11 倍**」—— 同向加仓跳过 ①②，但本单不能超过该币浮盈 × 持仓杠杆；
- *   所有订单仍受 ③ 和交易所保证金限制。判「是不是加仓」看持仓方向：
- *   这个币已经有仓位、方向跟这一单一致 = 加仓。
- *
- * 三条共用同样两发请求（一次 `positionRisk` + 一次余额），所以合在一个函数里。
+ * 判「是不是加仓」看持仓方向：这个币已经有仓位、方向跟这一单一致 = 加仓。
  * 权益读不到 / 为 0 ⇒ **不拦** —— 那种单子交易所自己会因保证金不足拒掉，别在这儿误伤。
  *
  * @param quantity 这一单的数量（基础币）
@@ -732,18 +690,13 @@ export async function assertOrderLimits(
   assertTradable(c)
   const spec = await specFor(c, rawSymbol)
   const ex = createExchange(c)
-  const [raw, balance] = await Promise.all([
-    readPositionRiskRow(ex, undefined),
-    fetchFuturesBalance(ex)
-  ])
+  /*
+   * 只读持仓，不再读余额 —— 5 倍 / 11 倍那两条要「权益」，现在没这条规则了，
+   * 少打一发 `/fapi/v2/balance`（下单前这条路径原来要两个来回）。
+   */
+  const raw = await readPositionRiskRow(ex, undefined)
   const rows: any[] = Array.isArray(raw) ? raw : raw ? [raw] : []
 
-  const notionals: number[] = []
-  for (const r of rows) {
-    const p = positionFromRow(r)
-    if (p) notionals.push(p.notional)
-  }
-  const equity = balance.wallet + balance.unrealized
   const dir = String(side ?? '').toLowerCase()
   const wantSide: 'long' | 'short' | '' =
     dir === 'buy' || dir === 'long' ? 'long' : dir === 'sell' || dir === 'short' ? 'short' : ''
@@ -765,85 +718,23 @@ export async function assertOrderLimits(
    * 这一单是**加仓**吗：这个币已经有仓位，而且方向跟这一单一致
    * （多单再买 / 空单再卖 ⇒ 加仓；反向的那是减仓，前端走 `closePositions`，不进这里）。
    *
-   * ★ 2026-10-15 用户确认：同向加仓额度按该币浮盈 × 持仓杠杆（当前最高 10x），
-   *   跳过开仓专用的 ①②；全账户总杠杆仍严格 ≤ 11 倍，交易所也会校验实际保证金。
+   * ★ 2026-10-18：同向加仓额度按该币浮盈 × 持仓杠杆（杠杆封顶 10x）；
+   *   开仓那边已经没有任何倍数闸（5 倍权益 / 11 倍总杠杆都删了），
+   *   保证金够不够由交易所自己校验。
    */
   const isAdd = !!minePos && wantSide !== '' && minePos.side === wantSide
+  if (!isAdd) return
 
-  if (isAdd) {
-    const positionProfit = Math.max(0, minePos.unrealized)
-    const positionLeverage = Math.min(MAX_SYMBOL_LEVERAGE, Math.max(1, minePos.leverage || 1))
-    const profitBudget = positionProfitAddBudget(minePos.unrealized, minePos.leverage)
-    if (!isWithinPositionProfitAddBudget(add, profitBudget)) {
-      throw new Error(
-        `${spec.symbol} 本次加仓约 ${add.toFixed(2)} USDT，超过该币浮盈额度：` +
-          `浮盈 ${positionProfit.toFixed(2)} × 持仓杠杆 ${positionLeverage}x = ` +
-          `${profitBudget.toFixed(2)} USDT；全账户总杠杆仍不能超过 ${MAX_ACCOUNT_LEVERAGE}x`
-      )
-    }
-  } else {
-    const ratio = orderEquityRatio(add, equity)
-    if (ratio !== null && ratio > MAX_ORDER_EQUITY_RATIO) {
-      throw new Error(
-        `这一单名义金额约 ${add.toFixed(0)} USDT，是账户权益（${equity.toFixed(2)}）的 ` +
-          `${ratio.toFixed(1)} 倍，超过单笔上限 ${MAX_ORDER_EQUITY_RATIO} 倍 —— 数量取小一点再开`
-      )
-    }
-
-    /*
-     * ② 这个币的**累计**额度：已开的 + 这一单 ≤ 5 × 权益（**只拦开仓**，见上面 `isAdd`）。
-     */
-    const budget = symbolBudget(equity, minePos?.notional ?? 0, add)
-    if (budget.overflow) {
-      throw new Error(
-        `${spec.symbol} 这个币的 ${MAX_ORDER_EQUITY_RATIO} 倍额度已经用满：` +
-          `已开 ${budget.existing.toFixed(0)} + 本单 ${budget.add.toFixed(0)} = ` +
-          `${(budget.existing + budget.add).toFixed(0)} USDT，` +
-          `超过额度 ${budget.cap.toFixed(0)}（${MAX_ORDER_EQUITY_RATIO} × 权益 ${equity.toFixed(2)}）` +
-          ` —— 要加仓就点面板上的「加仓」（按该币浮盈 × 持仓杠杆计算，并受全账户 ${MAX_ACCOUNT_LEVERAGE} 倍限制）`
-      )
-    }
-  }
-
-  const after = totalLeverageAfter(notionals, equity, add)
-  if (after !== null && after > MAX_ACCOUNT_LEVERAGE) {
+  const positionProfit = Math.max(0, minePos.unrealized)
+  const positionLeverage = Math.min(MAX_SYMBOL_LEVERAGE, Math.max(1, minePos.leverage || 1))
+  const profitBudget = positionProfitAddBudget(minePos.unrealized, minePos.leverage)
+  if (!isWithinPositionProfitAddBudget(add, profitBudget)) {
     throw new Error(
-      `这一单会把账户总杠杆推到 ${after.toFixed(1)}x（上限 ${MAX_ACCOUNT_LEVERAGE}x）：` +
-        `现有持仓名义 ${notionalSum(notionals).toFixed(0)} + 本单 ${add.toFixed(0)}，` +
-        `账户权益 ${equity.toFixed(2)}`
+      `${spec.symbol} 本次加仓约 ${add.toFixed(2)} USDT，超过该币浮盈额度：` +
+        `浮盈 ${positionProfit.toFixed(2)} × 持仓杠杆 ${positionLeverage}x = ` +
+        `${profitBudget.toFixed(2)} USDT`
     )
   }
-}
-
-/** Σ|名义价值| —— 空头的 `notional` 是负数，取绝对值 */
-function notionalSum(notionals: number[]): number {
-  return notionals.reduce((s, n) => s + Math.abs(n), 0)
-}
-
-/**
- * `本单名义金额 ÷ 账户权益` —— 单笔开单占权益的几倍。
- * 拆出来跟下面那个同一个理由：**能直接验**（算错会误拦真单子）。
- * @returns 权益 ≤ 0（读不到 / 已经爆了）时 `null` = 算不出来
- */
-export function orderEquityRatio(
-  addNotional: number,
-  equity: number
-): number | null {
-  if (!(equity > 0)) return null
-  return Math.max(0, addNotional) / equity
-}
-
-/**
- * `(Σ持仓名义价值 + 本单名义价值) ÷ 账户权益` —— 账户总杠杆。
- * @returns 权益 ≤ 0（读不到 / 已经爆了）时 `null` = 比例算不出来
- */
-export function totalLeverageAfter(
-  notionals: number[],
-  equity: number,
-  addNotional: number
-): number | null {
-  if (!(equity > 0)) return null
-  return (notionalSum(notionals) + Math.max(0, addNotional)) / equity
 }
 
 export interface OrderInput {

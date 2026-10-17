@@ -43,11 +43,8 @@ import {
   BINANCE_MAX_WINDOW_MS,
   BINANCE_RETENTION_MS,
   isWithinPositionProfitAddBudget,
-  orderEquityRatio,
   planWindows,
-  positionProfitAddBudget,
-  symbolBudget,
-  totalLeverageAfter
+  positionProfitAddBudget
 } from '../data/exchange-trade'
 import {
   KeyStream,
@@ -562,14 +559,11 @@ function checkTradeBudgets(): boolean {
   if (isWithinPositionProfitAddBudget(102, profitBudget)) bad('超出浮盈预算的加仓单应拒绝')
   if (isWithinPositionProfitAddBudget(5, 0)) bad('无浮盈时不应允许加仓')
 
-  if (orderEquityRatio(500, 100) !== 5) bad('新开仓恰为 5x 权益应放行')
-  if ((orderEquityRatio(501, 100) ?? 0) <= 5) bad('新开仓超过 5x 权益应拒绝')
-  if (symbolBudget(100, 0, 500).overflow) bad('新开其他币 5x 权益额度应放行')
-  if (!symbolBudget(100, 0, 502).overflow) bad('新开其他币超过 5x 权益应拒绝')
-  if (totalLeverageAfter([900], 100, 200) !== 11) bad('账户总杠杆恰为 11x 应放行')
-  if ((totalLeverageAfter([900], 100, 201) ?? 0) <= 11) bad('账户总杠杆超过 11x 应拒绝')
-
-  if (ok) console.log('✅ 加仓额度：浮盈 × 10、其他币开仓 5x、账户总杠杆 11x 夹具通过')
+  /*
+   * 2026-10-18：5 × 权益 / 11 倍总杠杆那两套夹具随规则一起删了
+   * （用户：「不再设置单币 5 倍杠杆，总共 11 倍限制」），现在只剩加仓这一条。
+   */
+  if (ok) console.log('✅ 加仓额度：该币浮盈 × 持仓杠杆（≤10x）夹具通过')
   return ok
 }
 

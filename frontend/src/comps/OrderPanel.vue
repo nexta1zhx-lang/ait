@@ -147,6 +147,7 @@ function lockedNow(): boolean {
  * 所以下单前先补一次 `setLeverage`，失败了就停手。
  */
 const levConfirmed = ref(false)
+const levOpen = ref(false)
 
 /*
  * ★ 2026-10-14 用户：「**去掉仓位界面融合到一个开单，只显示当前开单仓位**」——
@@ -169,7 +170,6 @@ const busySide = ref<'long' | 'short' | null>(null)
  */
 const lev = ref(10)
 /** 杠杆选值弹层开着没 */
-const levOpen = ref(false)
 
 /* ---------------- 提示（toast）：报错 / 结果一律走这儿，不占内容区 ----------------
  *
@@ -257,28 +257,22 @@ const exchangeMaxLev = computed(() => {
   return m >= 1 ? m : 125
 })
 
-/**
- * 杠杆**不设上限**（用户 2026-10-14 改的口径）：他要的是「所有币统一 10 倍」，
- * 由 `scripts/set-leverage.mjs` 去交易所设，面板只负责**跟随交易所显示**。
- * 所以这里只保留交易所自己的上限（冷门币可能只有 5x）和档位表本身。
- */
-/** 可选的杠杆档位 */
+/** 可选的杠杆档位（点着切换，用户 2026-10-18：「杠杆还是点击切换」） */
 const LEV_STEPS = [1, 2, 3, 5, 10, 15, 20]
-/** 面板自己最多给到 10x（用户 2026-10-14：「杠杆设置最大只能设 10 倍」） */
+/** 面板自己最多给到 10x（用户 2026-10-14：「杠杆设置最大只能设 10 倍」；后端 `MAX_SYMBOL_LEVERAGE` 同口径） */
 const LEV_UI_MAX = 10
 /**
  * 面板初值 —— **只有读不到交易所当前杠杆时才会用到它**
- * （正常情况下跟交易所同步，见 `load()` 里那段；用户 2026-10-14 提的「没有同步」）。
+ * （正常情况下跟交易所同步，见 `applyInfo`；用户 2026-10-14 提的「没有同步」）。
  */
 const DEFAULT_LEVERAGE = 10
-/**
- * 下单的两条硬上限（用户 2026-10-14 定）。真正拦人的是后端
- * （`MAX_ORDER_EQUITY_RATIO` / `MAX_ACCOUNT_LEVERAGE`），这里只用于文案：
- *   · **单笔开单的名义金额 ≤ 5 × 账户权益**（权益 = 钱包余额 + 未实现盈亏）
- *   · **账户总杠杆 ≤ 11 倍** = Σ持仓名义价值 ÷ 账户权益
+
+/*
+ * ★ 2026-10-18 用户：「合约杠杆功能修复，不再设置单币 5 倍杠杆，总共 11 倍限制」——
+ *   后端那两条「5 × 权益 / 账户总 11 倍」的额度闸已经删了，面板这边对应的
+ *   `ORDER_EQUITY_MAX` / `ACCOUNT_LEV_MAX` 和「能开多少」里的两处夹取也一并去掉：
+ *   现在**能开多少 = 可用保证金 × 杠杆**，钱不够由交易所自己拦。
  */
-const ORDER_EQUITY_MAX = 5
-const ACCOUNT_LEV_MAX = 11
 const levOptions = computed(() =>
   LEV_STEPS.filter(v => v <= Math.min(LEV_UI_MAX, exchangeMaxLev.value))
 )
@@ -302,6 +296,23 @@ function fitLeverage(l: number): number {
   const fit = opts.filter(v => v <= l)
   return fit.length ? fit[fit.length - 1] : opts[0]
 }
+
+/**
+ * **买入仓位的百分比**（用户 2026-10-18：「这个是买入仓位的百分比放在顶部」）。
+ *
+ * 就是「这次用掉多少可用额度」：数量 = 能开的名义价值 × pct%。
+ * 100% = 把可用保证金用满（跟以前一模一样），所以默认 100 不改变原有行为。
+ */
+const posPct = ref(100)
+/** 快捷比例（右边那几颗） */
+const POS_PCTS = [25, 50, 75, 100]
+/** 滑条填充比例（`--fill` 那个 CSS 变量） */
+const posFillPct = computed(() => Math.max(0, Math.min(100, posPct.value)))
+
+/** 本单名义价值 = 能开 × 百分比 */
+const orderNotional = computed(() =>
+  roomNotional.value > 0 ? (roomNotional.value * posPct.value) / 100 : 0
+)
 
 const amountPrecision = computed(() => Number(info.value?.amountPrecision ?? 3))
 const pricePrecision = computed(() => Number(info.value?.pricePrecision ?? 2))
@@ -419,24 +430,15 @@ const reading = computed(() => !info.value && loading.value)
 /** 有持仓吗（界面靠它分「已开 / 未开」两种样子） */
 const opened = computed(() => curPos.value !== null)
 
-/** 5 倍额度本身（USDT）= 5 × 权益 */
-const fiveNotional = computed(() => equity.value * ORDER_EQUITY_MAX)
-
 /*
- * 还能开多少 = 三条上限里**最紧**的那一条：
- *   ① 这个币的 5 倍额度还差多少（5 × 权益 − 已开）—— 后端 `symbolBudget` 同口径；
- *   ② 账户总杠杆那条还差多少（11 × 权益 − Σ现有持仓名义）—— 后端 `MAX_ACCOUNT_LEVERAGE`；
- *   ③ 可用保证金撑得起多少（可用 × 杠杆）。
+ * 还能开多少 = **可用保证金撑得起多少**（可用 × 杠杆）。
  *
- * ★ 用户 2026-10-14 的原话：「**我都已经开仓了，剩余开仓应该是 0**」——
- *   所以①算的是**剩余**，开满时这里就是 0，界面上也如实写 0（不再装作还能开 5 倍）。
+ * ★ 2026-10-18 用户：「合约杠杆功能修复，不再设置单币 5 倍杠杆，总共 11 倍限制」——
+ *   原来这里还有两条夹取（① 单币 5 × 权益 − 已开；② 账户 11 × 权益 − 现有持仓），
+ *   后端那两道闸一删，这两条口径就没有意义了（还留着的话界面会显示「还能开 0」
+ *   而实际上交易所允许开）。钱够不够由交易所的保证金校验兜底。
  */
-const roomBySymbol = computed(() =>
-  Math.max(0, fiveNotional.value - curNotional.value)
-)
-const roomByAccount = computed(() =>
-  Math.max(0, equity.value * ACCOUNT_LEV_MAX - openNotional.value)
-)
+
 /**
  * 可用保证金撑得起多少名义价值 = `可用 × 杠杆`。
  *
@@ -449,15 +451,7 @@ const roomByAccount = computed(() =>
 const roomByMargin = computed(() => Math.max(0, available.value * lev.value * 0.995))
 
 /** **还能开的名义价值**（USDT）—— 面板上那个大数字就是它 */
-const roomNotional = computed(() =>
-  Math.max(
-    0,
-    Math.min(roomBySymbol.value, roomByAccount.value, roomByMargin.value)
-  )
-)
-
-/** 这个币的 5 倍额度已经用满（还有仓）—— 界面要明说，别让人以为是坏了 */
-const fulled = computed(() => opened.value && roomBySymbol.value <= 0)
+const roomNotional = computed(() => Math.max(0, roomByMargin.value))
 
 /** 当前持仓的**未实现盈利**（USDT）—— 加仓的钱从这里来（走实时那一份 `curPos`） */
 const posProfit = computed(() =>
@@ -477,7 +471,7 @@ function floorTo(v: number, decimals: number): number {
 
 const quantity = computed(() => {
   const p = refPrice.value
-  return p > 0 ? floorTo(roomNotional.value / p, amountPrecision.value) : 0
+  return p > 0 ? floorTo(orderNotional.value / p, amountPrecision.value) : 0
 })
 
 /** 名义价值（USDT） */
@@ -507,24 +501,13 @@ const addValue = ref(0)
 const addMinCost = computed(() => Number(info.value?.minCost ?? 0) || 5)
 
 /**
- * 加仓金额的**上限**：该币浮盈预算、**全账户总杠杆**剩余额度，两者取小。
+ * 加仓金额的**上限** = 该币浮盈 × 持仓杠杆（`profitRoom`）。
  *
- * ★★ 2026-10-15 用户定的最终口径：「**加仓不算在 5 倍内，但是总杠杠还是 11 最大**」——
- *   所以这里**不看 `roomBySymbol`（单币 5 倍）和可用保证金**：加仓额度来自
- *   「该币浮盈 × 持仓杠杆」，并受「全账户总杠杆 ≤ 11 × 权益」约束。
- *   后端 `assertOrderLimits` 同口径：同向加仓跳过 ①② 两道 5 倍闸，但必须在浮盈预算内。
- *   可用保证金仍由交易所按实际订单校验，不作为加仓额度来源。
- *   ⚠️ 代价：一个币理论上能放到 11 × 权益（整账户压在它身上）—— 用户当面要的。
+ * ★ 2026-10-15 用户：「加仓不算在 5 倍内，但是总杠杠还是 11 最大」
+ *   → 2026-10-18 用户把「5 倍 / 11 倍」两条都撤了（「不再设置单币 5 倍杠杆，总共 11 倍
+ *   限制」），所以这里只剩浮盈这一条：后端 `assertOrderLimits` 现在也只校验它。
  */
-const addMax = computed(() =>
-  Math.max(
-    0,
-    Math.min(
-      profitRoom.value,
-      roomByAccount.value
-    )
-  )
-)
+const addMax = computed(() => Math.max(0, profitRoom.value))
 
 /** 一笔加仓金额 → 数量（按合约精度向下取整） */
 function addQty(usdt: number): number {
@@ -619,24 +602,8 @@ const blocker = computed(() => {
   const pre = preBlocked.value
   if (pre) return pre
   if (available.value <= 0) return '合约账户没有可用余额（先划转一点保证金）'
-  /* 这个币 5 倍额度已经开满 —— 想再加只能用浮盈（那两颗加仓按钮） */
-  if (fulled.value)
-    return (
-      `${props.symbol.toUpperCase()} 的 ${ORDER_EQUITY_MAX} 倍额度已经开满` +
-      `（已开 ${curNotional.value.toFixed(2)} / 额度 ${fiveNotional.value.toFixed(2)} USDT）` +
-      ` —— 想加仓就点下面的「加仓」（额度按该币浮盈 × 持仓杠杆，` +
-        `且不超过全账户 ${ACCOUNT_LEV_MAX} 倍）`
-    )
-  /* 额度被别的仓位 / 可用保证金卡住了 */
-  if (!(roomNotional.value > 0)) {
-    if (roomByAccount.value <= 0)
-      return (
-        `账户总杠杆已经顶到 ${ACCOUNT_LEV_MAX}x 上限` +
-        `（现有持仓名义 ${openNotional.value.toFixed(2)} / 权益 ${equity.value.toFixed(2)}）` +
-        ` —— 先平掉一点再开`
-      )
-    return '现在没有可开的空间（可用保证金不够）'
-  }
+  /* 唯一能把「能开多少」压到 0 的就是可用保证金（2026-10-18 起没有倍数额度了） */
+  if (!(roomNotional.value > 0)) return '现在没有可开的空间（可用保证金不够）'
   const minA = Number(info.value.minAmount ?? 0)
   if (minA && quantity.value < minA)
     return (
@@ -661,9 +628,7 @@ const addBlocker = computed(() => {
   if (!opened.value) return '现在没有持仓，不能加仓'
   if (!(refPrice.value > 0)) return '还没拿到价格，稍等一下'
   if (!(addMax.value >= addMinCost.value))
-    return roomByAccount.value <= 0
-      ? `全账户总杠杆已经顶到 ${ACCOUNT_LEV_MAX}x 上限 —— 先平掉一点再加`
-      : `该币浮盈 × 持仓杠杆的加仓额度不足最小下单量（${fmt(addMinCost.value, 2)} USDT）`
+    return `该币浮盈 × 持仓杠杆的加仓额度不足最小下单量（${fmt(addMinCost.value, 2)} USDT）`
   if (!(addQty(addMinCost.value) > 0))
     return '按这个合约的精度取整之后是 0'
   return ''
@@ -684,16 +649,6 @@ const notionalText = computed(() =>
 
 /** 「保证金」那一格（这一单要占多少 USDT） */
 const marginText = computed(() => (margin.value > 0 ? fmt(margin.value, 2) : '—'))
-
-/** 「5 倍额度」那一格（文案用；0 位小数就够看） */
-const fiveText = computed(() =>
-  fiveNotional.value > 0 ? fmt(fiveNotional.value, 0) : '—'
-)
-
-/** 账户权益（钱包 + 浮盈）—— 5 倍额度就是拿它算的，文案里要报出这个底数 */
-const equityText = computed(() =>
-  equity.value > 0 ? fmt(equity.value, 0) : '—'
-)
 
 /** 这个仓位的**保证金**（USDT）≈ 名义 ÷ 杠杆 —— 跟币安持仓页那个「保证金」同口径 */
 const curMargin = computed(() => {
@@ -768,46 +723,6 @@ function pnlShort(v: number): string {
   const a = Math.abs(v)
   return `${v > 0 ? '+' : '−'}${a.toFixed(a < 1 ? 2 : 1)}`
 }
-
-/**
- * 账户里**所有持仓**的名义价值合计（跨交易对，取绝对值）。
- * 后端那条「账户总杠杆 ≤ 11 倍」用的就是它当分子（`assertOrderLimits`）。
- */
-const openNotional = computed(() =>
-  positionsRows.value.reduce(
-    (sum, p) => sum + Math.abs(Number(p.notional ?? 0) || 0),
-    0
-  )
-)
-
-/**
- * 这一单成交后的**预计账户总杠杆** = (现有持仓名义 + 本单名义) ÷ 权益。
- *
- * 摆出来是为了**别等挨拦才知道**：后端 `MAX_ACCOUNT_LEVERAGE` 那道闸就是按这个数
- * 判的，超了直接拒单（提示里也是这么写的）。这里是同一个口径的**预演**。
- * 权益读不到就返回 0 ⇒ 模板里那枚小标不显示（不占高度）。
- */
-const levAfter = computed(() =>
-  equity.value > 0 ? (openNotional.value + notional.value) / equity.value : 0
-)
-
-/** 预计总杠杆的文案；`0` = 读不到权益，不显示 */
-const levAfterText = computed(() => (levAfter.value > 0 ? `${levAfter.value.toFixed(1)}x` : ''))
-
-/** 会不会顶到、或顶穿那条 11 倍上限（顶到就标黄提醒） */
-const levAfterWarn = computed(() => levAfter.value >= ACCOUNT_LEV_MAX)
-
-/**
- * **实时杠杆** = 这一单真开下去会占的杠杆 = 本单名义 ÷ 账户权益。
- *
- * 用户 2026-10-14：「右侧显示实时杠杆，**不够 5 倍数就是显示 4.3 这样**」——
- * 额度被可用保证金卡住时（比如只够 5700、权益 1328）就是 `4.3x`，
- * 够满 5 倍权益时就是 `5.0x`。没额度 / 读不到权益时不显示。
- */
-const liveLevText = computed(() => {
-  if (!(equity.value > 0) || !(notional.value > 0)) return ''
-  return `${(notional.value / equity.value).toFixed(1)}x`
-})
 
 /* ---------------- 持仓的账本侧信息（已开仓时间 / 已实现盈利） ---------------- */
 
@@ -1440,9 +1355,9 @@ watch(opened, (now, before) => {
  * 不然手指停在旧的最大值上、提交时才报「额度已变化」。
  *
  * ⚠️ 必须挂在这儿（文件末尾那一批 `watch` 里），**不能**跟 `addMax` 写在一起：
- *    `watch(源)` 会**立刻求值一次**，而 `addMax → roomByAccount → openNotional`
- *    这条链上的 `openNotional` 定义在更下面 ⇒ 写在前面会踩 `const` 的 TDZ
- *    （`Cannot access 'openNotional' before initialization`），
+ *    `watch(源)` 会**立刻求值一次**，而 `addMax → profitRoom → curPos`
+ *    这条链上的 `curPos` 定义在更下面 ⇒ 写在前面会踩 `const` 的 TDZ
+ *    （`Cannot access 'curPos' before initialization`），
  *    整个 setup 抛错、面板**整块渲染不出来**（2026-10-15 线上真踩到）。
  */
 watch(addMax, max => {
@@ -1506,7 +1421,7 @@ onMounted(async () => {
           <i :class="s.pnl >= 0 ? 'up' : 'down'">{{ pnlShort(s.pnl) }}</i>
         </button>
       </div>
-      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-14：默认 10 倍、**最高也是 10 倍**） -->
+      <!-- 杠杆：小标签，点开弹层选（用户 2026-10-14 默认 10 倍、最高也是 10 倍；2026-10-18 仍是点击切换） -->
       <button
         type="button"
         class="ghost tiny ord-lev"
@@ -1689,42 +1604,68 @@ onMounted(async () => {
       <template v-else>
         <!--
           开多大：**只显示这一块**（没持仓的时候）。大号数字 = 「能开」多少 =
-          `min(5 × 权益, 可用 × 杠杆)`，开不满时就说清是谁把它卡小了。
+          **可用保证金 × 杠杆**（2026-10-18 起没有 5 倍权益 / 11 倍总杠杆那两条了）。
         -->
         <!--
-          这一格（用户 2026-10-14：「**能开（xxx）字样去掉**，右侧显示**实时杠杆**，
-          不够 5 倍数就是显示 4.3 这样，**下面一大段字去掉**」）：
-          一行放下「能开多少 + 实时杠杆」，别的字都不要 —— 面板整体要**一屏放得下**。
-          实时杠杆 = 本单名义 ÷ 权益，额度被可用保证金卡住时就是 4.3x 这种。
+          这一格（用户 2026-10-14：「**能开（xxx）字样去掉**…**下面一大段字去掉**」；
+          2026-10-18：「杠杆还是点击切换，**这个是买入仓位的百分比放在顶部**，
+          **原有的实时杠杆去掉**」→「**滑动条和快捷两行布局放右侧**」）：
+          左边还是「能开多少 + 数量」，**右边**竖着两行：上面是仓位百分比滑条（带 %），
+          下面是快捷比例（25 / 50 / 75 / 100）。杠杆仍在币种行那颗 `10x` 上点着切换。
         -->
         <div class="ord-quota">
-          <!-- 用户 2026-10-14：「价值那一行…加上文字，**当前可开价值**」 -->
-          <span class="ord-quota-lb">当前可开价值</span>
-          <span class="ord-quota-row">
-            <b class="ord-quota-num">{{ roomText }}<i>USDT</i></b>
-            <span
-              v-if="liveLevText"
-              class="ord-lev-live"
-              :class="{warn: levAfterWarn}"
-              :title="
-                `实时杠杆 ${liveLevText}（本单 ${notionalText} ÷ 权益 ${equityText}）` +
-                ` · 上限 ${ORDER_EQUITY_MAX} 倍权益` +
-                (levAfterText
-                  ? ` · 成交后账户总杠杆 ${levAfterText}（上限 ${ACCOUNT_LEV_MAX}x）`
-                  : '')
-              "
-            >
-              <em>实时杠杆</em>{{ liveLevText }}
+          <div class="ord-quota-main">
+            <!-- 用户 2026-10-14：「价值那一行…加上文字，**当前可开价值**」 -->
+            <span class="ord-quota-lb">当前可开价值</span>
+            <span class="ord-quota-row">
+              <b class="ord-quota-num">{{ roomText }}<i>USDT</i></b>
             </span>
-          </span>
+            <!--
+              数量当**一行小字**贴在价值下面（用户 2026-10-14：「数量不用单独一个，
+              用小字放在下面就行」）—— 它是这一单「买多少」，跟着价值看最顺。
+            -->
+            <span class="ord-quota-sub"
+              >数量 <b>{{ quantityText }}</b
+              ><i v-if="quantityText !== '—'">{{ base }}</i></span
+            >
+          </div>
+
           <!--
-            数量当**一行小字**贴在价值下面（用户 2026-10-14：「数量不用单独一个，
-            用小字放在下面就行」）—— 它是这一单「买多少」，跟着价值看最顺。
+            右侧两行：① 滑条（拖 = 用掉多少可用额度，右边跟一个 %）；
+            ② 快捷比例。用户 2026-10-18：「滑动条和快捷两行布局放右侧」。
+            ⚠️ 100% = 把可用保证金用满（跟以前完全一样），所以默认别改。
           -->
-          <span class="ord-quota-sub"
-            >数量 <b>{{ quantityText }}</b
-            ><i v-if="quantityText !== '—'">{{ base }}</i></span
+          <div
+            class="ord-pos-side"
+            :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
           >
+            <div class="ord-pos-row">
+              <span class="ord-bar">
+                <input
+                  v-model.number="posPct"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  :style="{'--fill': posFillPct + '%'}"
+                  aria-label="买入仓位百分比"
+                />
+              </span>
+              <b class="ord-pos-num">{{ posPct }}%</b>
+            </div>
+            <div class="ord-pos-quick">
+              <button
+                v-for="v in POS_PCTS"
+                :key="v"
+                type="button"
+                :class="{on: v === posPct}"
+                :title="`用掉可用额度的 ${v}%`"
+                @click="posPct = v"
+              >
+                {{ v }}%
+              </button>
+            </div>
+          </div>
         </div>
 
         <!--
@@ -1809,7 +1750,7 @@ onMounted(async () => {
     </div>
     </div>
 
-    <!-- 杠杆选值：从底部弹出来 -->
+    <!-- 杠杆选值：从底部弹出来（用户 2026-10-18：「杠杆还是点击切换」） -->
     <Teleport to="body">
       <div v-if="levOpen" class="sheet-mask" @click="levOpen = false" />
       <section v-if="levOpen" class="sheet" role="dialog" aria-label="选择杠杆">
@@ -1837,12 +1778,10 @@ onMounted(async () => {
           </button>
         </div>
         <p class="sheet-foot">
-          单笔开单 ≤ <b>{{ ORDER_EQUITY_MAX }}</b> 倍账户权益 · 账户总杠杆 ≤
-          <b>{{ ACCOUNT_LEV_MAX }}x</b>
           <template v-if="levConfirmed">
-            · 当前 {{ lev }}x（交易所那边就是这个）
+            当前 {{ lev }}x（交易所那边就是这个）
           </template>
-          <template v-else> · 交易所那边不是 {{ lev }}x，下单前会先设成它</template>
+          <template v-else> 交易所那边不是 {{ lev }}x，下单前会先设成它</template>
         </p>
       </section>
     </Teleport>
@@ -1870,7 +1809,7 @@ onMounted(async () => {
           方向和持仓一致（{{ curPos ? sideText(curPos) : '' }}）· 最多
           <b>{{ fmt(addMax, 2) }} USDT</b>
           <span class="dim"
-            >（按该币浮盈 × 持仓杠杆计算，且不超过全账户 {{ ACCOUNT_LEV_MAX }} 倍剩余额度）</span
+            >（按该币浮盈 × 持仓杠杆计算）</span
           >
         </p>
         <label class="ord-field ord-slider">
