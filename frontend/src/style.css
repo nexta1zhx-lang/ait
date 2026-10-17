@@ -5789,11 +5789,12 @@ body.fixed-viewport .split {
   color: var(--muted);
 }
 
-/* 大号数字那一行（2026-10-18 起右边不再挂「实时杠杆」） */
+/* 大号数字 + 右边那排快捷比例（用户 2026-10-18：「快捷…放在可开价值后面」） */
 .ord-quota-row {
   display: flex;
   align-items: baseline;
   gap: 10px;
+  min-width: 0;
 }
 
 /* 这一卡的左半边：标签 + 大号数字 + 数量小字（竖着三行，宽的那一边） */
@@ -5873,17 +5874,18 @@ body.fixed-viewport .split {
   flex-direction: column;
   gap: 4px;
 }
-/* 快捷比例那一排：整张卡宽，四颗平分，摆在最下面一行 */
+/* 快捷比例那一排：跟大号数字同一行、贴到最右（不再自己占一行） */
 .ord-pos-quick {
   display: flex;
   gap: 5px;
-  margin-top: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 /* 快捷比例：小胶囊，各自定宽不再平分；选中的那颗用主色边（跟「订单设置」那几格一个语言） */
 .ord-pos-quick button {
-  flex: 1 1 0;
+  flex: 0 0 auto;
   min-width: 0;
-  padding: 2px 0;
+  padding: 2px 9px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;

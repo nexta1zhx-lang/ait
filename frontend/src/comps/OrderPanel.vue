@@ -1666,6 +1666,26 @@ onMounted(async () => {
               <b class="ord-quota-num" :style="{fontSize: roomFont + 'px'}"
                 >{{ roomText }}<i>USDT</i></b
               >
+              <!--
+                快捷比例放在**可开价值后面**（用户 2026-10-18：「原有的百分比不动，
+                坏单挑放在可开价值后面」→ 按「快捷挑选」理解）：跟大号数字同一行、靠右，
+                滑条那行不动。
+              -->
+              <span
+                class="ord-pos-quick"
+                :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
+              >
+                <button
+                  v-for="v in POS_PCTS"
+                  :key="v"
+                  type="button"
+                  :class="{on: v === posPct}"
+                  :title="`用掉可用额度的 ${v}%`"
+                  @click="posPct = v"
+                >
+                  {{ v }}%
+                </button>
+              </span>
             </span>
             <!--
               数量当**一行小字**贴在价值下面（用户 2026-10-14：「数量不用单独一个，
@@ -1677,22 +1697,6 @@ onMounted(async () => {
             >
           </div>
 
-          <!-- 快捷比例：最下面一行，四颗平分整张卡的宽度 -->
-          <div
-            class="ord-pos-quick"
-            :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
-          >
-            <button
-              v-for="v in POS_PCTS"
-              :key="v"
-              type="button"
-              :class="{on: v === posPct}"
-              :title="`用掉可用额度的 ${v}%`"
-              @click="posPct = v"
-            >
-              {{ v }}%
-            </button>
-          </div>
         </div>
 
         <!--
