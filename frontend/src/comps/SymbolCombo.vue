@@ -36,10 +36,21 @@ const props = defineProps<{
    *    开单分析那边不传，行为一点没变。
    */
   allLabel?: string
+  /**
+   * 输入框里的搜索提示（默认「输入币种搜索，如 BTC」）。
+   *
+   * ⚠️ 2026-10-18 加：经验页的编辑器要求「弹窗提示输入的文字都去掉」，
+   *    那边传空串；不传的页面一个字都不变。
+   */
+  searchPlaceholder?: string
 }>()
 
 /** 空值时的占位（见 `placeholder` 的说明） */
 const emptyText = computed(() => props.placeholder ?? '选币种')
+
+/** 搜索框里的提示（宽屏那颗输入框 / 窄屏列表最上面那颗） */
+const searchText = computed(() => props.searchPlaceholder ?? '输入币种搜索，如 BTC')
+const listSearchText = computed(() => props.searchPlaceholder ?? '搜币种，如 BTC')
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: string): void
@@ -194,7 +205,7 @@ onBeforeUnmount(() =>
       <input
         ref="inputEl"
         :value="modelValue"
-        placeholder="输入币种搜索，如 BTC"
+        :placeholder="searchText"
         autocomplete="off"
         spellcheck="false"
         @input="onInput"
@@ -230,7 +241,7 @@ onBeforeUnmount(() =>
         v-if="plain"
         v-model="filter"
         class="combo-search"
-        placeholder="搜币种，如 BTC"
+        :placeholder="listSearchText"
         autocomplete="off"
         spellcheck="false"
         @keydown="onKey"

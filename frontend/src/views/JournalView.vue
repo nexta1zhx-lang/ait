@@ -729,7 +729,13 @@ async function remove(e: JournalEntry): Promise<void> {
       <div class="j-sec">
         <p class="j-sec-t">币种</p>
         <div class="j-add">
-          <SymbolCombo v-model="comboPick" :contracts="swapContracts" placeholder="" @pick="addCoin" />
+          <SymbolCombo
+            v-model="comboPick"
+            :contracts="swapContracts"
+            placeholder=""
+            search-placeholder=""
+            @pick="addCoin"
+          />
         </div>
 
         <div v-for="c in editing.coins" :key="c.base" class="j-coin-row">
