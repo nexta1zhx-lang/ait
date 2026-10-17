@@ -451,6 +451,50 @@ export async function createJournalCategory(
   return {id: Number(row.id), name: row.name, color: row.color ?? ''}
 }
 
+/** 改分类的名字 / 颜色（只改自己的；重名给一句人话） */
+export async function updateJournalCategory(
+  userId: number,
+  id: number,
+  input: {name?: unknown; color?: unknown}
+): Promise<JournalCategory> {
+  const name = String(input.name ?? '').trim().slice(0, MAX_CATEGORY_NAME)
+  if (!name) throw new Error('分类得有个名字')
+  const wanted = String(input.color ?? '').trim()
+  const color = /^#[0-9a-fA-F]{6}$/.test(wanted) ? wanted.toLowerCase() : ''
+  const dup = await queryOne<{id: string}>(
+    'SELECT id FROM journal_categories WHERE user_id = $1 AND lower(name) = lower($2) AND id <> $3',
+    [userId, name, id]
+  )
+  if (dup) throw new Error(`「${name}」已经有了`)
+  const row = await queryOne<{id: string; name: string; color: string}>(
+    `UPDATE journal_categories
+        SET name = $3, color = COALESCE(NULLIF($4, ''), color)
+      WHERE id = $1 AND user_id = $2
+      RETURNING id, name, color`,
+    [id, userId, name, color]
+  )
+  if (!row) throw new Error('这个分类不存在（或者不是你的）')
+  return {id: Number(row.id), name: row.name, color: row.color ?? ''}
+}
+
+/**
+ * 删一个分类 —— 它底下的条目**先挪回「默认」**，别让它们变成孤儿。
+ * ⚠️「默认」不能删：它是没选分类时的落点，删了下次保存又会被建出来。
+ */
+export async function deleteJournalCategory(userId: number, id: number): Promise<boolean> {
+  const defId = await defaultCategoryId(userId)
+  if (id === defId) throw new Error('「默认」分类不能删')
+  await query(
+    'UPDATE journal_entries SET category_id = $3 WHERE user_id = $1 AND category_id = $2',
+    [userId, id, defId]
+  )
+  const rows = await query<{id: string}>(
+    'DELETE FROM journal_categories WHERE id = $1 AND user_id = $2 RETURNING id',
+    [id, userId]
+  )
+  return rows.length > 0
+}
+
 export async function deleteJournalEntry(userId: number, id: number): Promise<boolean> {
   const rows = await query<{id: string}>(
     'DELETE FROM journal_entries WHERE id = $1 AND user_id = $2 RETURNING id',

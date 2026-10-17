@@ -2652,6 +2652,17 @@ export const fetchJournalCategories = () =>
 export const createJournalCategory = (input: {name: string; color?: string}) =>
   post<{category: JournalCategory; error: string | null}>('/api/journal/categories', input)
 
+/** 改一个分类的名字 / 颜色 */
+export const updateJournalCategory = (id: number, input: {name: string; color?: string}) =>
+  post<{category: JournalCategory; error: string | null}>(
+    `/api/journal/categories/${id}`,
+    input
+  )
+
+/** 删一个分类（它底下的条目会被挪回「默认」） */
+export const deleteJournalCategory = (id: number) =>
+  del<{ok: boolean; error: string | null}>(`/api/journal/categories/${id}`)
+
 /** 置顶 / 取消置顶 */
 export const pinJournalEntry = (id: number, pinned: boolean) =>
   post<{ok: boolean; error: string | null}>(`/api/journal/entries/${id}/pin`, {pinned})

@@ -161,12 +161,14 @@ import {
 import {noteAlertChanged, startPriceAlerts} from './price-alerts'
 import {
   createJournalCategory,
+  deleteJournalCategory,
   deleteJournalEntry,
   listJournalCategories,
   listJournalEntries,
   MAX_BODY,
   saveJournalEntry,
-  setJournalPinned
+  setJournalPinned,
+  updateJournalCategory
 } from './db/journals'
 import {polishText} from './llm/polish'
 import {pickCandidates} from './scan/rules'
@@ -3876,6 +3878,31 @@ async function route(
       return sendJson(res, 200, {categories: await listJournalCategories(me.id), error: null})
     } catch (e) {
       return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  /* 改 / 删一个分类（用户 2026-10-18：「分类可以编辑删除」） */
+  const catMatch = /^\/api\/journal\/categories\/(\d+)$/.exec(p)
+  if (catMatch && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const category = await updateJournalCategory(me.id, Number(catMatch[1]), {
+        name: body.name,
+        color: body.color
+      })
+      return sendJson(res, 200, {category, error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (catMatch && method === 'DELETE') {
+    try {
+      const ok = await deleteJournalCategory(me.id, Number(catMatch[1]))
+      return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这个分类'})
+    } catch (e) {
+      return sendJson(res, 400, {ok: false, error: (e as Error).message})
     }
   }
 

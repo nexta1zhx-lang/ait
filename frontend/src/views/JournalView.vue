@@ -21,12 +21,14 @@
 import {computed, onMounted, ref, watch} from 'vue'
 import {
   createJournalCategory,
+  deleteJournalCategory,
   deleteJournalEntry,
   fetchJournal,
   fetchJournalCategories,
   pinJournalEntry,
   polishJournal,
   saveJournalEntry,
+  updateJournalCategory,
   type Contract,
   type JournalCategory,
   type JournalCoin,
@@ -200,15 +202,92 @@ function pickCategory(id: number | null): void {
   void load()
 }
 
-/** 颜色只露一颗：点一下换下一个（用户 2026-10-18：「只显示一个点击切换」） */
-function cycleColor(): void {
-  const i = CATEGORY_COLORS.indexOf(newCatColor.value)
-  newCatColor.value = CATEGORY_COLORS[(i + 1) % CATEGORY_COLORS.length]!
+/* ---- 分类的「新增 / 编辑」共用一个底部输入行 ---- */
+
+/** 正在编辑哪个分类（null = 新增模式） */
+const editingCatId = ref<number | null>(null)
+const editName = ref('')
+const editColor = ref('')
+/** 颜色面板开着没有（快捷色 + 自定义取色器） */
+const colorOpen = ref(false)
+
+/** 现在这颗圆点该显示什么色（编辑模式看 editColor，新增看 newCatColor） */
+const draftColor = computed(() => (editingCatId.value ? editColor.value : newCatColor.value))
+
+function setDraftColor(c: string): void {
+  if (editingCatId.value) editColor.value = c
+  else newCatColor.value = c
+  colorOpen.value = false
+}
+
+/** 系统取色器回传的值 */
+function onCustomColor(e: Event): void {
+  const v = (e.target as HTMLInputElement).value
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+    setDraftColor(v.toLowerCase())
+  }
+}
+
+function startEditCategory(c: JournalCategory): void {
+  editingCatId.value = c.id
+  editName.value = c.name
+  editColor.value = c.color || newCatColor.value
+  colorOpen.value = false
+}
+
+function cancelEditCategory(): void {
+  editingCatId.value = null
+  editName.value = ''
+  editColor.value = ''
+  colorOpen.value = false
+}
+
+/** 保存分类的改动 */
+async function saveCategory(): Promise<void> {
+  const id = editingCatId.value
+  if (!id) return
+  const name = editName.value.trim()
+  if (!name) {
+    showToast('分类得有个名字', 'bad')
+    return
+  }
+  try {
+    const r = await updateJournalCategory(id, {name, color: editColor.value})
+    categories.value = categories.value.map(c => (c.id === id ? r.category : c))
+    cancelEditCategory()
+    showToast('已保存')
+  } catch (e) {
+    showToast(`没存上：${(e as Error).message}`, 'bad')
+  }
+}
+
+/** 删一个分类：它底下的条目会被后端挪回「默认」 */
+async function removeCategory(c: JournalCategory): Promise<void> {
+  const ok = await askConfirm({
+    title: `删掉分类「${c.name}」？`,
+    body: [{t: '里面的记录不会删，会挪到「默认」下面。', tone: 'warn'}],
+    okText: '删掉',
+    danger: true
+  })
+  if (!ok) return
+  try {
+    await deleteJournalCategory(c.id)
+    categories.value = categories.value.filter(x => x.id !== c.id)
+    if (category.value === c.id) category.value = null
+    if (editingCatId.value === c.id) cancelEditCategory()
+    await load()
+    showToast('已删除')
+  } catch (e) {
+    showToast(`删不掉：${(e as Error).message}`, 'bad')
+  }
 }
 
 function toggleCat(): void {
   catOpen.value = !catOpen.value
-  if (catOpen.value) calOpen.value = false
+  if (catOpen.value) {
+    calOpen.value = false
+    cancelEditCategory()
+  }
 }
 
 /** 新增一个分类：建完直接选中它 */
@@ -242,6 +321,7 @@ async function togglePin(e: JournalEntry): Promise<void> {
 
 function toggleCal(): void {
   calOpen.value = !calOpen.value
+  if (calOpen.value) catOpen.value = false
   if (calOpen.value && month.value) calYear.value = Number(month.value.slice(0, 4))
 }
 
@@ -515,40 +595,108 @@ async function remove(e: JournalEntry): Promise<void> {
               <i class="j-catdot" style="background: var(--muted); opacity: 0.5" />
               <span>全部</span>
             </button>
-            <button
+
+            <!-- 每个分类：点名字=筛选；右边两颗是改 / 删（「默认」不给删） -->
+            <div
               v-for="c in categories"
               :key="c.id"
-              type="button"
-              class="j-cat-item"
+              class="j-cat-row"
               :class="{sel: category === c.id}"
-              @click="pickCategory(c.id)"
             >
-              <i class="j-catdot" :style="{background: c.color || 'var(--muted)'}" />
-              <span>{{ c.name }}</span>
-            </button>
+              <button type="button" class="j-cat-pick" @click="pickCategory(c.id)">
+                <i class="j-catdot" :style="{background: c.color || 'var(--muted)'}" />
+                <span>{{ c.name }}</span>
+              </button>
+              <button type="button" class="j-cat-op" title="改名字 / 换颜色" @click="startEditCategory(c)">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4 20h4l10-10-4-4L4 16v4Z" />
+                  <path d="M13.5 6.5l4 4" />
+                </svg>
+              </button>
+              <button
+                v-if="c.name !== '默认'"
+                type="button"
+                class="j-cat-op danger"
+                title="删掉这个分类（里面的记录挪到「默认」）"
+                @click="removeCategory(c)"
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4 7h16M9.5 7V4.6h5V7M6.5 7l1 13h9l1-13" />
+                  <path d="M10.5 10.5v6M13.5 10.5v6" />
+                </svg>
+              </button>
+            </div>
           </div>
 
+          <!--
+            底部这一行同时干两件事：新增（空）/ 编辑（点上面的铅笔）。
+            颜色只有**输入框里那一颗小圆点**，点它弹快捷色 + 系统取色器。
+          -->
           <div class="j-cat-new">
-            <input
-              v-model="newCatName"
-              type="text"
-              maxlength="16"
-              placeholder="新分类…"
-              @keydown.enter.prevent="addCategory"
-            />
-            <button
-              type="button"
-              class="j-cat-swatch"
-              :style="{background: newCatColor}"
-              title="换个颜色"
-              @click="cycleColor"
-            />
-            <button type="button" class="ghost tiny j-cat-add" title="新增分类" @click="addCategory">
+            <div class="j-cat-input">
+              <button
+                type="button"
+                class="j-cat-dot"
+                :style="{background: draftColor}"
+                title="换颜色"
+                @click="colorOpen = !colorOpen"
+              />
+              <input
+                v-if="editingCatId"
+                v-model="editName"
+                type="text"
+                maxlength="16"
+                @keydown.enter.prevent="saveCategory"
+                @keydown.esc.prevent="cancelEditCategory"
+              />
+              <input
+                v-else
+                v-model="newCatName"
+                type="text"
+                maxlength="16"
+                placeholder="新分类…"
+                @keydown.enter.prevent="addCategory"
+              />
+            </div>
+
+            <template v-if="editingCatId">
+              <button type="button" class="ghost tiny j-cat-ok" title="保存" @click="saveCategory">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                     stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M5 12.6 9.6 17.2 19 7.4" />
+                </svg>
+              </button>
+              <button type="button" class="ghost tiny" title="取消" @click="cancelEditCategory">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                     stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+                  <path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5" />
+                </svg>
+              </button>
+            </template>
+            <button v-else type="button" class="ghost tiny j-cat-add" title="新增分类" @click="addCategory">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                    stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
                 <path d="M12 5v14M5 12h14" />
               </svg>
             </button>
+
+            <!-- 快捷色 + 系统取色器（用户：「给出一些快捷和颜色选择器」） -->
+            <div v-if="colorOpen" class="j-cat-colors">
+              <button
+                v-for="c in CATEGORY_COLORS"
+                :key="c"
+                type="button"
+                class="j-cat-quick"
+                :style="{background: c}"
+                :title="c"
+                @click="setDraftColor(c)"
+              />
+              <label class="j-cat-custom" title="自己挑一个颜色">
+                <input type="color" :value="draftColor" @input="onCustomColor" />
+              </label>
+            </div>
           </div>
         </section>
       </Teleport>
@@ -568,8 +716,16 @@ async function remove(e: JournalEntry): Promise<void> {
           </svg>
         </button>
 
-        <div v-if="calOpen" class="j-cal-mask" @click="calOpen = false" />
-        <div v-if="calOpen" class="j-cal-panel">
+      </div>
+
+      <!-- 按月看：也从底部起来（用户 2026-10-18：「日历选择也在下面」） -->
+      <Teleport to="body">
+        <div v-if="calOpen" class="sheet-mask" @click="calOpen = false" />
+        <section v-if="calOpen" class="sheet j-cal-sheet" role="dialog" aria-label="按月份">
+          <header class="sheet-head">
+            <b>按月份</b>
+            <button class="ghost tiny" title="关掉" @click="calOpen = false">✕</button>
+          </header>
           <div class="j-cal-head">
             <button type="button" class="j-cal-nav" title="上一年" @click="shiftCalYear(-1)">◀</button>
             <b>{{ calYear }}</b>
@@ -587,11 +743,9 @@ async function remove(e: JournalEntry): Promise<void> {
               {{ m }} 月
             </button>
           </div>
-          <button type="button" class="ghost tiny j-cal-all" @click="pickMonth('')">
-            看全部
-          </button>
-        </div>
-      </div>
+          <button type="button" class="ghost j-cal-all" @click="pickMonth('')">看全部</button>
+        </section>
+      </Teleport>
 
       <button type="button" class="ghost tiny j-new" title="写一条（时间就是现在）" @click="startNew">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
@@ -880,7 +1034,7 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-list::before {
   content: '';
   position: absolute;
-  left: 6px;
+  left: 4px;
   top: 20px;
   bottom: 22px;
   width: 1px;
@@ -946,10 +1100,10 @@ async function remove(e: JournalEntry): Promise<void> {
   position: absolute;
   /* 离标题再远一点（用户 2026-10-18：「左侧球和左右加点距离」） */
   left: -18px;
-  /* 跟标题那一行垂直居中（标题 13px / 行高约 19.5 ⇒ 头内 8 + 9.75 − 5.5 ≈ 12） */
-  top: 12px;
-  width: 11px;
-  height: 11px;
+  /* 跟标题那一行垂直居中（标题 13px / 行高约 19.5 ⇒ 头内 8 + 9.75 − 4.5 ≈ 13） */
+  top: 13px;
+  width: 9px;
+  height: 9px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -972,8 +1126,8 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-dot.pinned {
   background: transparent;
   color: var(--blue);
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
   left: -20px;
   top: 10px;
 }
@@ -1056,7 +1210,8 @@ async function remove(e: JournalEntry): Promise<void> {
   display: flex;
   align-items: center;
   gap: 5px;
-  margin: 16px 0 4px;
+  /* 贴边：抵掉 `.j-list` 给时间轴留的那 18px（用户 2026-10-18：「年月聚集贴边显示」） */
+  margin: 16px 0 4px -18px;
   padding-left: 2px;
   font-size: 11.5px;
   font-weight: 600;
@@ -1099,22 +1254,16 @@ async function remove(e: JournalEntry): Promise<void> {
   color: var(--blue);
   border-color: color-mix(in srgb, var(--blue) 45%, transparent);
 }
-.j-cal-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
+/* 底部弹层里的月份格子：竖向空间够，格子做大一点 */
+.j-cal-sheet .j-cal-grid {
+  gap: 6px;
 }
-.j-cal-panel {
-  position: absolute;
-  z-index: 21;
-  top: calc(100% + 6px);
-  right: 0;
-  width: 212px;
-  padding: 8px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+.j-cal-sheet .j-cal-m {
+  padding: 11px 0;
+  font-size: 13px;
+}
+.j-cal-sheet .j-cal-all {
+  margin-top: 12px;
 }
 .j-cal-head {
   display: flex;
@@ -1211,7 +1360,58 @@ async function remove(e: JournalEntry): Promise<void> {
   height: 8px;
   border-radius: 50%;
 }
+/* 一行 = 名字（点了就筛选）+ 改 / 删两颗 */
+.j-cat-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+.j-cat-row.sel {
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+}
+.j-cat-pick {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+.j-cat-row.sel .j-cat-pick {
+  color: var(--blue);
+}
+.j-cat-op {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  opacity: 0.7;
+}
+.j-cat-op.danger {
+  color: var(--bad);
+}
+@media (hover: hover) {
+  .j-cat-op:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+  }
+}
+
+/* 底部这一行：输入框里**开头一颗小色点**，右边一颗 ＋ / ✓ ✕ */
 .j-cat-new {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1219,30 +1419,86 @@ async function remove(e: JournalEntry): Promise<void> {
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
-.j-cat-new input {
+.j-cat-input {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 7px 9px;
-  font: inherit;
-  font-size: 13px;
-  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
-/* 只露这一颗：点它轮着换颜色 */
-.j-cat-swatch {
+.j-cat-input input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+}
+/* 输入框开头那颗小色点（点了出快捷色 + 取色器） */
+.j-cat-dot {
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 13px;
+  height: 13px;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 20%, transparent);
   border-radius: 50%;
 }
-.j-cat-add {
+.j-cat-add,
+.j-cat-ok {
   display: inline-flex;
   align-items: center;
-  padding: 4px 6px;
+  padding: 5px 7px;
+}
+.j-cat-ok {
+  color: var(--blue);
+}
+/* 快捷色 + 系统取色器（浮在输入行上面） */
+.j-cat-colors {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+.j-cat-quick {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+}
+.j-cat-custom {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  overflow: hidden;
+  cursor: pointer;
+  /* 彩虹圈 = 「自己挑」 */
+  background: conic-gradient(#f07178, #f0b429, #72d6a0, #7aa2f7, #c792ea, #f07178);
+}
+.j-cat-custom input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
 }
 
 /* 条目头：分类点 + 标题，最右一颗置顶针 */
