@@ -5468,6 +5468,28 @@ body.fixed-viewport .split {
   font-weight: 400;
 }
 
+/* 「回到刚才那只币」—— 只在点过顶部仓位币种后出现，摆在头部最右边 */
+.ord-back {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 25px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: var(--fw-mid);
+  white-space: nowrap;
+}
+
+.ord-back svg {
+  width: 13px;
+  height: 13px;
+}
+
 .ord-sym i.up {
   color: var(--ok);
 }

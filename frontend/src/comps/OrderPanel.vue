@@ -732,13 +732,53 @@ const heldSymbols = computed(() => {
   return [...seen.values()]
 })
 
+/**
+ * 「返回」用的两组币（用户 2026-10-18：「顶部右侧仓位界面添加返回键，当我点击
+ * 正在持仓的币种，我需要返回我跳转前的币种」）——
+ *   · `backSymbol` = **跳之前**那只（有值就说明是点顶部仓位跳过来的，右上角出返回键）
+ *   · `jumpedTo`   = 跳过去的那只
+ * 只有「从顶部那排点过去」才记；从币种下拉 / 搜索换币不算（那里本来就能换回去）。
+ */
+const backSymbol = ref('')
+const jumpedTo = ref('')
+
 /** 点顶部的币 → 切 K 线（走分析页那套全局币种，跟「合约」页点一行是同一条路） */
 function gotoSymbol(base: string): void {
-  if (!base || base === String(props.symbol).toUpperCase()) return
+  const from = String(props.symbol).toUpperCase()
+  if (!base || base === from) return
   prefetchSymbol(base)
   pickSymbol(base)
+  backSymbol.value = from
+  jumpedTo.value = String(base).toUpperCase()
   buzz(8)
 }
+
+/**
+ * 返回跳转前那只。
+ * ⚠️ 回来之后就把这两组清掉：再点一次没有意义（来回横跳），而且「返回」本来就该只有一步。
+ */
+function goBackSymbol(): void {
+  const to = backSymbol.value
+  if (!to) return
+  backSymbol.value = ''
+  jumpedTo.value = ''
+  prefetchSymbol(to)
+  pickSymbol(to)
+  buzz(8)
+}
+
+/**
+ * 用**别的方式**换了币（下拉 / 搜索 / 合约页点一行）⇒ 刚才那一步跳转就不作数了，
+ * 返回键收起来（否则它会指向一个你早就不想要的币）。只有「跳到 `jumpedTo`」才算数。
+ */
+watch(
+  () => String(props.symbol).toUpperCase(),
+  v => {
+    if (!jumpedTo.value || v === jumpedTo.value) return
+    backSymbol.value = ''
+    jumpedTo.value = ''
+  }
+)
 
 /** 顶部那枚小字：浮盈（正负号 + 短数字） */
 function pnlShort(v: number): string {
@@ -1472,6 +1512,31 @@ onMounted(async () => {
         @click="emit('config')"
       >
         {{ tradeKey.name }}
+      </button>
+      <!--
+        返回（用户 2026-10-18：「顶部右侧仓位界面添加返回键，当我点击正在持仓的币种，
+        我需要返回我跳转前的币种」）—— 只在**刚点过顶部那排仓位币种**时出现，
+        点一下回到跳之前那只；换成别的币种自己就收起（见 `goBackSymbol`）。
+      -->
+      <button
+        v-if="backSymbol"
+        type="button"
+        class="ord-back"
+        :title="`回到 ${backSymbol}（刚才从这里跳过来的）`"
+        :aria-label="`返回 ${backSymbol}`"
+        @click="goBackSymbol"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M14.5 5.5L8 12l6.5 6.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+        {{ backSymbol }}
       </button>
       <!--
         ⚠️ 这里原来是「一键平仓」（整账户全平）。用户 2026-10-14：「**右上角一键平仓去掉**」
