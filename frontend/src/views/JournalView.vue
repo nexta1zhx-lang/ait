@@ -70,8 +70,17 @@ const coinOptions = computed<Contract[]>(() =>
  * 拉一页。
  * @param reset true = 回到第一页（筛选变了 / 刚存完）；false = 接着往后（「加载更多」）
  */
+/**
+ * 请求序号 —— **谁最后发谁算数**。
+ *
+ * ⚠️ 以前这里是 `if (loading.value) return`：连点两下（换币种、再点月份）时，
+ *    后一次直接被丢掉，页面停在前一次的结果上。改成「每次发都记一个号，
+ *    回来时号不是最新的就作废」，慢的那个回来也盖不掉新的。
+ */
+let loadSeq = 0
+
 async function load(reset = true): Promise<void> {
-  if (loading.value) return
+  const seq = ++loadSeq
   loading.value = true
   error.value = ''
   const offset = reset ? 0 : entries.value.length
@@ -83,14 +92,15 @@ async function load(reset = true): Promise<void> {
       limit: PAGE,
       offset
     })
+    if (seq !== loadSeq) return // 已经有更新的一发在路上了，这次结果扔了
     entries.value = reset ? r.entries : [...entries.value, ...r.entries]
     total.value = r.total
     myCoins.value = r.coins
     if (reset) openId.value = null
   } catch (e) {
-    error.value = (e as Error).message
+    if (seq === loadSeq) error.value = (e as Error).message
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -147,7 +157,7 @@ watch(month, () => void load())
 let qTimer: ReturnType<typeof setTimeout> | null = null
 watch(q, () => {
   if (qTimer) clearTimeout(qTimer)
-  qTimer = setTimeout(() => void load(), 300)
+  qTimer = setTimeout(() => void load(), 180)
 })
 
 onMounted(() => void load())
