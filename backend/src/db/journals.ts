@@ -265,8 +265,11 @@ export async function saveJournalEntry(
     if (coins.length >= MAX_JOURNAL_COINS) break
   }
 
-  /* 分类：只认自己的，且必须真的存在（不合法就当未分类，别把整条保存搞挂） */
-  let categoryId: number | null = null
+  /*
+   * 分类：没选就挂「默认」（用户 2026-10-18：「未选择就是默认分类」）；
+   * 选了的话只认自己的、且必须真的存在（不合法也退回默认，别把整条保存搞挂）。
+   */
+  let categoryId = await defaultCategoryId(userId)
   const wantCategory = Number(input.categoryId) || 0
   if (wantCategory > 0) {
     const own = await queryOne<{id: string}>(
@@ -339,10 +342,15 @@ export async function setJournalPinned(
 export const MAX_CATEGORY_NAME = 16
 
 /**
- * 预设三个分类的颜色（用户 2026-10-18：「预设 仓位，经验，回忆录」）。
- * 后面新加的分类按 `CATEGORY_COLORS` 的顺序轮着取色，不重复。
+ * 预设分类（用户 2026-10-18：「预设 仓位，经验，回忆录」；
+ * 同一天又补一句「未选择就是默认分类新增一个」⇒ 前面多一个中性的「默认」）。
+ *
+ * 「默认」是真的一行数据：新建时没选分类就自动挂到它上面，
+ * 老数据（`category_id IS NULL`）在第一次列分类时也会被归到它下面。
  */
+export const DEFAULT_CATEGORY_NAME = '默认'
 export const DEFAULT_CATEGORIES: {name: string; color: string}[] = [
+  {name: DEFAULT_CATEGORY_NAME, color: '#8b93a1'},
   {name: '仓位', color: '#f0b429'},
   {name: '经验', color: '#72d6a0'},
   {name: '回忆录', color: '#e08aa8'}
@@ -351,25 +359,60 @@ export const DEFAULT_CATEGORIES: {name: string; color: string}[] = [
 export const CATEGORY_COLORS = ['#f0b429', '#72d6a0', '#e08aa8', '#7aa2f7', '#c792ea', '#f07178']
 
 /**
+ * 「默认」分类的 id（没有就建一个）。
+ *
+ * 它跟另外三个预设不一样：**永远兜底存在** —— 没选分类的条目要挂到它上面。
+ */
+export async function defaultCategoryId(userId: number): Promise<number> {
+  const row = await queryOne<{id: string}>(
+    `INSERT INTO journal_categories (user_id, name, color, sort)
+     VALUES ($1, $2, $3, 0)
+     ON CONFLICT (user_id, lower(name)) DO NOTHING
+     RETURNING id`,
+    [userId, DEFAULT_CATEGORY_NAME, DEFAULT_CATEGORIES[0]!.color]
+  )
+  if (row) return Number(row.id)
+  const got = await queryOne<{id: string}>(
+    'SELECT id FROM journal_categories WHERE user_id = $1 AND lower(name) = lower($2)',
+    [userId, DEFAULT_CATEGORY_NAME]
+  )
+  if (!got) throw new Error('默认分类建不出来')
+  return Number(got.id)
+}
+
+/**
  * 第一次进「经验」页时把这套预设种下去。
  *
- * ⚠️ 只在**一条分类都没有**时种：否则用户把预设删光了、下次进来又冒出来。
+ * ⚠️ 另外三个预设只在**一条分类都没有**时种：否则用户把它们删光了、下次进来又冒出来。
+ * ⚠️「默认」例外，每次都会确保存在（它是兜底），顺手把「没分类的老条目」归到它下面。
  */
 async function ensureDefaultCategories(userId: number): Promise<void> {
   const row = await queryOne<{n: string}>(
     'SELECT count(*)::text AS n FROM journal_categories WHERE user_id = $1',
     [userId]
   )
-  if (Number(row?.n ?? 0) > 0) return
-  for (let i = 0; i < DEFAULT_CATEGORIES.length; i++) {
-    const c = DEFAULT_CATEGORIES[i]!
-    await query(
-      `INSERT INTO journal_categories (user_id, name, color, sort)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT DO NOTHING`,
-      [userId, c.name, c.color, i]
-    )
+  if (Number(row?.n ?? 0) === 0) {
+    for (let i = 0; i < DEFAULT_CATEGORIES.length; i++) {
+      const c = DEFAULT_CATEGORIES[i]!
+      await query(
+        `INSERT INTO journal_categories (user_id, name, color, sort)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING`,
+        [userId, c.name, c.color, i]
+      )
+    }
   }
+  const defId = await defaultCategoryId(userId)
+  /* 「默认」永远排第一个（它的 sort 固定 -1，不会被后来新增的分类挤下去） */
+  await query(
+    'UPDATE journal_categories SET sort = -1 WHERE id = $1 AND sort <> -1',
+    [defId]
+  )
+  /* 老条目（没分类）归到「默认」下面 */
+  await query(
+    'UPDATE journal_entries SET category_id = $2 WHERE user_id = $1 AND category_id IS NULL',
+    [userId, defId]
+  )
 }
 
 export async function listJournalCategories(userId: number): Promise<JournalCategory[]> {

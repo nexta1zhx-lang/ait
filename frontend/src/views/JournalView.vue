@@ -137,6 +137,13 @@ const groups = computed(() => {
 })
 
 /** `2026-10` → `2026 年 10 月` */
+/** 哪些年月分组被收起来了（用户 2026-10-18：「日记按年月聚集可收缩」） */
+const collapsed = ref<Record<string, boolean>>({})
+
+function toggleGroup(key: string): void {
+  collapsed.value = {...collapsed.value, [key]: !collapsed.value[key]}
+}
+
 function monthLabel(key: string): string {
   const [y, m] = key.split('-')
   if (!y || !m) return '更早'
@@ -176,6 +183,14 @@ async function loadCategories(): Promise<void> {
 /** 当前筛选的那个分类（顶栏按钮上显示名字 + 颜色点） */
 const currentCat = computed(
   () => categories.value.find(c => c.id === category.value) ?? null
+)
+
+/**
+ * 「默认」分类（没选分类的条目都挂它 —— 用户 2026-10-18：「未选择就是默认分类」）。
+ * 后端保证它一定存在；这里只是从列表里找出来给编辑器当默认值。
+ */
+const defaultCat = computed(
+  () => categories.value.find(c => c.name === '默认') ?? categories.value[0] ?? null
 )
 
 /** 选一个分类（null = 全部）→ 关面板 + 重新拉第一页 */
@@ -334,7 +349,7 @@ function startNew(): void {
     title: '',
     body: '',
     coins: [],
-    categoryId: category.value
+    categoryId: category.value ?? defaultCat.value?.id ?? null
   }
   comboPick.value = ''
   bodyBackup.value = ''
@@ -346,7 +361,7 @@ function startEdit(e: JournalEntry): void {
     title: e.title,
     body: e.body,
     coins: e.coins.map(c => ({...c})),
-    categoryId: e.category?.id ?? null
+    categoryId: e.category?.id ?? defaultCat.value?.id ?? null
   }
   comboPick.value = ''
   bodyBackup.value = ''
@@ -436,9 +451,24 @@ async function remove(e: JournalEntry): Promise<void> {
       用户 2026-10-18：「币种选择在左边字体放小，搜日记占剩余位置」。
     -->
     <div class="j-bar">
+      <SymbolCombo
+        plain
+        class="j-flt"
+        placeholder="全部"
+        all-label="全部"
+        :model-value="coin"
+        :contracts="coinOptions"
+        @pick="v => (coin = v)"
+      />
+      <div class="j-search">
+        <input v-model="q" type="text" placeholder="搜经验" />
+        <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
+          ✕
+        </button>
+      </div>
       <!--
-        分类（用户 2026-10-18：「分类图标在币种选择旁，点击左侧弹出层可新增分类或选择某一个分类过滤」）。
-        图标 + 当前分类名；点开是一条**贴着左边**的弹层：全部 / 各分类 / 新增。
+        分类（用户 2026-10-18：「文件夹放在日期左边」）。
+        图标 + 当前分类的色点；点开是一条弹层：全部 / 各分类 / 新增。
       -->
       <div class="j-cat-wrap">
         <button
@@ -508,21 +538,6 @@ async function remove(e: JournalEntry): Promise<void> {
         </div>
       </div>
 
-      <SymbolCombo
-        plain
-        class="j-flt"
-        placeholder="全部"
-        all-label="全部"
-        :model-value="coin"
-        :contracts="coinOptions"
-        @pick="v => (coin = v)"
-      />
-      <div class="j-search">
-        <input v-model="q" type="text" placeholder="搜经验" />
-        <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
-          ✕
-        </button>
-      </div>
       <!-- 日历：只看某个月 -->
       <div class="j-cal-wrap">
         <button
@@ -577,35 +592,44 @@ async function remove(e: JournalEntry): Promise<void> {
     <!-- 条目：最近改动的在上，时间精确到分钟 -->
     <div v-if="entries.length" class="j-list">
       <template v-for="g in groups" :key="g.key">
-        <h4 class="j-group">{{ g.label }}</h4>
-        <article v-for="e in g.items" :key="e.id" class="j-entry" :class="{open: openId === e.id}">
+        <h4 class="j-group" :class="{closed: collapsed[g.key]}" @click="toggleGroup(g.key)">
+          <span class="j-group-caret">{{ collapsed[g.key] ? '▸' : '▾' }}</span>
+          {{ g.label }}
+          <span class="j-group-n">{{ g.items.length }} 条</span>
+        </h4>
+        <article
+          v-for="e in g.items"
+          v-show="!collapsed[g.key]"
+          :key="e.id"
+          class="j-entry"
+          :class="{open: openId === e.id}"
+        >
           <div class="j-head" @click="toggle(e)">
-            <i class="j-dot" :class="{on: openId === e.id}" />
-            <span class="j-t">
-              <!-- 分类：一个文件夹色点（用户：「分类可以有不同的颜色表示不同文件夹」） -->
-              <i
-                v-if="e.category"
-                class="j-catdot"
-                :style="{background: e.category.color || 'var(--muted)'}"
-                :title="e.category.name"
-              />
-              <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
-            </span>
-            <span class="j-time">{{ timeLabel(e.at) }}</span>
-            <!-- 置顶：钉在头上一颗针（置顶的排在最前） -->
+            <!--
+              左边这颗圆点（用户 2026-10-18）：
+                · 颜色 = 这条的分类色，比原来大一圈；
+                · 位置钉在这一行**头上**（`.j-head` 是定位祖先），展开正文不会跟着挪；
+                · 点一下 = 置顶，置顶后圆点变成一颗针。
+            -->
             <button
               type="button"
-              class="j-pin"
-              :class="{on: e.pinned}"
+              class="j-dot"
+              :class="{on: openId === e.id, pinned: e.pinned}"
+              :style="e.category ? {background: e.category.color} : {}"
               :title="e.pinned ? '取消置顶' : '置顶'"
               @click.stop="togglePin(e)"
             >
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <svg v-if="e.pinned" viewBox="0 0 24 24" width="11" height="11" fill="none"
+                   stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
                 <path d="M9.5 3.8h5l-.9 5 2.9 2.9v1.2H7.5v-1.2l2.9-2.9-.9-5Z" />
                 <path d="M12 12.9V20" />
               </svg>
             </button>
+            <span class="j-t">
+              <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
+            </span>
+            <span class="j-time">{{ timeLabel(e.at) }}</span>
             <span class="j-caret dim" :class="{up: openId === e.id}">▾</span>
             <span v-if="e.coins.length" class="j-badges">
               <span v-for="c in e.coins" :key="c.base" class="j-badge">{{ c.base }}</span>
@@ -679,22 +703,14 @@ async function remove(e: JournalEntry): Promise<void> {
       <div class="sheet-row">
         <span class="rk">标题</span>
         <div class="ctl">
-          <input v-model="editing.title" type="text" placeholder="可不填" maxlength="120" />
+          <input v-model="editing.title" type="text" maxlength="120" />
         </div>
       </div>
 
-      <!-- 分类：一条一条选，跟币种一样都属于「这条挂了什么」 -->
+      <!-- 分类：一条一条选（没选就是「默认」，后端兜底） -->
       <div class="j-sec">
-        <p class="j-sec-t">分类 <span class="dim">（不选就是未分类）</span></p>
+        <p class="j-sec-t">分类</p>
         <div class="j-cat-pick">
-          <button
-            type="button"
-            class="j-cat-chip"
-            :class="{on: editing.categoryId === null}"
-            @click="editing.categoryId = null"
-          >
-            未分类
-          </button>
           <button
             v-for="c in categories"
             :key="c.id"
@@ -711,16 +727,9 @@ async function remove(e: JournalEntry): Promise<void> {
 
       <!-- 币种放在标题下面（用户：「弹窗编辑的币种放在标题下方」） -->
       <div class="j-sec">
-        <p class="j-sec-t">
-          币种 <span class="dim">（最多 20 个 · 可以定住一刻，点它就跳那一刻的 K 线）</span>
-        </p>
+        <p class="j-sec-t">币种</p>
         <div class="j-add">
-          <SymbolCombo
-            v-model="comboPick"
-            :contracts="swapContracts"
-            placeholder="加一个币…"
-            @pick="addCoin"
-          />
+          <SymbolCombo v-model="comboPick" :contracts="swapContracts" placeholder="" @pick="addCoin" />
         </div>
 
         <div v-for="c in editing.coins" :key="c.base" class="j-coin-row">
@@ -772,12 +781,7 @@ async function remove(e: JournalEntry): Promise<void> {
             </svg>
           </button>
         </p>
-        <textarea
-          v-model="editing.body"
-          class="j-body-input"
-          rows="7"
-          placeholder="怎么想的就怎么写 —— 一行一句也行"
-        />
+        <textarea v-model="editing.body" class="j-body-input" rows="7" />
       </div>
 
       <div class="j-submit">
@@ -855,7 +859,7 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-list::before {
   content: '';
   position: absolute;
-  left: 2.5px;
+  left: 5px;
   top: 20px;
   bottom: 22px;
   width: 1px;
@@ -868,8 +872,10 @@ async function remove(e: JournalEntry): Promise<void> {
   position: relative;
 }
 .j-head {
+  /* 左边那颗圆点挂在这上面 ⇒ 展开正文时它不会跟着跑 */
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: baseline;
   column-gap: 8px;
   row-gap: 4px;
@@ -909,25 +915,49 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-entry.open .j-head {
   background: transparent;
 }
-/* 圆点：钉在左边那条时间轴上；展开的那条亮起来 + 加光圈 */
+/*
+ * 左边那颗圆点（用户 2026-10-18）：
+ *   · 颜色 = 这条的分类色，比原来大一圈（11px）；
+ *   · 挂在 `.j-head` 上（不是整条），所以展开正文时它**钉在原地不动**；
+ *   · 点它 = 置顶；置顶后整颗变成一颗针（见模板里的 svg）。
+ */
 .j-dot {
   position: absolute;
   left: -14px;
-  top: 15px;
-  width: 6px;
-  height: 6px;
+  top: 9px;
+  width: 11px;
+  height: 11px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
   border-radius: 50%;
-  background: var(--muted);
-  opacity: 0.55;
+  /* 默认（没分类的老数据）：一圈中性灰 */
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+  color: var(--panel);
+  cursor: pointer;
   transition:
-    background 0.15s,
     box-shadow 0.15s,
-    opacity 0.15s;
+    transform 0.15s;
 }
+/* 展开那条：外面加一圈光圈（颜色仍是分类色） */
 .j-dot.on {
-  background: var(--blue);
-  opacity: 1;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
+}
+/* 置顶：不再是实心圆，变成一颗针 */
+.j-dot.pinned {
+  background: transparent;
+  color: var(--blue);
+  width: 15px;
+  height: 15px;
+  left: -16px;
+  top: 7px;
+}
+@media (hover: hover) {
+  .j-dot:hover {
+    transform: scale(1.12);
+  }
 }
 /*
  * 展开动画（用户 2026-10-18：「动画改为展开动画」）：高度从 0 涨到内容高度。
@@ -998,16 +1028,35 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 
 /* 年月分割的小标题 */
+/* 年月分组头：点一下收起 / 展开（用户 2026-10-18：「按年月聚集可收缩」） */
 .j-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   margin: 16px 0 4px;
   padding-left: 2px;
   font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.4px;
   color: var(--muted);
+  cursor: pointer;
+  user-select: none;
 }
 .j-group:first-child {
   margin-top: 2px;
+}
+.j-group-caret {
+  width: 9px;
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0.7;
+}
+/* 条数：收起时也能看出里面有多少 */
+.j-group-n {
+  font-size: 10px;
+  font-weight: 400;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 顶部那颗日历 + 它的小面板 */
@@ -1114,8 +1163,8 @@ async function remove(e: JournalEntry): Promise<void> {
   position: absolute;
   z-index: 21;
   top: calc(100% + 6px);
-  /* 按钮就在最左边，弹层也往左贴（用户：「点击左侧弹出层」） */
-  left: 0;
+  /* 按钮已经挪到日历左边，弹层往左展开 */
+  right: 0;
   width: 200px;
   padding: 6px;
   background: var(--panel);
@@ -1198,28 +1247,6 @@ async function remove(e: JournalEntry): Promise<void> {
   gap: 6px;
   min-width: 0;
 }
-.j-pin {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px;
-  color: var(--muted);
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  opacity: 0.5;
-}
-.j-pin.on {
-  color: var(--blue);
-  opacity: 1;
-}
-@media (hover: hover) {
-  .j-pin:hover {
-    opacity: 1;
-  }
-}
-
 /* 编辑器里的分类胶囊 */
 .j-cat-pick {
   display: flex;
