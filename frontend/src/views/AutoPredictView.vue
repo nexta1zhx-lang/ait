@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
- * **自动化预测**（用户 2026-10-12：「新建一个页面叫自动化预测 在预测历史后面」「可调参数
- * 改为前端配置 留着」「显筛选的币种」）。
+ * **预测分析**（用户 2026-10-12：「新建一个页面叫自动化预测 在预测历史后面」；
+ * 2026-10-18 改名并把一级 tab 排到第一个：「自动化预测改名叫做预测分析」）。
+ * 四个内层 tab：币种监测 / AI分析 / 自动分析 / 提醒。
  *
  * 这一页是"后台自动跑"的门面：
  *
@@ -18,7 +19,7 @@
  *     ⇒ 参数收进底部弹层（跟 K 线页那颗「配置」同一套 `.sheet`），**一行一项、不写说明**；
  *     候选列表从卡片改成三列表格。
  *
- *   ③ **「AI 分析」那一格**（2026-10-15 用户：「在自动化预测中加入 tab，线上所有的已自动 ai 的显示」）
+ *   ③ **「自动分析」那一格**（2026-10-15 用户：「在自动化预测中加入 tab，线上所有的已自动 ai 的显示」）
  *      —— 列出**所有**已经加入持久化分析的币（在跑的排前面，7 天内的都留着），
  *      每行是 币种 / 进度 / 最近结论，点一行**展开**：那一刻往后 1h、4h 涨了多少 + 看 K 线 / 跑一次 / 停止。
  *      数据就是 `../persist` 那个 store（跟 K 线页顶部那个图标同一份），进页时刷一次。
@@ -44,10 +45,28 @@ import {
   noteAlertsChanged,
   refreshKlineAlerts
 } from '../kline-alerts'
-import {markdownToPlain} from '../markdown'
+import {markdownToPlain, verdictKind} from '../markdown'
 import {showToast} from '../toast'
-import {MOBILE_MAX, leftTab, pickSymbol, prefetchSymbol} from '../analyze'
+import {
+  MOBILE_MAX,
+  type AutoTab,
+  autoTab,
+  leftTab,
+  pickSymbol,
+  prefetchSymbol,
+  result as anaResult,
+  showResult,
+  showSteps,
+  steps as anaSteps,
+  loading as anaLoading,
+  testAt,
+  testBarTime,
+  testMode
+} from '../analyze'
 import AnalysisDetail from '../comps/AnalysisDetail.vue'
+import AnswerBody from '../comps/AnswerBody.vue'
+import PredictHistory from '../comps/PredictHistory.vue'
+import StepsPanel from '../comps/StepsPanel.vue'
 import {
   afterCell,
   leftText,
@@ -133,12 +152,32 @@ const RULES = [
 /* ---------------- 「自动 AI」那一格 ---------------- */
 
 /**
- * 两格：`scan` = 筛选的币种（原样），`ai` = 自动 AI 分析（持久化会话）。
+ * 四格（用户 2026-10-18）：
+ *   `scan`   币种监测（原「筛选的币种」）
+ *   `live`   AI分析（原一级 tab「预测结果」：本次分析 + 结论 + 预测历史）
+ *   `ai`     自动分析（原「AI 分析」：持久化分析的会话）
+ *   `alerts` 提醒（画线提醒）
  *
+ * ⚠️ 状态放在 `../analyze` 的 `autoTab`，不在这个组件里：一级 tab 切走这里就卸载了，
+ *    而「点分析 / 点 ✓」都要能把人直接送到 `live` 那一格（见 `onRun` / `confirmTestPoint`）。
  * ⚠️ 不做成 URL 参数：这一页本身就是 `/analyze?t=auto` 的一格，再加一层查询参数
  *    会跟上面那层 tab 的 `?t=` 打架（`analyze.ts` 那套只认一层）。
  */
-const tab = ref<'scan' | 'ai' | 'alerts'>('scan')
+const tab = autoTab
+
+/** 四格的固定顺序（滑块按它在轨道里挪） */
+const TAB_ORDER: AutoTab[] = ['scan', 'live', 'ai', 'alerts']
+const tabIndex = computed(() => Math.max(0, TAB_ORDER.indexOf(tab.value)))
+
+/* ---------------- 「AI分析」那一格（原一级 tab「预测结果」） ---------------- */
+
+/**
+ * 结论卡的三样（判定色 / 收起后那一行）—— 跟原来 `AnalyzeView` 里那套一模一样，
+ * 只是数据源换成了 `analyze.ts` 里导出的 `result`（改名 `anaResult`，避开这一页自己的）。
+ */
+const judge = computed(() => anaResult.value?.judge)
+const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
+const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
 
 /** 展开了哪个会话（一次只展开一个，手上一屏放得下两个都会把页面拉得很长） */
 const expandId = ref<number | null>(null)
@@ -369,13 +408,22 @@ function pctClass(v: number): string {
   <div class="col auto warm-skin">
     <div v-if="error" class="error">{{ error }}</div>
 
-    <!-- 三格：筛选的币种 / AI 分析（持久化分析那批会话）/ 画线提醒 -->
-    <div class="seg auto-seg">
+    <!--
+      四格（用户 2026-10-18 定的顺序）：币种监测 / AI分析 / 自动分析 / 提醒。
+      ★ 「AI分析」就是原来一级 tab「预测结果」整格搬进来的那一格。
+      ★ 样式是**滑块指示式**（用户 2026-10-18）：一条胶囊轨道 + 一颗会滑过去的滑块，
+        不再是一格一颗独立胶囊。滑块位置靠 `--seg-i`（第几格）算，见下面 `.auto-seg`。
+    -->
+    <div class="seg auto-seg" :style="{'--seg-i': tabIndex}">
+      <span class="seg-thumb" aria-hidden="true"></span>
       <button type="button" :class="{active: tab === 'scan'}" @click="tab = 'scan'">
-        筛选的币种 <span class="tag">{{ picks.length }}</span>
+        币种监测 <span class="tag">{{ picks.length }}</span>
+      </button>
+      <button type="button" :class="{active: tab === 'live'}" @click="tab = 'live'">
+        AI分析
       </button>
       <button type="button" :class="{active: tab === 'ai'}" @click="tab = 'ai'">
-        AI 分析 <span class="tag">{{ aiRows.length }}</span>
+        自动分析 <span class="tag">{{ aiRows.length }}</span>
       </button>
       <button type="button" :class="{active: tab === 'alerts'}" @click="tab = 'alerts'">
         提醒 <span class="tag">{{ activeAlerts.length }}</span>
@@ -385,7 +433,7 @@ function pctClass(v: number): string {
     <section v-if="tab === 'scan'" class="panel">
       <div class="sec-head">
         <h2>
-          筛选的币种
+          币种监测
           <span class="tag">{{ picks.length }} 个</span>
         </h2>
         <div class="sec-actions">
@@ -435,6 +483,102 @@ function pctClass(v: number): string {
           </tbody>
         </table>
       </div>
+    </section>
+
+    <!--
+      AI分析（原一级 tab「预测结果」）：本次分析过程 + 结论卡，下面接预测历史。
+      ★ 2026-10-18 用户：「预测结果改名 ai分析，挪到自动化预测中」——
+        内容整块搬过来，行为不变（跑还是走 K 线头上那颗「分析」）。
+    -->
+    <section v-else-if="tab === 'live'" class="live-pane">
+      <!--
+        测试模式：整格**只有这一条**（用户 2026-10-15：「只添加一个测试模式」）。
+        ⚠️ 早先这里是 `v-if="testAt"`（跑完才有），现在按 `testMode` 出 ——
+           测试模式一开就挂上，一眼看得出来「这一局不存档」：
+             · 还没点线 ⇒ 提示去图上点一根；
+             · 点好了   ⇒ 报出结束线那一刻；
+             · 跑过之后 ⇒ 再补一句判断时点。
+      -->
+      <div v-if="testMode" class="test-banner">
+        <b v-if="testBarTime !== null"
+          >⏱ 测试模式 · 结束线 {{ bjTime(testBarTime) }}</b
+        >
+        <b v-else>⏱ 测试模式 · 在图上点一根 K 线定结束线</b>
+        <em v-if="testAt">判断时点 {{ bjTime(testAt) }}</em>
+      </div>
+
+      <!--
+        分析过程（可折叠）+ 分析结论（**不折叠**）。
+        ★ 2026-10-13 用户定死了这两颗的脾气：
+          · 「过程在结果出来后折叠」⇒ 面板归 `showSteps` 管：开跑时展开看进度
+            （`analyze.ts` 的 `run()` 置 true），出结果自动收成一颗按钮（`onDone` 置 false）；
+          · 「分析完成后不收起」⇒ 结论卡**只认 `result`**，不跟 `showSteps` 走 ——
+            过程收起来之后，结论照样摊在下面（折叠的是过程，不是答案）。
+        ★ 同一天还要求「分析结论加个背景块颜色即可，其余用 md 解析」——
+          底色在 `.result-card`（style.css），判定色靠 `v-go` / `v-no` / `v-wait`。
+      -->
+      <div class="ana-block">
+        <StepsPanel
+          :steps="anaSteps"
+          :done="!!anaResult"
+          :running="anaLoading"
+          :open="showSteps"
+          :hint="
+            testMode
+              ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
+              : '点「AI 分析」后，这里会逐步写出：读分析预测提示词 → 拉行情 → 拼上下文 → 调模型 → 记账存档。'
+          "
+          @update:open="showSteps = $event"
+        />
+
+        <!--
+          ★ 2026-10-13 用户：「结论也可收起」⇒ 卡的头上多一颗折叠按钮（与「分析过程」
+            那颗同一副脾气）：收起后只剩一行「分析结论 + 判定那句话」，点一下摊开。
+            默认展开（`showResult` 初值 true，`onDone` 里也会置回 true）。
+          ★ 2026-10-03 精简（用户要求）：
+          · 去掉「已存档 #N → 去复盘」那个链接
+          · 去掉二级 tab 栏（原来「结论 / 市场与周期」两格）→ 结论和热度直接铺下来
+          · 去掉「各周期行情」（发给 AI 的原文）那一大块
+          · 去掉下面那 6 项统计（当前价 / 24h 涨跌 / 资金费率 / 拉了多少行情 /
+            提示词版本 / 可用标签）—— 价格上面行情条里就有，其余与判断无关
+          · **市场热度**（2026-10-11 也删了：用户「热度不要，不需要」——
+            分析不取它、提示词里没有它，页面上也就没得显示）
+        -->
+        <section
+          v-if="anaResult"
+          class="result-card"
+          :class="`v-${verdict}`"
+        >
+          <button
+            type="button"
+            class="result-toggle"
+            :aria-expanded="showResult"
+            @click="showResult = !showResult"
+          >
+            <span class="rt-label">分析结论</span>
+            <span v-if="!showResult" class="rt-sum">{{ summary }}</span>
+            <span class="rt-chev">{{ showResult ? '收起 ▴' : '▾' }}</span>
+          </button>
+
+          <!--
+            ★ 2026-10-11 晚：提示词放开了输出格式 ⇒ 模型改成写小标题 + 分点 + 加粗。
+            结论卡片原来是把整段当**纯文本**贴出来的（`white-space: pre-wrap`），
+            于是页面上能直接看到 `#` `**` `-`。现在交给 `AnswerBody` 渲染成 HTML。
+            ⚠️ 收起用 `v-show`（不是 `v-if`）：md 渲染一次就够，来回折别重渲染。
+          -->
+          <div v-show="showResult" class="result-body">
+            <AnswerBody v-if="judge?.line" :text="judge.line" />
+            <p v-else class="verdict-line">（模型没给结论）</p>
+          </div>
+        </section>
+      </div>
+
+      <!--
+        预测历史（原「预测历史」那一格）：每次分析留下的那一句话。
+        `embedded` = 嵌在会滚的父容器里 ⇒ 列表自己不再滚、不再抢高度
+        （否则一页里套两层滚动条，手机上最难用）。
+      -->
+      <PredictHistory embedded />
     </section>
 
     <!-- 画线提醒：K 线图上点一条线加的「上穿 / 跌破」提醒（服务器自己盯价） -->
@@ -560,11 +704,11 @@ function pctClass(v: number): string {
       </div>
     </section>
 
-    <!-- 「自动 AI」：所有加入过持久化分析的币（在跑的排前面，7 天内的都留着） -->
+    <!-- 自动分析：所有加入过持久化分析的币（在跑的排前面，7 天内的都留着） -->
     <section v-else class="panel">
       <div class="sec-head">
         <h2>
-          AI 分析
+          自动分析
           <span class="tag">{{ activeCount }} 个在跑</span>
         </h2>
         <div class="sec-actions">
@@ -882,19 +1026,89 @@ function pctClass(v: number): string {
   gap: 10px;
 }
 
-/* 两格 tab（筛选的币种 / 自动 AI）：铺满一行，两格等宽，手指好按 */
+/*
+ * 四格滑块指示式（用户 2026-10-18：「改为滑块指示式」）。
+ *
+ * 一条胶囊轨道（`.auto-seg`）+ 一颗滑块（`.seg-thumb`），选中哪格滑块滑到哪格 ——
+ * 不再是一格一颗独立胶囊。四格等宽，滑块宽度 = 轨道内宽的四分之一，
+ * 位移直接 `translateX(格序号 × 100%)`（100% 是滑块自己的宽，所以正好挪一格）。
+ *
+ * ⚠️ 全站 `button` 默认 `padding: 9px 20px`，这里必须写死小值，否则四格撑爆（踩过）。
+ * ⚠️ `.seg` 自带的外壳（边框 / 底色 / `overflow` / 格间竖线）要一条条盖掉。
+ */
 .auto-seg {
+  position: relative;
   display: flex;
   width: 100%;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--panel-2);
+  overflow: visible;
 }
 
 .auto-seg button {
-  flex: 1;
+  flex: 1 1 0;
+  position: relative;
+  z-index: 1;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-height: 34px;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: var(--fw-mid);
+  white-space: nowrap;
+  transition: color 0.18s ease;
+}
+
+.auto-seg button:last-child {
+  border: 0;
+}
+
+/* 选中那格：底色由滑块给，这里只把字染成琥珀 */
+.auto-seg button.active {
+  background: transparent;
+  color: var(--accent);
+}
+
+/* 计数小标签：滑块滑到它底下时跟着染色，别留一圈灰边 */
+.auto-seg button.active .tag {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: rgba(255, 193, 107, 0.08);
+}
+
+/*
+ * 滑块：**淡琥珀色块 + 一圈细边**，不做亮渐变（用户 2026-10-18：「太亮了」）。
+ * 圆角跟轨道同一档小圆角（用户同一天：「圆角太大」）。
+ */
+.seg-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 4);
+  border: 1px solid var(--accent-line);
+  border-radius: 6px;
+  background: var(--accent-soft);
+  transform: translateX(calc(var(--seg-i, 0) * 100%));
+  transition: transform 0.24s cubic-bezier(0.4, 0.1, 0.2, 1);
+  pointer-events: none;
+}
+
+/* 「AI分析」那一格：测试标识 + 分析过程 + 结论卡 + 预测历史，竖着排 */
+.live-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
 }
 
 /*

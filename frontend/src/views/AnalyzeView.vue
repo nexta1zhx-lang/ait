@@ -25,14 +25,11 @@ import PersistSheet from '../comps/PersistSheet.vue'
 import MarginRateBadge from '../comps/MarginRateBadge.vue'
 import SegTabs from '../comps/SegTabs.vue'
 import CollectForm from '../comps/CollectForm.vue'
-import StepsPanel from '../comps/StepsPanel.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import HistoryView from './HistoryView.vue'
 import JournalView from './JournalView.vue'
 import AutoPredictView from './AutoPredictView.vue'
-import PredictHistory from '../comps/PredictHistory.vue'
-import AnswerBody from '../comps/AnswerBody.vue'
 import {
   ensurePins,
   isPinnedBase,
@@ -48,7 +45,6 @@ import {
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
 import {activeSessionOf, bindPersist, leftText} from '../persist'
-import {markdownToPlain, verdictKind} from '../markdown'
 import {collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
 import {useSwipeTabs} from '../swipe-tabs'
@@ -57,6 +53,7 @@ import {
   LEFT_TABS,
   type LeftTab,
   MOBILE_MAX,
+  autoTab,
   chartFrom,
   chartRange,
   chartTf,
@@ -70,16 +67,11 @@ import {
   pointPicking,
   prefetchSymbol,
   rangeDrawing,
-  result,
   run,
   setPointPicking,
-  showResult,
-  showSteps,
   startTestMode,
-  steps,
   symbol,
   testArmed,
-  testAt,
   testBarTime,
   testMode,
   testPoint
@@ -239,18 +231,18 @@ const router = useRouter()
 /**
  * `?t=` 的取值：`chart` 是窄屏专属那格，其余在 `LEFT_TABS` 里。
  *
- * ⚠️ `history` 是**老值**（2026-10-12 之前「预测历史」是独立一格）：
- *    它跟「实时分析」合并成「预测结果」之后，老书签 / 老链接（`/history`、
- *    `/me?p=replay` 都由 `router.ts` 转成 `?t=history`）必须还能落对地方 —— 映射到 `live`。
+ * ⚠️ `history` / `live` / `test` 都是**老值**：
+ *   · `history`（2026-10-12 之前「预测历史」是独立一格）、
+ *   · `live`（原一级 tab「预测结果」）、
+ *   · `test`（2026-10-15 之前桌面端那格「测试」）——
+ *   2026-10-18 起它们都落到「预测分析 → AI分析」那一内层格（老书签 / 老链接不能白屏）。
  */
 function readTab(v: unknown): LeftTab | null {
   if (v === 'chart') return 'chart'
-  if (v === 'history') return 'live'
-  /*
-   * `test` 也是**老值**（2026-10-15 之前桌面端有一格「测试」tab）：
-   * 那格已经删掉（PC 跟手机统一走 K 线头上那颗烧瓶），老链接落到「预测结果」。
-   */
-  if (v === 'test') return 'live'
+  if (v === 'history' || v === 'live' || v === 'test') {
+    autoTab.value = 'live'
+    return 'auto'
+  }
   return LEFT_TABS.some(t => t.value === v) ? (v as LeftTab) : null
 }
 
@@ -390,15 +382,18 @@ function onPickMarket(base: string): void {
  *
  * 用户 2026-10-03：「点击分析自动跳转实时分析界面」——
  * 默认停在「合约行情 / K 线」那一格，点完分析还杵在榜单前面，看不见结论，
- * 得自己再点一下「实时分析」。所以点下去先把左侧切过去。
+ * 得自己再点一下。所以点下去先把左侧切过去。
  *
- * ⚠️ **「测试」那一格不能切**：`testMode` 是从 `leftTab` 推出来的，
- * 切走会让它变 false、`testAt` 跟着变 null —— 测试跑会被当成实时跑**存进库里**
- * （踩过一次，`analyze.ts` 的 `run()` 里也留着同样的告警）。
+ * ★ 2026-10-18：结论那格搬进了「预测分析 → AI分析」，跳的落点跟着改。
+ *
+ * ⚠️ **测试模式不能因为切格就丢掉**：`testMode` 里除了 `testArmed` 还认遗留的
+ *    `leftTab === 'test'`，切走会让后者变 false、`testAt` 跟着变 null ——
+ *    测试跑会被当成实时跑**存进库里**（踩过一次，`analyze.ts` 的 `run()` 里也留着同样的告警）。
  */
 function onRun(): void {
-  if (leftTab.value !== 'live' && leftTab.value !== 'test')
-    leftTab.value = 'live'
+  if (leftTab.value === 'test') testArmed.value = true
+  autoTab.value = 'live'
+  leftTab.value = 'auto'
   run()
 }
 
@@ -604,22 +599,6 @@ function onPickPoint(at: number) {
   testPoint.value = at
 }
 
-/* ---------------- 结论渲染 ---------------- */
-
-const judge = computed(() => result.value?.judge)
-
-/** 判定：它说能做 / 不能做 / 还在等（只看开头那段，纯展示用）—— 给第一个块上色 */
-const verdict = computed(() => verdictKind(judge.value?.line ?? ''))
-
-/**
- * 结论那一行（收起态露在按钮上）。
- *
- * ★ 2026-10-13 用户：「结论也可收起」—— 收起来总得能看见「到底做不做」，
- *   所以把 md 抹成一行纯文字（`markdownToPlain`，与「预测历史」同一套），
- *   它开头就是模型写的那句判定（「BTC 1h｜不能做 …」）。
- */
-const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
-
 </script>
 
 <template>
@@ -710,111 +689,8 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
           </section>
         </div>
 
-        <!--
-          ② 预测结果 / 测试（两块共用同一套渲染）
-          ★ 2026-10-12 合并：这一格原来是「实时分析」，下面是**并列**的另一格「预测历史」；
-            用户要求「实时分析和预测历史合并改为预测结果」—— 于是历史列表挂到这一格末尾，
-            一次滚动看全：本次结论在上、以往记录在下。
-          ★ 2026-10-15 用户重做测试流程：「预测界面**只添加一个测试模式**」——
-            原来这儿那块「测试 · 结束线」面板（结束线那行 + 选结束线 / 重选 / 清掉 三颗按钮）
-            **整块删掉**：选线、重选、退出全走 K 线头上那对 ✓ / ✗（见下面 `tk-test` 那一段），
-            这一格只剩一条「测试模式」标识。
-        -->
-        <template v-if="leftTab === 'live' || leftTab === 'test'">
-          <div class="scroll-body">
-            <!--
-              测试模式：整格**只有这一条**（用户 2026-10-15：「只添加一个测试模式」）。
-              ⚠️ 早先这里是 `v-if="testAt"`（跑完才有），现在按 `testMode` 出 ——
-                 测试模式一开就挂上，一眼看得出来「这一局不存档」：
-                   · 还没点线 ⇒ 提示去图上点一根；
-                   · 点好了   ⇒ 报出结束线那一刻；
-                   · 跑过之后 ⇒ 再补一句判断时点。
-            -->
-            <div v-if="testMode" class="test-banner">
-              <b v-if="testBarTime !== null"
-                >⏱ 测试模式 · 结束线 {{ bjTime(testBarTime) }}</b
-              >
-              <b v-else>⏱ 测试模式 · 在图上点一根 K 线定结束线</b>
-              <em v-if="testAt">判断时点 {{ bjTime(testAt) }}</em>
-            </div>
-
-            <!--
-              分析过程（可折叠）+ 分析结论（**不折叠**）。
-              ★ 2026-10-13 用户定死了这两颗的脾气：
-                · 「过程在结果出来后折叠」⇒ 面板归 `showSteps` 管：开跑时展开看进度
-                  （`analyze.ts` 的 `run()` 置 true），出结果自动收成一颗按钮（`onDone` 置 false）；
-                · 「分析完成后不收起」⇒ 结论卡**只认 `result`**，不跟 `showSteps` 走 ——
-                  过程收起来之后，结论照样摊在下面（折叠的是过程，不是答案）。
-              ★ 同一天还要求「分析结论加个背景块颜色即可，其余用 md 解析」——
-                底色在 `.result-card`（style.css），判定色靠 `v-go` / `v-no` / `v-wait`。
-            -->
-            <div class="ana-block">
-              <StepsPanel
-                :steps="steps"
-                :done="!!result"
-                :running="loading"
-                :open="showSteps"
-                :hint="
-                  testMode
-                    ? '点「按这段行情判断」后，这里会逐步写出：读分析预测提示词 → 拉那一刻的行情 → 拼上下文 → 调模型（测试跑不存档）。'
-                    : '点「AI 分析」后，这里会逐步写出：读分析预测提示词 → 拉行情 → 拼上下文 → 调模型 → 记账存档。'
-                "
-                @update:open="showSteps = $event"
-              />
-
-              <!--
-                ★ 2026-10-13 用户：「结论也可收起」⇒ 卡的头上多一颗折叠按钮（与「分析过程」
-                  那颗同一副脾气）：收起后只剩一行「分析结论 + 判定那句话」，点一下摊开。
-                  默认展开（`showResult` 初值 true，`onDone` 里也会置回 true）。
-                ★ 2026-10-03 精简（用户要求）：
-                · 去掉「已存档 #N → 去复盘」那个链接
-                · 去掉二级 tab 栏（原来「结论 / 市场与周期」两格）→ 结论和热度直接铺下来
-                · 去掉「各周期行情」（发给 AI 的原文）那一大块
-                · 去掉下面那 6 项统计（当前价 / 24h 涨跌 / 资金费率 / 拉了多少行情 /
-                  提示词版本 / 可用标签）—— 价格上面行情条里就有，其余与判断无关
-                · **市场热度**（2026-10-11 也删了：用户「热度不要，不需要」——
-                  分析不取它、提示词里没有它，页面上也就没得显示）
-              -->
-              <section
-                v-if="result"
-                class="result-card"
-                :class="`v-${verdict}`"
-              >
-                <button
-                  type="button"
-                  class="result-toggle"
-                  :aria-expanded="showResult"
-                  @click="showResult = !showResult"
-                >
-                  <span class="rt-label">分析结论</span>
-                  <span v-if="!showResult" class="rt-sum">{{ summary }}</span>
-                  <span class="rt-chev">{{ showResult ? '收起 ▴' : '▾' }}</span>
-                </button>
-
-                <!--
-                  ★ 2026-10-11 晚：提示词放开了输出格式 ⇒ 模型改成写小标题 + 分点 + 加粗。
-                  结论卡片原来是把整段当**纯文本**贴出来的（`white-space: pre-wrap`），
-                  于是页面上能直接看到 `#` `**` `-`。现在交给 `AnswerBody` 渲染成 HTML。
-                  ⚠️ 收起用 `v-show`（不是 `v-if`）：md 渲染一次就够，来回折别重渲染。
-                -->
-                <div v-show="showResult" class="result-body">
-                  <AnswerBody v-if="judge?.line" :text="judge.line" />
-                  <p v-else class="verdict-line">（模型没给结论）</p>
-                </div>
-              </section>
-            </div>
-
-            <!--
-              预测历史（原「预测历史」那一格）：每次分析留下的那一句话。
-              `embedded` = 嵌在会滚的父容器里 ⇒ 列表自己不再滚、不再抢高度
-              （否则一页里套两层滚动条，手机上最难用）。
-            -->
-            <PredictHistory embedded />
-          </div>
-        </template>
-
         <!-- ②' 自动化预测：扫描参数（可调参数） + 这一轮筛出来的币种（2026-10-12） -->
-        <div v-else-if="leftTab === 'auto'" class="scroll-body">
+        <div v-if="leftTab === 'auto'" class="scroll-body">
           <AutoPredictView />
         </div>
 

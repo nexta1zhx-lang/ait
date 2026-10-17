@@ -153,30 +153,23 @@ export const error = ref('')
  * 这里不再有它（组件是 `comps/ExchangeAccountLivePanel.vue`，落点见 `views/MeView.vue`）。
  */
 export const LEFT_TABS = [
-  {value: 'market' as const, label: '合约行情'},
   /*
-   * ★ 2026-10-12 用户：「实时分析和预测历史合并改为预测结果」——
-   *   原来「实时分析」和「预测历史」是并列两格，可它们看的是同一件事
-   *   （一句话结论：上面是刚跑出来的，下面是以前跑过的）。现在合成一格：
-   *   上面是本次的分析过程 + 结论卡，下面接预测历史列表。
-   *
-   * ⚠️ `value` 仍然是 `'live'`，不改 —— 老链接 `?t=live`、以及
-   *    `leftTab === 'live'` 那一堆判断（含 `test` 共用同一套渲染）都不用动；
-   *    老链接 `?t=history` 由 `AnalyzeView.readTab` 映射过来。
+   * ★ 2026-10-18 用户：「预测结果改名 ai分析 挪到自动化预测中，自动化预测改名
+   *   叫做预测分析……预测分析放第一个」——
+   *   一级 tab 不再有「预测结果」：那整格（本次分析过程 + 结论卡 + 预测历史）
+   *   搬进「预测分析」当内层 tab（`autoTab === 'live'`，见下面 `AutoTab`），
+   *   一级这一格改叫「预测分析」并排到第一个。
    */
-  {value: 'live' as const, label: '预测结果'},
+  {value: 'auto' as const, label: '预测分析'},
+  {value: 'market' as const, label: '合约行情'},
   /*
    * ⚠️ 2026-10-15 用户：「**PC 模式也改为跟手机端一样**」—— 桌面那格「测试」
    *    **整格删掉**，两端统一走 K 线头上那颗烧瓶（点开变 ✓ / ✗，见 `startTestMode`）。
-   *    老书签 `?t=test` 由 `AnalyzeView.readTab` 映射到 `live`
-   *   （`LeftTab` 里仍留着 `'test'`：`testMode` 的判据和老链接都要认它）。
+   *    `LeftTab` 里仍留着 `'test'`（`testMode` 的判据、老状态回收都要认它）。
    */
-  /* 用户 2026-10-12：「新建一个页面叫自动化预测 在预测历史后面」 */
-  {value: 'auto' as const, label: '自动化预测'},
   /*
    * 交易日记（用户 2026-10-18：「日记模块可以加入某些币种，总结」）。
-   * 放在「自动化预测」后面 —— 用户选的就是「自动化预测旁边加一格」。
-   * 表结构 / 月统计口径 / 缺口提示见 `docs/JOURNAL.md`。
+   * 表结构 / 筛选口径见 `docs/JOURNAL.md`。
    */
   {value: 'journal' as const, label: '日记'},
   {value: 'kb' as const, label: '知识库'},
@@ -188,9 +181,23 @@ export const LEFT_TABS = [
  * ⚠️ `'test'` 是**遗留值**：2026-10-15 桌面那格「测试」tab 删掉了（PC 跟手机统一走
  * K 线头上那颗烧瓶图标），但 `testMode` 的判据（`testArmed || leftTab === 'test'`）、
  * 以及「老状态被收回来时把测试模式带走」那两处还要认它 —— 所以留在类型里，
- * 只是 `LEFT_TABS` 不再摆出来（老链接 `?t=test` 由 `readTab` 映射到 `live`）。
+ * 只是 `LEFT_TABS` 不再摆出来（老链接 `?t=test` 由 `readTab` 映射到「预测分析 → AI分析」）。
  */
 export type LeftTab = (typeof LEFT_TABS)[number]['value'] | 'chart' | 'test'
+
+/**
+ * 「预测分析」里面那排 tab（用户 2026-10-18 定下的四个 + 顺序）。
+ *
+ *   `scan`   币种监测（原「筛选的币种」）
+ *   `live`   AI分析（原一级 tab「预测结果」：本次分析过程 + 结论 + 预测历史）
+ *   `ai`     自动分析（原「AI 分析」：持久化分析的会话）
+ *   `alerts` 提醒（画线提醒）
+ *
+ * ⚠️ 状态放在模块作用域，不是 `AutoPredictView` 里：一级 tab 切走那个组件就卸载了，
+ *    而「点分析 / 点 ✓」都要能把人直接送到 `live` 那一格（见 `onRun` / `confirmTestPoint`）。
+ */
+export type AutoTab = 'scan' | 'live' | 'ai' | 'alerts'
+export const autoTab = ref<AutoTab>('scan')
 
 /** 窄屏断点 —— 跟 CSS 里 ≤900px 那套对齐（手机上「K 线」是单独一格） */
 export const MOBILE_MAX = 900
@@ -369,7 +376,10 @@ export function exitTestMode(): void {
   testArmed.value = false
   testPoint.value = null
   pointPicking.value = false
-  if (leftTab.value === 'test') leftTab.value = 'live'
+  if (leftTab.value === 'test') {
+    autoTab.value = 'live'
+    leftTab.value = 'auto'
+  }
 }
 
 /**
@@ -387,7 +397,8 @@ export function exitTestMode(): void {
  */
 export function confirmTestPoint(): void {
   if (testPoint.value === null) return
-  leftTab.value = 'live'
+  autoTab.value = 'live'
+  leftTab.value = 'auto'
   if (!loading.value && lastRunAt !== testAt.value) run()
 }
 
@@ -403,18 +414,14 @@ export const testBarTime = computed(() =>
 
 /**
  * 切 tab 时顺手做两件事（就放这里，组件里不用再挂一个 watch）：
- *   1. **实时 ↔ 测试** 是两种跑法，切了就清掉上一局的结论，免得看成上一局的；
- *   2. 进「测试」就直接等我在图上点结束线（少按一次）；图上点不到的那些格
- *      （窄屏「预测结果 / 知识库」…）一律退出选线 —— 让人「点一根」却看不见图，
- *      那是死路。测试模式本身不跟着 tab 走（见 `testArmed`）。
+ *   1. 测试模式下点不到图的那些格（窄屏「预测分析 / 日记 / 知识库」…）一律退出选线 ——
+ *      让人「点一根」却看不见图，那是死路。测试模式本身不跟着 tab 走（见 `testArmed`）。
+ *   2. 离开「添加案例」就把图上拖出来的那段范围收掉。
+ *
+ * ⚠️ 「实时 ↔ 测试切了清结论」那条已经没用了：2026-10-18 起「预测结果」不再是一级 tab，
+ *    测试也不再占一格（两端都走 K 线头上那颗烧瓶），一级 tab 里没有第二种跑法可切。
  */
-watch(leftTab, (v, prev) => {
-  const running = (x: LeftTab) => x === 'live' || x === 'test'
-  if (running(v) && running(prev)) {
-    result.value = null
-    steps.value = []
-    error.value = ''
-  }
+watch(leftTab, v => {
   /*
    * ⚠️ 这里**不能**每次都重算选线状态：窄屏点「重选」是先把选线打开、**再**切到
    *    「K 线」那一格（见 `setPointPicking`），无条件重算会被这次切格自己抹掉 ——
