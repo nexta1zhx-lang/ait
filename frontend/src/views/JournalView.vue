@@ -1,17 +1,17 @@
 <script setup lang="ts">
 /**
- * **交易日记**（用户 2026-10-18）。
+ * **日记**（用户 2026-10-18）。
  *
- * 用户原话：「想再加一个模块。日记模块可以加入某些币种，总结」→「是我手动写日记。
- * 也不一定是日记，有可能是一周才写一次。最后，都是按月给我汇总到一起」。
+ * 用户原话：「想再加一个模块。日记模块可以加入某些币种，总结」
+ * →「是我手动写日记。也不一定是日记，有可能是一周才写一次」
+ * → 同一天改口：「**不要自动按月总结了，默认排版，不显示什么总结，就是每日感想，可以筛选**」。
  *
- * 所以这一页是**条目式 + 月视图汇总**：
- *   · 上面一条月份切换（◀ 2026-10 ▶），中间是这个月的**自动汇总**
- *     （写了几篇 / 提到哪些币 / 这些币这个月涨跌 / 我在它们上面做了多少），
- *     外加两个**缺口提示**：交易过但没写的（最该补）、写了但没交易的；
- *   · 然后一个「本月总结」框 —— **自己写**，不接模型（用户明确说手动写）；
- *   · 下面是这个月的条目列表，点开看全文，能编辑 / 删除；
- *   · 每条可以**挂几个币**，每个币后面跟一句自己的话；点币名跳 K 线并把时间定在那一天。
+ * 所以这一页现在是**一条倒序的感想流水 + 一行筛选**：
+ *   · 顶上就一行：搜正文/标题 + 币种下拉（默认「全部」）+「写一篇」；
+ *   · 下面直接是条目 —— 点日期 / 点正文展开看全文，展开后有「编辑 / 删除」；
+ *   · 每条可以**挂几个币**，每个币后面跟一句自己的话；点币名跳 K 线并定在那一天；
+ *   · 没有月度统计、没有缺口提示、没有「月度总结」框（原来那套 2026-10-18 当天就按
+ *     用户要求撤掉了，后端 `/api/journal`、`/summary`、`/months`、`/coin` 也一并删了）。
  *
  * ⚠️ 全部是纯读库 / 写库（不打交易所、不计权重、不调模型），所以随便刷。
  */
@@ -19,85 +19,68 @@ import {computed, onMounted, ref, watch} from 'vue'
 import {
   deleteJournalEntry,
   fetchJournal,
-  fetchJournalMonths,
   saveJournalEntry,
-  saveJournalSummary,
   type Contract,
   type JournalCoin,
-  type JournalEntry,
-  type JournalMonth
+  type JournalEntry
 } from '../api'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
-import {fmt} from '../format'
 import {contracts} from '../store'
 import {leftTab, prefetchSymbol, pickSymbol, chartFrom, MOBILE_MAX} from '../analyze'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 
-/* ---------------- 月份 ---------------- */
-
-/** 「这个月」是哪个月（北京时间）—— 跟后端 `bjMonthNow()` 同一口径 */
-function thisMonth(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
-
-/** 「今天」是哪一天（北京时间，`YYYY-MM-DD`） */
+/** 「今天」是哪一天（北京时间，`YYYY-MM-DD`）—— 跟后端 `bjDayNow()` 同一口径 */
 function today(): string {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
     d.getDate()
   ).padStart(2, '0')}`
 }
+/** 日期框最远只能选到今天（日记不写未来） */
+const todayStr = today()
 
-const month = ref(thisMonth())
-const data = ref<JournalMonth | null>(null)
+/* ---------------- 列表 + 筛选 ---------------- */
+
+/** 一页多少条（后端默认 30） */
+const PAGE = 30
+
+const entries = ref<JournalEntry[]>([])
+const total = ref(0)
+/** 写进过日记的那些币（筛选下拉的选项，来自后端） */
+const myCoins = ref<string[]>([])
 const loading = ref(false)
 const error = ref('')
-/** 有日记的那些月份（用来知道 ◀ 还能不能往前翻） */
-const months = ref<string[]>([])
+const openId = ref<number | null>(null)
 
-const monthLabel = computed(() => {
-  const [y, m] = month.value.split('-')
-  return `${y} 年 ${Number(m)} 月`
-})
+const q = ref('')
+const coin = ref('')
 
-function shiftMonth(delta: number): void {
-  const [y, m] = month.value.split('-').map(Number)
-  const d = new Date(y!, m! - 1 + delta, 1)
-  month.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
+/** 筛选下拉要 `Contract[]`，这里只有币名 —— 补一个 `symbol` 就行（下拉只认 `base`） */
+const coinOptions = computed<Contract[]>(() =>
+  myCoins.value.map(base => ({base, symbol: `${base}USDT`}))
+)
 
 /**
- * ◀ 往前翻到哪为止。
- *
- * ⚠️ 早先是「只能翻到**有日记的最早那个月**」—— 结果只要当月写过一篇，就再也翻不过去，
- * 补一篇上个月的就做不到（用户是**一周一次、甚至隔月**才写一篇）。现在改成：
- * 至少能往前 12 个月；要是更早有日记，就一路翻到那一篇为止。
+ * 拉一页。
+ * @param reset true = 回到第一页（筛选变了 / 刚存完）；false = 接着往后（「加载更多」）
  */
-function minusMonths(m: string, n: number): string {
-  const [y, mm] = m.split('-').map(Number)
-  const d = new Date(y!, mm! - 1 - n, 1)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
-
-const canPrev = computed(() => {
-  const floor12 = minusMonths(thisMonth(), 12)
-  const earliest = months.value[months.value.length - 1]
-  const floor = earliest && earliest < floor12 ? earliest : floor12
-  return month.value > floor
-})
-
-const stats = computed(() => data.value?.stats ?? null)
-const entries = computed(() => data.value?.entries ?? [])
-
-async function load(): Promise<void> {
+async function load(reset = true): Promise<void> {
+  if (loading.value) return
   loading.value = true
   error.value = ''
+  const offset = reset ? 0 : entries.value.length
   try {
-    data.value = await fetchJournal(month.value)
-    summaryDraft.value = data.value.summary
-    months.value = (await fetchJournalMonths()).months
+    const r = await fetchJournal({
+      coin: coin.value || undefined,
+      q: q.value.trim() || undefined,
+      limit: PAGE,
+      offset
+    })
+    entries.value = reset ? r.entries : [...entries.value, ...r.entries]
+    total.value = r.total
+    myCoins.value = r.coins
+    if (reset) openId.value = null
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -105,43 +88,41 @@ async function load(): Promise<void> {
   }
 }
 
-watch(month, () => void load())
+const more = computed(() => entries.value.length < total.value)
+
+/* 币种筛选：立刻重拉 */
+watch(coin, () => void load())
+
+/* 关键词：等一下再发（边打边搜，但别一个字一发） */
+let qTimer: ReturnType<typeof setTimeout> | null = null
+watch(q, () => {
+  if (qTimer) clearTimeout(qTimer)
+  qTimer = setTimeout(() => void load(), 300)
+})
+
 onMounted(() => void load())
 
-/* ---------------- 月度总结（自己写，失焦存） ---------------- */
-
-const summaryDraft = ref('')
-const summarySaving = ref(false)
-/** 刚存过 / 没改过 —— 用来在标题右边显示「已保存」 */
-const summarySaved = ref(true)
-
-async function saveSummary(): Promise<void> {
-  const text = summaryDraft.value
-  if (text === (data.value?.summary ?? '')) return
-  summarySaving.value = true
-  try {
-    await saveJournalSummary(month.value, text)
-    if (data.value) data.value.summary = text
-    summarySaved.value = true
-  } catch (e) {
-    showToast(`总结没存上：${(e as Error).message}`, 'bad')
-  } finally {
-    summarySaving.value = false
-  }
-}
-
-function onSummaryInput(): void {
-  summarySaved.value = false
-}
-
-/* ---------------- 条目：展开 / 编辑 ---------------- */
-
-const openId = ref<number | null>(null)
 function toggle(e: JournalEntry): void {
   openId.value = openId.value === e.id ? null : e.id
 }
 
-/** 编辑器状态：`id` 为空 = 新建 */
+function dayLabel(day: string): string {
+  const d = new Date(`${day}T00:00:00`)
+  const wd = '日一二三四五六'[d.getDay()] ?? ''
+  return `${day.slice(5).replace('-', '/')} 周${wd}`
+}
+
+/* ---------------- 跳转：币 → K 线（定在那一天） ---------------- */
+
+function goCoin(base: string, day?: string): void {
+  prefetchSymbol(base)
+  pickSymbol(base)
+  if (day) chartFrom.value = `${day}T12:00`
+  if (window.innerWidth <= MOBILE_MAX) leftTab.value = 'chart'
+}
+
+/* ---------------- 编辑器 ---------------- */
+
 const editing = ref<{
   id: number | null
   day: string
@@ -150,16 +131,15 @@ const editing = ref<{
   coins: JournalCoin[]
 } | null>(null)
 const saving = ref(false)
+/** 「加一个币」那颗下拉的当前值（选完就清空，它只是个选择器） */
+const comboPick = ref('')
+
+/** 合约清单（`SymbolCombo` 要）—— 只保留 swap，跟别的页面一致 */
+const swapContracts = computed(() => contracts.value.filter(c => c.symbol.endsWith('USDT')))
 
 function startNew(): void {
-  editing.value = {
-    id: null,
-    /* 新建默认「今天」，但停在当前看的那个月时用那个月 1 号（历史上补记更顺） */
-    day: month.value === thisMonth() ? today() : `${month.value}-01`,
-    title: '',
-    body: '',
-    coins: []
-  }
+  editing.value = {id: null, day: todayStr, title: '', body: '', coins: []}
+  comboPick.value = ''
 }
 
 function startEdit(e: JournalEntry): void {
@@ -170,19 +150,27 @@ function startEdit(e: JournalEntry): void {
     body: e.body,
     coins: e.coins.map(c => ({...c}))
   }
+  comboPick.value = ''
 }
 
 function closeEditor(): void {
   editing.value = null
 }
 
-/** 加到这篇里的币（默认空备注；已经在里面的就不重复加） */
-function addCoin(base: string): void {
+function addCoin(v: string): void {
   const ed = editing.value
-  const b = String(base ?? '').trim().toUpperCase()
-  if (!ed || !b) return
-  if (ed.coins.some(c => c.base === b)) return
-  ed.coins.push({base: b, note: ''})
+  const base = String(v || '').trim().toUpperCase()
+  if (!ed || !base) return
+  if (ed.coins.some(c => c.base === base)) {
+    showToast(`${base} 已经在里面了`)
+    return
+  }
+  if (ed.coins.length >= 20) {
+    showToast('一篇最多挂 20 个币', 'bad')
+    return
+  }
+  ed.coins.push({base, note: ''})
+  comboPick.value = ''
 }
 
 function dropCoin(base: string): void {
@@ -191,11 +179,13 @@ function dropCoin(base: string): void {
   ed.coins = ed.coins.filter(c => c.base !== base)
 }
 
-const comboPick = ref('')
-
 async function submit(): Promise<void> {
   const ed = editing.value
   if (!ed || saving.value) return
+  if (!ed.body.trim() && !ed.title.trim()) {
+    showToast('写点什么再记下来', 'bad')
+    return
+  }
   saving.value = true
   try {
     const r = await saveJournalEntry({
@@ -205,17 +195,12 @@ async function submit(): Promise<void> {
       body: ed.body,
       coins: ed.coins
     })
-    /* 后端把**那条所在月份**的最新全份一起回来了 —— 直接换上，省一次请求 */
-    if (r.month === month.value) {
-      data.value = r
-      summaryDraft.value = r.summary
-      months.value = (await fetchJournalMonths()).months
-    } else {
-      /* 改了日期、写到别的月份去了：跳到那个月 */
-      month.value = r.month
-    }
-    openId.value = r.entry.id
     editing.value = null
+    /* 存完回到第一页（新条目在第一页顶上；改过日期会挪位置），并把它展开 */
+    q.value = ''
+    coin.value = ''
+    await load(true)
+    if (!coin.value && !q.value.trim()) openId.value = r.entry.id
     showToast(ed.id ? '已保存' : '已记下')
   } catch (e) {
     showToast(`没存上：${(e as Error).message}`, 'bad')
@@ -234,197 +219,86 @@ async function remove(e: JournalEntry): Promise<void> {
   if (!ok) return
   try {
     await deleteJournalEntry(e.id)
-    await load()
+    entries.value = entries.value.filter(x => x.id !== e.id)
+    total.value = Math.max(0, total.value - 1)
+    if (openId.value === e.id) openId.value = null
     showToast('已删除')
   } catch (err) {
     showToast(`删不掉：${(err as Error).message}`, 'bad')
   }
 }
-
-/* ---------------- 跳转：币 → K 线（定在那一天） ---------------- */
-
-/**
- * 点一个币 —— 去 K 线看它，并且**把图定在提到它的那一天**。
- *
- * 图上的「日期选择」入口 2026-10-17 拆掉了，但 `chartFrom` 这条属性还在
- * （`KlineChart` 的 `centered` / 拉数据那套都还认它），所以这里直接写值就行。
- */
-function goCoin(base: string, day?: string): void {
-  prefetchSymbol(base)
-  pickSymbol(base)
-  if (day) chartFrom.value = `${day}T12:00`
-  if (window.innerWidth <= MOBILE_MAX) leftTab.value = 'chart'
-}
-
-function dayLabel(day: string): string {
-  const d = new Date(`${day}T00:00:00`)
-  const wd = '日一二三四五六'[d.getDay()] ?? ''
-  return `${day.slice(5).replace('-', '/')} 周${wd}`
-}
-
-function pctText(v: number | null): string {
-  if (v === null) return '—'
-  return `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}%`
-}
-
-function pctClass(v: number | null): string {
-  if (v === null) return 'dim'
-  return v >= 0 ? 'up' : 'down'
-}
-
-/** 该月提到的币里，成交笔数为 0 的（只是观察） */
-const idleSet = computed(() => new Set(stats.value?.idle ?? []))
-
-/** 缺口那一行默认露几个（其余折起来，见模板里那段说明） */
-const GAP_SHOW = 5
-const gapAll = ref(false)
-const shownMissing = computed(() => {
-  const list = stats.value?.missing ?? []
-  return gapAll.value ? list : list.slice(0, GAP_SHOW)
-})
-
-/** 合约清单（`SymbolCombo` 要）—— 只保留 swap，跟别的页面一致 */
-const swapContracts = computed<Contract[]>(() => contracts.value)
 </script>
 
 <template>
   <div class="col journal">
-    <!-- 月份切换 -->
-    <div class="seg j-months">
-      <button type="button" :disabled="!canPrev" title="上个月" @click="shiftMonth(-1)">
-        ◀
-      </button>
-      <b class="j-month">{{ monthLabel }}</b>
-      <button type="button" title="下个月" @click="shiftMonth(1)">▶</button>
-      <button
-        v-if="month !== thisMonth()"
-        type="button"
-        class="ghost tiny"
-        title="回到这个月"
-        @click="month = thisMonth()"
-      >
-        这个月
-      </button>
+    <!-- 一行：搜 + 币种筛选 + 写 -->
+    <div class="j-bar">
+      <div class="j-search">
+        <input v-model="q" type="text" placeholder="搜日记…（标题或正文）" />
+        <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
+          ✕
+        </button>
+      </div>
+      <SymbolCombo
+        plain
+        class="j-flt"
+        placeholder="全部"
+        all-label="全部"
+        :model-value="coin"
+        :contracts="coinOptions"
+        @pick="v => (coin = v)"
+      />
+      <button class="ghost tiny j-new" title="写一篇（今天）" @click="startNew">写一篇</button>
     </div>
 
     <div v-if="error" class="error">{{ error }}</div>
 
-    <!-- 这个月的自动汇总 -->
-    <section class="panel">
-      <div class="sec-head">
-        <h2>
-          {{ monthLabel }}
-          <span class="tag">{{ stats?.entries ?? 0 }} 篇</span>
-        </h2>
-        <div class="sec-actions">
-          <button class="ghost tiny" :disabled="loading" title="重新读一遍" @click="load">
-            {{ loading ? '…' : '刷新' }}
-          </button>
-          <button class="ghost tiny" title="写一篇（今天）" @click="startNew">写一篇</button>
-        </div>
-      </div>
-
-      <p class="meta-line">
-        提到 {{ stats?.coins.length ?? 0 }} 个币 · 成交 {{ stats?.fills ?? 0 }} 笔 ·
-        净 {{ (stats?.pnl ?? 0) >= 0 ? '+' : '−' }}{{ fmt(Math.abs(stats?.pnl ?? 0), 2) }} USDT
-      </p>
-
-      <div v-if="stats?.coins.length" class="j-chips">
-        <button
-          v-for="c in stats.coins"
-          :key="c.base"
-          type="button"
-          class="j-chip"
-          :title="`${c.base}：这个月 ${c.mentions} 篇提到 · 成交 ${c.fills} 笔 · 净 ${fmt(c.pnl, 2)} —— 点一下看它的 K 线`"
-          @click="goCoin(c.base)"
-        >
-          <b>{{ c.base }}</b>
-          <span class="j-cnt">{{ c.mentions }}</span>
-          <span class="j-pct" :class="pctClass(c.pct)">{{ pctText(c.pct) }}</span>
-          <span v-if="idleSet.has(c.base)" class="j-idle" title="这个月只是观察，没交易">只看</span>
-        </button>
-      </div>
-
-      <!--
-        缺口提示：**交易过、但一篇没写的币**（复盘最该补的就是这些）。
-        ⚠️ 一个月可能几十个（实测 46 个），全铺出来会把面板撑爆 ——
-           默认只露前 5 个（按成交笔数），其余折起来。
-      -->
-      <p v-if="stats?.missing.length" class="j-gap">
-        <span class="j-gap-t">交易过、但没写进来：</span>
-        <button
-          v-for="m in shownMissing"
-          :key="m.base"
-          type="button"
-          class="j-gap-b"
-          :title="`${m.base}：这个月成交 ${m.fills} 笔 —— 点一下看它的 K 线`"
-          @click="goCoin(m.base)"
-        >
-          {{ m.base }}<em v-if="m.fills > 1">×{{ m.fills }}</em>
-        </button>
-        <button
-          v-if="stats.missing.length > GAP_SHOW"
-          type="button"
-          class="j-gap-more dim"
-          @click="gapAll = !gapAll"
-        >
-          {{ gapAll ? '收起' : `还有 ${stats.missing.length - GAP_SHOW} 个` }}
-        </button>
-      </p>
-    </section>
-
-    <!-- 本月总结（自己写） -->
-    <section class="panel">
-      <div class="sec-head">
-        <h2>本月总结</h2>
-        <span class="dim j-save">
-          {{ summarySaving ? '保存中…' : summarySaved ? '自动保存' : '改了还没存（离开输入框就存）' }}
-        </span>
-      </div>
-      <textarea
-        v-model="summaryDraft"
-        class="j-summary"
-        rows="4"
-        placeholder="这个月做对了什么、哪几笔是情绪单、下个月改什么（自己写，离开输入框自动保存）"
-        @input="onSummaryInput"
-        @blur="saveSummary"
-      />
-    </section>
-
-    <!-- 条目列表 -->
-    <section class="panel">
-      <p v-if="loading && !entries.length" class="dim">读日记…</p>
-      <p v-else-if="!entries.length" class="dim">
-        这个月还没写。点上面的「写一篇」记一条 —— 不用天天写，想到就记。
-      </p>
-
-      <article v-for="e in entries" :key="e.id" class="j-entry" :class="{open: openId === e.id}">
-        <header class="j-head" @click="toggle(e)">
+    <!-- 条目：日期新的在上 -->
+    <div v-if="entries.length" class="j-list">
+      <article v-for="e in entries" :key="e.id" class="j-entry">
+        <div class="j-head" @click="toggle(e)">
           <span class="j-day">{{ dayLabel(e.day) }}</span>
-          <b class="j-title">{{ e.title || '（无标题）' }}</b>
-          <span class="j-badges">
+          <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
+          <span v-if="e.coins.length" class="j-badges">
             <span v-for="c in e.coins" :key="c.base" class="j-badge">{{ c.base }}</span>
           </span>
           <span class="j-caret dim">{{ openId === e.id ? '▴' : '▾' }}</span>
-        </header>
+        </div>
 
         <div v-if="openId === e.id" class="j-body-wrap">
           <p v-if="e.body" class="j-body">{{ e.body }}</p>
           <ul v-if="e.coins.length" class="j-notes">
             <li v-for="c in e.coins" :key="c.base">
-              <button type="button" class="j-coin" @click.stop="goCoin(c.base, e.day)">
+              <button
+                type="button"
+                class="j-coin"
+                :title="`看 ${c.base} 的 K 线`"
+                @click="goCoin(c.base, e.day)"
+              >
                 {{ c.base }}
               </button>
-              <span class="dim">{{ c.note || '（没写这一条）' }}</span>
+              <span v-if="c.note" class="dim">{{ c.note }}</span>
             </li>
           </ul>
           <div class="j-acts">
-            <button class="ghost tiny" @click.stop="startEdit(e)">编辑</button>
-            <button class="ghost tiny" @click.stop="remove(e)">删除</button>
+            <button class="ghost tiny" @click="startEdit(e)">编辑</button>
+            <button class="ghost tiny" @click="remove(e)">删除</button>
           </div>
         </div>
       </article>
-    </section>
+
+      <button v-if="more" type="button" class="ghost tiny j-more" :disabled="loading" @click="load(false)">
+        {{ loading ? '读…' : `还有 ${total - entries.length} 篇` }}
+      </button>
+    </div>
+
+    <p v-else-if="!loading" class="j-empty dim">
+      {{
+        q || coin
+          ? '这个筛选下没有日记。'
+          : '还没有日记。点右上角「写一篇」记一条 —— 不用天天写，想到就记。'
+      }}
+    </p>
 
     <!-- 编辑器（底部弹层，跟「扫描参数」同一套 `.sheet`） -->
     <div v-if="editing" class="sheet-mask" @click="closeEditor" />
@@ -437,7 +311,7 @@ const swapContracts = computed<Contract[]>(() => contracts.value)
       <div class="sheet-row">
         <span class="rk">日期</span>
         <div class="ctl">
-          <input v-model="editing.day" type="date" :max="thisMonth() + '-31'" />
+          <input v-model="editing.day" type="date" :max="todayStr" />
         </div>
       </div>
 
@@ -502,128 +376,52 @@ const swapContracts = computed<Contract[]>(() => contracts.value)
 </template>
 
 <style scoped>
-.j-months {
+/* 顶上一行：搜 / 币种 / 写 */
+.j-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin-bottom: 10px;
 }
-.j-months button {
-  min-width: 30px;
+.j-search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
 }
-.j-month {
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* 提到过的币：一行 chips，点一下跳 K 线 */
-.j-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.j-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
-  font-size: 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
-}
-.j-chip b {
-  font-weight: var(--fw-mid, 500);
-}
-.j-chip .j-cnt {
-  color: var(--muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.j-chip .j-pct {
-  font-variant-numeric: tabular-nums;
-}
-.j-chip .j-idle {
-  color: var(--muted);
-  font-size: 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0 3px;
-}
-@media (hover: hover) {
-  .j-chip:hover {
-    border-color: var(--blue);
-  }
-}
-
-.up {
-  color: var(--ok);
-}
-.down {
-  color: var(--bad);
-}
-
-/* 缺口那一行：交易过但没写 —— 最该补的，用警示色 */
-.j-gap {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--warn, #f0b429);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-.j-gap-b {
-  padding: 1px 7px;
-  font-size: 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: inherit;
-}
-.j-gap-b em {
-  margin-left: 3px;
-  font-style: normal;
-  font-size: 10px;
-  opacity: 0.65;
-}
-.j-gap-more {
-  padding: 1px 6px;
-  font-size: 11px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-/* 月度总结 */
-.j-save {
-  font-size: 11px;
-}
-.j-summary {
+.j-search input {
   width: 100%;
   box-sizing: border-box;
-  resize: vertical;
-  min-height: 88px;
-  padding: 9px 10px;
+  padding: 6px 26px 6px 9px;
   font: inherit;
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: 12.5px;
   color: var(--text);
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 8px;
+}
+.j-search-x {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 2px 5px;
+}
+.j-flt {
+  flex: 0 0 auto;
+}
+.j-new {
+  flex: 0 0 auto;
 }
 
 /* 条目 */
+.j-list {
+  display: flex;
+  flex-direction: column;
+}
 .j-entry {
   border-top: 1px solid var(--line);
-  padding: 2px 0;
 }
-.j-entry:first-of-type {
+.j-entry:first-child {
   border-top: none;
 }
 .j-head {
@@ -692,6 +490,16 @@ const swapContracts = computed<Contract[]>(() => contracts.value)
 .j-acts {
   display: flex;
   gap: 6px;
+}
+.j-more {
+  align-self: center;
+  margin: 12px 0 4px;
+  font-size: 12px;
+}
+.j-empty {
+  margin: 14px 2px;
+  font-size: 12.5px;
+  line-height: 1.7;
 }
 
 /* 弹层里的币行 */

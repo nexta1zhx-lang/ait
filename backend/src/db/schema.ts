@@ -466,17 +466,18 @@ CREATE TABLE IF NOT EXISTS kline_alerts (
 CREATE INDEX IF NOT EXISTS kline_alerts_user_idx   ON kline_alerts (user_id, id DESC);
 CREATE INDEX IF NOT EXISTS kline_alerts_active_idx ON kline_alerts (status);
 
--- ---------------------------------------------------------------- 交易日记（2026-10-18）
+-- ---------------------------------------------------------------- 日记（2026-10-18）
 -- 用户 2026-10-18：「想再加一个模块。日记模块可以加入某些币种，总结」→「是我手动写日记。
--- 也不一定是日记，有可能是一周才写一次。最后，都是按月给我汇总到一起」。
+-- 也不一定是日记，有可能是一周才写一次」→ 当天又改口：「不要自动按月总结了，
+-- 默认排版，不显示什么总结，就是每日感想，可以筛选」。
 --
--- 三条口径（细节见 db/journals.ts 文件头）：
+-- 两条口径（细节见 db/journals.ts 文件头）：
 --   · **条目式**（journal_entries）：哪天想写就写一条，一周一条也行 —— 所以没有
 --     「一天只能一篇」的唯一约束；
---   · **挂币**（journal_coins）：一条日记可以带几个币，每个币后面跟一句自己的话；
---   · **按月汇总**（journal_months）：月视图把这个月的条目、提到的币、这些币那个月的
---     涨跌和我的盈亏汇到一页，外加一段自己写的「月度总结」。
--- ⚠️ day 用 DATE（不带时区）：它就是「哪一天」这件事本身，统计时按北京时间的月份窗口去捞。
+--   · **挂币**（journal_coins）：一条日记可以带几个币，每个币后面跟一句自己的话。
+-- ⚠️ 原来那张 journal_months（月度总结）已按用户要求弃用：schema 里删掉了，
+--    线上库里那张表还在但没人读 —— 别再用它。
+-- ⚠️ day 用 DATE（不带时区）：它就是「哪一天」这件事本身，日期由前端按北京时间给。
 CREATE TABLE IF NOT EXISTS journal_entries (
   id         BIGSERIAL   PRIMARY KEY,
   user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -499,15 +500,6 @@ CREATE TABLE IF NOT EXISTS journal_coins (
 );
 -- 「这个币在历次日记里被怎么说的」走这条
 CREATE INDEX IF NOT EXISTS journal_coins_base_idx ON journal_coins (base);
-
-CREATE TABLE IF NOT EXISTS journal_months (
-  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-  -- 'YYYY-MM'（北京时间那一个月）
-  month      TEXT        NOT NULL,
-  summary    TEXT        NOT NULL DEFAULT '',
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, month)
-);
 
 -- ---------------------------------------------------------------- App 推送（FCM）
 -- 手机 App 的推送 token（2026-10-15 用户：「加入 app 推送」）。
