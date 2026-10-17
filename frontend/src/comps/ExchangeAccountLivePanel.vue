@@ -50,6 +50,7 @@ import {
   fetchExchangeFills,
   fetchExchangeKeys,
   fetchExchangeIncome,
+  fetchExchangeLiveState,
   fetchExchangeOpenOrders,
   fetchExchangePositionHistory,
   fetchExchangeOverview,
@@ -70,7 +71,8 @@ import {
   type FuturesAsset,
   type FuturesPosition,
   type CollectResult,
-  type PositionImportTarget
+  type PositionImportTarget,
+  type PositionsPatch
 } from '../api'
 
 /**
@@ -1186,7 +1188,7 @@ async function loadSnapshots(): Promise<void> {
        *    刚推过来的新数**退回**成库里那份旧的（越刷新越旧，很难查）。
        */
       if (!(next[id] && dbAt <= knownAt)) {
-        next[id] = r.overview
+        next[id] = snapshotWithPatch(id, r.overview)
         snapAt = {...snapAt, [id]: dbAt}
         setAvailableBalance(id, r.overview.futures?.available, dbAt)
       }
@@ -1272,7 +1274,7 @@ async function doRefresh(auto = false): Promise<void> {
       const {k, r} = item.value
       if (r.overview) {
         /* 用户手动刷新拿到的新数据 ⇒ 合约那块也是刚问过的（同上） */
-        next[k.id] = {...r.overview, liveAt: new Date().toISOString()}
+        next[k.id] = snapshotWithPatch(k.id, r.overview, new Date().toISOString())
         setAvailableBalance(k.id, r.overview.futures?.available)
         delete nextReason[k.id]
         snapAt = {...snapAt, [k.id]: Date.now()}
@@ -1525,6 +1527,103 @@ function keyIsActive(id: number): boolean {
 }
 
 /**
+ * keyId → 最近一次盖上去的 `positions` 补丁的**服务端时间**（`p.at`）。
+ *
+ * 只用来挡住「更旧的盖新的」（刚才的同步请求比 SSE 推送晚回来那种）。
+ * 两边都是**服务端**时间，比较不会受本机钟差影响。
+ */
+const livePatchAt: Record<number, string> = {}
+/** keyId → 最近一条补丁（快照回来时用它把**已被旧值盖掉**的实时字段补回来） */
+const latestPatch: Record<number, PositionsPatch> = {}
+
+/**
+ * 把一条 `positions` 补丁盖到一份快照上。
+ *
+ * ⚠️ 这里**只盖 `liveAt`，不碰 `takenAt`**。
+ *    原来写的是 `takenAt: p.at`，于是那颗「几分钟前」的标签在**有持仓**
+ *    的账户上永远显示「刚刚更新」—— 因为持仓/浮盈每秒都在推。
+ *    可它旁边那几项（C2C / 现货）其实还是上一份快照的，
+ *    最长可能一小时前 —— 标签在**替它们报喜**。
+ *    现在拆成两个时间：`liveAt` = 合约那块（WS，秒级），
+ *    `takenAt` = 整份快照（现货 / C2C / 资产明细）。
+ */
+function mergeLivePatch(cur: ExchangeOverview, p: PositionsPatch): ExchangeOverview {
+  return {
+    ...cur,
+    liveAt: p.at,
+    futures: {
+      ...cur.futures,
+      positions: p.positions,
+      wallet: p.wallet,
+      available: p.available,
+      used: Math.max(p.margin - p.available, 0),
+      unrealized: p.unrealized,
+      margin: p.margin
+    },
+    stats: p.stats
+  }
+}
+
+/**
+ * 把一条 `positions` 补丁盖到已有快照上（SSE 推送 / 激活时的对齐**共用**）。
+ *
+ * ⚠️ 没有底稿（`parts` 还没到）就先不盖 —— 凭空造一份缺 wallet/assets/c2c 的
+ *    快照会让净资产算错；那种情况马上会有 `snapshot` 事件补上。
+ *    补丁本身记在 `latestPatch` 里，等快照到了会用 `mergeLivePatch` 补上。
+ */
+function applyPositions(k: number, p: PositionsPatch): void {
+  setAvailableBalance(k, p.available)
+  const seen = livePatchAt[k]
+  if (seen && p.at <= seen) return
+  livePatchAt[k] = p.at
+  latestPatch[k] = p
+  const cur = parts.value[k]
+  if (!cur) return
+  parts.value = {...parts.value, [k]: mergeLivePatch(cur, p)}
+  if (keyIsActive(k)) rebuild()
+}
+
+/**
+ * 一份快照回来时：如果手上还有**比它更新**的实时补丁，别让旧快照把浮盈盖回去。
+ *
+ * 场景：激活时 `syncLiveState()` 刚拿到最新内存，后到的 `snapshot`（库里的整份）
+ * 比它旧 —— 直接替换就会「刚对齐又跳回旧数」，等下一拍标记价才恢复。
+ * `takenAt` 和 `p.at` 都是**服务端**时间，比较不受本机钟差影响。
+ */
+function snapshotWithPatch(
+  k: number,
+  ov: ExchangeOverview,
+  liveAt?: string
+): ExchangeOverview {
+  const p = latestPatch[k]
+  if (p && p.at > (ov.takenAt ?? '')) return mergeLivePatch(ov, p)
+  return liveAt ? {...ov, liveAt} : ov
+}
+
+/**
+ * 页面**重新激活**时先对齐一次（每套账户一发，只读后端内存、0 权重）。
+ *
+ * 为什么必须有：`sharedSse` 会复用 30 秒内的旧连接，而复用**不重发底稿** ——
+ * 只等下一次标记价推送（3 秒档）的话，切回来的第一眼是上一次离开时那份旧数，
+ * 也就是用户说的「我的里面慢一拍」。K 线那边 `bindPositions()` 一绑就 GET 一份，
+ * 所以两边看起来不同步。这里把同一步补上（数据形状跟 SSE 事件完全一样）。
+ */
+async function syncLiveState(): Promise<void> {
+  const list = activeTargets.value
+  if (!list.length) return
+  await Promise.all(
+    list.map(async k => {
+      try {
+        const r = await fetchExchangeLiveState(k.id)
+        if (r.state) applyPositions(k.id, r.state)
+      } catch {
+        /* 内存里没有 / 网络抖动：退回等 SSE，别打扰界面 */
+      }
+    })
+  )
+}
+
+/**
  * 给**每一套**账户都开一条 SSE（不是只给「正在看的那几套」）。
  *
  * 以前每次换 tab 都 `stopStreams()` + 重新订阅 ——
@@ -1552,7 +1651,7 @@ function startStreams(): void {
              * 后端主动推来的快照 = 新鲜数据 ⇒ 合约那块也算「活的」
              * （`takenAt` 用它自己的采集时间，`liveAt` 记我们收到的时间）。
              */
-            next[k.id] = {...r.overview, liveAt: new Date().toISOString()}
+            next[k.id] = snapshotWithPatch(k.id, r.overview, new Date().toISOString())
              setAvailableBalance(k.id, r.overview.futures?.available)
              delete nextReason[k.id]
             snapAt = {...snapAt, [k.id]: Date.now()}
@@ -1571,39 +1670,7 @@ function startStreams(): void {
          * ⚠️ **不动 `snapAt`**：这份补丁更新持仓 / 钱包 / 可用余额，C2C / 现货还是上一份快照的，
          *    所以那条「太久没整份快照就刷一次」的兜底定时器不该被它喂饱。
          */
-        positions: p => {
-          setAvailableBalance(k.id, p.available)
-          const cur = parts.value[k.id]
-          if (!cur) return
-          parts.value = {
-            ...parts.value,
-            [k.id]: {
-              ...cur,
-              /*
-               * 这里**只盖 `liveAt`，不碰 `takenAt`**。
-               *
-               * ⚠️ 原来写的是 `takenAt: p.at`，于是那颗「几分钟前」的标签在**有持仓**
-               *    的账户上永远显示「刚刚更新」—— 因为持仓/浮盈每秒都在推。
-               *    可它旁边那几项（C2C / 现货）其实还是上一份快照的，
-               *    最长可能一小时前 —— 标签在**替它们报喜**。
-               *    现在拆成两个时间：`liveAt` = 合约那块（WS，秒级），
-               *    `takenAt` = 整份快照（现货 / C2C / 资产明细）。
-               */
-              liveAt: p.at,
-              futures: {
-                ...cur.futures,
-                positions: p.positions,
-                wallet: p.wallet,
-                available: p.available,
-                used: Math.max(p.margin - p.available, 0),
-                unrealized: p.unrealized,
-                margin: p.margin
-              },
-              stats: p.stats
-            }
-          }
-          if (keyIsActive(k.id)) rebuild()
-        },
+        positions: p => applyPositions(k.id, p),
         fill: t => {
           /*
            * ⚠️ 流是**全部账户**都订着的，所以别的账户成交时不能往这张列表里塞
@@ -1774,7 +1841,8 @@ watch(picked, () => {
    *    中间那一下空白没必要（切到没数据的账户时 `rebuild()` 自己会给原因）。
    */
   err.value = ''
-  void loadSnapshots()
+  /* 切账户时也先对齐一次实时持仓（库里的快照可能比常驻流旧；必须等底稿到位） */
+  void loadSnapshots().then(() => syncLiveState())
   void loadFills()
   void loadIncome()
   void loadCycles()
@@ -1881,7 +1949,20 @@ function startWork(): void {
   startStreams()
   startSnapTimer()
   startLastPrices()
-  if (!data.value && !reason.value) void loadSnapshots()
+  /*
+   * ★ **一激活就对齐一次实时持仓**（2026-10-17）。
+   *
+   * 页面切走时 `stopWork()` 会把 SSE 退掉；切回来时 `sharedSse` 若还在
+   * `STREAM_GRACE_MS`（30 秒）里，**连接是复用的、后端不会重发底稿** ——
+   * 于是只等下一次标记价推送（3 秒档）的话，第一眼看到的是**上次离开时**那份数，
+   * 也就是用户说的「『我的』里的持仓盈利比 K 线慢一拍」。
+   * K 线那边一绑就自己 GET 一份，所以两边不同步；这里补上同一步。
+   * ⚠️ 这一发**只读后端内存**（0 权重、不打交易所），跟 SSE 事件同一个形状。
+   * ⚠️ 必须**排在快照之后**：`applyPositions` 只往已有底稿上盖（否则净资产会缺项）。
+   */
+  if (!data.value && !reason.value)
+    void loadSnapshots().then(() => syncLiveState())
+  else void syncLiveState()
   /*
    * ★ **进来就把三本台账读一遍**（2026-10-08 加）。
    *

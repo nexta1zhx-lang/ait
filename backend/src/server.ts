@@ -4814,6 +4814,46 @@ async function route(
   }
 
   /*
+   * **常驻流内存里**的实时持仓状态（0 权重、不碰交易所）。
+   *
+   * 用途：页面**重新激活**（底栏切回来 / 从别的 tab 回来）时先对齐一次。
+   * `sharedSse` 会复用 30 秒内的旧连接，而复用**不会重发底稿** ——
+   * 只等下一次标记价推送的话，页面上那份 `parts` 最多要旧 3 秒；
+   * K 线那边 `bindPositions()` 一绑就自己 GET 一份，所以会出现
+   * 「同一时刻『我的』比 K 线慢一拍」。
+   *
+   * ⚠️ 只读内存：常驻流没跑就是 `state: null`，**绝不在这一发里打交易所**
+   * （要 REST 的那条路是 `/api/exchange/trade/positions`）。
+   */
+  if (p === '/api/exchange/live-state' && method === 'GET') {
+    const idRaw = num(url.searchParams.get('id'))
+    const key = idRaw
+      ? await getExchangeKey(me.id, idRaw)
+      : await getDefaultExchangeKey(me.id)
+    if (!key) return sendJson(res, 404, {error: '还没有配置交易所 API Key'})
+    if (!key.apiKey || !key.secret)
+      return sendJson(res, 200, {ok: false, state: null, error: '这一套还没填 API Key'})
+    const st = liveStateOf(key.id)
+    return sendJson(res, 200, {
+      ok: true,
+      /* 形状跟 SSE 的 `positions` 事件**逐字一致** —— 前端同一个函数盖上去 */
+      state: st
+        ? {
+            at: new Date(st.at).toISOString(),
+            live: st.live,
+            wallet: st.wallet,
+            available: st.available,
+            unrealized: st.unrealized,
+            margin: st.margin,
+            stats: st.stats,
+            positions: st.positions
+          }
+        : null,
+      error: null
+    })
+  }
+
+  /*
    * 所有持仓（面板「仓位」那一格 + K 线叠加用的列表）。
    *
    * ★ 2026-10-06 改造（P1/P3）：**不再每次都直连交易所**，改成读

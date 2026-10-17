@@ -2303,6 +2303,17 @@ export const closeTradePositions = (
     error: string | null
   }>(`/api/exchange/trade/close${id ? `?id=${id}` : ''}`, {...(target ?? {}), test})
 
+/**
+ * **常驻流内存里**的实时持仓状态（0 权重、不打交易所）。
+ *
+ * 回来的是 `state: null` 或一个跟 SSE `positions` 事件**一模一样**的补丁 ——
+ * 页面重新激活时先盖这一份，别等下一次标记价推送（最多 3 秒）。
+ */
+export const fetchExchangeLiveState = (id?: number) =>
+  get<{ok: boolean; state: PositionsPatch | null; error: string | null}>(
+    `/api/exchange/live-state${id ? `?id=${id}` : ''}`
+  )
+
 /** 账户里**所有**持仓（面板「仓位」那一格列的列表） */
 export const fetchTradePositions = (id?: number, fresh = false) =>
   get<{

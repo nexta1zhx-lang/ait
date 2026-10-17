@@ -5379,3 +5379,34 @@ grep -c "（bg）权重" logs/backend.log   # 后台让路——常态，不用�
 | 账户 / 交易路的 `-1003` 也进全局冷却、也落一行日志 | 那几条路的 catch | 小 |
 | 重连不再整轮补成交（同窗口内的重连去抖 / 退避） | `reconcile('ws')` → `backfillFills()` 前面加去抖 | 小 |
 | 「真单验证」不与主实例抢同一对 Key / 同一条 IP | 验证脚本（或让 `ALLOW_MULTI_SERVER=1` 时**自动把 `EXCHANGE_WEIGHT_LIMIT` 折半**） | 中 |
+
+## 70. 「我的」里的持仓盈利比 K 线慢一拍（2026-10-17 用户）
+
+用户：「**我的和 k 线的持有仓位盈利不同步，我的里面的慢一拍**」。
+
+### 70.1 根因：两边**激活时**拉数的动作不一样
+
+| 页面 | 激活 / 绑定时做什么 |
+|---|---|
+| K 线（`frontend/src/positions.ts` 的 `bindPositions`） | 一绑就 `load(keyId)` → **立刻 GET 一份**（`/api/exchange/trade/positions`，读后端内存），然后才等 SSE |
+| 「我的」(`ExchangeAccountLivePanel.startWork`) | 只 `startStreams()`；`loadSnapshots()` 在**已有 `data`** 时还会被跳过 |
+
+而 `sharedSse` 对 30 秒内复用的连接**不会重发底稿**（见 `STREAM_GRACE_MS`），
+所以切回来时「我的」手上还是**上次离开时**那份 `parts`，只能等下一拍标记价
+（后端 `@markPrice` 是 3 秒档）才动 —— 看起来就是「慢一拍」。
+同一时刻 K 线那边已经 `GET` 过了，于是两边不同步。
+
+### 70.2 修法
+
+- 后端加 `GET /api/exchange/live-state?id=`：只读 `position-cache` 的**内存状态**
+  （`liveStateOf`），**0 权重、不打交易所**；常驻流没跑就回 `state: null`。
+  形状跟 SSE 的 `positions` 事件**逐字一致**。
+- 前端 `ExchangeAccountLivePanel`：
+  - `positions` 的合并逻辑抽成 `applyPositions()`，SSE 与同步请求共用；
+  - `startWork()` / 切账户 tab 时，**等底稿到位后**调 `syncLiveState()` 对齐一次；
+  - 加 `livePatchAt`（服务端 `p.at`）挡「更旧的盖新的」—— 同步请求比推送晚回来也安全；
+  - 整份快照落地时（`loadSnapshots` / SSE `snapshot` / 手动刷新）用 `snapshotWithPatch()`：
+    若手上那条补丁比快照的 `takenAt` 新，就把实时字段盖回去 —— 否则「刚对齐又被旧快照顶掉」。
+
+⚠️ 仍然**只在激活那一下**补一次，不常连：常驻流不订阅时后端才能保持
+「没人看就不打 25 权重快照 / 该睡就睡」那两处优化（见 §57.2）。
