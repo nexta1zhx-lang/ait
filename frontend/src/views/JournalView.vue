@@ -886,16 +886,15 @@ async function remove(e: JournalEntry): Promise<void> {
         <button class="ghost tiny" title="关掉（不保存）" @click="closeEditor">✕</button>
       </header>
 
-      <div class="sheet-row">
-        <span class="rk">标题</span>
-        <div class="ctl">
-          <input v-model="editing.title" type="text" maxlength="120" />
-        </div>
+      <!-- 标题：跟下面几行同一套（标签在左、输入框铺满右边的横向） -->
+      <div class="j-sec j-sec-inline">
+        <span class="j-sec-t">标题</span>
+        <input v-model="editing.title" class="j-field" type="text" maxlength="120" />
       </div>
 
-      <!-- 分类：一条一条选（没选就是「默认」，后端兜底） -->
-      <div class="j-sec">
-        <p class="j-sec-t">分类</p>
+      <!-- 分类：标签 + 胶囊同一行（用户 2026-10-18：「分类和币种就跟在文字后面不要换行」） -->
+      <div class="j-sec j-sec-inline">
+        <span class="j-sec-t">分类</span>
         <div class="j-cat-pick">
           <button
             v-for="c in categories"
@@ -911,32 +910,36 @@ async function remove(e: JournalEntry): Promise<void> {
         </div>
       </div>
 
-      <!-- 币种放在标题下面（用户：「弹窗编辑的币种放在标题下方」） -->
+      <!-- 币种：标签 + 选择框同一行；下面挂着的币各自一行（不跟着挤在同一行里） -->
       <div class="j-sec">
-        <p class="j-sec-t">币种</p>
-        <div class="j-add">
-          <SymbolCombo
-            v-model="comboPick"
-            :contracts="swapContracts"
-            placeholder=""
-            search-placeholder=""
-            @pick="addCoin"
-          />
+        <div class="j-sec-inline">
+          <span class="j-sec-t">币种</span>
+          <div class="j-add">
+            <SymbolCombo
+              v-model="comboPick"
+              :contracts="swapContracts"
+              placeholder=""
+              search-placeholder=""
+              @pick="addCoin"
+            />
+          </div>
         </div>
 
-        <div v-for="c in editing.coins" :key="c.base" class="j-coin-row">
-          <button
-            type="button"
-            class="j-coin"
-            :title="`看 ${c.base} 的 K 线`"
-            @click="goCoin(c.base, c.at, '')"
-          >
-            {{ c.base }}
-          </button>
-          <DateTimePick v-model="c.at" mode="datetime" placeholder="定时刻" />
-          <button type="button" class="ghost tiny" title="移出这条" @click="dropCoin(c.base)">
-            ✕
-          </button>
+        <div v-if="editing.coins.length" class="j-coin-list">
+          <div v-for="c in editing.coins" :key="c.base" class="j-coin-row">
+            <button
+              type="button"
+              class="j-coin"
+              :title="`看 ${c.base} 的 K 线`"
+              @click="goCoin(c.base, c.at, '')"
+            >
+              {{ c.base }}
+            </button>
+            <DateTimePick v-model="c.at" mode="datetime" placeholder="定时刻" />
+            <button type="button" class="ghost tiny" title="移出这条" @click="dropCoin(c.base)">
+              ✕
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1670,6 +1673,48 @@ async function remove(e: JournalEntry): Promise<void> {
   font-size: 12px;
   color: var(--muted);
 }
+/*
+ * 一行式：标签在左、内容在右铺满（标题 / 分类 / 币种）。
+ * 分类那排是 `nowrap + 横滚` —— 分类多了也不换行，免得把行高撑起来。
+ */
+.j-sec-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.j-sec-inline .j-sec-t {
+  flex: none;
+  margin: 0;
+}
+.j-sec-inline .j-cat-pick {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.j-sec-inline .j-cat-pick::-webkit-scrollbar {
+  display: none;
+}
+.j-sec-inline .j-add {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+/* 标题输入框：跟币种框 / 正文框同一套字体和边框 */
+.j-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
 /* 「正文」那行：左边是字，右边是 AI 那一下 */
 .j-body-head {
   display: flex;
@@ -1756,20 +1801,29 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-add {
   margin-bottom: 8px;
 }
-/* 币种选择框矮一档（用户 2026-10-18：「选择框高度短一点」） */
+/*
+ * 币种选择框：跟标题 / 正文同一个高度档（用户 2026-10-18：
+ * 「选择框高度短一点」→ 后来又「币种选择的框高度大一点」）。
+ */
 .j-add :deep(.combo-box input) {
-  padding-top: 5px;
-  padding-bottom: 5px;
-  font-size: 12.5px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  font-size: 13px;
 }
 .j-add :deep(.combo-box) {
-  min-height: 0;
+  min-height: 36px;
+}
+/* 挂着的币：每行一个，跟在「币种」那一行下面 */
+.j-coin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
 }
 .j-coin-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 6px;
 }
 .j-coin {
   flex: none;
