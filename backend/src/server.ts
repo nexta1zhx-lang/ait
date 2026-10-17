@@ -588,11 +588,6 @@ function bjDate(ms: number): string {
   return new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
 }
 
-/** 「今天」是哪一天（北京时间，`YYYY-MM-DD`）—— 日记的默认日期 */
-function bjDayNow(): string {
-  return bjDate(Date.now())
-}
-
 /** 文件的大小 / 时间 / md5；清单里写了但文件不在（本地没打包）时返回 0 */
 function diskInfo(file: string): {size: number; mtime: number; md5: string | null} {
   try {
@@ -3832,7 +3827,6 @@ async function route(
     try {
       const entry = await saveJournalEntry(me.id, {
         id: Number(body.id) || null,
-        day: str(body.day) || bjDayNow(),
         title: str(body.title),
         body: str(body.body),
         coins: body.coins

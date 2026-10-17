@@ -467,17 +467,19 @@ CREATE INDEX IF NOT EXISTS kline_alerts_user_idx   ON kline_alerts (user_id, id 
 CREATE INDEX IF NOT EXISTS kline_alerts_active_idx ON kline_alerts (status);
 
 -- ---------------------------------------------------------------- 日记（2026-10-18）
--- 用户 2026-10-18：「想再加一个模块。日记模块可以加入某些币种，总结」→「是我手动写日记。
--- 也不一定是日记，有可能是一周才写一次」→ 当天又改口：「不要自动按月总结了，
--- 默认排版，不显示什么总结，就是每日感想，可以筛选」。
+-- 用户 2026-10-18：「想再加一个模块。日记模块可以加入某些币种」→「不是我手动写日记，
+-- 不一定每天」→「不要自动按月总结了，默认排版，就是每日感想，可以筛选」
+-- →「默认就是当前时刻不用写日期，有改动就更新时间；每条显示到分钟级」。
 --
--- 两条口径（细节见 db/journals.ts 文件头）：
---   · **条目式**（journal_entries）：哪天想写就写一条，一周一条也行 —— 所以没有
---     「一天只能一篇」的唯一约束；
---   · **挂币**（journal_coins）：一条日记可以带几个币，每个币后面跟一句自己的话。
+-- 口径（细节见 db/journals.ts 文件头）：
+--   · 条目式（journal_entries）：想到就写一条，一天几条也行；**没有「写哪天」这个字段**，
+--     条目的时间就是它最后被改动的那一刻（updated_at），列表按它倒序、显示到分钟；
+--   · 挂币（journal_coins）：一条可以带几个币，每个币可以**定住一刻**（at_ts，可空），
+--     点这个币就跳到那一刻的 K 线。
+-- ⚠️ day 是老字段：原来让用户手填「写在哪天」，现在不填了 —— 只在插入时写北京时间的今天，
+--    读的时候不再用它（留着是为了不破坏老数据，别再往它上面加逻辑）。
 -- ⚠️ 原来那张 journal_months（月度总结）已按用户要求弃用：schema 里删掉了，
 --    线上库里那张表还在但没人读 —— 别再用它。
--- ⚠️ day 用 DATE（不带时区）：它就是「哪一天」这件事本身，日期由前端按北京时间给。
 CREATE TABLE IF NOT EXISTS journal_entries (
   id         BIGSERIAL   PRIMARY KEY,
   user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -488,21 +490,20 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS journal_entries_user_day_idx ON journal_entries (user_id, day DESC);
+-- 列表按「最后改动时间」倒序（用户：「有改动就更新时间」）
+CREATE INDEX IF NOT EXISTS journal_entries_user_upd_idx ON journal_entries (user_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS journal_coins (
   entry_id BIGINT NOT NULL REFERENCES journal_entries (id) ON DELETE CASCADE,
   -- 基础币（DOGE）—— 跟置顶 / 黑名单 / 提醒同一个口径
   base     TEXT   NOT NULL,
-  -- 这条日记里对这个币的一句话
-  note     TEXT   NOT NULL DEFAULT '',
-  -- 这个币在这一篇里**定住的那一刻**（北京时间 HH:mm，空 = 没定）。
-  -- 点它跳 K 线时就定在这一刻（用户 2026-10-18：「可以固定一个时间，点击就显示该段时间」）。
-  at_time  TEXT   NOT NULL DEFAULT '',
+  -- 这个币在这一篇里**定住的那一刻**（空 = 没定）。点它跳 K 线就定在这一刻。
+  at_ts    TIMESTAMPTZ,
   sort     INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (entry_id, base)
 );
 -- 老库补列（上面的 CREATE 只对全新的库生效）
-ALTER TABLE journal_coins ADD COLUMN IF NOT EXISTS at_time TEXT NOT NULL DEFAULT '';
+ALTER TABLE journal_coins ADD COLUMN IF NOT EXISTS at_ts TIMESTAMPTZ;
 -- 「这个币在历次日记里被怎么说的」走这条
 CREATE INDEX IF NOT EXISTS journal_coins_base_idx ON journal_coins (base);
 

@@ -7,9 +7,10 @@
  * 尤其手机 App 的 WebView 里长得完全不一样，窄屏上还会被截断（用户遇到的「显示不全」）。
  * 这里就是自己画的日历格子 / 时分两列，样式跟全站一致。
  *
- * 两种模式：
- *   · `mode="date"` → 值形如 `2026-10-18`
- *   · `mode="time"` → 值形如 `14:30`（到分钟）
+ * 三种模式：
+ *   · `mode="date"`     → 值形如 `2026-10-18`
+ *   · `mode="time"`     → 值形如 `14:30`（到分钟）
+ *   · `mode="datetime"` → 值形如 `2026-10-18 14:30`（两步：先点日历，再点时分）
  *
  * 面板**就地展开**（不是浮层）—— 它主要活在底部弹层 `.sheet` 里，而 `.sheet` 是
  * `overflow:auto` 的，浮层会被裁掉。
@@ -18,7 +19,7 @@ import {computed, nextTick, ref, watch} from 'vue'
 
 const props = defineProps<{
   modelValue: string
-  mode: 'date' | 'time'
+  mode: 'date' | 'time' | 'datetime'
   /** `mode=date` 时可选的最后一天（`YYYY-MM-DD`），日记不写未来 */
   max?: string
   /** `mode=time` 没选时的兜底文案 */
@@ -28,6 +29,8 @@ const props = defineProps<{
 const emit = defineEmits<{(e: 'update:modelValue', v: string): void}>()
 
 const open = ref(false)
+/** `datetime` 模式分两步：先选日期，再选时分 */
+const stage = ref<'date' | 'time'>('date')
 const wrapEl = ref<HTMLElement | null>(null)
 const panelEl = ref<HTMLElement | null>(null)
 
@@ -46,7 +49,10 @@ const WD = ['日', '一', '二', '三', '四', '五', '六']
 const viewY = ref(new Date().getFullYear())
 const viewM = ref(new Date().getMonth() + 1)
 
-const valueDate = computed(() => (/^\d{4}-\d{2}-\d{2}$/.test(props.modelValue) ? props.modelValue : ''))
+const datePart = computed(() => (props.modelValue || '').slice(0, 10))
+const valueDate = computed(() =>
+  /^\d{4}-\d{2}-\d{2}$/.test(datePart.value) ? datePart.value : ''
+)
 
 interface Cell {
   day: string
@@ -84,6 +90,13 @@ function shiftMonth(delta: number): void {
 
 function pickDay(c: Cell): void {
   if (c.disabled) return
+  if (props.mode === 'datetime') {
+    const t = hour.value && minute.value ? `${hour.value}:${minute.value}` : '12:00'
+    emit('update:modelValue', `${c.day} ${t}`)
+    stage.value = 'time'
+    void nextTick(scrollToPicked)
+    return
+  }
   emit('update:modelValue', c.day)
   open.value = false
 }
@@ -93,18 +106,31 @@ function pickDay(c: Cell): void {
 const HOURS = Array.from({length: 24}, (_, i) => String(i).padStart(2, '0'))
 const MINS = Array.from({length: 60}, (_, i) => String(i).padStart(2, '0'))
 
-const hour = computed(() => (props.modelValue || '').slice(0, 2))
-const minute = computed(() => (props.modelValue || '').slice(3, 5))
+const hour = computed(() => (props.modelValue.split(' ')[1] || '').slice(0, 2))
+const minute = computed(() => (props.modelValue.split(' ')[1] || '').slice(3, 5))
 
 const hourCol = ref<HTMLElement | null>(null)
 const minCol = ref<HTMLElement | null>(null)
 
 function pickHour(h: string): void {
   const m = minute.value || '00'
+  if (props.mode === 'datetime') {
+    const d = valueDate.value
+    if (!d) return
+    emit('update:modelValue', `${d} ${h}:${m}`)
+    return
+  }
   emit('update:modelValue', `${h}:${m}`)
 }
 function pickMin(m: string): void {
   const h = hour.value || '00'
+  if (props.mode === 'datetime') {
+    const d = valueDate.value
+    if (!d) return
+    emit('update:modelValue', `${d} ${h}:${m}`)
+    open.value = false
+    return
+  }
   emit('update:modelValue', `${h}:${m}`)
   open.value = false
 }
@@ -123,7 +149,8 @@ function scrollToPicked(): void {
 function toggle(): void {
   open.value = !open.value
   if (!open.value) return
-  if (props.mode === 'date') {
+  stage.value = 'date'
+  if (props.mode === 'date' || props.mode === 'datetime') {
     const base = valueDate.value || todayStr()
     const [y, m] = base.split('-').map(Number)
     viewY.value = y!
@@ -183,7 +210,8 @@ function onDocDown(e: MouseEvent): void {
 
 const label = computed(() => {
   if (props.mode === 'date') return props.modelValue || '选日期'
-  return props.modelValue || props.placeholder || '不定时间'
+  if (props.mode === 'time') return props.modelValue || props.placeholder || '不定时间'
+  return props.modelValue || props.placeholder || '定时刻'
 })
 </script>
 
@@ -194,7 +222,11 @@ const label = computed(() => {
       <span class="dtp-c">▾</span>
     </button>
 
-    <div v-if="open && mode === 'date'" ref="panelEl" class="dtp-panel">
+    <div
+      v-if="open && (mode === 'date' || (mode === 'datetime' && stage === 'date'))"
+      ref="panelEl"
+      class="dtp-panel"
+    >
       <div class="dtp-head">
         <button type="button" class="dtp-nav" title="上个月" @click="shiftMonth(-1)">◀</button>
         <b>{{ viewY }} 年 {{ viewM }} 月</b>
@@ -210,6 +242,9 @@ const label = computed(() => {
       </div>
       <div class="dtp-wd">
         <span v-for="w in WD" :key="w">{{ w }}</span>
+      </div>
+      <div v-if="mode === 'datetime'" class="dtp-picked">
+        定在 <b>{{ modelValue || '—' }}</b>（选完日期再点时分）
       </div>
       <div class="dtp-grid">
         <button
@@ -252,7 +287,18 @@ const label = computed(() => {
           {{ m }}
         </button>
       </div>
-      <button type="button" class="dtp-clear" title="不定时间" @click="clear">✕</button>
+      <div class="dtp-side">
+        <button
+          v-if="mode === 'datetime'"
+          type="button"
+          class="dtp-back"
+          title="回去改日期"
+          @click="stage = 'date'"
+        >
+          ◀
+        </button>
+        <button type="button" class="dtp-clear" title="不定时刻" @click="clear">✕</button>
+      </div>
     </div>
   </div>
 </template>
@@ -413,12 +459,32 @@ const label = computed(() => {
   font-size: 12px;
   color: var(--muted);
 }
-.dtp-clear {
+.dtp-side {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   align-self: flex-start;
+}
+.dtp-clear,
+.dtp-back {
   padding: 2px 4px;
   font-size: 11px;
   color: var(--muted);
   background: transparent;
   border: 0;
+}
+.dtp-back {
+  color: var(--blue);
+}
+.dtp-picked {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+.dtp-picked b {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
 }
 </style>

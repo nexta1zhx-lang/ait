@@ -2,16 +2,19 @@
 /**
  * **日记**（用户 2026-10-18）。
  *
- * 用户原话：「想再加一个模块。日记模块可以加入某些币种，总结」
- * →「是我手动写日记。也不一定是日记，有可能是一周才写一次」
- * → 同一天改口：「**不要自动按月总结了，默认排版，不显示什么总结，就是每日感想，可以筛选**」。
+ * 用户一路改下来的口径：
+ *   1. 「日记模块可以加入某些币种，总结」→「是我手动写日记，不一定每天」；
+ *   2. 「不要自动按月总结了，默认排版，不显示什么总结，就是每日感想，可以筛选」；
+ *   3. 「**默认就是当前时刻不用写日期，有改动就更新时间**；每条日记显示到分钟级，加点区分样式整体」
+ *      →「弹窗编辑的币种放在标题下方，定时刻显示的加上年月日，不需要一句话」
+ *      →「全部在搜索旁边，搜索框小一点要能放在币种，笔改为加号图标」。
  *
- * 所以这一页现在是**一条倒序的感想流水 + 一行筛选**：
- *   · 顶上就一行：搜正文/标题 + 币种下拉（默认「全部」）+「写一篇」；
- *   · 下面直接是条目 —— 点日期 / 点正文展开看全文，展开后有「编辑 / 删除」；
- *   · 每条可以**挂几个币**，每个币后面跟一句自己的话；点币名跳 K 线并定在那一天；
- *   · 没有月度统计、没有缺口提示、没有「月度总结」框（原来那套 2026-10-18 当天就按
- *     用户要求撤掉了，后端 `/api/journal`、`/summary`、`/months`、`/coin` 也一并删了）。
+ * 所以这一页现在：
+ *   · 顶上**一行**：小搜索框 + 币种下拉（默认「全部」）+ 加号（写一条）；
+ *   · 下面是**按时间倒序**的感想流水 —— 每条前面一个圆点 + `MM/DD HH:mm`（精确到分钟），
+ *     这个时间就是它**最后一次被改动**的时刻（新建 = 现在，改一次变一次）；
+ *   · 条目里挂的币可以**定住一刻**（年月日时分），点这个币就跳到那一刻的 K 线；
+ *   · 没有月度统计、没有月度总结、没有缺口提示（那些 2026-10-18 当天就按用户要求撤了）。
  *
  * ⚠️ 全部是纯读库 / 写库（不打交易所、不计权重、不调模型），所以随便刷。
  */
@@ -30,16 +33,6 @@ import {contracts} from '../store'
 import {leftTab, prefetchSymbol, pickSymbol, chartFrom, MOBILE_MAX} from '../analyze'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import DateTimePick from '../comps/DateTimePick.vue'
-
-/** 「今天」是哪一天（北京时间，`YYYY-MM-DD`）—— 跟后端 `bjDayNow()` 同一口径 */
-function today(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
-    d.getDate()
-  ).padStart(2, '0')}`
-}
-/** 日期框最远只能选到今天（日记不写未来） */
-const todayStr = today()
 
 /* ---------------- 列表 + 筛选 ---------------- */
 
@@ -107,22 +100,28 @@ function toggle(e: JournalEntry): void {
   openId.value = openId.value === e.id ? null : e.id
 }
 
-function dayLabel(day: string): string {
-  const d = new Date(`${day}T00:00:00`)
-  const wd = '日一二三四五六'[d.getDay()] ?? ''
-  return `${day.slice(5).replace('-', '/')} 周${wd}`
+/** `2026-10-18 14:32` → `10/18 14:32`（后端给的就是北京时间，不用再算时区） */
+function timeLabel(at: string): string {
+  const t = (at || '').slice(5).replace('-', '/')
+  return t || '—'
 }
 
-/* ---------------- 跳转：币 → K 线（定在那一天） ---------------- */
+/** 定住的那一刻用在 K 线上：`2026-10-18 14:32` → `2026-10-18T14:32` */
+function chartAt(at: string): string {
+  return (at || '').replace(' ', 'T')
+}
+
+/* ---------------- 跳转：币 → K 线（定在那一刻） ---------------- */
 
 /**
- * 点一个币 → 去 K 线看它，并且**定在这一刻**（条目那天 + 这个币自己定的 `HH:mm`）。
- * 没定时间就退回当天 12:00（原来就是这个口径）。
+ * 点一个币 → 去 K 线看它，并把图**定在这个币定住的那一刻**。
+ * 没定时刻就退回「这条日记的时间」。
  */
-function goCoin(base: string, day?: string, at?: string): void {
+function goCoin(base: string, at: string, fallbackAt: string): void {
   prefetchSymbol(base)
   pickSymbol(base)
-  if (day) chartFrom.value = `${day}T${at || '12:00'}`
+  const when = chartAt(at) || chartAt(fallbackAt)
+  if (when) chartFrom.value = when
   if (window.innerWidth <= MOBILE_MAX) leftTab.value = 'chart'
 }
 
@@ -130,7 +129,6 @@ function goCoin(base: string, day?: string, at?: string): void {
 
 const editing = ref<{
   id: number | null
-  day: string
   title: string
   body: string
   coins: JournalCoin[]
@@ -143,17 +141,16 @@ const comboPick = ref('')
 const swapContracts = computed(() => contracts.value.filter(c => c.symbol.endsWith('USDT')))
 
 function startNew(): void {
-  editing.value = {id: null, day: todayStr, title: '', body: '', coins: []}
+  editing.value = {id: null, title: '', body: '', coins: []}
   comboPick.value = ''
 }
 
 function startEdit(e: JournalEntry): void {
   editing.value = {
     id: e.id,
-    day: e.day,
     title: e.title,
     body: e.body,
-    coins: e.coins.map(c => ({...c, at: c.at ?? ''}))
+    coins: e.coins.map(c => ({...c}))
   }
   comboPick.value = ''
 }
@@ -171,10 +168,10 @@ function addCoin(v: string): void {
     return
   }
   if (ed.coins.length >= 20) {
-    showToast('一篇最多挂 20 个币', 'bad')
+    showToast('一条最多挂 20 个币', 'bad')
     return
   }
-  ed.coins.push({base, note: '', at: ''})
+  ed.coins.push({base, at: ''})
   comboPick.value = ''
 }
 
@@ -195,17 +192,16 @@ async function submit(): Promise<void> {
   try {
     const r = await saveJournalEntry({
       id: ed.id,
-      day: ed.day,
       title: ed.title,
       body: ed.body,
       coins: ed.coins
     })
     editing.value = null
-    /* 存完回到第一页（新条目在第一页顶上；改过日期会挪位置），并把它展开 */
+    /* 存完回到第一页（时间是刚改的，一定在最上面），并把它展开 */
     q.value = ''
     coin.value = ''
     await load(true)
-    if (!coin.value && !q.value.trim()) openId.value = r.entry.id
+    openId.value = r.entry.id
     showToast(ed.id ? '已保存' : '已记下')
   } catch (e) {
     showToast(`没存上：${(e as Error).message}`, 'bad')
@@ -216,8 +212,8 @@ async function submit(): Promise<void> {
 
 async function remove(e: JournalEntry): Promise<void> {
   const ok = await askConfirm({
-    title: `删掉 ${e.day} 这篇？`,
-    body: [{t: e.title || '（无标题）', tone: 'num'}, {t: '删了找不回来。', tone: 'warn'}],
+    title: `删掉 ${timeLabel(e.at)} 这条？`,
+    body: [{t: e.title || e.body.split('\n')[0] || '（空）', tone: 'num'}, {t: '删了找不回来。', tone: 'warn'}],
     okText: '删掉',
     danger: true
   })
@@ -237,27 +233,16 @@ async function remove(e: JournalEntry): Promise<void> {
 <template>
   <div class="col journal">
     <!--
-      第一行：搜索 + 「写一篇」（图标）。
-      第二行：币种筛选 —— 用户 2026-10-18：「币种筛选显示不全… 加入币种放到下」，
-      跟搜索挤一行时被压得只剩几个字，所以单独占一行。
+      一行：小搜索框 + 币种 + 加号（用户 2026-10-18：「全部在搜索旁边，搜索框小一点
+      要能放在币种，笔改为加号图标」）。
     -->
     <div class="j-bar">
       <div class="j-search">
-        <input v-model="q" type="text" placeholder="搜日记…（标题或正文）" />
+        <input v-model="q" type="text" placeholder="搜日记" />
         <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
           ✕
         </button>
       </div>
-      <button type="button" class="ghost tiny j-new" title="写一篇" @click="startNew">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M4 20h4l10-10-4-4L4 16v4Z" />
-          <path d="M13.5 6.5l4 4" />
-        </svg>
-      </button>
-    </div>
-
-    <div class="j-flt-row">
       <SymbolCombo
         plain
         class="j-flt"
@@ -267,15 +252,22 @@ async function remove(e: JournalEntry): Promise<void> {
         :contracts="coinOptions"
         @pick="v => (coin = v)"
       />
+      <button type="button" class="ghost tiny j-new" title="写一条（时间就是现在）" @click="startNew">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
     </div>
 
     <div v-if="error" class="error">{{ error }}</div>
 
-    <!-- 条目：日期新的在上 -->
+    <!-- 条目：最近改动的在上，时间精确到分钟 -->
     <div v-if="entries.length" class="j-list">
       <article v-for="e in entries" :key="e.id" class="j-entry">
         <div class="j-head" @click="toggle(e)">
-          <span class="j-day">{{ dayLabel(e.day) }}</span>
+          <i class="j-dot" :class="{on: openId === e.id}" />
+          <span class="j-time">{{ timeLabel(e.at) }}</span>
           <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
           <span v-if="e.coins.length" class="j-badges">
             <span v-for="c in e.coins" :key="c.base" class="j-badge">{{ c.base }}</span>
@@ -290,24 +282,23 @@ async function remove(e: JournalEntry): Promise<void> {
               <button
                 type="button"
                 class="j-coin"
-                :title="`看 ${c.base} 的 K 线`"
-                @click="goCoin(c.base, e.day, c.at)"
+                :title="c.at ? `看 ${c.base} 在 ${c.at} 的 K 线` : `看 ${c.base} 的 K 线（这条的时间）`"
+                @click="goCoin(c.base, c.at, e.at)"
               >
                 {{ c.base }}
               </button>
-              <span v-if="c.note" class="dim">{{ c.note }}</span>
               <span v-if="c.at" class="j-at dim">{{ c.at }}</span>
             </li>
           </ul>
           <div class="j-acts">
-            <button type="button" class="ghost tiny j-act" title="编辑这一篇" @click="startEdit(e)">
+            <button type="button" class="ghost tiny j-act" title="编辑这一条" @click="startEdit(e)">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M4 20h4l10-10-4-4L4 16v4Z" />
                 <path d="M13.5 6.5l4 4" />
               </svg>
             </button>
-            <button type="button" class="ghost tiny j-act j-del" title="删掉这一篇" @click="remove(e)">
+            <button type="button" class="ghost tiny j-act j-del" title="删掉这一条" @click="remove(e)">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M4 7h16M9.5 7V4.6h5V7M6.5 7l1 13h9l1-13" />
@@ -319,7 +310,7 @@ async function remove(e: JournalEntry): Promise<void> {
       </article>
 
       <button v-if="more" type="button" class="ghost tiny j-more" :disabled="loading" @click="load(false)">
-        {{ loading ? '读…' : `还有 ${total - entries.length} 篇` }}
+        {{ loading ? '读…' : `还有 ${total - entries.length} 条` }}
       </button>
     </div>
 
@@ -327,7 +318,7 @@ async function remove(e: JournalEntry): Promise<void> {
       {{
         q || coin
           ? '这个筛选下没有日记。'
-          : '还没有日记。点右上角「写一篇」记一条 —— 不用天天写，想到就记。'
+          : '还没有日记。点右边那颗加号记一条 —— 不用天天写，想到就记。'
       }}
     </p>
 
@@ -335,16 +326,9 @@ async function remove(e: JournalEntry): Promise<void> {
     <div v-if="editing" class="sheet-mask" @click="closeEditor" />
     <section v-if="editing" class="sheet" role="dialog" aria-label="写日记">
       <header class="sheet-head">
-        <b>{{ editing.id ? '编辑日记' : '写一篇' }}</b>
+        <b>{{ editing.id ? '编辑日记' : '写一条' }}</b>
         <button class="ghost tiny" title="关掉（不保存）" @click="closeEditor">✕</button>
       </header>
-
-      <div class="sheet-row">
-        <span class="rk">日期</span>
-        <div class="ctl">
-          <DateTimePick v-model="editing.day" mode="date" :max="todayStr" />
-        </div>
-      </div>
 
       <div class="sheet-row">
         <span class="rk">标题</span>
@@ -353,18 +337,11 @@ async function remove(e: JournalEntry): Promise<void> {
         </div>
       </div>
 
+      <!-- 币种放在标题下面（用户：「弹窗编辑的币种放在标题下方」） -->
       <div class="j-sec">
-        <p class="j-sec-t">正文</p>
-        <textarea
-          v-model="editing.body"
-          class="j-body-input"
-          rows="7"
-          placeholder="怎么想的就怎么写 —— 一行一句也行"
-        />
-      </div>
-
-      <div class="j-sec">
-        <p class="j-sec-t">加入币种 <span class="dim">（最多 20 个，每个可以跟一句话）</span></p>
+        <p class="j-sec-t">
+          币种 <span class="dim">（最多 20 个 · 可以定住一刻，点它就跳那一刻的 K 线）</span>
+        </p>
         <div class="j-add">
           <SymbolCombo
             v-model="comboPick"
@@ -379,27 +356,25 @@ async function remove(e: JournalEntry): Promise<void> {
             type="button"
             class="j-coin"
             :title="`看 ${c.base} 的 K 线`"
-            @click="goCoin(c.base, editing.day)"
+            @click="goCoin(c.base, c.at, '')"
           >
             {{ c.base }}
           </button>
-          <input
-            v-model="c.note"
-            type="text"
-            class="j-note-input"
-            maxlength="200"
-            :placeholder="`对 ${c.base} 的一句话（可不填）`"
-          />
-          <DateTimePick
-            v-model="c.at"
-            mode="time"
-            placeholder="定时刻"
-            :title="`定了时刻，点 ${c.base} 就跳到那一刻的 K 线`"
-          />
-          <button type="button" class="ghost tiny" title="移出这篇" @click="dropCoin(c.base)">
+          <DateTimePick v-model="c.at" mode="datetime" placeholder="定时刻" />
+          <button type="button" class="ghost tiny" title="移出这条" @click="dropCoin(c.base)">
             ✕
           </button>
         </div>
+      </div>
+
+      <div class="j-sec">
+        <p class="j-sec-t">正文</p>
+        <textarea
+          v-model="editing.body"
+          class="j-body-input"
+          rows="7"
+          placeholder="怎么想的就怎么写 —— 一行一句也行"
+        />
       </div>
 
       <div class="j-submit">
@@ -413,7 +388,7 @@ async function remove(e: JournalEntry): Promise<void> {
 </template>
 
 <style scoped>
-/* 顶上一行：搜 / 币种 / 写 */
+/* 顶上一行：小搜索框 / 币种 / 加号 */
 .j-bar {
   display: flex;
   align-items: center;
@@ -422,13 +397,13 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 .j-search {
   position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 1 128px;
+  min-width: 84px;
 }
 .j-search input {
   width: 100%;
   box-sizing: border-box;
-  padding: 6px 26px 6px 9px;
+  padding: 6px 24px 6px 9px;
   font: inherit;
   font-size: 12.5px;
   color: var(--text);
@@ -438,10 +413,15 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 .j-search-x {
   position: absolute;
-  right: 2px;
+  right: 1px;
   top: 50%;
   transform: translateY(-50%);
-  padding: 2px 5px;
+  padding: 2px 4px;
+}
+/* 币种吃掉剩下的宽度，币名再长也不截断 */
+.j-flt {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .j-new {
   flex: 0 0 auto;
@@ -449,18 +429,6 @@ async function remove(e: JournalEntry): Promise<void> {
   align-items: center;
   justify-content: center;
   padding: 6px 8px;
-}
-/* 筛选单独一行：给足宽度，别把「全部 / 币名」榨成省略号 */
-.j-flt-row {
-  display: flex;
-  align-items: center;
-  margin: -2px 0 10px;
-}
-.j-flt {
-  /* 独占一行、最多吃满 —— 币名再长也不截断（用户：「币种筛选显示不全」） */
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: 260px;
 }
 
 /* 条目 */
@@ -481,7 +449,21 @@ async function remove(e: JournalEntry): Promise<void> {
   padding: 10px 2px;
   cursor: pointer;
 }
-.j-day {
+/* 圆点：展开的那条亮起来（「加点区分样式整体」） */
+.j-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-right: -2px;
+  border-radius: 50%;
+  background: var(--border);
+  align-self: center;
+  transition: background 0.15s;
+}
+.j-dot.on {
+  background: var(--blue);
+}
+.j-time {
   flex: none;
   font-family: var(--mono);
   font-size: 11px;
@@ -551,7 +533,7 @@ async function remove(e: JournalEntry): Promise<void> {
   color: var(--bad);
   border-color: var(--bad);
 }
-/* 币后面那个定住的时刻 */
+/* 币后面那个定住的那一刻（年月日时分） */
 .j-at {
   font-family: var(--mono);
   font-size: 11px;
@@ -608,17 +590,6 @@ async function remove(e: JournalEntry): Promise<void> {
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--blue);
-}
-.j-note-input {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 6px 9px;
-  font: inherit;
-  font-size: 12.5px;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 7px;
 }
 .j-submit {
   display: flex;

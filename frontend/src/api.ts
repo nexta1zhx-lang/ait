@@ -2580,21 +2580,21 @@ export const rearmKlineAlert = (id: number) =>
 /**
  * 日记 —— **字段与后端 `db/journals.ts` 的 `JournalEntry` / `JournalList` 一一对应**。
  *
- * 用户 2026-10-18：「日记模块可以加入某些币种，总结」→「是我手动写日记，不一定每天」
- * → 当天改口：「不要自动按月总结了，默认排版，不显示什么总结，就是每日感想，可以筛选」。
+ * 用户 2026-10-18：「是我手动写日记，不一定每天」→「不要自动按月总结了…可以筛选」
+ * →「默认就是当前时刻不用写日期，有改动就更新时间；每条显示到分钟级」。
+ *
+ * ⚠️ 时间字段一律是**北京时间的字面串** `YYYY-MM-DD HH:mm`（不是 ISO），前后端都不再算时区。
  */
 export interface JournalCoin {
   base: string
-  /** 这个币在我这篇里的一句话 */
-  note: string
-  /** 这个币定住的时刻 `HH:mm`（空串 = 没定，跳 K 线时用当天 12:00） */
+  /** 这个币定住的那一刻 `YYYY-MM-DD HH:mm`（空串 = 没定） */
   at: string
 }
 
 export interface JournalEntry {
   id: number
-  /** `YYYY-MM-DD`（北京时间） */
-  day: string
+  /** 最后一次改动的时刻 `YYYY-MM-DD HH:mm` —— 列表就显示它 */
+  at: string
   title: string
   body: string
   coins: JournalCoin[]
@@ -2620,10 +2620,9 @@ export const fetchJournal = (opts: {coin?: string; q?: string; limit?: number; o
   return get<JournalList & {error: string | null}>(`/api/journal/entries${q ? `?${q}` : ''}`)
 }
 
-/** 新建 / 更新一条（带 `id` 就是更新） */
+/** 新建 / 更新一条（带 `id` 就是更新；时间由服务器给，前端不传） */
 export const saveJournalEntry = (input: {
   id?: number | null
-  day: string
   title?: string
   body?: string
   coins?: JournalCoin[]
