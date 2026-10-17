@@ -63,8 +63,8 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
-  /* 跟「我的 → 管理 / 模型配置」那排二级 tab 同一档（11.5px），比一级（13px）小一号 */
-  font-size: 11.5px;
+  /* 二级 12px（用户 2026-10-18 定），比一级（13px）小一号 */
+  font-size: 12px;
   /* 用户 2026-10-18：「加粗一点」——11.5px 用 400 在暖底上发虚 */
   font-weight: 500;
   white-space: nowrap;
