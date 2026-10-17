@@ -6,7 +6,6 @@ import {
   createKlineAlert,
   deleteKlineAlert,
   fetchCandles,
-  fetchKlineAlerts,
   fetchKlineDrawings,
   klineStream,
   placeStopOrder,
@@ -57,6 +56,12 @@ import {positionsFallbackAt} from '../positions'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
 import {createOverlayLines} from '../overlay-lines'
+import {
+  alertById,
+  klineAlerts,
+  noteAlertsChanged,
+  refreshKlineAlerts
+} from '../kline-alerts'
 import {
   createDrawings,
   hitTest,
@@ -3727,7 +3732,7 @@ function renderDrawings(): void {
           price: p,
           color,
           axis: priceText(p),
-          alert: it.alertId !== undefined
+          alert: alertAlive(it.alertId)
         })
       } else if (it.a && it.b) {
         shapes.push({id: it.id, kind: it.kind, a: it.a, b: it.b, color})
@@ -3775,33 +3780,30 @@ async function loadDrawings(): Promise<void> {
 }
 
 /**
- * 把线上挂的提醒跟服务器对一遍（用户 2026-10-17：「提醒状态显示」）。
+ * 这条线上挂的提醒现在**还在等**吗（响过了 / 在提醒页删了 → 铃铛就该灭）。
  *
- * 只在**还在等**（`active`）的时候才算挂着：响过 / 在自动化预测那边删掉了，
- * 线上那个铃铛就该消失（不然看到的是个假状态）。对不上就顺手清掉这条线上的记录。
+ * 数据来自共享 store（`../kline-alerts.ts`）：提醒页那边删一条、重新盯一条，
+ * 这边同一步就跟着变，不用等下次进页面。
  */
-async function loadAlertMarks(): Promise<void> {
+function alertAlive(id: number | undefined): boolean {
+  if (id === undefined) return false
+  return alertById(id)?.status === 'active'
+}
+
+/** 线上记的 `alertId` 跟服务器对一遍：**只清「那条已经不存在」的**，别动触发过的 */
+function syncAlertLinks(): void {
   const symbol = String(props.symbol ?? '').toUpperCase()
-  const active = new Map<number, {op: 'above' | 'below'; symbol: string}>()
-  try {
-    const r = await fetchKlineAlerts()
-    for (const a of r.alerts) {
-      if (a.status === 'active') active.set(a.id, {op: a.op, symbol: a.symbol})
-    }
-  } catch {
-    /* 读不到就先按原样画（总比把铃铛全抹掉好） */
-    renderDrawings()
-    return
-  }
   let dirty = false
   drawings.value = drawings.value.map(d => {
     if (d.alertId === undefined) return d
-    const a = active.get(d.alertId)
+    const a = alertById(d.alertId)
+    /* 那条真被删了（或者压根不是这个币的）⇒ 挂接作废 */
     if (!a || a.symbol !== symbol) {
       dirty = true
       const {alertId: _i, alertOp: _o, ...rest} = d
       return rest
     }
+    /* 触发过也**留着 id**：在提醒页点「重新盯」之后铃铛要能自己回来 */
     if (d.alertOp !== a.op) {
       dirty = true
       return {...d, alertOp: a.op}
@@ -3900,6 +3902,8 @@ async function addAlertFor(id: string, price: number, op: 'above' | 'below'): Pr
     })
     renderDrawings()
     scheduleSaveDrawings()
+    /* 提醒页那边也立刻看到这一条 */
+    void noteAlertsChanged()
     showToast(
       `${op === 'above' ? '上穿' : '下穿'} ${priceText(price)} 提醒已加 —— 服务器盯着，关掉页面也会响`
     )
@@ -3926,6 +3930,7 @@ async function cancelAlertFor(id: string): Promise<void> {
   })
   renderDrawings()
   scheduleSaveDrawings()
+  void noteAlertsChanged()
   showToast('提醒已取消')
 }
 
@@ -4182,12 +4187,30 @@ watch(() => props.symbol, load)
  */
 onMounted(() => {
   void loadDrawings()
-  void loadAlertMarks()
+  void refreshKlineAlerts(true)
 })
 watch(() => props.symbol, () => {
   void loadDrawings()
-  void loadAlertMarks()
+  void refreshKlineAlerts(true)
 })
+/*
+ * 提醒是**服务器**在盯（网页没开也会响），所以「已经触发」这件事不会主动推过来 ——
+ * 只能轮询：这一格露着的时候 60 秒刷一次，铃铛该灭就灭（打的是纯读库接口，0 权重）。
+ * 另外 store 一变（提醒页删了 / 重新盯了）就重画，两边永远同一份数据。
+ */
+let alertTimer: ReturnType<typeof setInterval> | null = null
+function syncAlertPoll(): void {
+  const on = !!props.active
+  if (on && !alertTimer) {
+    void refreshKlineAlerts(true)
+    alertTimer = setInterval(() => void refreshKlineAlerts(true), 60_000)
+  } else if (!on && alertTimer) {
+    clearInterval(alertTimer)
+    alertTimer = null
+  }
+}
+watch(() => props.active, syncAlertPoll, {immediate: true})
+watch(klineAlerts, syncAlertLinks)
 watch(chartShowDraw, renderDrawings)
 watch(() => props.timeframe, load)
 watch(() => props.from, load)
@@ -4257,6 +4280,8 @@ onBeforeUnmount(() => {
   drawPrim.detach()
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = null
+  if (alertTimer) clearInterval(alertTimer)
+  alertTimer = null
   try {
     refs?.chart.remove()
   } catch {
@@ -4448,7 +4473,7 @@ onBeforeUnmount(() => {
         <span class="draw-sep" />
 
         <!-- 没提醒：上穿 / 下穿两颗箭头；已经有提醒：同一格变成「取消」 -->
-        <template v-if="menuItem.alertId === undefined">
+        <template v-if="!alertAlive(menuItem.alertId)">
           <button
             type="button"
             class="dp-ico"

@@ -29,7 +29,6 @@
 import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
   deleteKlineAlert,
-  fetchKlineAlerts,
   fetchScanPicks,
   fetchScanSettings,
   rearmKlineAlert,
@@ -40,6 +39,11 @@ import {
   type ScanPicks
 } from '../api'
 import {bjTime, fmt, int} from '../format'
+import {
+  klineAlerts,
+  noteAlertsChanged,
+  refreshKlineAlerts
+} from '../kline-alerts'
 import {markdownToPlain} from '../markdown'
 import {showToast} from '../toast'
 import {MOBILE_MAX, leftTab, pickSymbol, prefetchSymbol} from '../analyze'
@@ -202,9 +206,14 @@ watch(tab, t => {
  * 判定在服务器（`backend/src/price-alerts.ts`）—— **网页没开也会响**，
  * 所以这里只是读列表 / 删除 / 重新盯，不用在前端盯着价格算。
  */
-const alerts = ref<KlineAlert[]>([])
+/**
+ * ⚠️ 不在这儿自己拉一份：跟 K 线那边**共用** `../kline-alerts.ts` 那份 store。
+ * 之前两边各拉各的 —— 在 K 线上加一条、这边要等 30 秒才看到；这边删一条，
+ * K 线上的铃铛还挂着（用户 2026-10-17：「提醒页面和 k 线的线上提醒状态不同步」）。
+ */
+const alerts = klineAlerts
 const alertsBusy = ref(false)
-/** 这一格开着的时候每 30 秒刷一次（响过的能立刻看到「已触发」） */
+/** 这一格开着的时候每 30 秒刷一次（服务器触发的铃铛要能灭） */
 let alertsTimer: ReturnType<typeof setInterval> | null = null
 
 const activeAlerts = computed(() => alerts.value.filter(a => a.status === 'active'))
@@ -220,7 +229,7 @@ const filteredAlerts = computed(() => {
 async function loadAlerts(): Promise<void> {
   alertsBusy.value = true
   try {
-    alerts.value = (await fetchKlineAlerts()).alerts
+    await refreshKlineAlerts(true)
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -231,7 +240,8 @@ async function loadAlerts(): Promise<void> {
 async function dropAlert(id: number): Promise<void> {
   try {
     await deleteKlineAlert(id)
-    alerts.value = alerts.value.filter(a => a.id !== id)
+    /* 重拉一次让 K 线上那条线的铃铛同一步灭掉（共享 store） */
+    await noteAlertsChanged()
   } catch (e) {
     error.value = (e as Error).message
   }
@@ -240,7 +250,7 @@ async function dropAlert(id: number): Promise<void> {
 async function armAlert(id: number): Promise<void> {
   try {
     await rearmKlineAlert(id)
-    await loadAlerts()
+    await noteAlertsChanged()
   } catch (e) {
     error.value = (e as Error).message
   }
