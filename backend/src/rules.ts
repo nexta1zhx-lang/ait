@@ -113,6 +113,34 @@ export interface ExtractRules {
   dbError: string | null
 }
 
+/**
+ * 日记润色用的提示词（`ai_docs` 里 kind=polish 的文档）。
+ *
+ * 跟另外几份**分开读**，互不干扰 —— 分析读 predict、提炼读 extract、日记读 polish。
+ * 库里一份都没有时 `ensurePolishDoc()` 会先种一份默认的（见 `db/prompts.ts`）。
+ */
+export async function loadPolishRules(): Promise<ExtractRules> {
+  try {
+    const {polish} = await getEnabledDocs()
+    const system = joinDocs(polish)
+    return {
+      system,
+      enabled: Boolean(system.trim()),
+      sources: polish.map(d => `日记：${d.name}`),
+      hash: hashOf(system),
+      dbError: null
+    }
+  } catch (e) {
+    return {
+      system: '',
+      enabled: false,
+      sources: [],
+      hash: hashOf(''),
+      dbError: (e as Error).message
+    }
+  }
+}
+
 export async function loadExtractRules(): Promise<ExtractRules> {
   try {
     const {extract} = await getEnabledDocs()

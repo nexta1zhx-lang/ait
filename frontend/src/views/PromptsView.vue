@@ -40,11 +40,14 @@ const notice = ref('')
 const predicts = computed(() => docs.value.filter(d => d.kind === 'predict'))
 /** 知识库提炼那份（收录案例时用，跟开单分析不是一条链路） */
 const extracts = computed(() => docs.value.filter(d => d.kind === 'extract'))
+/** 日记润色那份（日记页「AI 美化」用，2026-10-18） */
+const polishes = computed(() => docs.value.filter(d => d.kind === 'polish'))
 
 /** 类型 → 中文名（role / rule 是旧版留下的，不再参与分析） */
 const KIND_TEXT: Record<DocKind, string> = {
   predict: '分析预测',
   extract: '知识库提炼',
+  polish: '日记润色',
   role: '角色设定（旧）',
   rule: '规则正文（旧）'
 }
@@ -52,7 +55,11 @@ const kindText = (k: DocKind) => KIND_TEXT[k]
 
 /** 某一类的清单（排序 / 上下移都用它） */
 const listOf = (k: DocKind) =>
-  k === 'extract' ? extracts.value : predicts.value
+  k === 'extract'
+    ? extracts.value
+    : k === 'polish'
+      ? polishes.value
+      : predicts.value
 
 /**
  * 右列显示什么。
@@ -185,6 +192,7 @@ async function addDoc(kind: DocKind) {
   const NAMES: Record<DocKind, [string, string]> = {
     predict: ['提示词的名字', '新分析预测'],
     extract: ['提炼提示词的名字', '新提炼提示词'],
+    polish: ['润色提示词的名字', '新日记润色'],
     role: ['角色设定的名字', '新角色'],
     rule: ['规则的名字', '新规则']
   }
@@ -512,6 +520,32 @@ async function openPreview() {
         <code>&#123;&#123;标签&#125;&#125;</code> 的话，标签清单就插在那一行；
         没写就接在末尾。
       </p>
+
+      <!-- 日记润色（2026-10-18）-->
+      <h3 class="group">
+        日记润色 <span class="dim">日记页那颗 ✨ 让 AI 改写正文时用</span>
+      </h3>
+      <ul class="docs">
+        <li
+          v-for="d in polishes"
+          :key="d.id"
+          :class="{off: !d.enabled, on: current?.id === d.id}"
+          @click="openDoc(d)"
+        >
+          <label class="pick" title="打勾才会生效" @click.stop>
+            <input type="checkbox" :checked="d.enabled" @change="toggle(d)" />
+          </label>
+          <span class="name">{{ d.name }}</span>
+          <span class="meta">{{ d.content.length }} 字</span>
+          <span class="arrow">›</span>
+        </li>
+        <li v-if="!polishes.length" class="empty">
+          还没有润色提示词 —— 日记里点 ✨ 会先按默认那份种一条进来
+        </li>
+      </ul>
+      <button class="ghost tiny add" @click="addDoc('polish')">
+        + 新建润色提示词
+      </button>
     </section>
 
     <!-- ── 右：点出来的内容 ── -->

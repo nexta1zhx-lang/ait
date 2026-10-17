@@ -198,7 +198,7 @@ CREATE TABLE IF NOT EXISTS ai_docs (
   -- role / rule = 旧版（角色设定 + 规则正文，已不再参与拼装）
   -- predict = 分析预测（开单分析读这一份）；extract = 知识库提炼
   kind       TEXT        NOT NULL DEFAULT 'rule'
-                         CHECK (kind IN ('role', 'rule', 'extract', 'predict')),
+                         CHECK (kind IN ('role', 'rule', 'extract', 'predict', 'polish')),
   name       TEXT        NOT NULL,
   content    TEXT        NOT NULL DEFAULT '',
   -- 关掉就不参与拼 prompt（方便我存多个版本轮流试）
@@ -1146,7 +1146,7 @@ BEGIN
       EXECUTE format('ALTER TABLE ai_docs DROP CONSTRAINT %I', c.conname);
     END LOOP;
     ALTER TABLE ai_docs ADD CONSTRAINT ai_docs_kind_check
-      CHECK (kind IN ('role', 'rule', 'extract', 'predict'));
+      CHECK (kind IN ('role', 'rule', 'extract', 'predict', 'polish'));
   END IF;
 END $$;
 

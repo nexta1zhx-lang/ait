@@ -1023,7 +1023,7 @@ export interface RulesInfo {
  * extract = 知识库提炼；
  * role / rule = 旧版留下的，不再参与分析。
  */
-export type DocKind = 'role' | 'rule' | 'extract' | 'predict'
+export type DocKind = 'role' | 'rule' | 'extract' | 'predict' | 'polish'
 
 export interface AiDoc {
   id: number

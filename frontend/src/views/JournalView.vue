@@ -141,10 +141,15 @@ const comboPick = ref('')
 
 /* ---------------- AI 美化正文 ---------------- */
 
-/** 模型整理出来的候选稿（**不落库**，用户点「用这段」才换成正文） */
-const polishDraft = ref('')
+/**
+ * AI 美化（用户 2026-10-18：「ai 整理后直接替换，旁边添加撤回图标」）。
+ *
+ * 拿到就直接顶上正文，**不弹预览**；换之前把原文记在 `bodyBackup` 里，
+ * 旁边那颗 ↩ 一键撤回。只要还有备份，「撤回」就一直挂在那儿。
+ */
 const polishing = ref(false)
-const polishErr = ref('')
+/** 被 AI 顶掉之前的那一版（空串 = 没有可撤回的） */
+const bodyBackup = ref('')
 
 async function beautify(): Promise<void> {
   const ed = editing.value
@@ -155,28 +160,25 @@ async function beautify(): Promise<void> {
     return
   }
   polishing.value = true
-  polishErr.value = ''
   try {
     const r = await polishJournal(text)
     if (r.error || !r.text) throw new Error(r.error || '模型没有返回内容')
-    polishDraft.value = r.text
+    bodyBackup.value = ed.body
+    ed.body = r.text
+    showToast('已按 AI 整理替换（可以撤回）')
   } catch (e) {
-    polishErr.value = (e as Error).message
+    showToast(`没整理成：${(e as Error).message}`, 'bad')
   } finally {
     polishing.value = false
   }
 }
 
-function applyPolish(): void {
-  if (!editing.value) return
-  editing.value.body = polishDraft.value
-  polishDraft.value = ''
-  showToast('已换成整理后的版本')
-}
-
-function dropPolish(): void {
-  polishDraft.value = ''
-  polishErr.value = ''
+/** 撤回：把 AI 顶掉的那一版放回去 */
+function undoPolish(): void {
+  if (!editing.value || !bodyBackup.value) return
+  editing.value.body = bodyBackup.value
+  bodyBackup.value = ''
+  showToast('已撤回')
 }
 
 /** 合约清单（`SymbolCombo` 要）—— 只保留 swap，跟别的页面一致 */
@@ -185,7 +187,7 @@ const swapContracts = computed(() => contracts.value.filter(c => c.symbol.endsWi
 function startNew(): void {
   editing.value = {id: null, title: '', body: '', coins: []}
   comboPick.value = ''
-  dropPolish()
+  bodyBackup.value = ''
 }
 
 function startEdit(e: JournalEntry): void {
@@ -196,12 +198,12 @@ function startEdit(e: JournalEntry): void {
     coins: e.coins.map(c => ({...c}))
   }
   comboPick.value = ''
-  dropPolish()
+  bodyBackup.value = ''
 }
 
 function closeEditor(): void {
   editing.value = null
-  dropPolish()
+  bodyBackup.value = ''
 }
 
 function addCoin(v: string): void {
@@ -309,7 +311,7 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <!-- 条目：最近改动的在上，时间精确到分钟 -->
     <div v-if="entries.length" class="j-list">
-      <article v-for="e in entries" :key="e.id" class="j-entry">
+      <article v-for="e in entries" :key="e.id" class="j-entry" :class="{open: openId === e.id}">
         <div class="j-head" :class="{open: openId === e.id}" @click="toggle(e)">
           <i class="j-dot" :class="{on: openId === e.id}" />
           <span class="j-time">{{ timeLabel(e.at) }}</span>
@@ -424,7 +426,7 @@ async function remove(e: JournalEntry): Promise<void> {
             class="j-ai"
             :class="{on: polishing}"
             :disabled="polishing"
-            title="AI 美化：只改写法，不改事实（币种、时间、数字都原样留着）"
+            title="AI 整理：只改写法，不改事实（币种、时间、数字都原样留着）"
             @click="beautify"
           >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
@@ -432,7 +434,21 @@ async function remove(e: JournalEntry): Promise<void> {
               <path d="M12 3.5l1.7 4.3 4.3 1.7-4.3 1.7L12 15.5l-1.7-4.3L6 9.5l4.3-1.7L12 3.5Z" />
               <path d="M18.5 15l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1Z" />
             </svg>
-            <span v-if="polishing">美化中…</span>
+            <span v-if="polishing">整理中…</span>
+          </button>
+          <!-- 撤回：AI 顶掉的那一版还能拿回来 -->
+          <button
+            v-if="bodyBackup"
+            type="button"
+            class="j-ai j-undo"
+            title="撤回 AI 整理，恢复我原来写的"
+            @click="undoPolish"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 9h9.5a5.5 5.5 0 0 1 0 11H8" />
+              <path d="M7.5 5.5 4 9l3.5 3.5" />
+            </svg>
           </button>
         </p>
         <textarea
@@ -441,27 +457,6 @@ async function remove(e: JournalEntry): Promise<void> {
           rows="7"
           placeholder="怎么想的就怎么写 —— 一行一句也行"
         />
-
-        <!-- AI 整理出来的候选稿（不落库）：看一眼，觉得好再替换 -->
-        <div v-if="polishing || polishDraft || polishErr" class="j-polish">
-          <div class="j-polish-h">
-            <span class="j-polish-t">AI 整理后</span>
-            <button
-              v-if="polishDraft"
-              type="button"
-              class="j-polish-use"
-              @click="applyPolish"
-            >
-              用这段
-            </button>
-            <button type="button" class="ghost tiny" title="不要这段" @click="dropPolish">
-              ✕
-            </button>
-          </div>
-          <p v-if="polishing" class="dim j-polish-wait">等一下，正在整理…</p>
-          <p v-else-if="polishErr" class="j-polish-err">{{ polishErr }}</p>
-          <AnswerBody v-else :text="polishDraft" soft-breaks />
-        </div>
       </div>
 
       <div class="j-submit">
@@ -563,11 +558,28 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 @media (hover: hover) {
   .j-head:hover {
-    background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+    background: color-mix(in srgb, var(--panel-2) 45%, transparent);
   }
 }
-.j-head.open {
-  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+/*
+ * 展开 / 激活：**整条变成一张浮起来的卡**（不再是给选中行刷个底色）——
+ * 用户 2026-10-18：「点击激活背景换个样式，设计一下不用拘束之前的风格」。
+ */
+.j-entry.open {
+  margin: 4px -8px;
+  padding: 0 8px;
+  border-radius: 14px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--panel-2) 92%, transparent),
+    color-mix(in srgb, var(--panel-2) 55%, transparent)
+  );
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--blue) 20%, transparent),
+    0 8px 22px rgba(0, 0, 0, 0.28);
+}
+.j-entry.open .j-head {
+  background: transparent;
 }
 /* 圆点：钉在左边那条时间轴上；展开的那条亮起来 + 加光圈 */
 .j-dot {
@@ -588,6 +600,10 @@ async function remove(e: JournalEntry): Promise<void> {
   background: var(--blue);
   opacity: 1;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
+}
+/* 展开那条整块往外扩了 8px，圆点得跟着挪回来，才跟别条在同一条竖线上 */
+.j-entry.open .j-dot {
+  left: -6px;
 }
 .j-time {
   flex: none;
@@ -626,13 +642,9 @@ async function remove(e: JournalEntry): Promise<void> {
   flex: none;
   font-size: 11px;
 }
+/* 展开的正文：就是一页纸，**不加左侧色块、不加背景**（用户明确不要） */
 .j-body-wrap {
-  position: relative;
-  margin: 0 0 10px;
-  padding: 2px 10px 10px 11px;
-  border-left: 2px solid color-mix(in srgb, var(--blue) 45%, transparent);
-  border-radius: 0 8px 8px 0;
-  background: color-mix(in srgb, var(--panel-2) 45%, transparent);
+  padding: 0 4px 12px 6px;
 }
 .j-body {
   margin: 0 0 8px;
@@ -721,6 +733,11 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-ai.on {
   opacity: 0.6;
 }
+.j-ai.j-undo {
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--border);
+}
 .j-ai:disabled {
   cursor: default;
 }
@@ -777,6 +794,15 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 .j-add {
   margin-bottom: 8px;
+}
+/* 币种选择框矮一档（用户 2026-10-18：「选择框高度短一点」） */
+.j-add :deep(.combo-box input) {
+  padding-top: 5px;
+  padding-bottom: 5px;
+  font-size: 12.5px;
+}
+.j-add :deep(.combo-box) {
+  min-height: 0;
 }
 .j-coin-row {
   display: flex;

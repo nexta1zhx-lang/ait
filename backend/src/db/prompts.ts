@@ -11,11 +11,11 @@
  */
 import {query, queryOne} from './client'
 
-export type DocKind = 'role' | 'rule' | 'extract' | 'predict'
+export type DocKind = 'role' | 'rule' | 'extract' | 'predict' | 'polish'
 
-/** 把数据库里读回来的 kind 收敛成四种之一（认不出的当规则正文） */
+/** 把数据库里读回来的 kind 收敛成已知的几种之一（认不出的当规则正文） */
 function asKind(v: unknown): DocKind {
-  return v === 'role' || v === 'extract' || v === 'predict'
+  return v === 'role' || v === 'extract' || v === 'predict' || v === 'polish'
     ? (v as DocKind)
     : 'rule'
 }
@@ -233,14 +233,46 @@ export async function restoreVersion(versionId: number): Promise<AiDoc | null> {
 /**
  * 拼 prompt 要用的：**启用的**文档，按 kind 分组拼好。
  *
- * role → 角色设定（开单分析）；rule → 规则正文；extract → 知识库提炼。
- * 返回的顺序就是拼接顺序。三块互不干扰，各自拼各自的。
+ * role → 角色设定（开单分析）；rule → 规则正文；extract → 知识库提炼；
+ * predict → 分析预测；polish → 日记润色。
+ * 返回的顺序就是拼接顺序。几块互不干扰，各自拼各自的。
  */
+/**
+ * **日记润色**的默认提示词（用户 2026-10-18：「提示词放在数据库中，写的间距小一点，
+ * 可以加符号」）。
+ *
+ * 库里一份都没有时种这一份进去 —— 之后就在「我的 → AI 提示词」里改，代码不再兜底。
+ * ⚠️ 写紧凑一点（一行一条，不要空行隔开），在提示词页面里一眼能看完。
+ */
+export const DEFAULT_POLISH_PROMPT = `你是中文交易日记的编辑，只做写法上的整理，不改事实。
+必须遵守：
+1. 事实原样保留：币种、时间、价格、数量、盈亏、方向、情绪，一个字都不改；用户没写的数字绝不编。
+2. 不加交易建议、不加评价、不灌鸡汤，不替用户下结论。
+3. 不要前言后语（不写「好的」「以下是整理后的版本」），直接输出整理后的正文。
+4. 口语化、短句，像人在本子上写；可以分段，可以用 \`-\` 或 \`1.\` 列表。
+5. 允许用符号帮助阅读：✅ ❌ ⚠️ ⬆ ⬇ 🔴 🟢 之类都可以，但别堆砌，一条一个就够。
+6. 篇幅跟原文相当，最多 1.6 倍；原文只有一两句就保持一两句。
+7. 用 Markdown（加粗、列表、空行分段），不要代码块，不要 # 标题。`
+
+/** 没有「日记润色」提示词时种一份默认的（只种一次） */
+export async function ensurePolishDoc(): Promise<void> {
+  try {
+    const row = await queryOne<{n: string}>(
+      `SELECT count(*)::text AS n FROM ai_docs WHERE kind = 'polish'`
+    )
+    if (Number(row?.n ?? 0) > 0) return
+    await createDoc({kind: 'polish', name: '日记润色', content: DEFAULT_POLISH_PROMPT})
+  } catch {
+    /* 种不进去不影响主流程：润色那条路会拿到空提示词，`polishText` 会报错让人去写 */
+  }
+}
+
 export async function getEnabledDocs(): Promise<{
   role: AiDoc[]
   rule: AiDoc[]
   extract: AiDoc[]
   predict: AiDoc[]
+  polish: AiDoc[]
   updatedAt: string | null
 }> {
   const rows = await query<DocRow>(
@@ -257,6 +289,7 @@ export async function getEnabledDocs(): Promise<{
     rule: pick('rule'),
     extract: pick('extract'),
     predict: pick('predict'),
+    polish: pick('polish'),
     updatedAt: times.length ? times[times.length - 1] : null
   }
 }

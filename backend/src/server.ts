@@ -12,13 +12,14 @@ import {
   loadContracts
 } from './contracts'
 import {marketCapRanks, rankOf, refreshMarketCapRanks} from './data/marketcap'
-import {fullSystem, loadExtractRules, loadRules} from './rules'
+import {fullSystem, loadExtractRules, loadPolishRules, loadRules} from './rules'
 import {buildSystemPrompt} from './llm/prompt'
 import {buildExtractPrompt} from './llm/extract'
 import {ensureTonePresets, TONE_PRESETS} from './llm/tone-presets'
 import {
   createDoc,
   deleteDoc,
+  ensurePolishDoc,
   getVersion,
   listDocs,
   listVersions,
@@ -2479,7 +2480,7 @@ async function streamCollect(
 
 /** 提示词文档类型（认不出的返回 null，由调用方决定默认值） */
 const asDocKind = (v: unknown): DocKind | null =>
-  v === 'predict' || v === 'extract' || v === 'role' || v === 'rule'
+  v === 'predict' || v === 'extract' || v === 'role' || v === 'rule' || v === 'polish'
     ? (v as DocKind)
     : null
 
@@ -3863,7 +3864,9 @@ async function route(
     try {
       const resolved = await resolveUserLlm(me.id)
       const config = loadConfig({llm: resolved.llm})
-      const r = await polishText(text, config)
+      await ensurePolishDoc()
+      const prompt = await loadPolishRules()
+      const r = await polishText(text, config, prompt.system)
       await recordUsage({
         userId: me.id,
         llmKeyId: resolved.keyId,
