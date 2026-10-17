@@ -102,13 +102,24 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/*
+ * 二级 tab 这套**照抄「我的 → 管理 / 模型配置」那排**
+ * （`AdminView` 的 `.adm-tabs` / `ModelPaneView` 的 `.model-tabs`）：
+ * 一条横胶囊轨道（细描边 + 暖灰渐变底），选中那颗是淡琥珀渐变胶囊。
+ * 用户 2026-10-18：「改为像我的那样的一级和二级」。
+ *
+ * 区别只有一个：这里的选中胶囊是**滑过去**的（`--seg-i` 那套量法在后面）。
+ */
 .slide-tabs {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
+  align-self: flex-start;
+  padding: 3px;
   max-width: 100%;
-  /* 窄屏挤不下时自己横着滚，不把页面撑破 */
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: linear-gradient(120deg, rgb(19, 19, 21), rgb(18, 15, 13));
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -118,16 +129,23 @@ onBeforeUnmount(() => {
 }
 
 /*
- * 细滑条：贴在格子底部的一小段（2px），宽度跟着选中的文字走。
- * 位置和宽度由 JS 量出来给（见上面 `measure` / `bar`）。
+ * 滑块：跟 `.adm-tabs button.active` 同一份渐变 + 内描边。
+ * 位置和宽度由 JS 量出来给（见上面 `measure` / `bar`）；
+ * `left: 0` + `translateX(offsetLeft)` —— `offsetLeft` 已经含轨道那 3px 内边距。
  */
 .st-bar {
   position: absolute;
-  bottom: 0;
+  top: 3px;
+  bottom: 3px;
   left: 0;
-  height: 2px;
   border-radius: 999px;
-  background: var(--accent);
+  background: linear-gradient(
+    112deg,
+    rgba(255, 217, 158, 0.25) 0%,
+    rgba(255, 193, 107, 0.15) 52%,
+    rgba(243, 154, 63, 0.09) 100%
+  );
+  box-shadow: inset 0 0 0 1px rgba(255, 193, 107, 0.12);
   opacity: 0;
   transition:
     transform 0.24s cubic-bezier(0.4, 0.1, 0.2, 1),
@@ -146,46 +164,39 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 32px;
+  gap: 5px;
+  min-height: 30px;
   min-width: 0;
-  padding: 0 8px;
+  padding: 0 12px;
   border: 0;
-  border-radius: 0;
+  border-radius: 999px;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 400;
   white-space: nowrap;
   transition: color 0.18s ease;
 }
 
-/*
- * 手机 13px（一级那排 16px）—— 二级永远比一级小一号，主次才立得住；
- * 字重固定 400、选中只换颜色，不给底色块，免得跟一级抢。
- */
-@media (max-width: 900px) {
-  .slide-tabs button {
-    font-size: 13px;
-  }
-}
-
 .slide-tabs button.on {
-  color: var(--accent);
+  color: #ffd291;
 }
 
-/* 计数：就是一个淡数字，不画框 */
+/* 计数：跟 `.tag` 一个意思，但更淡（选中时贴近滑块那档琥珀） */
 .st-badge {
   font-size: 10px;
   font-weight: 400;
   line-height: 1;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   color: var(--muted);
-  opacity: 0.75;
   font-variant-numeric: tabular-nums;
 }
 
 .slide-tabs button.on .st-badge {
-  color: inherit;
-  opacity: 0.85;
+  color: #ffd291;
+  border-color: rgba(255, 193, 107, 0.22);
+  background: rgba(255, 193, 107, 0.08);
 }
 </style>
