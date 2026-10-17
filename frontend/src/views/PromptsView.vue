@@ -403,7 +403,7 @@ async function openPreview() {
   <div class="prompts" :class="`v-${view}`">
     <!-- ── 左：清单（点一条，右边就显示它） ── -->
     <section class="panel list">
-      <h2>AI 提示词 <span class="tag">分析预测 + 知识库提炼</span></h2>
+      <h2>AI 提示词 <span class="tag">分析预测 + 知识库提炼 + 日记润色</span></h2>
 
       <p class="hint">
         分析时读的就是<b>分析预测</b>那一份（打勾才生效；有多份时按顺序拼起来）。
