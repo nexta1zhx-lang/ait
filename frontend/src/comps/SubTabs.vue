@@ -71,9 +71,13 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
   transition: color 0.16s ease;
 }
 
-/* 选中：**只换字体颜色**（用户 2026-10-18：「只要字体，不要背景」） */
+/*
+ * 选中：**只换字体颜色**（用户 2026-10-18：「只要字体，不要背景」）。
+ * 亮度压到 `--accent` 之下一点（用户同一天：「选中太亮了」）：
+ * 比未选中的 `--muted` 亮、但不再发光，靠字重 + 色相区分。
+ */
 .sub-tabs button.on {
-  color: var(--accent);
+  color: #b8894f;
   font-weight: var(--fw-mid);
 }
 
