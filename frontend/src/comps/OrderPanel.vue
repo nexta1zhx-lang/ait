@@ -685,8 +685,14 @@ const curNotionalText = computed(() =>
   curNotional.value > 0 ? fmt(curNotional.value, 2) : '—'
 )
 
-/** 面板中间那个**大数字**：还能开多少（开满时就是 `0.00`，用户要的就是这个） */
+/** 还能开多少（开满时就是 `0.00`，用户要的就是这个）—— 现在是下面那行**小字** */
 const roomText = computed(() => fmt(Math.max(0, roomNotional.value), 2))
+
+/**
+ * 面板中间那个**大数字**：**仓位价值** = 可开 × 开仓百分比，滑条一动就跟着变
+ * （用户 2026-10-18：「原有的改为仓位价值根据开仓百分比实时计算」）。
+ */
+const posValueText = computed(() => fmt(Math.max(0, orderNotional.value), 2))
 
 /**
  * 大数字那行的字号 —— 按**字符数**往下缩。
@@ -696,8 +702,8 @@ const roomText = computed(() => fmt(Math.max(0, roomNotional.value), 2))
  * 所以 6 个字符以内维持 19px（`96.76` / `470.00` 这些日常值一点没变），
  * 再长就 17 / 15 / 13 一路缩下去（单位 `USDT` 跟着 `em` 一起缩）。
  */
-const roomFont = computed(() => {
-  const n = roomText.value.length
+const posValueFont = computed(() => {
+  const n = posValueText.value.length
   if (n <= 6) return 19
   if (n <= 8) return 17
   if (n <= 10) return 15
@@ -1660,11 +1666,14 @@ onMounted(async () => {
             不再左右分列、也没有那条竖线。
           -->
           <div class="ord-quota-main">
-            <!-- 用户 2026-10-14：「价值那一行…加上文字，**当前可开价值**」 -->
-            <span class="ord-quota-lb">当前可开价值</span>
+            <!--
+              大号数字改叫**仓位价值**（用户 2026-10-18：「原有的改为仓位价值根据开仓
+              百分比实时计算」）—— 它跟着滑条实时变，原来那个「还能开多少」挪到下面小字。
+            -->
+            <span class="ord-quota-lb">仓位价值</span>
             <span class="ord-quota-row">
-              <b class="ord-quota-num" :style="{fontSize: roomFont + 'px'}"
-                >{{ roomText }}<i>USDT</i></b
+              <b class="ord-quota-num" :style="{fontSize: posValueFont + 'px'}"
+                >{{ posValueText }}<i>USDT</i></b
               >
               <!--
                 快捷比例放在**可开价值后面**（用户 2026-10-18：「原有的百分比不动，
@@ -1689,46 +1698,57 @@ onMounted(async () => {
             </span>
           </div>
 
-            <!--
-              数量当**一行小字**贴在价值下面（用户 2026-10-14：「数量不用单独一个，
-              用小字放在下面就行」）—— 它是这一单「买多少」，跟着价值看最顺。
-            -->
-            <span class="ord-quota-sub"
-              >数量 <b>{{ quantityText }}</b
-              ><i v-if="quantityText !== '—'">{{ base }}</i></span
-            >
-
           <!--
-            **所需保证金 / 账户可用** —— 2026-10-18 用户：「所需和账户可用放在快捷选择
-            下面」→「靠右侧显示」→「标题文字横向显示」→「**两行，整体布局协调一点**」：
-            现在是**两行**，每行「标签在左、数值在右」占满整卡宽，跟上面的行对齐。
+            底下这一行分两栏（用户 2026-10-18：「**所需和账户可用放在右侧**」）：
+            左边是「数量 + 当前可开价值（小字）」，右边是「所需保证金 / 账户可用」两行。
             高度**不随数值变**（用户 2026-10-05：「下单区域高度固定」，K 线不能被顶来顶去）。
             ⚠️ 报错**不放这儿**（用户：「报错不占用内容」）—— 真正的原因都在点下单时弹提示。
           -->
-          <div class="ord-read">
-            <!-- 用户 2026-10-14：「占用改为**所需保证金**」 -->
-            <span class="ord-r"
-              ><em>所需保证金</em
-              ><b>{{ marginText }}<i>USDT</i></b></span
-            >
-            <!--
-              可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast）。
-              真读到 0 的时候**标红 + 带一句怎么办**（用户 2026-10-05：「我怎么开仓位」——
-              默认那套 Key 的钱在现货/资金钱包，合约里是 0，光看「可用 0 USDT」不知道下一步）。
-            -->
-            <span
-              class="ord-r"
-              :title="
-                ready && available <= 0
-                  ? '合约账户没有可用余额 —— 先去「我的 → 交易所账户 → 划转」把 USDT 划到合约钱包，或在「配置 → 下单账户」换一套 Key'
-                  : undefined
-              "
-            >
-              <em>账户可用</em>
-              <b :class="{empty: ready && available <= 0}"
-                >{{ availableText }}<i>USDT</i></b
+          <div class="ord-quota-foot">
+            <div class="ord-quota-left">
+              <!--
+                数量当**一行小字**贴在价值下面（用户 2026-10-14：「数量不用单独一个，
+                用小字放在下面就行」）—— 它是这一单「买多少」，跟着价值看最顺。
+              -->
+              <span class="ord-quota-sub"
+                >数量 <b>{{ quantityText }}</b
+                ><i v-if="quantityText !== '—'">{{ base }}</i></span
               >
-            </span>
+              <!--
+                「还能开多少」从大号数字降成小字（用户 2026-10-18：「当前可开放在下面
+                小字写」）—— 它是个上限，瞄一眼就够，主角让给跟着滑条动的仓位价值。
+              -->
+              <span class="ord-quota-cap" :title="`可用额度上限：${roomText} USDT`"
+                >当前可开价值 <b>{{ roomText }}</b
+                ><i>USDT</i></span
+              >
+            </div>
+
+            <div class="ord-read">
+              <!-- 用户 2026-10-14：「占用改为**所需保证金**」 -->
+              <span class="ord-r"
+                ><em>所需保证金</em
+                ><b>{{ marginText }}<i>USDT</i></b></span
+              >
+              <!--
+                可用余额：读不到时是「—」（显示 0 会让人以为账户真没钱，原因走 toast）。
+                真读到 0 的时候**标红 + 带一句怎么办**（用户 2026-10-05：「我怎么开仓位」——
+                默认那套 Key 的钱在现货/资金钱包，合约里是 0，光看「可用 0 USDT」不知道下一步）。
+              -->
+              <span
+                class="ord-r"
+                :title="
+                  ready && available <= 0
+                    ? '合约账户没有可用余额 —— 先去「我的 → 交易所账户 → 划转」把 USDT 划到合约钱包，或在「配置 → 下单账户」换一套 Key'
+                    : undefined
+                "
+              >
+                <em>账户可用</em>
+                <b :class="{empty: ready && available <= 0}"
+                  >{{ availableText }}<i>USDT</i></b
+                >
+              </span>
+            </div>
           </div>
 
 

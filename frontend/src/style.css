@@ -5780,7 +5780,52 @@ body.fixed-viewport .split {
   color: var(--muted);
 }
 
-/* 「当前可开价值」那行小字（用户 2026-10-14：「价值那一行…加上文字」） */
+/*
+ * 底部那一行分两栏（用户 2026-10-18：「**所需和账户可用放在右侧**」）：
+ * 左边「数量 + 当前可开价值」（竖着两行小字），右边「所需保证金 / 账户可用」两行。
+ * ⚠️ `flex-start` 对齐：左边两行小字比右边两行矮，顶端齐平才不显得歪。
+ */
+.ord-quota-foot {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 3px;
+}
+
+/* 左栏：数量 / 当前可开价值（都要能在窄屏上缩，缩了就省略号） */
+.ord-quota-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 「当前可开价值」那行小字（用户 2026-10-18：「当前可开放在下面小字写」） */
+.ord-quota-cap {
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ord-quota-cap b {
+  margin-left: 2px;
+  font-family: var(--mono);
+  font-weight: var(--fw-mid);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ord-quota-cap i {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+/* 大号数字上面那个标签：现在是「仓位价值」（跟着滑条实时变的就是它） */
 .ord-quota-lb {
   display: block;
   margin-bottom: 0;
@@ -5905,7 +5950,7 @@ body.fixed-viewport .split {
 
 .ord-quota-num {
   display: block;
-  /* 长度由模板按字符数给（`roomFont`）：长数字缩一档，别顶穿右边那条分隔线 */
+  /* 长度由模板按字符数给（`posValueFont`）：长数字缩一档，别顶穿右边那条分隔线 */
   font-family: var(--mono);
   white-space: nowrap;
   font-size: 19px;
@@ -5927,24 +5972,19 @@ body.fixed-viewport .split {
 }
 
 /*
- * 底下三格：保证金 / 数量 / 可用。
- * ★ 等宽三等分的小卡片（用户 2026-10-05：「下单区域高度固定」）：
- *   数字等宽 + `tabular-nums`，格子按 `1fr` 平分 ⇒ 数值怎么变、
- *   有没有「—」，这一块高度都一样，上面的 K 线不会被挤上挤下。
+ * **所需保证金 / 账户可用** 两行 —— 摆在底部那一行的**右栏**（用户 2026-10-18：
+ * 「所需和账户可用放在**右侧**」）。
+ * ★ 宽度由内容撑开（`flex: 0 1 auto`）+ 行内 `space-between` ⇒ 两行标签左对齐、
+ *   数值右对齐，两行的数值右边界自然对齐，看着像一张小表。
+ * ★ 数字等宽 + `tabular-nums`（用户 2026-10-05：「下单区域高度固定」）：
+ *   数值怎么变、有没有「—」，这块高度都一样，上面的 K 线不会被挤上挤下。
  */
 .ord-read {
-  /*
-   * 2026-10-18 用户：「**两行，整体布局协调一点**」——
-   * 从「两列并排」改成**上下两行**，每行占满整卡宽（标签在左、数值在右）。
-   */
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /*
-   * 2026-10-18 用户：「所需和账户可用放在**快捷选择下面**」⇒ 这块挪进了
-   * 「当前可开价值」那张卡里（不再是卡外单独一行）：上边留一行间隔、去掉外边距。
-   */
-  margin: 4px 0 0;
+  margin: 0;
 }
 
 .ord-read .ord-r {
