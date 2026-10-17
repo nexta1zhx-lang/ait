@@ -34,6 +34,8 @@ interface Stored {
   autoStopPct?: number
   /** 用户画的线（水平线 / 趋势线 / 矩形）显不显示。缺省 = 显示 */
   chartShowDraw?: boolean
+  /** 吸铁石：画线时吸附到 K 线的开高低收。缺省 = 关 */
+  chartDrawSnap?: boolean
   /** 订单设置（2026-10-06）：这四样画不画在 K 线上。缺省 = 都画 */
   chartShowPosition?: boolean
   chartShowHistory?: boolean
@@ -62,6 +64,7 @@ function read(): Stored {
         autoStopOn: v.autoStopOn !== false,
         autoStopPct: Number.isFinite(v.autoStopPct) ? Number(v.autoStopPct) : undefined,
         chartShowDraw: v.chartShowDraw !== false,
+        chartDrawSnap: v.chartDrawSnap === true,
         chartShowPosition: v.chartShowPosition !== false,
         chartShowHistory: v.chartShowHistory !== false,
         chartShowOrders: v.chartShowOrders !== false,
@@ -250,6 +253,12 @@ export function autoStopOf(): number {
  */
 export const chartShowDraw = ref(saved.chartShowDraw !== false)
 
+/**
+ * 吸铁石（用户 2026-10-17：「加个吸铁石」）—— 画线时价吸附到那根 K 线的**开高低收**，
+ * 时间吸附到那根的中心。画支撑压力线时不用跟小数位较劲。
+ */
+export const chartDrawSnap = ref(saved.chartDrawSnap === true)
+
 export const chartShowPosition = ref(saved.chartShowPosition !== false)
 export const chartShowLiq = ref(saved.chartShowLiq !== false)
 export const chartShowOrders = ref(saved.chartShowOrders !== false)
@@ -309,6 +318,7 @@ watch(
     autoStopOn,
     autoStopPct,
     chartShowDraw,
+    chartDrawSnap,
     chartShowPosition,
     chartShowLiq,
     chartShowOrders,
@@ -329,6 +339,7 @@ watch(
           autoStopOn: autoStopOn.value,
           autoStopPct: autoStopPct.value,
           chartShowDraw: chartShowDraw.value,
+          chartDrawSnap: chartDrawSnap.value,
           chartShowPosition: chartShowPosition.value,
           chartShowLiq: chartShowLiq.value,
           chartShowOrders: chartShowOrders.value,

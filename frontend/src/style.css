@@ -4422,7 +4422,8 @@ body.fixed-viewport .split {
 .draw-top {
   position: absolute;
   top: 4px;
-  right: 4px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 6;
   display: flex;
   align-items: center;
@@ -4507,35 +4508,32 @@ body.fixed-viewport .split {
 }
 
 /*
- * 点中一条线之后的面板：颜色一排 + 提醒 / 删除。
- * `translate(-50%, 10px)` 让手指点的地方落在面板**上边中间**，不被自己挡住。
+ * 点中一条线之后的面板：**一行到底、全是图标**（用户 2026-10-17：
+ * 「点击线 上下换图标」「删除只保留图标，一行显示」）。
+ * `translate(-50%, 10px)` 让手指点的地方落在面板上边中间，不被自己挡住。
  */
 .draw-pop {
   position: absolute;
   z-index: 8;
   transform: translate(-50%, 10px);
   display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 148px;
-  padding: 7px;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 7px;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: rgba(12, 16, 22, 0.95);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
 }
 
-/* 自定义颜色那一格：原生取色器藏在圆点后面（点圆点就开系统取色盘） */
-.draw-pop .dp-colors {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
+/* 颜色圆点（自定义那个是「藏起来的原生取色器 + 彩虹底」） */
 .draw-pop .dp-swatch {
   position: relative;
   width: 18px;
   height: 18px;
   padding: 0;
+  flex: none;
   border-radius: 50%;
   border: 2px solid transparent;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
@@ -4557,42 +4555,39 @@ body.fixed-viewport .split {
   cursor: pointer;
 }
 
-.draw-pop .dp-row {
-  display: flex;
-  gap: 4px;
-}
-.draw-pop button {
+/* 面板里的动作按钮：只有图标 */
+.draw-pop .dp-ico {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  flex: none;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
-  font-size: 12px;
-  text-align: left;
+  justify-content: center;
   border: none;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
-  white-space: nowrap;
 }
-.draw-pop button svg {
-  width: 14px;
-  height: 14px;
-  flex: none;
+.draw-pop .dp-ico svg {
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.6;
+  stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-/* 「取消提醒」那颗：已经在盯了，用蓝色（跟线上的铃铛同一个语义） */
-.draw-pop button.dp-on {
+/* 取消提醒那颗：已经在盯了，用蓝色（跟线上的铃铛同一个语义） */
+.draw-pop .dp-ico.on {
   color: var(--blue);
+  background: var(--blue-soft);
 }
-.draw-pop button.dp-del {
+.draw-pop .dp-ico.del {
   color: var(--bad);
 }
 @media (hover: hover) {
-  .draw-pop button:hover {
+  .draw-pop .dp-ico:hover {
     background: var(--panel-2);
   }
 }

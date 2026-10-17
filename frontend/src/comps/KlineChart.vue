@@ -23,6 +23,7 @@ import {emptyLevels, nearestLevels, type Levels} from '../levels'
 import {freshLivePrice, livePrice, setLivePrice} from '../ticker'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
+  chartDrawSnap,
   chartShowDraw,
   chartShowHistory,
   chartShowLiq,
@@ -3666,6 +3667,8 @@ const draft = ref<{kind: 'hline' | 'trend' | 'rect'; a: DrawPoint; b: DrawPoint}
 /** 正在拖的那条（按住线 ⇒ 整条挪：横线改价，斜线/方块两点一起挪） */
 const dragging = ref<{
   id: string
+  /** `move` = 整条挪；`a` / `b` = 拖某一头（趋势线 / 矩形的端点，改方向） */
+  mode: 'move' | 'a' | 'b'
   from: DrawPoint
   /** 落指那一下的屏幕坐标（判断「拖」还是「点」按像素算，不按价） */
   x0: number
@@ -3899,7 +3902,12 @@ async function cancelAlertFor(id: string): Promise<void> {
   showToast('提醒已取消')
 }
 
-/** 指针位置 → 图上的（时间, 价）；落在坐标轴 / 图外给 null */
+/**
+ * 指针位置 → 图上的（时间, 价）；落在坐标轴 / 图外给 null。
+ *
+ * **吸铁石**（用户 2026-10-17「加个吸铁石」）开着时：价吸到那根 K 线的开高低收里
+ * 最近的一个、时间吸到那根的中心 —— 画支撑压力线不用跟小数位较劲。
+ */
 function pointAt(e: {clientX: number; clientY: number}): DrawPoint | null {
   if (!refs || !chartEl.value) return null
   const r = chartEl.value.getBoundingClientRect()
@@ -3907,10 +3915,53 @@ function pointAt(e: {clientX: number; clientY: number}): DrawPoint | null {
   const y = e.clientY - r.top
   const pane = refs.chart.paneSize?.() ?? {width: r.width, height: r.height}
   if (x < 0 || y < 0 || x > pane.width || y > pane.height) return null
-  const p = Number(refs.candle.coordinateToPrice(y))
-  const t = Number(refs.chart.timeScale().coordinateToTime(x))
-  if (!Number.isFinite(p) || !Number.isFinite(t)) return null
+  let p = Number(refs.candle.coordinateToPrice(y))
+  let t = Number(refs.chart.timeScale().coordinateToTime(x))
+  /* ⚠️ `t <= 0` 是「那一列还没有 K 线」（库在数据右边缘外会给 0）—— 拿它画出来的线
+     会落到 1970 年被画出可视区，看着像「线凭空消失」 */
+  if (!Number.isFinite(p) || !Number.isFinite(t) || t <= 0) return null
+  if (chartDrawSnap.value && candles.length) {
+    const i = xToIndex(x)
+    const bar = candles[i]
+    if (bar) {
+      const best = [bar.open, bar.high, bar.low, bar.close].reduce((a, b) =>
+        Math.abs(b - p) < Math.abs(a - p) ? b : a
+      )
+      p = best
+      t = Math.floor(bar.timestamp / 1000)
+    }
+  }
   return {t, p}
+}
+
+/** 选中的那条线两头那两个把手在屏幕上的位置（趋势线 / 矩形才有） */
+function handlesOf(id: string): {mode: 'a' | 'b'; x: number; y: number}[] {
+  const d = drawings.value.find(x => x.id === id)
+  if (!refs || !d || d.kind === 'hline' || !d.a || !d.b) return []
+  const out: {mode: 'a' | 'b'; x: number; y: number}[] = []
+  for (const mode of ['a', 'b'] as const) {
+    const pt = d[mode]!
+    const x = refs.chart.timeScale().timeToCoordinate(pt.t)
+    const y = refs.candle.priceToCoordinate(pt.p)
+    if (x === null || y === null || !Number.isFinite(Number(x)) || !Number.isFinite(Number(y)))
+      continue
+    out.push({mode, x: Number(x), y: Number(y)})
+  }
+  return out
+}
+
+/** 点到选中那条线的把手了吗（点中就能拖这一头，改方向 / 角度） */
+function hitHandle(e: {clientX: number; clientY: number}): 'a' | 'b' | null {
+  if (!drawSelected.value || !chartEl.value) return null
+  const r = chartEl.value.getBoundingClientRect()
+  const x = e.clientX - r.left
+  const y = e.clientY - r.top
+  let best: {mode: 'a' | 'b'; d: number} | null = null
+  for (const h of handlesOf(drawSelected.value)) {
+    const d = Math.hypot(h.x - x, h.y - y)
+    if (d <= 12 && (!best || d < best.d)) best = {mode: h.mode, d}
+  }
+  return best?.mode ?? null
 }
 
 /** 指针落在哪条线上（只有编辑模式会问） */
@@ -3948,13 +3999,18 @@ function shifted(d: DrawingItem, dt: number, dp: number): DrawingItem {
 function onDrawDown(e: PointerEvent): void {
   const p = pointAt(e)
   if (!p) return
-  ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+  /* 有的环境（合成事件 / 老 WebView）没有这个指针，捕获会抛 —— 抛了也别把这一次画线带没 */
+  try {
+    ;(e.currentTarget as HTMLElement | null)?.setPointerCapture?.(e.pointerId)
+  } catch {
+    /* 不要捕获也行：后面照样收 pointermove */
+  }
   if (drawTool.value) {
     draft.value = {kind: drawTool.value, a: p, b: p}
     renderDrawings()
     return
   }
-  /* 没拿工具 = 编辑：按住线才拖，点一下只是选中 */
+  /* 没拿工具 = 编辑：先看是不是按住**选中线的某一头**（改方向），否则整条挪 */
   const id = hitAt(e)
   if (!id) {
     closeLineMenu()
@@ -3962,8 +4018,10 @@ function onDrawDown(e: PointerEvent): void {
   }
   const orig = drawings.value.find(d => d.id === id)
   if (!orig) return
+  const handle = id === drawSelected.value ? hitHandle(e) : null
   dragging.value = {
     id,
+    mode: handle ?? 'move',
     from: p,
     x0: e.clientX,
     y0: e.clientY,
@@ -3992,7 +4050,10 @@ function onDrawMove(e: PointerEvent): void {
     lineMenu.value = null
     drawSelected.value = g.id
   }
-  const next = shifted(g.orig, p.t - g.from.t, p.p - g.from.p)
+  const next =
+    g.mode === 'move'
+      ? shifted(g.orig, p.t - g.from.t, p.p - g.from.p)
+      : {...g.orig, [g.mode]: {t: p.t, p: p.p}}
   drawings.value = drawings.value.map(x => (x.id === g.id ? next : x))
   renderDrawings()
 }
@@ -4026,6 +4087,8 @@ function onDrawUp(e: PointerEvent): void {
     scheduleSaveDrawings()
     return
   }
+  /* 点的是把手又没拖动：什么都不做（别把面板弹出来挡住那头） */
+  if (g.mode !== 'move') return
   /* 没动 = 点了一下：选中它，弹出颜色 / 提醒 / 删除 */
   const r = chartEl.value?.getBoundingClientRect()
   const item = drawings.value.find(d => d.id === g.id)
@@ -4223,7 +4286,7 @@ onBeforeUnmount(() => {
 
       <!--
         编辑模式下的那排工具（用户 2026-10-17：「点击编辑，划线的一排放在 k 线区域的顶部，
-        不占位置」）—— 所以它是**浮在图里的**（绝对定位，靠右上角；左上那行是开高低收的图例）。
+        不占位置」→「划线一排居中显示」）—— **浮在图里、水平居中**。
         只有图标（用户：「划线的线用图标表示」），认不出来就看 title / aria-label。
       -->
       <div v-if="drawEdit" class="draw-top">
@@ -4267,6 +4330,20 @@ onBeforeUnmount(() => {
             <rect x="4" y="7" width="16" height="10" rx="1.5" />
           </svg>
         </button>
+        <!-- 吸铁石（用户 2026-10-17：「加个吸铁石」）：开着的线吸到开高低收 -->
+        <button
+          type="button"
+          class="dt-ico"
+          :class="{active: chartDrawSnap}"
+          :title="chartDrawSnap ? '吸铁石：开着 —— 线吸到 K 线的开高低收' : '吸铁石：关着 —— 想吸附就点开'"
+          aria-label="吸铁石"
+          @click="chartDrawSnap = !chartDrawSnap"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 4v8a6 6 0 0 0 12 0V4" />
+            <path d="M6 8h4M14 8h4" />
+          </svg>
+        </button>
         <span class="draw-sep" />
         <button
           type="button"
@@ -4299,57 +4376,90 @@ onBeforeUnmount(() => {
         点中一条线之后的面板：颜色 + 提醒（挂着就是「取消」）+ 删除。
         位置跟着点击处走（`translate(-50%, 10px)` 让面板落在手指下面）。
       -->
+      <!--
+        点中一条线之后的面板：**一行到底，全是图标**（用户 2026-10-17
+        「点击线 上下换图标」「删除只保留图标，一行显示」）——
+        颜色 / 上穿提醒 / 下穿提醒（已经挂着就变成取消）/ 删除这条线。
+      -->
       <div
         v-if="lineMenu && menuItem"
         class="draw-pop"
         :style="{left: lineMenu.x + 'px', top: lineMenu.y + 'px'}"
       >
-        <div class="dp-colors">
-          <button
-            v-for="c in DRAW_COLORS"
-            :key="c"
-            type="button"
-            class="dp-swatch"
-            :class="{sel: colorOf(menuItem) === c}"
-            :style="{background: c}"
-            :title="`用这个颜色 ${c}`"
-            @click="setLineColor(menuItem.id, c)"
+        <button
+          v-for="c in DRAW_COLORS"
+          :key="c"
+          type="button"
+          class="dp-swatch"
+          :class="{sel: colorOf(menuItem) === c}"
+          :style="{background: c}"
+          :title="`用这个颜色 ${c}`"
+          @click="setLineColor(menuItem.id, c)"
+        />
+        <label class="dp-swatch dp-custom" title="自定义颜色">
+          <input
+            type="color"
+            :value="colorOf(menuItem)"
+            @input="setLineColor(menuItem.id, ($event.target as HTMLInputElement).value)"
           />
-          <label class="dp-swatch dp-custom" title="自定义颜色">
-            <input
-              type="color"
-              :value="colorOf(menuItem)"
-              @input="setLineColor(menuItem.id, ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-        </div>
+        </label>
+        <span class="draw-sep" />
 
-        <div class="dp-row">
-          <template v-if="menuItem.alertId === undefined">
-            <button type="button" @click="addAlertFor(menuItem.id, lineMenu.price, 'above')">
-              上穿提醒
-            </button>
-            <button type="button" @click="addAlertFor(menuItem.id, lineMenu.price, 'below')">
-              下穿提醒
-            </button>
-          </template>
-          <!-- 已经有提醒 ⇒ 同一个位置变成「取消」（用户 2026-10-17：「点击就取消」） -->
-          <button v-else type="button" class="dp-on" @click="cancelAlertFor(menuItem.id)">
+        <!-- 没提醒：上穿 / 下穿两颗箭头；已经有提醒：同一格变成「取消」 -->
+        <template v-if="menuItem.alertId === undefined">
+          <button
+            type="button"
+            class="dp-ico"
+            title="上穿提醒（价格涨过这条线时叫我）"
+            aria-label="上穿提醒"
+            @click="addAlertFor(menuItem.id, lineMenu.price, 'above')"
+          >
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M6 16V11a6 6 0 0 1 12 0v5l1.6 2H4.4L6 16Z" />
-              <path d="M10 20.5h4" />
+              <path d="M12 19V5" />
+              <path d="M6 11l6-6 6 6" />
             </svg>
-            取消提醒
           </button>
-        </div>
+          <button
+            type="button"
+            class="dp-ico"
+            title="下穿提醒（价格跌破这条线时叫我）"
+            aria-label="下穿提醒"
+            @click="addAlertFor(menuItem.id, lineMenu.price, 'below')"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14" />
+              <path d="M6 13l6 6 6-6" />
+            </svg>
+          </button>
+        </template>
+        <button
+          v-else
+          type="button"
+          class="dp-ico on"
+          title="已经挂着提醒 —— 点一下取消"
+          aria-label="取消提醒"
+          @click="cancelAlertFor(menuItem.id)"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 16V11a6 6 0 0 1 12 0v5l1.6 2H4.4L6 16Z" />
+            <path d="M10 20.5h4" />
+            <path d="M3 3l18 18" />
+          </svg>
+        </button>
 
-        <button type="button" class="dp-del" @click="removeDrawing(menuItem.id)">
+        <button
+          type="button"
+          class="dp-ico del"
+          title="删除这条线"
+          aria-label="删除这条线"
+          @click="removeDrawing(menuItem.id)"
+        >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 7h16M9.5 7V4.8h5V7M6.5 7l.9 13h9.2l.9-13" />
           </svg>
-          删除这条线
         </button>
       </div>
+
       <!--
         换币 / 换周期的指示灯：三颗灯一颗一颗亮过去（`style.css` 的 `.kl-dots`）。
         以前是整块变淡，用户觉得像蒙了层遮罩 —— 现在只加这一条灯带。

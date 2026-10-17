@@ -157,16 +157,24 @@ export function createDrawings(): DrawingsApi {
             ctx.moveTo(x1, y1)
             ctx.lineTo(x2, y2)
             ctx.stroke()
-            /* 两个端点各一个小圈：拖完看得出来线头在哪 */
+            /*
+             * 选中时两头各一个小把手（用户 2026-10-17：「点击趋势线的两头可以调转方向」）——
+             * 半径 5 + 深色描边，一眼看得出来能抓；抓的时候按 12px 容差算（见 `hitHandle`）。
+             */
             if (hot) {
               for (const [x, y] of [
                 [x1, y1],
                 [x2, y2]
               ] as const) {
                 ctx.beginPath()
-                ctx.arc(x, y, 3, 0, Math.PI * 2)
+                ctx.arc(x, y, 5, 0, Math.PI * 2)
                 ctx.fillStyle = it.color
                 ctx.fill()
+                ctx.lineWidth = 1.5
+                ctx.strokeStyle = '#0b0f14'
+                ctx.stroke()
+                ctx.lineWidth = 2
+                ctx.strokeStyle = it.color
               }
             }
           }
