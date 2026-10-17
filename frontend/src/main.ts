@@ -7,6 +7,7 @@ import {setupNativeShell} from './native'
 import {isNativeShell} from './platform'
 import {bindPush} from './push'
 import {bindWatch} from './watch'
+import {reloadOnce} from './async-pane'
 /*
  * 自托管字体（Noto Sans SC）—— ⚠️ 必须在 `style.css` **之前** import，
  * 否则它自己的 `@font-face` 会排在后面，`--font-sans` 里的回退顺序就乱了。
@@ -16,6 +17,22 @@ import './fonts.css'
 import './style.css'
 
 const app = createApp(App).use(router)
+
+/*
+ * **发版后旧 chunk 404 的自愈**（2026-10-17，用户：「账户统计有时候打不开」）。
+ *
+ * 已经打开的页面记着上一版的文件名（`AccountStatsView-<hash>.js`），发版之后那个文件
+ * 就没了 —— 点开那一格时动态 import 会 404，**面板永远空白**（不刷新就一直坏）。
+ *
+ * Vite 在**预载失败**时会派发 `vite:preloadError`；这里吃掉它并**自动刷新一次**
+ * （限频 30 秒，见 `async-pane.ts` 的 `reloadOnce`）。
+ * ⚠️ 懒加载组件自己的失败由 `asyncPane()` 的 `onError` 兜（两条路互补：这条管
+ *    `modulepreload` / 主包，那条管 `defineAsyncComponent`）。
+ */
+window.addEventListener('vite:preloadError', e => {
+  e.preventDefault()
+  reloadOnce()
+})
 
 /*
  * 原生壳（Android / iOS App）接线：状态栏 + 前后台状态（`native.ts`）。

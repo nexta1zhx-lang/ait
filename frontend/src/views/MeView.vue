@@ -17,9 +17,10 @@
  *    老链接（`?p=replay…`、`?records|kb|history`）在 `router.ts` 里就分流好了。
  *    「管理」里的二级 tab 用 `?t=` 记，`/me?p=admin&t=server` 分享出去能直接落在服务器那半。
  */
-import {computed, defineAsyncComponent, onActivated, onDeactivated, ref, watch} from 'vue'
+import {computed, onActivated, onDeactivated, ref, watch} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import {useScrollMemory} from '../scroll'
+import {asyncPane} from '../async-pane'
 import PaneShell from '../comps/PaneShell.vue'
 import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
 import ProfileView from './ProfileView.vue'
@@ -31,10 +32,15 @@ import {user} from '../session'
 /*
  * 账户统计（带着 echarts，~580KB）**异步加载**：它是这一页里的第二格，
  * 但没点进去之前不该为它买单（以前它是独立路由的懒加载，搬进来后继续保持）。
+ *
+ * ⚠️ 走 `asyncPane()` 而不是裸 `defineAsyncComponent`（2026-10-17 用户：
+ *    「账户统计有时候打不开」）—— 裸的那个**加载中什么都不画**、
+ *    **发版后旧 chunk 404 就永远空白**。那层壳补了：加载中有字、失败有重试、
+ *    旧 chunk 自动刷新一次。判据和限频见 `async-pane.ts`。
  */
-const AccountStatsView = defineAsyncComponent(
-  () => import('./AccountStatsView.vue')
-)
+const AccountStatsView = asyncPane(() => import('./AccountStatsView.vue'), {
+  label: '账户统计'
+})
 
 type Pane = 'exchange' | 'stats' | 'ask' | 'profile' | 'model' | 'admin'
 

@@ -503,3 +503,14 @@ docs/MOBILE.md           打包成 App（Capacitor）
   query 那条路一律走 `server.ts` 的 `numQ()`（空 / 没给 = `undefined`）；body 那条没这毛病。
 - **`SCHEMA_SQL` / 提示词模板这些大模板串里绝不能写反引号** —— 会把字符串当场截断，
   `tsx` 直接起不来（语法错报在几百行之外，看半天）。schema.ts 里那条老注释就是为这个写的。
+- **按需加载的面板（`defineAsyncComponent`）裸用会在两种情况下"打不开"**（用户 2026-10-17
+  「账户统计有时候打不开」）：① 拉那 600KB chunk 的几秒里**什么都不画**；
+  ② **发版之后**没刷新的老页面还记着旧 hash，一点就 404 ⇒ 面板**永远空白**。
+  两条都交给 `frontend/src/async-pane.ts`（`asyncPane()`）：加载中有字、失败给原因 + 「重试」、
+  旧 chunk 自动刷新一次（限频 30 秒防刷新死循环）。
+  ⚠️ 「重试」对**模块加载失败**只能整页刷新 —— 浏览器的 module map 会把这次失败按文档缓存住，
+  同一个 `import()` 再跑一次还是那条错（实测换 key 重挂也没用）。
+- 排查「页面某个接口/面板卡住」先量一下再说：`/api/exchange/analytics` 实测 **50ms**，
+  不是它；本地 dev 是 HTTP/1.1（每源 **6 条**连接），而站上同时开着
+  tickers / kline / exchange×N 几条 **SSE 长连接** —— 真要怀疑阻塞，先数这个
+  （线上走 HTTP/2，不吃这个限制）。

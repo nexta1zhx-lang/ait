@@ -665,6 +665,31 @@ a {
   padding: 14px 16px;
 }
 
+/*
+ * 懒加载面板的占位（`async-pane.ts` 的 loading / error 组件）。
+ *
+ * ⚠️ 这两态以前**什么都不画** —— 点「账户统计」要等 echarts 那 600KB 下来，
+ *    或者发版后旧 chunk 404，表现都是「一片空白、点了没反应」。
+ *    现在至少有一句话，失败还有颗「重试」。
+ */
+.pane-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 18px 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.pane-fallback p {
+  margin: 0;
+  line-height: 1.7;
+}
+.pane-fallback-title {
+  color: var(--text, #e8e2d6);
+  font-size: 13.5px;
+}
+
 .tag {
   font-size: 10px;
   font-weight: 400;

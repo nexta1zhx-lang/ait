@@ -23,7 +23,6 @@
  */
 import {
   computed,
-  defineAsyncComponent,
   onMounted,
   nextTick,
   onUnmounted,
@@ -50,6 +49,7 @@ import {
   posSortDir
 } from '../settings'
 import {orderKind, pairOf, tpSlOf, typeText, type OrderEditTarget, type TpSlTarget} from '../tpsl'
+import {asyncPane} from '../async-pane'
 import SegTabs from './SegTabs.vue'
 import SymbolCombo from './SymbolCombo.vue'
 import SettingsSheet from './SettingsSheet.vue'
@@ -67,9 +67,9 @@ import {
  * 连只看「合约」页的人都得替它付费。而这块面板本身是 `v-else-if` 挂的，
  * 所以只有真的点开「交易所账户」时才会去下载。
  */
-const ExchangeCurveChart = defineAsyncComponent(
-  () => import('./ExchangeCurveChart.vue')
-)
+const ExchangeCurveChart = asyncPane(() => import('./ExchangeCurveChart.vue'), {
+  label: '资产曲线'
+})
 
 const props = defineProps<{
   data: ExchangeOverview | null
