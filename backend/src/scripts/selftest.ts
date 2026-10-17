@@ -25,7 +25,6 @@
  *      （直接建不出来）。所以拿固定夹具卡住它们。
  *   ⑨ 同向加仓浮盈额度、其他币开仓 5 倍额度、账户总杠杆 11 倍上限。
  *   ⑩ 「数据问答」的参数收敛（模型给的日期 / 跨度 / 条数 / 币种 → SQL 参数）
- *   ⑪ 「从一笔仓位导入知识库」截哪一段行情（见 `knowledge-window.ts`）
  */
 import {
   ALL_INTERVALS,
@@ -63,12 +62,6 @@ import {judgeSchema} from '../llm/schema'
 import {render} from '../output/render'
 import type {MarketSnapshot} from '../types'
 import {enteredGo, verdictOf, type Verdict} from '../analysis/verdict'
-import {
-  POSITION_POST_BARS,
-  POSITION_PRE_BARS,
-  pickTimeframe,
-  positionWindowMs
-} from '../knowledge-window'
 import {
   bjDayEndMs,
   bjDayStartMs,
@@ -838,74 +831,6 @@ function checkAsk(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
-/* ⑪ 从一笔仓位导入：截哪一段行情 + 用哪个周期                            */
-/* ------------------------------------------------------------------ */
-
-/**
- * 夹具在卡什么：这两个是「点一下收录」那条路上**唯一**一处把仓位变成行情窗口的规则
- * （`knowledge-service.ts` 只管取数和调模型）。
- *
- * 它们的失效方式很隐蔽 —— 窗口少截一段、周期挑大一档，界面上照样导入成功，
- * 只是 AI 看到的图不对（前面没有蓄势 → 总结出的经验是错的），没人会发现。
- * 所以这里把档位边界和窗口两端都钉死。
- *
- * ⚠️ 夹具一个真时钟都不吃：`positionWindowMs` 的「现在」由调用方给。
- */
-function checkKnowledgeWindow(): boolean {
-  let ok = true
-  const bad = (msg: string): void => {
-    console.error(`❌ 仓位导入夹具：${msg}`)
-    ok = false
-  }
-
-  // ① 周期档位（闭区间：正好 6 小时还是 5m）
-  const tfCases: [number, string][] = [
-    [0, '5m'],
-    [115, '5m'],
-    [6 * 3600, '5m'],
-    [6 * 3600 + 1, '15m'],
-    [24 * 3600, '15m'],
-    [24 * 3600 + 1, '1h'],
-    [4 * 86400, '1h'],
-    [4 * 86400 + 1, '4h'],
-    [16 * 86400, '4h'],
-    [16 * 86400 + 1, '1d'],
-    /* 脏数据（负数 / 调时差算出的怪值）不能把档位带塌 */
-    [-100, '5m']
-  ]
-  for (const [sec, want] of tfCases) {
-    const got = pickTimeframe(sec)
-    if (got !== want) bad(`pickTimeframe(${sec}) 期望 ${want}，实际 ${got}`)
-  }
-
-  // ② 已平的仓位：前 40 根 + 整段持仓 + 后 6 根（5m ⇒ 一根 300000ms）
-  const TF = 300_000
-  const openAt = Date.parse('2026-10-16T09:18:00+08:00')
-  const closeAt = Date.parse('2026-10-16T09:35:00+08:00')
-  const now = Date.parse('2026-10-16T12:00:00+08:00')
-  const w = positionWindowMs({openAt, closeAt}, TF, now)
-  if (w.from !== openAt - POSITION_PRE_BARS * TF)
-    bad(`窗口左端该是开仓前 ${POSITION_PRE_BARS} 根，实际差 ${(openAt - w.from) / TF} 根`)
-  if (w.to !== closeAt + POSITION_POST_BARS * TF)
-    bad(`窗口右端该是平仓后 ${POSITION_POST_BARS} 根，实际差 ${(w.to - closeAt) / TF} 根`)
-
-  /*
-   * ③ **还没平完**的仓位：右端取「现在」，不能拿 `closeAt = null` 去算
-   *    （`null + 6 根` 会变成 1970 年那一段，或者 NaN —— 两种都拉不到行情）
-   */
-  const open2 = positionWindowMs({openAt, closeAt: null}, TF, now)
-  if (open2.to !== now + POSITION_POST_BARS * TF)
-    bad('还没平完的仓位，右端该是「现在 + 后置几根」')
-
-  if (ok)
-    console.log(
-      `✅ 仓位导入：${tfCases.length} 组周期档位 + 前置 ${POSITION_PRE_BARS} / 后置 ` +
-        `${POSITION_POST_BARS} 根窗口 夹具通过`
-    )
-  return ok
-}
-
-/* ------------------------------------------------------------------ */
 /* 跑                                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -920,7 +845,6 @@ if (!checkWindows()) failed = true
 if (!checkTradeBudgets()) failed = true
 if (!checkVerdict()) failed = true
 if (!checkAsk()) failed = true
-if (!checkKnowledgeWindow()) failed = true
 
 // 夹具也得过 zod —— 少了字段 / 类型写错，这里会立刻炸
 const parsed = judgeSchema.safeParse(judge)

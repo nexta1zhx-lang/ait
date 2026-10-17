@@ -68,7 +68,7 @@ export interface SeriesBlock {
  *
  * 那三个是「先把 K 线压成公式值再给 AI」那一套的产物（摆点、量比、量能水平、
  * 区间位置…）。现在改成把 K 线**切成小段直接描述**给 AI（`analysis/describe.ts`
- * 的 `describeSeries`，跟知识库收录时同一个做法），所以它们没人用了。
+ * 的 `describeSeries`），所以它们没人用了。
  */
 
 /*
@@ -131,8 +131,7 @@ export interface AppConfig {
    * 分析 / 用量流水保留多少天（<= 0 = 不清理）。
    *
    * 用户 2026-10-04：「历史统计数据保存 3 个月的」→ 默认 **90**。
-   * ⚠️ 只删 `analyses` / `llm_usage` 这两张流水表，
-   *    `knowledge`（一条条攒的经验案例）和提示词**绝不碰**。
+   * ⚠️ 只删 `analyses` / `llm_usage` 这两张流水表，提示词**绝不碰**。
    */
   keepDays: number
   llm: {

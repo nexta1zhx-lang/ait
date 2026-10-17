@@ -12,7 +12,6 @@
  *    跟「用量统计」那套一致，别混 UTC。
  */
 import {query, queryOne} from '../db/client'
-import {listCases} from '../db/knowledge'
 import {listSessions} from '../db/persist'
 import {usageSummary} from '../db/usage'
 import {unifiedPerpSymbol} from '../db/candle-store'
@@ -115,26 +114,6 @@ export const TOOL_SPECS: AskToolSpec[] = [
         ...rangeProps,
         symbol: {type: 'string', description: '只看某个币，如 BTC'},
         limit: {type: 'number', description: `最多几条，默认 20，上限 ${MAX_ROWS}`}
-      }
-    }
-  },
-  {
-    name: 'knowledge_search',
-    label: '检索知识库',
-    description:
-      '检索「知识库」里我自己标过的案例（标题 / 为什么 / 教训 / 备注）。' +
-      '问「我以前总结过什么」「有没有类似的案例」用它。' +
-      '⚠️ 要按**币种**筛请用 symbol（keyword 只匹配上面那几个文本字段，' +
-      '把「BTC」当关键词多半一条都搜不到）。',
-    parameters: {
-      type: 'object',
-      properties: {
-        keyword: {
-          type: 'string',
-          description: '关键词，在标题 / 为什么 / 教训 / 备注里模糊匹配'
-        },
-        symbol: {type: 'string', description: '只看某个币，如 BTC'},
-        limit: {type: 'number', description: '最多几条，默认 10，上限 50'}
       }
     }
   },
@@ -420,8 +399,6 @@ export async function runTool(
       return analysisStats(args, ctx, today)
     case 'recent_analyses':
       return recentAnalyses(args, ctx, today)
-    case 'knowledge_search':
-      return knowledgeSearch(args, ctx)
     case 'market_klines':
       return marketKlines(args, ctx, today)
     case 'usage_cost':
@@ -605,41 +582,6 @@ async function recentAnalyses(
   }
 }
 
-async function knowledgeSearch(
-  args: Record<string, unknown>,
-  ctx: AskToolContext
-): Promise<AskToolResult> {
-  const keyword = String(args.keyword ?? '')
-    .trim()
-    .slice(0, 60)
-  const symbol = normalizeSymbol(args.symbol)
-  const limit = clampInt(args.limit, 10, 50)
-
-  const cases = await listCases({
-    userId: ctx.userId,
-    symbol: symbol || undefined,
-    q: keyword || undefined,
-    limit
-  })
-
-  const data = cases.map(c => ({
-    时间: c.createdAt.slice(0, 10),
-    币种: c.symbol,
-    标题: c.title,
-    走势类型: c.moveType,
-    标签: c.tags,
-    为什么: String(c.why ?? '').slice(0, 300),
-    教训: String(c.lesson ?? '').slice(0, 300)
-  }))
-  return {
-    data,
-    rows: cases.length,
-    detail:
-      (keyword ? `关键词「${keyword}」` : '全部') +
-      (symbol ? ` · ${symbol}` : '') +
-      ` · ${cases.length} 条`
-  }
-}
 
 async function marketKlines(
   args: Record<string, unknown>,

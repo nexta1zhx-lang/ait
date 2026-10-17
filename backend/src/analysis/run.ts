@@ -18,7 +18,23 @@ import {saveAnalysis} from '../db/analyses'
 import {buildContext} from '../context/builder'
 import {judge, type JudgeResult} from '../llm/client'
 import {oneLineCost, usdToCny} from '../llm/pricing'
-import {bjFull} from '../knowledge-service'
+/**
+ * `MM-DD HH:mm`（北京时间）—— 原来借的是 `knowledge-service` 里的 `bjFull`，
+ * 那个模块 2026-10-18 随知识库一起删了，这一步只用来拼「测试：… 为止」的提示。
+ */
+function bjFull(ms: number): string {
+  const p: Record<string, string> = {}
+  for (const x of new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date(ms)))
+    p[x.type] = x.value
+  return `${p.month}-${p.day} ${p.hour}:${p.minute}`
+}
 import {stepRecorder, type AnalyzeStep, type OnStep} from '../step'
 import {fetchSnapshot} from '../data/market'
 import type {MarketSnapshot, MarketType, Timeframe} from '../types'

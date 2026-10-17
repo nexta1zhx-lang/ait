@@ -233,8 +233,8 @@ export async function restoreVersion(versionId: number): Promise<AiDoc | null> {
 /**
  * 拼 prompt 要用的：**启用的**文档，按 kind 分组拼好。
  *
- * role → 角色设定（开单分析）；rule → 规则正文；extract → 知识库提炼；
- * predict → 分析预测；polish → 日记润色。
+ * role → 角色设定（开单分析）；rule → 规则正文；predict → 分析预测；
+ * polish → 日记润色；extract → 知识库提炼（模块已删，数据保留、不再拼装）。
  * 返回的顺序就是拼接顺序。几块互不干扰，各自拼各自的。
  */
 /**

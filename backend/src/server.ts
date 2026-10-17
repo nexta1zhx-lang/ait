@@ -12,9 +12,8 @@ import {
   loadContracts
 } from './contracts'
 import {marketCapRanks, rankOf, refreshMarketCapRanks} from './data/marketcap'
-import {fullSystem, loadExtractRules, loadPolishRules, loadRules} from './rules'
+import {fullSystem, hashOf, loadPolishRules, loadRules} from './rules'
 import {buildSystemPrompt} from './llm/prompt'
-import {buildExtractPrompt} from './llm/extract'
 import {ensureTonePresets, TONE_PRESETS} from './llm/tone-presets'
 import {
   createDoc,
@@ -54,25 +53,6 @@ import {
 } from './proxy'
 import {rustDeskSnapshot, setRustDeskNote} from './rustdesk'
 import {pruneOldData} from './db/prune'
-import {
-  CaseLabel,
-  CaseSource,
-  MoveType,
-  deleteCase,
-  getCase,
-  listCases,
-  listTags,
-  updateCase,
-  type UpdateCaseInput
-} from './db/knowledge'
-import {
-  addTagTemplate,
-  deleteTagTemplate,
-  listTagTemplates,
-  loadTagTemplates,
-  moveTagTemplate,
-  renameTagTemplate
-} from './db/tags'
 import {
   recordUsage,
   usageByKey,
@@ -271,9 +251,6 @@ import {
 import {oneLineCost, usdToCny} from './llm/pricing'
 import {fetchBalance, fetchModels, type ModelsResult} from './llm/account'
 import {hasBuiltFrontend, mountViteDev, type ViteDev} from './devtools/vite-dev'
-import {bjFull, collectCase, reeditCase, type CollectInput} from './knowledge-service'
-/* 「从仓位导入」挑哪个周期是纯规则，跟 `knowledge-service` 分开一个文件（夹具直接测它） */
-import {pickTimeframe} from './knowledge-window'
 import {stepRecorder, type AnalyzeStep, type OnStep} from './step'
 import {runAnalysis} from './analysis/run'
 import {runPersistTick, runSessionOnce} from './analysis/persist'
@@ -460,7 +437,7 @@ function serveStatic(res: http.ServerResponse, urlPath: string): void {
     return
   }
 
-  // 其余路径交给前端路由（/knowledge、/usage …），刷新也能打开
+  // 其余路径交给前端路由（/usage、/journal …），刷新也能打开
   const indexHtml = path.join(PUBLIC_DIR, 'index.html')
   if (fs.existsSync(indexHtml)) {
     res.writeHead(200, {
@@ -1581,7 +1558,7 @@ async function handleKlineStream(
    * 心跳：**必须是具名事件**，不能写成 SSE 注释行（`: ping`）。
    * 注释行浏览器不会派发给 JS，前端那套「多久没动静就判定连接已死」的看门狗
    * 就瞎了 —— 手机切后台回来的僵尸连接全靠它收（见 `frontend/src/api.ts` 的 `liveSse`）。
-   * 下面 analyze / knowledge 那两条是**任务型**一次性流，不收僵尸，用注释行就行。
+   * 下面 analyze 那条是**任务型**一次性流，不收僵尸，用注释行就行。
    */
   const beat = setInterval(() => send('heartbeat', {}), 20_000)
 
@@ -2275,212 +2252,7 @@ async function handleAnalyzeStream(
 }
 
 /* ------------------------------------------------------------------ */
-/* 知识库                                                              */
-/* ------------------------------------------------------------------ */
-
-/**
- * 把参数（POST body / SSE 的 query）整理成 collectCase 的输入。
- * 两种入口共用一个解析，免得规则写两遍。
- */
-function collectInput(get: (k: string) => unknown):
-  | {error: string}
-  | {
-      symbol: string
-      timeframe: Timeframe
-      note: string
-      center?: number
-      aroundBars?: number
-      from?: number
-      to?: number
-      lookbackBars?: number
-      exact?: boolean
-      dryRun?: boolean
-    } {
-  const symbol = str(get('symbol')).trim().toUpperCase()
-  if (!symbol) return {error: '请填写币种，例如 MAGMA'}
-
-  const tf = str(get('timeframe'), '4h') as Timeframe
-  const timeframe = (VALID_TFS as string[]).includes(tf) ? tf : '4h'
-
-  const from = numQ(get('from'))
-  const to = numQ(get('to'))
-  if ((from && !to) || (!from && to)) {
-    return {error: '时间段要同时给起止时间'}
-  }
-
-  return {
-    symbol,
-    timeframe,
-    note: str(get('note')),
-    // 「点选为中心」走这条：以某个时间点为中心，前后各 N 根
-    center: numQ(get('center')),
-    aroundBars: numQ(get('aroundBars')),
-    from,
-    to,
-    lookbackBars: numQ(get('lookbackBars')),
-    // 我在图上画了范围 → 就要这一段本身，前后不补
-    exact: get('exact') === true || get('exact') === '1',
-    // save=0（或 body 里 save:false）= 只分析不落库，调试用
-    dryRun: get('save') === false || get('save') === '0'
-  }
-}
-
-async function handleCollectCase(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const body = await readJsonBody(req)
-  const params = collectInput(k => body[k])
-  if ('error' in params) {
-    sendJson(res, 400, {error: params.error})
-    return
-  }
-  sendJson(res, 200, await collectCase({...params, userId: user.id}))
-}
-
-/**
- * 带进度的案例提炼（Server-Sent Events）。
- * 一路上推 `step`，最后推 `done`（内容与 POST /api/knowledge 完全一致）。
- */
-async function handleCollectStream(
-  url: URL,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  /* 这里先回 200 再校验（老行为）：参数不对也走 `failed` 事件，前端一套收尾就够 */
-  await streamCollect(req, res, user, collectInput(k => url.searchParams.get(k)))
-}
-
-/**
- * 「从一笔仓位导入」的取数参数。
- *
- * 窗口（开仓前 40 根 + 整段持仓 + 平仓后 6 根）和周期（按持仓时长挑）都在
- * `collectCase` / `pickTimeframe` 里定，这里只负责**校验 + 收敛**，
- * 顺手把「还没平完」的持仓时长换成「到现在」。
- */
-function positionInput(get: (k: string) => unknown):
-  | {error: string}
-  | Omit<CollectInput, 'userId' | 'onStep'> {
-  const symbol = str(get('symbol')).trim().toUpperCase()
-  if (!symbol) return {error: '缺少币种'}
-
-  const side = str(get('side')).toLowerCase()
-  if (side !== 'long' && side !== 'short')
-    return {error: '方向只能是 long / short'}
-
-  const openAt = numQ(get('openAt'))
-  if (!openAt) return {error: '缺少开仓时间（这条仓位在账本里没有开仓记录）'}
-
-  const closeRaw = numQ(get('closeAt'))
-  /* 平仓时间早于开仓 = 数据不对：宁可当「还没平」，也别拿一段倒着的窗口去拉行情 */
-  const closeAt = closeRaw && closeRaw > openAt ? closeRaw : null
-  const given = numQ(get('holdSec'))
-  const holdSec = closeAt
-    ? (given ?? (closeAt - openAt) / 1000)
-    : Math.max(0, (Date.now() - openAt) / 1000)
-
-  return {
-    symbol,
-    /* 拉 K 线用交易所原始符号（`1000BONKUSDT`），存库 / 显示用上面的简称 */
-    rawSymbol: str(get('rawSymbol')).trim().toUpperCase() || undefined,
-    timeframe: pickTimeframe(holdSec),
-    note: str(get('note')),
-    position: {
-      side,
-      openAt,
-      closeAt,
-      /* ⚠️ 这些全是**可以没有**的：账本不全时开仓均价就是没有，
-             没给就老老实实 null（别变成 0.000）—— 见 `numQ` 那段 */
-      entryPrice: numQ(get('entryPrice')) ?? null,
-      exitPrice: numQ(get('exitPrice')) ?? null,
-      qty: numQ(get('qty')) ?? 0,
-      net: numQ(get('net')) ?? 0,
-      holdSec,
-      leverage: numQ(get('leverage')) ?? null,
-      keyName: str(get('keyName')).trim() || undefined
-    },
-    // save=0 只分析不落库（调试用）
-    dryRun: get('save') === false || get('save') === '0'
-  }
-}
-
-/** GET /api/knowledge/from-position/stream —— 从一笔仓位导入（带进度） */
-function handleCollectFromPositionStream(
-  url: URL,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  return streamCollect(req, res, user, positionInput(k => url.searchParams.get(k)))
-}
-
-/** POST /api/knowledge/from-position —— 同上，不带进度（命令行 / 调试用） */
-async function handleCollectFromPosition(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const body = await readJsonBody(req)
-  const params = positionInput(k => body[k])
-  if ('error' in params) {
-    sendJson(res, 400, {error: params.error})
-    return
-  }
-  sendJson(res, 200, await collectCase({...params, userId: user.id}))
-}
-
-/**
- * 收案例那条路（画一段 / 点一个时间 / 从仓位导入）共同的 SSE 外壳。
- * `params` 已经校验过；是 `{error}` 就当场回一个 `failed`。
- */
-async function streamCollect(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User,
-  params: {error: string} | Omit<CollectInput, 'userId' | 'onStep'>
-): Promise<void> {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-    ...CORS
-  })
-
-  const send = (event: string, data: unknown) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-  }
-
-  if ('error' in params) {
-    send('failed', {error: params.error})
-    res.end()
-    return
-  }
-
-  let closed = false
-  /* ⚠️ 只能听 `res` 的 close（`req` 的 close 在请求收完就触发，等于立刻「已关闭」） */
-  res.on('close', () => (closed = true))
-
-  try {
-    const outcome = await collectCase({
-      ...params,
-      userId: user.id,
-      onStep: s => {
-        if (!closed) send('step', s)
-      }
-    })
-    if (!closed) send('done', outcome)
-  } catch (e) {
-    if (!closed) send('failed', {error: (e as Error).message})
-  } finally {
-    res.end()
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* AI 提示词文档（分析预测 / 知识库提炼，全部存数据库）                   */
+/* AI 提示词文档（分析预测 / 润色，全部存数据库）                         */
 /* ------------------------------------------------------------------ */
 
 /** 提示词文档类型（认不出的返回 null，由调用方决定默认值） */
@@ -2492,11 +2264,14 @@ const asDocKind = (v: unknown): DocKind | null =>
 /** 列表 + 「这次真正会发出去什么」的概览 */
 async function handleListAiDocs(res: http.ServerResponse): Promise<void> {
   try {
-    const [docs, bundle, extract] = await Promise.all([
-      listDocs(),
-      loadRules(),
-      loadExtractRules()
-    ])
+    const [docs, bundle] = await Promise.all([listDocs(), loadRules()])
+    /*
+     * 提炼那几份（kind=extract）已经不参与拼装了（知识库模块删了），
+     * 但**数据留在库里**、提示词页也还列着，所以这里照旧给它一份概览 ——
+     * 光看字数与 hash 就能知道「那份东西还在」。
+     */
+    const extracts = docs.filter(d => d.kind === 'extract' && d.enabled)
+    const extractText = extracts.map(d => d.content.trim()).filter(Boolean).join('\n\n')
     sendJson(res, 200, {
       docs,
       /** 「+ 新建分析预测」用的语气预设（同一份定义在 `llm/tone-presets.ts`、启动时会播种） */
@@ -2507,9 +2282,9 @@ async function handleListAiDocs(res: http.ServerResponse): Promise<void> {
         sources: bundle.sources,
         hash: bundle.hash,
         predictChars: bundle.system.length,
-        extractChars: extract.system.length,
-        extractSources: extract.sources,
-        extractHash: extract.hash,
+        extractChars: extractText.length,
+        extractSources: extracts.map(d => `提炼：${d.name}`),
+        extractHash: hashOf(extractText),
         updatedAt: bundle.updatedAt,
         warnings: bundle.warnings
       }
@@ -2613,29 +2388,14 @@ async function handleRestoreAiVersion(
 }
 
 /**
- * 看看这次真正发出去的 system prompt 长什么样。
- *
- * `?kind=extract` 看知识库提炼那份（它不是通过 buildSystemPrompt 拼的，
- * 而是正文 + 标签规则）。
+ * 看看这次真正发出去的 system prompt 长什么样（分析预测那一份）。
  */
 async function handleAiPreview(
   url: URL,
   res: http.ServerResponse,
   user: User
 ): Promise<void> {
-  if (url.searchParams.get('kind') === 'extract') {
-    const [extract, templates] = await Promise.all([
-      loadExtractRules(),
-      loadTagTemplates(user.id)
-    ])
-    sendJson(res, 200, {
-      system: buildExtractPrompt(extract.system, templates),
-      enabled: extract.enabled,
-      sources: extract.sources,
-      hash: extract.hash
-    })
-    return
-  }
+  /* 只留分析预测那份 —— 提炼那份（kind=extract）已随知识库模块下线，数据仍在库里 */
   const bundle = await loadRules()
   sendJson(res, 200, {
     system: buildSystemPrompt(bundle.system),
@@ -2643,170 +2403,6 @@ async function handleAiPreview(
     sources: bundle.sources,
     hash: bundle.hash
   })
-}
-
-async function handleListCases(
-  url: URL,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const q = url.searchParams
-  const labelRaw = q.get('label') ?? 'all'
-  const label = (['do', 'dont'] as string[]).includes(labelRaw)
-    ? (labelRaw as CaseLabel)
-    : 'all'
-  const moveRaw = q.get('moveType') ?? 'all'
-  const moveType = (['up', 'down', 'range', 'none'] as string[]).includes(
-    moveRaw
-  )
-    ? (moveRaw as MoveType | 'none')
-    : 'all'
-  const withCandles = q.get('candles') === '1'
-  const sourceRaw = q.get('source') ?? 'all'
-  const source = (['manual', 'position'] as string[]).includes(sourceRaw)
-    ? (sourceRaw as CaseSource)
-    : 'all'
-  const cases = await listCases({
-    userId: user.id,
-    label,
-    moveType,
-    tag: q.get('tag') ?? '',
-    symbol: q.get('symbol') ?? '',
-    source,
-    q: q.get('q') ?? '',
-    // 卡片要画迷你图时才把 K 线一起带上
-    withCandles
-  })
-
-  sendJson(res, 200, {total: cases.length, cases})
-}
-
-/** GET /api/knowledge/tags —— 标签模板（我自己维护）+ 已用统计 + 模板外的老标签 */
-async function handleListTags(
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const [rows, used] = await Promise.all([
-    listTagTemplates(user.id),
-    listTags(user.id)
-  ])
-  const counts = new Map(used.map(t => [t.tag, t.n]))
-  const names = rows.map(r => r.name)
-  sendJson(res, 200, {
-    tags: used,
-    templates: rows.map(r => ({...r, n: counts.get(r.name) ?? 0})),
-    // 老记录里那些不在模板里的标签（弹窗里提示清掉）
-    legacy: used.map(t => t.tag).filter(t => !names.includes(t))
-  })
-}
-
-/** 标签模板的增 / 删 / 改 / 排序 —— 全部由我自己在网页上维护 */
-async function handleAddTagTemplate(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const body = await readJsonBody(req).catch(() => null)
-  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
-  try {
-    sendJson(res, 201, await addTagTemplate(user.id, body.name))
-  } catch (e) {
-    sendJson(res, 400, {error: (e as Error).message})
-  }
-}
-
-async function handleUpdateTagTemplate(
-  id: number,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const body = await readJsonBody(req).catch(() => null)
-  if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
-  try {
-    const row = await renameTagTemplate(user.id, id, body.name)
-    sendJson(res, row ? 200 : 404, row ?? {error: '模板不存在'})
-  } catch (e) {
-    sendJson(res, 400, {error: (e as Error).message})
-  }
-}
-
-async function handleMoveTagTemplate(
-  id: number,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const body = await readJsonBody(req).catch(() => null)
-  const dir = body?.dir === 'up' ? 'up' : 'down'
-  const ok = await moveTagTemplate(user.id, id, dir)
-  sendJson(res, 200, {ok})
-}
-
-async function handleDeleteTagTemplate(
-  id: number,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const ok = await deleteTagTemplate(user.id, id)
-  sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '模板不存在'})
-}
-
-/** PATCH /api/knowledge/:id —— 只改文案，K 线不动 */
-async function handleUpdateCase(
-  id: number,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const body = await readJsonBody(req)
-  const patch: UpdateCaseInput = {}
-  if (typeof body.title === 'string') patch.title = body.title
-  if (typeof body.note === 'string') patch.note = body.note
-  if (typeof body.lesson === 'string') patch.lesson = body.lesson
-  if (typeof body.why === 'string') patch.why = body.why
-  if (body.label === 'do' || body.label === 'dont') patch.label = body.label
-  if (body.moveType === null) patch.moveType = null
-  else if (['up', 'down', 'range'].includes(String(body.moveType)))
-    patch.moveType = body.moveType as MoveType
-  if (Array.isArray(body.tags))
-    patch.tags = body.tags
-      .map(t => String(t ?? '').trim())
-      .filter(t => t.length > 0 && t.length <= 12)
-      .slice(0, 10)
-  if (body.features && typeof body.features === 'object')
-    patch.features = body.features as UpdateCaseInput['features']
-
-  const ok = await updateCase(id, user.id, patch)
-  sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '案例不存在'})
-}
-
-/** POST /api/knowledge/:id/reedit —— 用库里存下的 K 线重跑一次 AI 提炼 */
-async function handleReeditCase(
-  id: number,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const body = await readJsonBody(req)
-  const result = await reeditCase(id, {
-    userId: user.id,
-    note: typeof body.note === 'string' ? body.note : undefined
-  })
-  sendJson(res, 200, result)
-}
-
-async function handleGetCase(
-  id: number,
-  res: http.ServerResponse,
-  user: User
-): Promise<void> {
-  const row = await getCase(id, user.id)
-  if (!row) {
-    sendJson(res, 404, {error: '案例不存在'})
-    return
-  }
-  sendJson(res, 200, {case: row})
 }
 
 /* ------------------------------------------------------------------ */
@@ -2925,7 +2521,7 @@ function sessionMeta(req: http.IncomingMessage): SessionMeta {
 
 /**
  * 不需要登录的接口：行情 / K 线 / 币种 / 图标 / 健康检查 / 下载清单。
- * 其余（分析、存档、知识库、标签、用量、账户、服务器监测）全要登录。
+ * 其余（分析、存档、用量、账户、服务器监测）全要登录。
  */
 function isPublicApi(p: string): boolean {
   return (
@@ -3280,7 +2876,7 @@ async function route(
 
   /*
    * 除了上面 `isPublicApi()` 里那几个（行情 / 币种 / 图标 / 下载…），
-   * 其余都要登录 —— 分析、存档、知识库、标签、用量、账户、服务器监测
+   * 其余都要登录 —— 分析、存档、用量、账户、服务器监测
    * 都是「用户自己的东西」。
    */
   /*
@@ -3338,12 +2934,6 @@ async function route(
   if (p === '/api/config') {
     const rules = await loadRules()
     const env = process.env
-    // 知识库只报一个总数（已经不再分「该做 / 不该做」）—— 只数**这个用户自己的**
-    const rows = await query<{n: string}>(
-      'SELECT count(*)::text AS n FROM knowledge WHERE user_id = $1',
-      [me.id]
-    ).catch(() => [] as {n: string}[])
-    const knowledge = {total: Number(rows[0]?.n ?? 0)}
     const head = await usageHeadline(me.id).catch(() => ({
       todayCalls: 0,
       todayCostUsd: 0,
@@ -3376,7 +2966,6 @@ async function route(
         updatedAt: rules.updatedAt,
         warnings: rules.warnings
       },
-      knowledge,
       usage: {
         todayCalls: head.todayCalls,
         todayCostUsd: head.todayCostUsd,
@@ -5985,7 +5574,7 @@ async function route(
       }
     }
 
-    // 删号（⚠️ 会级联删掉这个人的分析 / 知识库 / 用量）
+    // 删号（⚠️ 会级联删掉这个人的分析 / 用量）
     if (method === 'DELETE') {
       if (id === me.id) return sendJson(res, 400, {error: '不能删掉自己'})
       const ok = await deleteUser(id)
@@ -6363,7 +5952,7 @@ async function route(
     return
   }
 
-  /* ---- AI 提示词文档（分析预测 / 知识库提炼，全部存数据库） ---- */
+  /* ---- AI 提示词文档（分析预测 / 润色，全部存数据库） ---- */
   if (p === '/api/ai-docs') {
     if (method === 'GET') return handleListAiDocs(res)
     if (method === 'POST') return handleCreateAiDoc(req, res)
@@ -6400,80 +5989,6 @@ async function route(
     if (method !== 'GET')
       return sendJson(res, 405, {error: 'Method Not Allowed'})
     return handleGetAiVersion(Number(m[1]), res)
-  }
-
-  /* ---- 知识库 ---- */
-  if (p === '/api/knowledge') {
-    if (method === 'GET') return handleListCases(url, res, me)
-    if (method === 'POST') return handleCollectCase(req, res, me)
-    return sendJson(res, 405, {error: 'Method Not Allowed'})
-  }
-  if (p === '/api/knowledge/tags') {
-    if (method !== 'GET')
-      return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleListTags(res, me)
-  }
-  /* ---- 标签模板（我自己维护，AI 只能从这里挑） ---- */
-  if (p === '/api/tag-templates') {
-    if (method === 'GET') return handleListTags(res, me)
-    if (method === 'POST') return handleAddTagTemplate(req, res, me)
-    return sendJson(res, 405, {error: 'Method Not Allowed'})
-  }
-  if (p.startsWith('/api/tag-templates/')) {
-    const mm = p.match(/^\/api\/tag-templates\/(\d+)(\/move)?$/)
-    if (!mm) return sendJson(res, 404, {error: 'Not Found'})
-    const id = Number(mm[1])
-    if (mm[2] === '/move') {
-      if (method !== 'POST')
-        return sendJson(res, 405, {error: 'Method Not Allowed'})
-      return handleMoveTagTemplate(id, req, res, me)
-    }
-    if (method === 'PUT') return handleUpdateTagTemplate(id, req, res, me)
-    if (method === 'DELETE') return handleDeleteTagTemplate(id, res, me)
-    return sendJson(res, 405, {error: 'Method Not Allowed'})
-  }
-  // 带进度地收录一个案例（SSE）—— EventSource 只能发 GET，参数走 query
-  if (p === '/api/knowledge/stream') {
-    if (method !== 'GET')
-      return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleCollectStream(url, req, res, me)
-  }
-  /*
-   * 从「持仓 / 仓位历史」那张卡上一键导入（2026-10-16）。
-   *
-   * ⚠️ 参数照样走 query（GET）：EventSource 只能发 GET，而这一串都是短数字 / 简称
-   *    （币种、方向、开平仓时间、几个价），撑不爆请求头 —— 跟 `/api/ask/stream`
-   *    那边「把多轮历史塞 URL 撞 431」不是一回事（见那段说明）。
-   */
-  if (p === '/api/knowledge/from-position') {
-    if (method !== 'POST')
-      return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleCollectFromPosition(req, res, me)
-  }
-  if (p === '/api/knowledge/from-position/stream') {
-    if (method !== 'GET')
-      return sendJson(res, 405, {error: 'Method Not Allowed'})
-    return handleCollectFromPositionStream(url, req, res, me)
-  }
-  if (p.startsWith('/api/knowledge/')) {
-    const m = p.match(/^\/api\/knowledge\/(\d+)(\/reedit)?$/)
-    if (!m) return sendJson(res, 404, {error: 'Not Found'})
-    const id = Number(m[1])
-    if (m[2] === '/reedit') {
-      if (method !== 'POST')
-        return sendJson(res, 405, {error: 'Method Not Allowed'})
-      return handleReeditCase(id, req, res, me)
-    }
-    if (method === 'DELETE') {
-      const ok = await deleteCase(id, me.id)
-      return sendJson(
-        res,
-        ok ? 200 : 404,
-        ok ? {ok: true} : {error: '案例不存在'}
-      )
-    }
-    if (method === 'PATCH') return handleUpdateCase(id, req, res, me)
-    return handleGetCase(id, res, me)
   }
 
   // 「下载」页的数据：磁盘上的 APK + `downloads/releases.json` 里的介绍
@@ -6909,8 +6424,7 @@ async function main(): Promise<void> {
    * 历史流水只留最近 N 天（默认 90 = 3 个月）。
    * 用户 2026-10-04：「历史统计数据保存 3 个月的」。
    *
-   * ⚠️ 只删 `analyses` / `llm_usage` 两张**流水表** ——
-   *    `knowledge`（自己一条条攒的经验案例）和提示词**绝不碰**。
+   * ⚠️ 只删 `analyses` / `llm_usage` 两张**流水表** —— 提示词**绝不碰**。
    *    想全留着：`.env` 里写 `KEEP_DAYS=0`。
    *
    * 跟币种表一个套路：不 await（别拖住启动），失败只告警。

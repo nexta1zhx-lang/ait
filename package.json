@@ -33,7 +33,6 @@
     "deploy": "bash scripts/deploy.sh",
     "apk": "bash scripts/build-apk.sh",
     "swing": "tsx backend/src/scripts/swing.ts",
-    "learn": "tsx backend/src/scripts/learn.ts",
     "archive": "tsx backend/src/scripts/archive.ts",
     "cost": "tsx backend/src/scripts/cost.ts",
     "reprice": "tsx backend/src/scripts/reprice.ts",

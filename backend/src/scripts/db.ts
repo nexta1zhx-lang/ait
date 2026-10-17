@@ -15,7 +15,6 @@ async function status(): Promise<void> {
     return
   }
   const labels: Record<string, string> = {
-    knowledge: '知识库案例',
     analyses: '分析记录',
     llm_usage: 'API 调用记录'
   }
@@ -28,15 +27,6 @@ async function status(): Promise<void> {
     )
   }
 
-  const byGrade = await query<{label: string; n: string}>(
-    'SELECT label, count(*)::text AS n FROM knowledge GROUP BY label'
-  ).catch(() => [])
-  if (byGrade.length) {
-    console.log('\n  知识库明细：')
-    for (const r of byGrade) {
-      console.log(`    ${r.label === 'do' ? '我该做的' : '我不该做的'}  ${r.n}`)
-    }
-  }
   console.log('')
   console.log('提示：')
   console.log('  npm run web          启动网页')
@@ -46,14 +36,14 @@ async function status(): Promise<void> {
 
 async function reset(): Promise<void> {
   if (!process.argv.includes('--yes')) {
-    console.log('这会清空「知识库」「分析记录」和「API 用量记录」。')
+    console.log('这会清空「分析记录」和「API 用量记录」。')
     console.log('确认请加 --yes：npm run db:reset -- --yes')
     process.exitCode = 1
     return
   }
   const db = await checkDb()
   if (!db.ok) throw new Error(dbHelpMessage({message: db.error}))
-  await query('TRUNCATE knowledge, analyses, llm_usage RESTART IDENTITY')
+  await query('TRUNCATE analyses, llm_usage RESTART IDENTITY')
   console.log('✓ 已清空。')
 }
 

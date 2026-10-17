@@ -37,8 +37,7 @@ import {
   type ExchangeOpenOrder,
   type ExchangeOverview,
   type ExchangePositionCycle,
-  type ExchangeTrade,
-  type PositionImportTarget
+  type ExchangeTrade
 } from '../api'
 import {ago, bjTime, bjTimeSec, fixed, fmt} from '../format'
 import {
@@ -195,15 +194,6 @@ const emit = defineEmits<{
    */
   (e: 'editOrder', target: OrderEditTarget): void
   /**
-   * 点「收录到知识库」（持仓卡 / 仓位历史卡）——把**这笔仓位**交上去：
-   * 币种、方向、开平仓时间与均价、数量、净盈亏、持仓时长、杠杆。
-   *
-   * 取哪一段行情（开仓前 40 根 + 整段持仓 + 平仓后 6 根）和用哪个周期都由外层 / 后端定，
-   * 这里只负责「这笔仓位是什么」。⚠️ 账本里没有开仓记录的那条**按钮是禁用的**
-   * （取不到开仓时间就没法知道该从哪儿截），见 `collectOfPos`。
-   */
-  (e: 'collect', target: PositionImportTarget): void
-  /**
    * 换二级 tab（`pos` / `ord` / `inc` / `trades` / `flow`）。
    *
    * 容器收到就**重读那一份**——
@@ -290,84 +280,6 @@ function baseOf(symbol: string): string {
 
 /** 归一成币安原始交易对（跨数据源比对用：`1000LUNC/USDT:USDT` 与 `1000LUNCUSDT` 等价） */
 /* `pairOf` 搬去 `../tpsl` 了（弹层那边也要比同一批单），这里直接用它的 */
-
-/* ---------------- 「收录到知识库」（用户 2026-10-16） ---------------- */
-
-/**
- * 这条持仓的**开仓时间**（毫秒）；账本里没有这一段就是 `NaN`。
- *
- * 两条路：快照自带的 `meta.openedAt`（常驻流每次推送都带，见 `PositionMeta`），
- * 或者从「未平的那一轮仓位」里找（`openCycleOf`，同一份账本推出来的，当第二保险）。
- * ⚠️ 两条都拿不到 = 开仓发生在记账之前 ⇒ **不知道从哪儿截那一段行情**，
- *    按钮就得禁用（别拿「今天」当开仓时间去截一段莫名其妙的行情）。
- */
-function openAtOfPos(p: FuturesPosition): number {
-  const fromMeta = p.meta?.openedAt
-  if (typeof fromMeta === 'number' && fromMeta > 0) return fromMeta
-  const c = openCycleOf(p)
-  return c ? Date.parse(c.openAt) : Number.NaN
-}
-
-/**
- * 点「收录」——把这条**持仓**整理成导入参数。
- *
- * ⚠️ 开仓时间、持仓时长这类**数**取账本侧的（`meta` / 未平周期）；
- *    开仓价 / 数量 / 杠杆优先用**快照**里的（币安当场给的，比账本残值准 ——
- *    账本覆盖不到开仓那一段时 `cycle.entryPrice` 是 null）。
- */
-function collectOfPos(p: FuturesPosition): PositionImportTarget {
-  const c = openCycleOf(p)
-  const openAt = openAtOfPos(p)
-  const entry = p.entryPrice || c?.entryPrice || null
-  const qty = p.amount > 0 ? p.amount : (c?.qty ?? 0)
-  return {
-    name: baseOf(p.symbol),
-    open: true,
-    params: {
-      symbol: baseOf(p.symbol),
-      rawSymbol: p.raw ?? pairOf(p.symbol),
-      side: p.side === 'short' ? 'short' : 'long',
-      openAt,
-      /* 还没平完：右端让后端取「现在」 */
-      closeAt: null,
-      entryPrice: entry,
-      exitPrice: null,
-      qty,
-      net: c?.net ?? 0,
-      holdSec: Math.max(0, (Date.now() - openAt) / 1000),
-      leverage: p.leverage || c?.leverage || null,
-      keyName: p.keyName ?? c?.keyName
-    }
-  }
-}
-
-/**
- * 点「收录」——把这一笔**已平**的仓位整理成导入参数。
- *
- * ⚠️ 这一条上的数就是账本算出来的那份（开平仓均价 / 净盈亏 / 持仓时长），
- *    原样交上去，别再自己算一遍（口径会跟「仓位历史」卡上显示的对不上）。
- */
-function collectOfCycle(c: ExchangePositionCycle): PositionImportTarget {
-  const openAt = Date.parse(c.openAt)
-  return {
-    name: baseOf(c.symbol),
-    open: false,
-    params: {
-      symbol: baseOf(c.symbol),
-      rawSymbol: pairOf(c.symbol),
-      side: c.side,
-      openAt,
-      closeAt: c.closeAt ? Date.parse(c.closeAt) : null,
-      entryPrice: c.entryPrice,
-      exitPrice: c.exitPrice,
-      qty: c.qty,
-      net: c.net,
-      holdSec: c.holdSec,
-      leverage: c.leverage,
-      keyName: c.keyName
-    }
-  }
-}
 
 /** 这个币现在的最新成交价（拿不到给 `null`） */
 function lastOf(p: FuturesPosition): number | null {
@@ -2053,31 +1965,6 @@ const RANGES = [
                   </span>
                 </span>
                 <!--
-                  「收录到知识库」（2026-10-16）：点一下就按**这笔仓位**截一段行情
-                  （开仓前 40 根 + 整段持仓 + 平仓后 6 根）交给 AI 提炼成一条经验。
-                  ⚠️ 这一整行 `.p-h` 是「点去 K 线」的，所以必须 `.stop`。
-                  ⚠️ 账本里没有开仓记录时**禁用**（取不到开仓时间 ⇒ 不知道从哪儿截），
-                     悬停里说明白原因。
-                -->
-                <button
-                  type="button"
-                  class="col-btn"
-                  :disabled="!Number.isFinite(openAtOfPos(p)) || busy"
-                  :title="
-                    Number.isFinite(openAtOfPos(p))
-                      ? '收录到知识库（截开仓前 + 整段持仓 + 平仓后那几根，让 AI 提炼经验）'
-                      : '账本里还没有这条持仓的开仓记录，取不到开仓时间 —— 暂时收录不了'
-                  "
-                  aria-label="收录到知识库"
-                  @click.stop="emit('collect', collectOfPos(p))"
-                >
-                  <!-- 书 + 书签（「收录进知识库」；原来那颗往下插的箭头像「下载」，2026-10-16 换掉） -->
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
-                    <path d="M10 2v8l3-3 3 3V2" />
-                  </svg>
-                </button>
-                <!--
                   「分享这条持仓」（2026-10-13）：开底部弹层 → 画一张持仓卡 → 弹系统分享面板。
                   ⚠️ 这一整行 `.p-h` 是「点去 K 线」的，所以必须 `.stop`，否则分享的同时还会跳走。
                   ⚠️ 内联 SVG 一定要给尺寸（`width/height`）—— 光靠 `viewBox` 会被 flex 撑爆。
@@ -2439,25 +2326,6 @@ const RANGES = [
                 <span class="pnl cyc-net" :class="tone(c.net)">{{
                   signedMoney(c.net)
                 }}</span>
-                <!--
-                  「收录到知识库」（2026-10-16）：把这一笔仓位（开→平）截成一段行情
-                  （开仓前 40 根 + 整段持仓 + 平仓后 6 根）交给 AI 提炼成经验。
-                  整张卡是「点开成交明细」，所以必须 `.stop`。
-                -->
-                <button
-                  type="button"
-                  class="col-btn"
-                  :disabled="busy"
-                  title="收录到知识库（截开仓前 + 整段持仓 + 平仓后那几根，让 AI 提炼经验）"
-                  aria-label="收录到知识库"
-                  @click.stop="emit('collect', collectOfCycle(c))"
-                >
-                  <!-- 书 + 书签（「收录进知识库」；原来那颗往下插的箭头像「下载」，2026-10-16 换掉） -->
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20" />
-                    <path d="M10 2v8l3-3 3 3V2" />
-                  </svg>
-                </button>
                 <!--
                   「分享这段仓位」（2026-10-13 用户：「历史仓位也要加分享功能」）——
                   跟持仓那颗同一副样子、同一个弹层；整张卡是「点开成交明细」，
@@ -3666,44 +3534,6 @@ const RANGES = [
  *       至少看得出"这里还有个东西"，别跟 PnL 抢注意力。
  *    ⚠️ SVG 必须显式给 `width/height` —— 只写 `viewBox` 会被 flex 撑成大块。
  */
-/*
- * 标题行那两颗图标按钮（分享 / 收录到知识库）——同一副样子：
- * 26×26 的命中区、14px 的描边图标、平时是淡的。
- * ⚠️ `.col-btn` 是 2026-10-16 加的「收录到知识库」，跟分享那颗并排放在标题行右端。
- *    它会在**没有开仓记录**时禁用（见模板里那段说明），所以补一条禁用态。
- */
-.p-h .sh-btn,
-.cyc-h .sh-btn,
-.p-h .col-btn,
-.cyc-h .col-btn {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-}
-.p-h .sh-btn svg,
-.cyc-h .sh-btn svg,
-.p-h .col-btn svg,
-.cyc-h .col-btn svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-}
-.p-h .col-btn:disabled,
-.cyc-h .col-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
 /*
  * ⚠️ **只留键盘焦点**，不给悬浮态（用户 2026-10-07：「不需要 hover 效果」）——
  *    手机 WebView 里悬停本来就是虚的，安卓还会在**点完之后把 `:hover` 粘住**，

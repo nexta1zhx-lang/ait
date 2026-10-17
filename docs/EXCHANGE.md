@@ -237,7 +237,7 @@ CREATE INDEX IF NOT EXISTS exchange_fills_sym_idx  ON exchange_fills (key_id, sy
 
 **绑定关系**（照仓库现有规矩，跟 `llm_usage` 一个思路）：
 
-- `user_id` **必带** —— 用户自己的数据一律带它（`analyses` / `knowledge` / `llm_usage` …
+- `user_id` **必带** —— 用户自己的数据一律带它（`analyses` / `journal_entries` / `llm_usage` …
   都带），读接口一律 `WHERE user_id = $1`；**哪天 join 漏了也不会串号**，这是兜底。
 - `key_id` 也带 —— 数据是**一套 key 一个账户**，界面按套切。
 - **删除即删除**（用户 2026-10-05 定）⇒ 两个 FK 都 `ON DELETE CASCADE`，

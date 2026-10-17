@@ -155,7 +155,7 @@ async function removeUser(u: AdminUser): Promise<void> {
   const ok = await askConfirm({
     title: `确定删除用户「${u.username}」？`,
     body: [
-      {t: `他名下的 ${u.stats.analyses} 条预测历史、${u.stats.knowledge} 条知识库和用量记录会一起删除。`, tone: 'num'},
+      {t: `他名下的 ${u.stats.analyses} 条预测历史和用量记录会一起删除。`, tone: 'num'},
       {t: '删掉就恢复不了了。', tone: 'warn'}
     ],
     okText: '删除用户',
@@ -235,7 +235,7 @@ onMounted(load)
               <div class="u-meta">
                 <span class="dim small">建于 {{ bjTime(u.createdAt) }}</span>
                 <span class="dim small">
-                  {{ u.stats.analyses }} 条预测 · {{ u.stats.knowledge }} 条知识库
+                  {{ u.stats.analyses }} 条预测
                 </span>
               </div>
             </div>

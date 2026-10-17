@@ -24,10 +24,8 @@ import SettingsSheet from '../comps/SettingsSheet.vue'
 import PersistSheet from '../comps/PersistSheet.vue'
 import MarginRateBadge from '../comps/MarginRateBadge.vue'
 import SegTabs from '../comps/SegTabs.vue'
-import CollectForm from '../comps/CollectForm.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
-import HistoryView from './HistoryView.vue'
 import JournalView from './JournalView.vue'
 import AutoPredictView from './AutoPredictView.vue'
 import {
@@ -45,7 +43,6 @@ import {
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
 import {activeSessionOf, bindPersist, leftText} from '../persist'
-import {collectStream} from '../api'
 import {useScrollMemory} from '../scroll'
 import {useSwipeTabs} from '../swipe-tabs'
 import {
@@ -55,9 +52,7 @@ import {
   MOBILE_MAX,
   autoTab,
   chartFrom,
-  chartRange,
   chartTf,
-  clearChartRange,
   confirmTestPoint,
   error,
   exitTestMode,
@@ -66,7 +61,6 @@ import {
   pickSymbol,
   pointPicking,
   prefetchSymbol,
-  rangeDrawing,
   run,
   setPointPicking,
   startTestMode,
@@ -152,7 +146,7 @@ const isMobile = ref(window.innerWidth <= MOBILE_MAX)
  *    留在这儿只是**兜住老状态**（本地记住的 tab / 老链接可能还是 `test`）：
  *    宽 → 窄 切过来时照样把 `testArmed` 带走并落到「K 线」，别让那一局变成实时跑。
  */
-const MOBILE_HIDDEN_TABS: string[] = ['test', 'add']
+const MOBILE_HIDDEN_TABS: string[] = ['test']
 
 /** 跑分析那颗按钮的文案（桌面 / 手机两处按钮共用一个，不会写漂） */
 const runLabel = computed(() =>
@@ -344,10 +338,6 @@ const marketCount = ref(0)
  * （见上面 `useSwipeTabs` 那段）。
  */
 
-onBeforeUnmount(() => {
-  collectClose?.()
-})
-
 /*
  * 图表报错：**「找不到交易对」这种不弹红字**。
  * 币种输入框每敲一个字都会带着 symbol 去重画图，用户只是在筛选，
@@ -459,14 +449,10 @@ async function confirmBlacklist(): Promise<void> {
   }
 }
 
-/* ---------------- 手机端「＋ 添加案例」---------------- */
-/*
- * 窄屏不再有「添加案例」那一格（那套表单要在图上看过程、还要填备注，手机上来不及）：
- * 「AI 分析」右边一颗「＋」→ 点开变成「✕」，旁边冒出「添加案例」，图上也就能拖范围了。
- * 提炼时**不摆那串步骤**（手机屏放不下），就转个圈；完了弹一下结果。
- */
-const collectMode = ref(false)
-const collecting = ref(false)
+function onPickPoint(at: number) {
+  testPoint.value = at
+}
+
 /** 配置面板（K 线头部最右边那颗按钮点开，从底部弹出来） */
 const cfgOpen = ref(false)
 /**
@@ -515,89 +501,6 @@ onActivated(() => {
 onDeactivated(() => {
   pageAlive.value = false
 })
-/** 一次性提示：走全站那一份（`../toast`，画在 `ToastHost`）—— 这一页不再自己攒一套 */
-let collectClose: (() => void) | null = null
-
-function toggleCollect(): void {
-  collectMode.value = !collectMode.value
-  if (collectMode.value) {
-    // 图上开始能横向拖一段
-    rangeDrawing.value = true
-    showToast('在图上横向拖一段，再点「添加案例」')
-  } else {
-    rangeDrawing.value = false
-    clearChartRange()
-  }
-}
-
-/** 把图上拖出来的那一段提炼成经验（不带备注、不看步骤） */
-function runCollect(): void {
-  const r = chartRange.value
-  const s = symbol.value.trim().toUpperCase()
-  if (!s) return showToast('先选币种', 'bad')
-  if (!r) return showToast('先在图上拖一段行情', 'bad')
-  if (collecting.value) return
-
-  collecting.value = true
-  collectClose = collectStream(
-    {
-      symbol: s,
-      timeframe: chartTf.value,
-      note: '',
-      from: r.from,
-      to: r.to,
-      exact: true
-    },
-    {
-      // 步骤一律丢掉 —— 手机上只看结果
-      onStep() {},
-      onDone(res) {
-        collecting.value = false
-        collectClose = null
-        collectMode.value = false
-        rangeDrawing.value = false
-        clearChartRange()
-        showToast(
-          `已存进知识库：${res.symbol} ${res.timeframe} · ${res.window.bars} 根 · ` +
-            (res.tags?.[0] ?? '没挑到标签')
-        )
-        void refreshConfig()
-      },
-      onError(msg) {
-        collecting.value = false
-        collectClose = null
-        showToast(`提炼失败：${msg}`, 'bad')
-      }
-    }
-  )
-}
-
-/** 「拖一段」只给「添加案例」用 —— 手机端那颗「＋」展开时也算 */
-const chartSelectable = computed(
-  () => leftTab.value === 'add' || collectMode.value
-)
-
-/** 图上拖完一段 → 记下范围，顺手退出拖动模式（图恢复可拖） */
-function onPickRange(v: {from: number; to: number; bars: number}) {
-  chartRange.value = v
-  rangeDrawing.value = false
-}
-
-/**
- * 图上点了结束线 → 记下那一刻。
- *
- * ⚠️ 这里**只记时点**，别做别的事：
- *   · **不能**在这儿 `pointPicking = false`（2026-10-15 实测踩到）：拖动那条线时
- *     `KlineChart` **每动一下就 emit 一次** `point`（好让「判断时点」跟着跳），
- *     一停选线 ⇒ 图那边的 `watch(picking)` 立刻把 `dragLineX` 清掉、
- *     `onLayerMove` 也改走「划范围」那条路 ⇒ **线拖到一半就不跟手、手指还在屏上就断了**。
- *     选线什么时候停由**图自己**在抬手时决定（`onLineUp` → `setPicking(false)`）。
- *   · **不要**在这儿弹提示（用户 2026-10-15：「确定好线之后，不需要弹窗提示说确定线了」）——
- *     而且拖动过程中每动一下都会触发这里，弹出来就是刷屏。
- */
-function onPickPoint(at: number) {
-  testPoint.value = at
-}
 
 </script>
 
@@ -699,27 +602,6 @@ function onPickPoint(at: number) {
           <JournalView />
         </div>
 
-        <!-- ③ 知识库：2026-10-10 从「我的 → 复盘」挪进来，替掉原来的「历史分析」 -->
-        <div
-          v-else-if="leftTab === 'kb'"
-          class="scroll-body"
-        >
-          <HistoryView />
-        </div>
-
-        <!-- ④ 添加案例：币种/周期跟右侧，时间段只认「图上拖的那一段」
-             （不再跟 K 线日历选的那个时间绑在一起） -->
-        <div v-else-if="leftTab === 'add'" class="scroll-body">
-          <CollectForm
-            compact
-            :symbol="symbol"
-            :timeframe="chartTf"
-            :range="chartRange"
-            :drawing="rangeDrawing"
-            @draw-range="rangeDrawing = $event"
-            @clear:select="clearChartRange"
-          />
-        </div>
       </div>
 
       <!-- ── 右：K 线（整屏高度） ── -->
@@ -730,18 +612,12 @@ function onPickPoint(at: number) {
           :timeframe="chartTf"
           :from="chartFrom"
           :active="pageAlive && chartActive"
-          :selectable="chartSelectable"
-          :range="chartRange"
-          :drawing="rangeDrawing"
           :pick-point="pointPicking"
           :point-at="testMode ? testPoint : null"
           @update:timeframe="chartTf = $event"
           @update:from="chartFrom = $event"
-          @update:drawing="rangeDrawing = $event"
           @update:pick-point="setPointPicking"
-          @select="onPickRange"
           @point="onPickPoint"
-          @clear:select="clearChartRange"
           @error="onChartError"
           @note="showToast"
         >
@@ -835,35 +711,6 @@ function onPickPoint(at: number) {
               </template>
               <!-- 最右侧那组：＋ / 添加案例 / 配置 -->
               <template #actions>
-                <!--
-                  手机端「＋」：点开变成「✕」，左边冒出「添加案例」，
-                  图上同时可以横向拖一段。
-                -->
-                <button
-                  v-if="!collectMode"
-                  class="ghost tiny tk-only-mobile tk-plus"
-                  title="添加案例：在图上拖一段，提炼成经验"
-                  @click="toggleCollect"
-                >
-                  ＋
-                </button>
-                <template v-else>
-                  <button
-                    class="ghost tiny tk-only-mobile tk-add"
-                    :disabled="collecting"
-                    title="添加案例：把图上拖出来的这段提炼成经验"
-                    @click="runCollect"
-                  >
-                    ✓
-                  </button>
-                  <button
-                    class="ghost tiny tk-only-mobile tk-plus on"
-                    title="退出添加案例"
-                    @click="toggleCollect"
-                  >
-                    ✕
-                  </button>
-                </template>
                 <!--
                   ⚠️ MM 合约保证金率 2026-10-07 **挪到「大字价格」那一行的最右端**了
                   （用户：「mm放在 下面最右侧和价格那一排」＋「右侧」）——
@@ -1019,18 +866,6 @@ function onPickPoint(at: number) {
           </template>
         </KlineChart>
       </aside>
-    </div>
-
-    <!--
-      提炼中：就转个圈。手机上不看那串步骤（一屏放不下，还得往下滑），
-      完了弹一下结果。
-    -->
-    <div v-if="collecting" class="collect-mask">
-      <div class="collect-mask-card">
-        <span class="spin" />
-        <b>AI 正在提炼这段行情…</b>
-        <span class="dim">拉行情 → 算压力支撑 → 读结构 → 提炼经验</span>
-      </div>
     </div>
 
     <!-- 一次性提示由全局的 `ToastHost` 画（见 App.vue / style.css 那一节） -->

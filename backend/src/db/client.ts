@@ -78,7 +78,7 @@ export async function checkDb(): Promise<DbStatus> {
   try {
     const v = await queryOne<{version: string}>('SELECT version() AS version')
     const counts: Record<string, number> = {}
-    for (const t of ['knowledge', 'analyses', 'llm_usage']) {
+    for (const t of ['analyses', 'llm_usage']) {
       try {
         const r = await queryOne<{n: string}>(
           `SELECT count(*)::text AS n FROM ${t}`

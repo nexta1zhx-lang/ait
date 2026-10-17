@@ -93,11 +93,9 @@ let lastCpu = {at: Date.now(), usage: process.cpuUsage()}
 /** 业务表（行数展示用；表名是白名单常量，拼进 SQL 是安全的） */
 const TABLES = [
   'analyses',
-  'knowledge',
   'llm_usage',
   'ai_docs',
   'ai_doc_versions',
-  'tag_templates',
   'contract_store'
 ]
 

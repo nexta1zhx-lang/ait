@@ -57,7 +57,7 @@ function mean(nums: number[]): number {
  *   这一段把最后 `recent` 根原样列出来（开高低收 / 量 / 涨跌），
  *   「该调不调」「不破前低」「极弱转强」这些判断才有依据。
  *
- * ⚠️ 只在**分析**那条链上传 `recent`（`data/market.ts`）；知识库收录 / 提炼
+ * ⚠️ 只在**分析**那条链上传 `recent`（`data/market.ts`），别的调用方
  *    （`describeRally`）没传就是 0，输出逐字不变，别改坏那条链。
  */
 export function tailLines(seg: Candle[], recent: number): string[] {

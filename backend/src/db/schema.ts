@@ -4,12 +4,11 @@
  *   users            用户（用户名 + scrypt 密码）
  *   sessions         登录会话（token）
  *   user_llm         每个用户自己的 DeepSeek 配置（空 = 用服务器 .env 那份）
- *   ai_docs          AI 的提示词文档（kind=predict 分析预测 / kind=extract 知识库提炼），
+ *   ai_docs          AI 的提示词文档（kind=predict 分析预测 / kind=polish 润色 …），
  *                    「我的 → AI 提示词」里改，即改即生效（见 `db/prompts.ts`）。
  *   ai_doc_versions  上面那份文档的历史版本（每次改存一条，可回滚）。
  *   analyses         预测历史：每次分析存**那一句话** + 币种 / 时间 / 现价 / 成本
  *                    （2026-10-11 重置后只写这几个字段，其余老列一律留空）
- *   knowledge        知识库 —— 我标过的案例 + AI 提炼的经验
  *   llm_usage        每次大模型调用的 token 与花费
  *   contract_store   币种表（合约清单整份一行，每天自动从币安刷）
  *
@@ -196,7 +195,8 @@ CREATE TABLE IF NOT EXISTS user_llm (
 CREATE TABLE IF NOT EXISTS ai_docs (
   id         BIGSERIAL   PRIMARY KEY,
   -- role / rule = 旧版（角色设定 + 规则正文，已不再参与拼装）
-  -- predict = 分析预测（开单分析读这一份）；extract = 知识库提炼
+  -- predict = 分析预测（开单分析读这一份）；polish = 日记润色；
+  -- extract = 知识库提炼（模块已删，数据保留、不再参与拼装）
   kind       TEXT        NOT NULL DEFAULT 'rule'
                          CHECK (kind IN ('role', 'rule', 'extract', 'predict', 'polish')),
   name       TEXT        NOT NULL,
@@ -231,7 +231,7 @@ CREATE INDEX IF NOT EXISTS ai_doc_versions_idx
 -- 价目快照存在 price 里，这样以后官方调价也不会篡改历史记录。
 CREATE TABLE IF NOT EXISTS llm_usage (
   id                BIGSERIAL    PRIMARY KEY,
-  -- judge = 开单分析；extract = 案例提炼
+  -- judge = 开单分析；ask = 数据问答；polish = 日记润色
   kind              TEXT         NOT NULL,
   model             TEXT         NOT NULL,
   symbol            TEXT,
@@ -317,8 +317,6 @@ CREATE TABLE IF NOT EXISTS analyses (
 
   -- ────────── 来源与成本 ──────────
   model         TEXT,
-  -- @deprecated 知识库经验不再注入提示词，新记录恒为 []
-  knowledge_refs JSONB      NOT NULL DEFAULT '[]'::jsonb,
   -- 对应 llm_usage 里那一笔，方便对账
   llm_usage_id  BIGINT      REFERENCES llm_usage (id) ON DELETE SET NULL,
   prompt_tokens     INTEGER,
@@ -555,70 +553,6 @@ CREATE TABLE IF NOT EXISTS push_tokens (
 );
 CREATE INDEX IF NOT EXISTS push_tokens_user_idx ON push_tokens (user_id);
 
--- ---------------------------------------------------------------- 知识库
-CREATE TABLE IF NOT EXISTS knowledge (
-  id           BIGSERIAL   PRIMARY KEY,
-  symbol       TEXT        NOT NULL,
-  ccxt_symbol  TEXT,
-  exchange     TEXT        NOT NULL DEFAULT 'binance',
-  timeframe    TEXT        NOT NULL,
-  -- do = 这是我该做的；dont = 这是我不该做的
-  label        TEXT        NOT NULL CHECK (label IN ('do', 'dont')),
-  -- A 顺势单 / A-W 顺势双底 / S 突破 / V 超跌极速V反 / B 不该做
-  grade        TEXT,
-  title        TEXT        NOT NULL DEFAULT '',
-  note         TEXT        NOT NULL DEFAULT '',
-  -- ★ AI 提炼的可复用经验
-  lesson       TEXT        NOT NULL DEFAULT '',
-  features     JSONB       NOT NULL DEFAULT '{}'::jsonb,
-  window_start TIMESTAMPTZ NOT NULL,
-  window_end   TIMESTAMPTZ NOT NULL,
-  rally_from   INTEGER,
-  rally_to     INTEGER,
-  -- 压缩后的 K 线：[[t,o,h,l,c,v], ...]
-  candles      JSONB       NOT NULL DEFAULT '[]'::jsonb,
-  rally_meta   JSONB       NOT NULL DEFAULT '{}'::jsonb,
-  snapshot     JSONB       NOT NULL DEFAULT '{}'::jsonb,
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS knowledge_created_idx ON knowledge (created_at DESC);
-CREATE INDEX IF NOT EXISTS knowledge_symbol_idx  ON knowledge (symbol);
-CREATE INDEX IF NOT EXISTS knowledge_label_idx   ON knowledge (label, grade);
-
--- ---------------------------------------------------------- 标签模板
--- 案例标签只能从这份清单里挑；清单由我自己在网页上维护。
--- ⚠️ 2026-10-04 起**按用户隔离**：唯一索引是 (user_id, name)，见文件末尾。
-CREATE TABLE IF NOT EXISTS tag_templates (
-  id         BIGSERIAL   PRIMARY KEY,
-  user_id    BIGINT      REFERENCES users (id) ON DELETE CASCADE,
-  name       TEXT        NOT NULL,
-  sort       INTEGER     NOT NULL DEFAULT 0,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- ──────────────────────────────────────────────────────────── 新列（幂等）
--- 这段行情是什么：up 拉升 / down 下跌 / range 横盘。
--- 以前是 grade(A/B/C)，那是套我自己的体系；现在 AI 不判档了，只客观说走势。
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS move_type TEXT;
--- 为什么走成这样（AI 的分析过程）
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS why       TEXT NOT NULL DEFAULT '';
--- 标签：只能从固定的 10 个模板里挑，AI 不许自己造词
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS tags      JSONB NOT NULL DEFAULT '[]'::jsonb;
--- 「该做 / 不该做」这一维已经去掉：新记录 label 为空，老记录保留原值
-ALTER TABLE knowledge ALTER COLUMN label DROP NOT NULL;
--- 标签筛选走 GIN
-CREATE INDEX IF NOT EXISTS knowledge_tags_idx      ON knowledge USING GIN (tags);
-CREATE INDEX IF NOT EXISTS knowledge_move_type_idx ON knowledge (move_type);
-
--- ──────────────────────────────── 案例来源（2026-10-16，幂等）-- manual = 我在 K 线上画一段收录的；position = 从「持仓 / 仓位历史」一键导入的。
--- 老记录一律算 manual（那时候还没有别的来源）。
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
--- 从仓位导入时那笔仓位的事实（方向 / 开平仓价 / 净盈亏 / 持仓时长 / 杠杆）。
--- 见 db/knowledge.ts 的 CasePosition；不是从仓位来的记录是空对象，前端不画那一块。
-ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS pos JSONB NOT NULL DEFAULT '{}'::jsonb;
--- 卡片上的「来源」筛选按 (user_id, source) 走
-CREATE INDEX IF NOT EXISTS knowledge_source_idx ON knowledge (user_id, source);
-
 -- ------------------------------------------------- 数据问答的会话（2026-10-17）
 -- 用户：「现在服务器数据问答的数据有保存在数据库吗」→ 要存（多设备能续上）。
 -- 以前问题 / 回答只在浏览器 localStorage 里，服务端只记了一条 llm_usage。
@@ -669,17 +603,14 @@ CREATE TABLE IF NOT EXISTS contract_store (
 );
 
 -- ──────────────────────────────────────── 按用户隔离（2026-10-04，幂等）
--- 四个「用户自己的数据」表都加 user_id：
---   analyses（预测历史）/ knowledge（知识库）/ tag_templates（标签模板）/ llm_usage（用量）
+-- 「用户自己的数据」表都加 user_id：
+--   analyses（预测历史）/ llm_usage（用量）
 -- 老的、还没归属的行 user_id 是 NULL；**第一个注册的账号**会把它们认领走
 -- （见 db/users.ts 的 claimLegacyData）。
 ALTER TABLE analyses      ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
-ALTER TABLE knowledge     ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
-ALTER TABLE tag_templates ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
 ALTER TABLE llm_usage     ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users (id) ON DELETE CASCADE;
 
 CREATE INDEX IF NOT EXISTS analyses_user_idx  ON analyses (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS knowledge_user_idx ON knowledge (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS llm_usage_user_idx ON llm_usage (user_id, created_at DESC);
 
 -- ──────────────────────────────── 分析来源（2026-10-15，幂等）
@@ -689,13 +620,6 @@ CREATE INDEX IF NOT EXISTS llm_usage_user_idx ON llm_usage (user_id, created_at 
 -- 老行默认 manual（那时候只有手动）。
 ALTER TABLE analyses ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
 CREATE INDEX IF NOT EXISTS analyses_source_idx ON analyses (user_id, source, created_at DESC);
-
--- 标签模板的唯一性从「全局」改成「每个用户一套」：
--- 老库那个 name 全局唯一索引必须先拆掉，否则两个用户不能有同名标签。
-DROP INDEX IF EXISTS tag_templates_name_idx;
-CREATE UNIQUE INDEX IF NOT EXISTS tag_templates_user_name_idx
-  ON tag_templates (user_id, name);
-CREATE INDEX IF NOT EXISTS tag_templates_user_idx ON tag_templates (user_id, sort, id);
 
 -- ──────────────────────────────── 大模型密钥（多把，2026-10-04）
 -- 一个用户可以有**多把** Key（各自带名字 / 模型 / 接口地址），其中一把是
@@ -1156,7 +1080,7 @@ DROP TABLE IF EXISTS rules_versions;
 -- 形状标签（档位 / 概率）那一套已经删了，analyses.tags 不再写入
 ALTER TABLE IF EXISTS analyses DROP COLUMN IF EXISTS tags;
 
--- 知识库提炼的提示词也搬进了 ai_docs → kind 多一个 'extract'。
+-- 提炼 / 润色提示词也搬进了 ai_docs → kind 多出 'extract' / 'polish'。
 -- 老库的 CHECK 只允许 role/rule，得先把它拆了重加（名字不定，按定义找）。
 DO $$
 DECLARE c RECORD;

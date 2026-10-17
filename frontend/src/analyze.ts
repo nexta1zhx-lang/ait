@@ -1,7 +1,7 @@
 /**
  * 开单分析的全局状态。
  *
- * 放模块作用域，不放组件的 `ref` —— 切到「预测历史 / 知识库 / 用量」再回来时
+ * 放模块作用域，不放组件的 `ref` —— 切到「预测分析 / 经验 / 用量」再回来时
  * 组件会重新挂载，局部 ref 就没了，结论会被「刷新掉」。
  * 这里保证：
  *   · 结论、分析过程、报错都留着
@@ -33,37 +33,6 @@ export const chartTf = ref('1h')
  * 一次拉多少根是内部策略，界面上不体现。
  */
 export const chartFrom = ref('')
-
-/**
- * 我在 K 线图上画出来的范围（毫秒时间戳）。
- *
- * 只在「添加案例」tab 用得上：画哪一段就提炼哪一段，
- * 这时候跟 `chartFrom`（从哪一刻开始画到最新）是两码事。
- */
-export interface ChartRange {
-  from: number
-  to: number
-  /** 这个范围里有多少根 K 线 */
-  bars: number
-}
-export const chartRange = ref<ChartRange | null>(null)
-
-/**
- * 是不是正等着我在 K 线上拖一段。
- *
- * 按钮在左边「添加案例」的时间那一行（`CollectForm`），
- * 状态放这儿是为了两边都能读 —— 左边显示「在图上拖一段…」，右边进拖动模式。
- */
-export const rangeDrawing = ref(false)
-
-/**
- * 画范围时不会切图的显示 —— 范围只是给「添加案例」用的，
- * 图上看哪一段时间不受影响。
- */
-export function clearChartRange(): void {
-  chartRange.value = null
-  rangeDrawing.value = false
-}
 
 /** 周期由后端配置决定，页面上不让用户填 */
 export const timeframesText = computed(
@@ -172,9 +141,11 @@ export const LEFT_TABS = [
    * 并加了分类 / 置顶）。`value` 仍是 `'journal'`（老链接 `?t=journal` 不变）。
    * 表结构 / 筛选口径见 `docs/JOURNAL.md`。
    */
-  {value: 'journal' as const, label: '经验'},
-  {value: 'kb' as const, label: '知识库'},
-  {value: 'add' as const, label: '添加案例'}
+  {value: 'journal' as const, label: '经验'}
+  /*
+   * ⚠️ 2026-10-18 用户：「知识库模块整个去掉……仓位到知识库、划线进入知识库全部去掉」——
+   *    原来的「知识库」「添加案例」两格连同后端一起删了，这里不再摆。
+   */
 ]
 /**
  * 左侧一级 tab 的取值。
@@ -414,10 +385,9 @@ export const testBarTime = computed(() =>
 )
 
 /**
- * 切 tab 时顺手做两件事（就放这里，组件里不用再挂一个 watch）：
- *   1. 测试模式下点不到图的那些格（窄屏「预测分析 / 日记 / 知识库」…）一律退出选线 ——
- *      让人「点一根」却看不见图，那是死路。测试模式本身不跟着 tab 走（见 `testArmed`）。
- *   2. 离开「添加案例」就把图上拖出来的那段范围收掉。
+ * 切 tab 时顺手收一下选线状态（就放这里，组件里不用再挂一个 watch）：
+ *   测试模式下点不到图的那些格（窄屏「预测分析 / 经验」…）一律退出选线 ——
+ *   让人「点一根」却看不见图，那是死路。测试模式本身不跟着 tab 走（见 `testArmed`）。
  *
  * ⚠️ 「实时 ↔ 测试切了清结论」那条已经没用了：2026-10-18 起「预测结果」不再是一级 tab，
  *    测试也不再占一格（两端都走 K 线头上那颗烧瓶），一级 tab 里没有第二种跑法可切。
@@ -430,7 +400,6 @@ watch(leftTab, v => {
    */
   if (v === 'test' && !testPoint.value) pointPicking.value = true
   else if (!chartVisible(v)) pointPicking.value = false
-  if (v !== 'add') rangeDrawing.value = false
 })
 
 /** 换币种：清掉上一只币的结论 */

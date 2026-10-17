@@ -6,7 +6,9 @@ import {getEnabledDocs} from './db/prompts'
  *
  * 全部来自数据库 `ai_docs`（网页「AI 提示词」页上编辑）：
  *   kind = predict → 分析预测提示词（**只有这一份**，不再分角色/规则）
- *   kind = extract → 知识库提炼提示词
+ *   kind = polish  → 日记润色提示词
+ *   kind = extract → 知识库提炼；2026-10-18 知识库模块删了，这份**数据留在库里**
+ *                    但已不参与任何拼装（没有任何代码读它）。
  * 关掉的文档不参与。
  *
  * 没有文件、没有内置角色、没有兜底文案 —— 库里没写就是没有。
@@ -84,7 +86,7 @@ function joinDocs(docs: {name: string; content: string}[]): string {
     .join('\n\n---\n\n')
 }
 
-function hashOf(s: string): string {
+export function hashOf(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex').slice(0, 12)
 }
 
@@ -100,10 +102,10 @@ export function fullSystem(system: string): string {
 }
 
 /**
- * 知识库提炼用的提示词（`ai_docs` 里 kind=extract 的文档）。
+ * 「一份提示词文档」读出来的样子（润色用它；以前提炼也用）。
  *
- * 跟开单分析那份**分开读**，互不干扰 —— 分析读 role + rule，提炼读 extract。
- * 库里没写就是空的，`extractCase` 会直接报错（代码里没有兜底文案）。
+ * 跟开单分析那份**分开读**，互不干扰 —— 分析读 predict、日记读 polish。
+ * 库里没写就是空的（代码里没有兜底文案）。
  */
 export interface ExtractRules {
   system: string
@@ -116,7 +118,7 @@ export interface ExtractRules {
 /**
  * 日记润色用的提示词（`ai_docs` 里 kind=polish 的文档）。
  *
- * 跟另外几份**分开读**，互不干扰 —— 分析读 predict、提炼读 extract、日记读 polish。
+ * 跟另外几份**分开读**，互不干扰 —— 分析读 predict、日记读 polish。
  * 库里一份都没有时 `ensurePolishDoc()` 会先种一份默认的（见 `db/prompts.ts`）。
  */
 export async function loadPolishRules(): Promise<ExtractRules> {
@@ -127,28 +129,6 @@ export async function loadPolishRules(): Promise<ExtractRules> {
       system,
       enabled: Boolean(system.trim()),
       sources: polish.map(d => `日记：${d.name}`),
-      hash: hashOf(system),
-      dbError: null
-    }
-  } catch (e) {
-    return {
-      system: '',
-      enabled: false,
-      sources: [],
-      hash: hashOf(''),
-      dbError: (e as Error).message
-    }
-  }
-}
-
-export async function loadExtractRules(): Promise<ExtractRules> {
-  try {
-    const {extract} = await getEnabledDocs()
-    const system = joinDocs(extract)
-    return {
-      system,
-      enabled: Boolean(system.trim()),
-      sources: extract.map(d => `提炼：${d.name}`),
       hash: hashOf(system),
       dbError: null
     }

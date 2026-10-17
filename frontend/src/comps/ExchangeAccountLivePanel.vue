@@ -19,7 +19,6 @@ import TransferSheet from './TransferSheet.vue'
 import ReduceSheet from './ReduceSheet.vue'
 import TpSlSheet from './TpSlSheet.vue'
 import OrderEditSheet from './OrderEditSheet.vue'
-import PositionImportSheet from './PositionImportSheet.vue'
 import type {PositionRef} from './ExchangeAccountBoard.vue'
 import {chartQuery, pickSymbol, prefetchSymbol} from '../analyze'
 import {bindLastPrices, lastPrices} from '../last-price'
@@ -70,8 +69,6 @@ import {
   type ExchangeTrade,
   type FuturesAsset,
   type FuturesPosition,
-  type CollectResult,
-  type PositionImportTarget,
   type PositionsPatch
 } from '../api'
 
@@ -592,30 +589,6 @@ const tpslTarget = ref<TpSlTarget | null>(null)
 const editTarget = ref<OrderEditTarget | null>(null)
 /** 改单 / 撤单正在提交（弹层那两颗按钮一起禁点） */
 const orderBusy = ref(false)
-
-/* ---------------- 收录到知识库（2026-10-16） ---------------- */
-
-/**
- * 正在收录的那一笔仓位（null = 弹层关着）。
- *
- * 取数 + 调模型 + 画过程都在弹层里（它拿着 SSE 的取消把手），
- * 这里只管**开与关**：板子把「这笔仓位是什么」交上来，存完提示一句 + 刷计数。
- */
-const collectTarget = ref<PositionImportTarget | null>(null)
-
-/**
- * 存进知识库之后：提示 + 把「我的」那几条计数刷新一下。
- *
- * ⚠️ 提示文案跟「添加案例」那条路保持一致（`AnalyzeView.runCollect`）——
- *    都是「已存进知识库：币种 周期 · 几根 · 第一个标签」。
- */
-function onImported(res: CollectResult): void {
-  showToast(
-    `已存进知识库：${res.symbol} ${res.timeframe} · ${res.window.bars} 根 · ` +
-      (res.tags[0] ?? '没挑到标签')
-  )
-  void refreshConfig()
-}
 
 /**
  * 这一坨数据（持仓 / 挂单）该用哪套 Key 去下单。
@@ -2129,7 +2102,6 @@ onUnmounted(stopWork)
       @close="closeRow"
       @closeAll="closeAllRows"
       @tpsl="openTpSl"
-      @collect="collectTarget = $event"
       @open-chart="openChart"
       @edit-order="openOrderEdit"
       @tab="onTab"
@@ -2234,17 +2206,6 @@ onUnmounted(stopWork)
       @close="transferOpen = false"
       @pick-key="pickTransferKey"
       @done="onTransferred"
-    />
-
-    <!--
-      「收录到知识库」（2026-10-16）——持仓卡 / 仓位历史卡上那颗 ↓ 图标按钮。
-      ⚠️ 挂在**容器**这一层：板子（纯展示）只把「这笔仓位是什么」交上来，
-         SSE 的取消把手、提示、刷新计数都在这儿。
-    -->
-    <PositionImportSheet
-      :target="collectTarget"
-      @close="collectTarget = null"
-      @saved="onImported"
     />
 
     <p v-if="ordersErr" class="dim tiny">挂单查询失败：{{ ordersErr }}</p>

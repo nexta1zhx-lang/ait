@@ -20,7 +20,7 @@
 - AI 输出**只有 6 个字段**：标签（带概率）、理由、走势、走势概率、结论、推荐。
 - 没有止损止盈、没有仓位、没有 checklist、没有护栏校验 —— 那些都删了。
 - **提示词写在代码里**（`backend/src/llm/prompts.ts`），改完要**重新部署**。
-- 知识库**不注入** prompt，只借它一份**标签池**。
+- 提示词全部存在库里（`ai_docs`），网页「我的 → 模型配置 → AI 提示词」可改，即改即生效。
 
 ---
 
@@ -67,7 +67,7 @@ npm run dev -- BTC/USDT -t 4h -d 30     # 换周期 / 换天数
 | `npm run cost`                                                     | 看用量与花费                                                       |
 | `npm run reprice`                                                  | **重算历史花费**（改过节假日表/时段规则后跑；加 `--write` 才写库） |
 | `npm run peak`                                                     | 列全年每天算高峰还是空闲（核对节假日表用）                         |
-| `npm run learn` / `npm run swing`                                  | 辅助脚本                                                           |
+| `npm run swing`                                                    | 辅助脚本（拉升检测）                                               |
 | `npm run sync:contracts`                                           | 拉交易所合约表                                                     |
 | `npm run scan:pick`                                                | 手动跑一轮**选币**（自动化预测第一段，纯 SQL 不花钱）               |
 
@@ -140,13 +140,12 @@ npm run release:dry        # 只看打包结果和要执行的命令，不碰服
 「我的」子页用 `?p=exchange|stats|ask|profile|model|admin`：
 「模型配置」里再分「密钥配置 / 用量统计 / AI 提示词」（`?t=keys|usage|prompts`），
 管理里再分「用户管理 / 服务器」（`?t=users|server`）。
-「预测历史 / 知识库」原来挂在「我的 → 复盘」，2026-10-10 起搬进开单分析左栏。
+「预测历史」原来挂在「我的 → 复盘」，2026-10-10 起搬进开单分析左栏。
 
-开单分析左栏一级 tab：**合约行情 / 预测结果 / 测试 / 自动化预测 / 知识库 / 添加案例**
-（窄屏去掉「合约行情 / 测试 / 添加案例」，剩 **K 线 / 预测结果 / 自动化预测 / 知识库**）。
-「预测结果」= 原来的「实时分析」+「预测历史」两格合并（2026-10-12）：上面是本次的分析过程与结论卡，
-下面接预测历史列表；「自动化预测」是后台扫描（选币 → 快讯式判定 → App 通知）的门面，见
-[docs/AUTO-PREDICT.md](./docs/AUTO-PREDICT.md)。
+开单分析左栏一级 tab：**预测分析 / 合约行情 / 经验**
+（窄屏去掉「合约行情」，剩 **预测分析 / 经验**）。
+「预测分析」是四格（币种监测 / AI分析 / 自动分析 / 提醒），把原来的「实时分析 + 预测历史」、
+「自动化预测」都收进来了 —— 二级 tab 见下；经验页见 [docs/JOURNAL.md](./docs/JOURNAL.md)。
 窄屏在一级 tab 上**左右滑动**可切换；下单模块上横划则是切「开单 / 仓位」。
 
 登录后才有业务数据（行情 / K 线 / 币种 / 图标 / 下载清单无需登录）。
@@ -200,32 +199,23 @@ npm run release:dry        # 只看打包结果和要执行的命令，不碰服
 ⚠️ 手机上「测试」**不是一格 tab**：tab 行放不下第 5 格（4 格 + 模型余额刚好铺满），
 所以走那颗图标。手机那格的图只在自己那格（「K 线」），所以「选线 → 预测结果」是一进一出。
 
-（「添加案例」那个 tab 才是真的**拖一段**：画哪一段就提炼哪一段，那是另一套。）
-
 - 「各周期行情」那块显示的就是**真正发给 AI 的原文** —— 每一段都标了天数、根数、起止时间。
   看着不对劲，就是这里不对劲。
 
-### 知识库（案例）怎么攒
+### 知识库（案例）—— **2026-10-18 已删**
 
-两条路，都会调一次模型提炼成「走势类型 + 标题 + 为什么 + 经验 + 标签」：
+用户：「知识库模块整个去掉，提示词数据留下，其他的数据库表和仓位到知识库、划线进入知识库
+全部去掉」。删掉的东西：
 
-1. **画一段**（开单分析的「添加案例」tab）：图上拖一段，画哪段就提炼哪段 —— 只管行情。
-2. **从一笔仓位导入**（2026-10-16，用户：「订单的仓位上、历史仓位中加一个按钮……点一下
-   自动导入到我的资料库」）：在「我的 → 交易所账户」的**持仓卡**和**仓位历史卡**上点那颗
-   ↓ 图标 —— 它同时把**那笔真实仓位**（方向 / 开平仓价 / 净盈亏 / 持仓时长 / 杠杆）一起交给模型。
+- 左栏「知识库」「添加案例」两格 tab、案例卡片 / 详情弹窗 / 筛选栏
+- 划一段收录、从「持仓 / 仓位历史」一键导入（含 `knowledge-window` / `from-position` 两条流）
+- `/api/knowledge*`、`/api/tags*`、`db/knowledge.ts`、`db/tags.ts`、`knowledge-service.ts`、
+  `llm/extract.ts`、`scripts/learn.ts`，以及数据问答里的 `knowledge_search` 工具
+- `knowledge` / `tag_templates` 两张表的建表语句（**老库里已经存在的那两张表没删**，
+  数据还在，只是代码不再读写）
 
-段怎么截（见 [backend/src/knowledge-window.ts](./backend/src/knowledge-window.ts)，纯函数、夹具在
-`selftest.ts` 里）：**开仓前 40 根 + 整段持仓 + 平仓后 6 根**，周期按**持仓时长**换档
-（≤6h→5m / ≤1d→15m / ≤4d→1h / ≤16d→4h / 更长→1d）——
-这样一段里同时看得到「我是在什么结构下开的」「持了多久怎么走的」「平掉之后又走了几根」。
-还没平完的仓位右端取「现在」。喂进模型时额外说一句「这是我自己的一笔真实仓位」，
-并附上**开仓那一刻**的 4H / 日线压力支撑（画一段那条用的是「行情结束时」那一刻）。
-
-导入进来的案例在库里 `knowledge.source = 'position'`（老记录都是 `manual`）、
-`knowledge.pos` 存那笔仓位的事实 ⇒ 知识库卡片上多一颗药丸（`仓位 · 多 +12.30`）、
-详情弹窗里多一块开平仓对照、筛选栏多一个「仓位导入」开关。
-接口：`POST /api/knowledge/from-position`（不带进度）和
-`GET /api/knowledge/from-position/stream`（SSE，网页走这条；参数都是短数字，走 query 没问题）。
+**留着的是提示词数据**：`ai_docs` 里 `kind = 'extract'` 那几份文档不删（网页上不再显示、
+也不再参与任何拼装），要捞出来看直接查 `ai_docs`。
 
 ---
 
@@ -333,13 +323,12 @@ npm run release:dry        # 只看打包结果和要执行的命令，不碰服
 它**不能随便查库**：模型能做的只有「从下面这些工具里选一个 + 填参数」，
 SQL 和口径都写死在 [backend/src/ask/tools.ts](./backend/src/ask/tools.ts)。
 
-「我分析过什么」那半边（走 `analyses` / `knowledge` / `candles` / `llm_usage` / `persist_sessions`）：
+「我分析过什么」那半边（走 `analyses` / `candles` / `llm_usage` / `persist_sessions`）：
 
 | 工具               | 读什么                              |
 | ------------------ | ----------------------------------- |
 | `analysis_stats`   | 预测历史：按天 / 币种 / 档位统计    |
 | `recent_analyses`  | 预测历史：原始结论（带档位与现价）  |
-| `knowledge_search` | 知识库：我标过的案例                |
 | `market_daily`     | 底座库的日线收盘（只覆盖 U 本位永续） |
 | `usage_cost`       | 大模型用量与花费                    |
 | `persist_status`   | 持久化分析的会话                    |
@@ -407,18 +396,19 @@ SQL 和口径都写死在 [backend/src/ask/tools.ts](./backend/src/ask/tools.ts)
 
 ## 提示词
 
-**写在代码里**，两份常量（`backend/src/llm/prompts.ts`）：
+**全部存数据库**（`ai_docs`，`backend/src/db/prompts.ts`），网页「我的 → 模型配置 → AI 提示词」
+里改，**即改即生效**（不用重新部署）：
 
-| 常量             | 干什么                                                             | 谁在用                 |
-| ---------------- | ------------------------------------------------------------------ | ---------------------- |
-| `PREDICT_PROMPT` | **分析预测**：怎么读行情、怎么预测、怎么给概率、**结论三档怎么判** | 每次分析（`/analyze`） |
-| `EXTRACT_PROMPT` | **知识库提炼**：收录案例时怎么把这段行情写成一条案例               | 知识库「收录」         |
+| kind      | 干什么                                                     | 谁在用                     |
+| --------- | ---------------------------------------------------------- | -------------------------- |
+| `predict` | **分析预测**：怎么读行情、怎么预测、怎么给概率、结论三档   | 每次分析（`/analyze`）     |
+| `polish`  | **日记润色**：只改写法、不改事实                           | 经验页的润色按钮           |
+| `extract` | 原「知识库提炼」—— 模块已删，**数据保留、不再参与拼装**     | 无（等哪天想捞出来）/       |
 
-- **改提示词 = 改这个文件 + 重新部署**（`bash scripts/release.sh`）。网页上没有编辑入口
-  （原 `/prompts` 页已撤）。
-- 每次分析会把「正文 + 输出契约」一起算 hash 存进 `analyses`，能对出当时用的是哪版。
-- 标签池 = **标签模板**（知识库页维护）∪ **知识库里用过的标签**。
-  名字要保持一致，不然池子会膨胀；模板外的自造词会在存库前被丢掉。
+- 文档可以**关掉**（关掉的不参与拼装）；改一次存一条历史，能回滚。
+- 分析那条的「正文」和代码里的输出契约一起算 hash 存进 `analyses`，能对出当时用的是哪版。
+- 数据问答的 system prompt 例外，仍在代码里（[backend/src/ask/prompt.ts](./backend/src/ask/prompt.ts)）——
+  它嵌着工具清单与数据字典，工具是写死的，用户改坏一处会静默答错。
 
 ---
 
@@ -457,15 +447,15 @@ backend/src/
   config.ts              读 .env
   calibers.ts            取数表：哪个主周期带哪些周期、各看多少天
   contracts.ts           合约表
-  db/                    PostgreSQL（schema / 文档 / 存档 / 知识库 / 用量）
+  db/                    PostgreSQL（schema / 提示词文档 / 存档 / 用量 / 经验）
   data/market.ts         拉 K 线（含「回到某一刻」的重放）
   analysis/describe.ts   把 K 线切成小段读成文字   ← 核心
   ask/                   数据问答：tools（6 个工具 + 写死的 SQL）/ range（参数收敛）/
                          prompt（数据字典）/ run（最多 4 轮的取数循环）
   context/builder.ts     拼成给 AI 的行情快照
-  llm/                   client / prompt（含输出契约）/ schema（zod）/ extract
+  llm/                   client / prompt（含输出契约）/ schema（zod）/ polish
   output/render.ts       命令行渲染
-  scripts/               selftest / history / cost / learn / swing …
+  scripts/               selftest / history / cost / swing …
 
 frontend/src/
   views/AnalyzeView.vue  开单分析 · MeView.vue 我的 · ContractsView.vue 合约行情

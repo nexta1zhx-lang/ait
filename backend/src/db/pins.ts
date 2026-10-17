@@ -8,7 +8,7 @@
  *   · 无视排行 → 置顶的永远排在最前（排序/搜索都只是决定它们**之后**那一段）
  *   · 用户绑定 → 存库、按 `user_id` 隔离（换设备也能看到同一份置顶）
  *
- * 只存 `base`（`BTC`，不带 `/USDT`），跟 `MarketRow.base`、知识库的写法一致。
+ * 只存 `base`（`BTC`，不带 `/USDT`），跟 `MarketRow.base` 的写法一致。
  */
 import {query, queryOne} from './client'
 

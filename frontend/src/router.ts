@@ -119,8 +119,11 @@ export const routes = [
     path: '/usage',
     redirect: to => ({path: '/me', query: {...to.query, p: 'model', t: 'usage'}})
   },
-  // 「知识库」现在是「开单分析」左栏的一格
-  {path: '/knowledge', redirect: to => analyzeTab('kb', to.query)},
+  /*
+   * 知识库整块已删（用户 2026-10-18）—— 老书签落到「预测分析 → AI分析」，
+   * 不让人打开一个空白页。
+   */
+  {path: '/knowledge', redirect: to => analyzeTab('history', to.query)},
   /*
    * `/replay` 一度是独立的一级页（2026-10-06 上午）—— 2026-10-10 整格取消了，
    * 旧链接按「预测历史 / 知识库」分流到「开单分析」。

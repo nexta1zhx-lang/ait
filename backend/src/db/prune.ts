@@ -6,7 +6,7 @@
  *
  * ⚠️ 只删**流水**：
  *    · `llm_usage`   每次调用的 token / 花费 ✓ 删
- *    · `analyses` / `knowledge` / `ai_docs` / `tag_templates` / `contract_store` —— **绝不碰**
+ *    · `analyses` / `ai_docs` / `contract_store` —— **绝不碰**
  */
 import {query} from './client'
 

@@ -11,7 +11,7 @@ import {describeDevice} from '../util/device'
  *   · 登录发一个随机 token 存 `sessions`，前端放 localStorage、请求带
  *     `Authorization: Bearer <token>`（SSE 带不了请求头，所以也允许 `?token=`）
  *   · 每个用户有自己的 DeepSeek 配置（`user_llm`）—— 空串表示没设，回落到 `.env`
- *   · 预测历史 / 知识库 / 标签模板 / 用量都按 `user_id` 隔离；
+ *   · 预测历史 / 用量都按 `user_id` 隔离；
  *     **第一个注册的账号**会把之前没有归属的老数据认领走
  *   · **多端登录**：每个设备一条会话，互不影响；账号能看到有哪些设备在线、
  *     单独踢掉某一台（本文件下面的 listSessions / revokeSession）
@@ -336,7 +336,7 @@ export async function register(input: Credentials): Promise<AuthResult> {
   )
   const user = mapUser(rows[0])
 
-  // 第一个账号：把没有归属的老数据（预测历史 / 知识库 / 标签模板 / 用量）
+  // 第一个账号：把没有归属的老数据（预测历史 / 用量）
   // 全部认领走 —— 用户要求「老数据归第一个注册的账号」。
   const total = await query<{n: string}>(
     'SELECT count(*)::text AS n FROM users'
@@ -412,7 +412,7 @@ export async function login(
 
 /** 老数据（user_id IS NULL）归给第一个用户 */
 export async function claimLegacyData(userId: number): Promise<void> {
-  for (const t of ['analyses', 'knowledge', 'tag_templates', 'llm_usage']) {
+  for (const t of ['analyses', 'llm_usage']) {
     await query(`UPDATE ${t} SET user_id = $1 WHERE user_id IS NULL`, [
       userId
     ]).catch(e =>
@@ -638,15 +638,14 @@ export async function seedAdminLlmFromEnv(): Promise<boolean> {
 export interface AdminUserRow extends User {
   /** 他自己的大模型密钥（管理员要能查看，明文也在里面） */
   llmKeys: LlmKey[]
-  /** 有多少条知识库 / 预测历史 */
-  stats: {knowledge: number; analyses: number}
+  /** 有多少条预测历史 */
+  stats: {analyses: number}
 }
 
 /** 管理员用：所有人 + 各自的密钥 + 数据条数 */
 export async function listUsersForAdmin(): Promise<AdminUserRow[]> {
-  const rows = await query<UserRaw & {knowledge: string; analyses: string}>(
+  const rows = await query<UserRaw & {analyses: string}>(
     `SELECT u.id, u.username, u.is_admin, u.created_at,
-            (SELECT count(*) FROM knowledge k WHERE k.user_id = u.id)::text AS knowledge,
             (SELECT count(*) FROM analyses a WHERE a.user_id = u.id)::text AS analyses
        FROM users u
       ORDER BY u.id`
@@ -691,7 +690,7 @@ export async function listUsersForAdmin(): Promise<AdminUserRow[]> {
   return rows.map(r => ({
     ...mapUser(r),
     llmKeys: byUser.get(Number(r.id)) ?? [],
-    stats: {knowledge: Number(r.knowledge), analyses: Number(r.analyses)}
+    stats: {analyses: Number(r.analyses)}
   }))
 }
 
@@ -733,7 +732,7 @@ export async function setUserPassword(
 
 /**
  * 管理员删号。
- * ⚠️ `analyses / knowledge / tag_templates / llm_usage` 都是
+ * ⚠️ `analyses / llm_usage` 都是
  * `ON DELETE CASCADE` —— **数据会跟着一起没**，前端必须二次确认。
  */
 export async function deleteUser(id: number): Promise<boolean> {

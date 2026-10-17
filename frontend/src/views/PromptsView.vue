@@ -38,7 +38,7 @@ const notice = ref('')
 
 /** 分析预测 —— 开单分析读的就是它（可以有备选，但只有打勾的会生效） */
 const predicts = computed(() => docs.value.filter(d => d.kind === 'predict'))
-/** 知识库提炼那份（收录案例时用，跟开单分析不是一条链路） */
+/** 知识库提炼那份 —— 模块 2026-10-18 删了，这几份**数据留着**（不再参与任何拼装） */
 const extracts = computed(() => docs.value.filter(d => d.kind === 'extract'))
 /** 日记润色那份（日记页「AI 美化」用，2026-10-18） */
 const polishes = computed(() => docs.value.filter(d => d.kind === 'polish'))
@@ -403,7 +403,7 @@ async function openPreview() {
   <div class="prompts" :class="`v-${view}`">
     <!-- ── 左：清单（点一条，右边就显示它） ── -->
     <section class="panel list">
-      <h2>AI 提示词 <span class="tag">分析预测 + 知识库提炼 + 日记润色</span></h2>
+      <h2>AI 提示词 <span class="tag">分析预测 + 日记润色（+ 提炼留档）</span></h2>
 
       <p class="hint">
         分析时读的就是<b>分析预测</b>那一份（打勾才生效；有多份时按顺序拼起来）。
@@ -429,10 +429,10 @@ async function openPreview() {
             :title="
               assembly.extractChars
                 ? assembly.extractSources.join('、')
-                : '收录案例会直接报错'
+                : '知识库模块已删，这几份只留档、不参与拼装'
             "
           >
-            知识库提炼 {{ extracts.filter(d => d.enabled).length }} 份 ·
+            知识库提炼（留档）{{ extracts.filter(d => d.enabled).length }} 份 ·
             {{ assembly.extractChars }} 字 · {{ assembly.extractHash }}
           </span>
         </template>
@@ -490,9 +490,9 @@ async function openPreview() {
         </div>
       </div>
 
-      <!-- 知识库提炼 -->
+      <!-- 知识库提炼（模块已删，数据留在这儿备查） -->
       <h3 class="group">
-        知识库提炼 <span class="dim">收录案例时让 AI 怎么读这段行情</span>
+        知识库提炼 <span class="dim">模块已删 —— 这几份留着备查，不再参与拼装</span>
       </h3>
       <ul class="docs">
         <li
@@ -509,7 +509,7 @@ async function openPreview() {
           <span class="arrow">›</span>
         </li>
         <li v-if="!extracts.length" class="empty">
-          还没有提炼提示词 —— 没有它「添加案例」会直接报错
+          没有提炼提示词（知识库模块已删，这里空着也不影响任何功能）
         </li>
       </ul>
       <button class="ghost tiny add" @click="addDoc('extract')">
@@ -564,7 +564,7 @@ async function openPreview() {
       <template v-if="view === 'preview'">
         <h2>
           这次真正发出去的 system prompt
-          <span class="tag">不含知识库经验与行情</span>
+          <span class="tag">只含提示词，不含行情</span>
         </h2>
         <pre class="preview">{{ previewText }}</pre>
         <div class="edit-ops">
