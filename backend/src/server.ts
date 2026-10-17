@@ -160,10 +160,13 @@ import {
 } from './db/kline-alerts'
 import {noteAlertChanged, startPriceAlerts} from './price-alerts'
 import {
+  createJournalCategory,
   deleteJournalEntry,
+  listJournalCategories,
   listJournalEntries,
   MAX_BODY,
-  saveJournalEntry
+  saveJournalEntry,
+  setJournalPinned
 } from './db/journals'
 import {polishText} from './llm/polish'
 import {pickCandidates} from './scan/rules'
@@ -3807,9 +3810,12 @@ async function route(
    * 用户：「日记模块可以加入某些币种，总结」→「是我手动写日记，不一定每天」
    * → 当天又改口：「**不要自动按月总结了，默认排版，不显示什么总结，就是每日感想，可以筛选**」。
    *
-   *   GET    /api/journal/entries            倒序列出（?coin=&q=&limit=&offset=）
+   *   GET    /api/journal/entries            倒序列出（?coin=&q=&month=&category=&limit=&offset=）
    *   POST   /api/journal/entries            新建 / 更新一条（带 id 就是更新）
    *   DELETE /api/journal/entries/:id        删一条
+   *   POST   /api/journal/entries/:id/pin    置顶 / 取消置顶（body: {pinned}）
+   *   GET    /api/journal/categories         分类列表（首次自动种 仓位 / 经验 / 回忆录）
+   *   POST   /api/journal/categories         新增一个分类（body: {name, color?}）
    *
    * ⚠️ 全是纯读库 + 写库：**不打交易所、不计权重、不调模型**。
    * ⚠️ 不再有 `/api/journal`（按月统计）、`/summary`（月度总结）、`/months`、`/coin` —— 都已删。
@@ -3820,6 +3826,7 @@ async function route(
         coin: str(url.searchParams.get('coin') ?? ''),
         q: str(url.searchParams.get('q') ?? ''),
         month: str(url.searchParams.get('month') ?? ''),
+        category: Number(url.searchParams.get('category') ?? 0) || null,
         limit: Number(url.searchParams.get('limit') ?? 0) || undefined,
         offset: Number(url.searchParams.get('offset') ?? 0) || 0
       })
@@ -3837,7 +3844,8 @@ async function route(
         id: Number(body.id) || null,
         title: str(body.title),
         body: str(body.body),
-        coins: body.coins
+        coins: body.coins,
+        categoryId: Number(body.categoryId) || null
       })
       return sendJson(res, 200, {entry, error: null})
     } catch (e) {
@@ -3845,11 +3853,44 @@ async function route(
     }
   }
 
+  /* 置顶 / 取消置顶 —— 必须排在下面那条 DELETE 前面：
+     否则 `/entries/12/pin` 会被当成 id = "12/pin" 直接吃掉（Number → NaN）。 */
+  const pinMatch = /^\/api\/journal\/entries\/(\d+)\/pin$/.exec(p)
+  if (pinMatch && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    const id = Number(pinMatch[1])
+    const ok = await setJournalPinned(me.id, id, body?.pinned !== false)
+    return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这条日记'})
+  }
+
   if (p.startsWith('/api/journal/entries/') && method === 'DELETE') {
     const id = Number(p.slice('/api/journal/entries/'.length))
     if (!Number.isFinite(id) || id <= 0) return sendJson(res, 400, {error: 'id 不对'})
     const ok = await deleteJournalEntry(me.id, id)
     return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这条日记'})
+  }
+
+  /* 分类：列 / 新增（用户 2026-10-18：「添加分类……筛选某一个分类」） */
+  if (p === '/api/journal/categories' && method === 'GET') {
+    try {
+      return sendJson(res, 200, {categories: await listJournalCategories(me.id), error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (p === '/api/journal/categories' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const category = await createJournalCategory(me.id, {
+        name: body.name,
+        color: body.color
+      })
+      return sendJson(res, 200, {category, error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
   }
 
   /* 日记正文交给模型润色（用户 2026-10-18：「标题旁加个 ai 的图标，可以美化正文部分」）。

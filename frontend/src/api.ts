@@ -2591,6 +2591,14 @@ export interface JournalCoin {
   at: string
 }
 
+/** 分类（用户 2026-10-18：「分类可以有不同的颜色表示不同文件夹」） */
+export interface JournalCategory {
+  id: number
+  name: string
+  /** 文件夹颜色 `#rrggbb`（空串 = 用默认色） */
+  color: string
+}
+
 export interface JournalEntry {
   id: number
   /** 最后一次改动的时刻 `YYYY-MM-DD HH:mm` —— 列表就显示它 */
@@ -2598,6 +2606,10 @@ export interface JournalEntry {
   title: string
   body: string
   coins: JournalCoin[]
+  /** 挂的分类（null = 未分类） */
+  category: JournalCategory | null
+  /** 置顶（置顶的排在最前） */
+  pinned: boolean
   createdAt: string
   updatedAt: string
 }
@@ -2611,17 +2623,38 @@ export interface JournalList {
 
 /** 倒序列出（`coin` / `q` 可空，两个一起给就是「同时满足」） */
 export const fetchJournal = (
-  opts: {coin?: string; q?: string; month?: string; limit?: number; offset?: number} = {}
+  opts: {
+    coin?: string
+    q?: string
+    month?: string
+    /** 只看某个分类（分类 id） */
+    category?: number
+    limit?: number
+    offset?: number
+  } = {}
 ) => {
   const qs = new URLSearchParams()
   if (opts.coin) qs.set('coin', opts.coin)
   if (opts.q) qs.set('q', opts.q)
   if (opts.month) qs.set('month', opts.month)
+  if (opts.category) qs.set('category', String(opts.category))
   if (opts.limit) qs.set('limit', String(opts.limit))
   if (opts.offset) qs.set('offset', String(opts.offset))
   const q = qs.toString()
   return get<JournalList & {error: string | null}>(`/api/journal/entries${q ? `?${q}` : ''}`)
 }
+
+/** 分类列表（第一次会由后端种下 仓位 / 经验 / 回忆录 三个预设） */
+export const fetchJournalCategories = () =>
+  get<{categories: JournalCategory[]; error: string | null}>('/api/journal/categories')
+
+/** 新增一个分类（没给颜色时后端按调色板轮流给） */
+export const createJournalCategory = (input: {name: string; color?: string}) =>
+  post<{category: JournalCategory; error: string | null}>('/api/journal/categories', input)
+
+/** 置顶 / 取消置顶 */
+export const pinJournalEntry = (id: number, pinned: boolean) =>
+  post<{ok: boolean; error: string | null}>(`/api/journal/entries/${id}/pin`, {pinned})
 
 /** 新建 / 更新一条（带 `id` 就是更新；时间由服务器给，前端不传） */
 export const saveJournalEntry = (input: {
@@ -2629,6 +2662,8 @@ export const saveJournalEntry = (input: {
   title?: string
   body?: string
   coins?: JournalCoin[]
+  /** 挂到哪个分类（null = 未分类） */
+  categoryId?: number | null
 }) => post<{entry: JournalEntry; error: string | null}>('/api/journal/entries', input)
 
 export const deleteJournalEntry = (id: number) =>

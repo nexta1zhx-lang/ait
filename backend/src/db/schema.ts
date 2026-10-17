@@ -507,6 +507,34 @@ ALTER TABLE journal_coins ADD COLUMN IF NOT EXISTS at_ts TIMESTAMPTZ;
 -- 「这个币在历次日记里被怎么说的」走这条
 CREATE INDEX IF NOT EXISTS journal_coins_base_idx ON journal_coins (base);
 
+-- ---------------------------------------------------------------- 日记分类（2026-10-18）
+-- 用户 2026-10-18：「日记改名为经验 添加分类和置顶功能……分类可以有不同的颜色
+-- 表示不同文件夹，预设 仓位，经验，回忆录」。
+--
+-- 每个用户一套自己的分类（可以新增），颜色是 #rrggbb，前端拿它画文件夹圆点。
+-- 预设的三个分类在**第一次列分类时**才种下去（见 db/journals.ts 的 ensureDefaultCategories），
+-- 这样老用户不会凭空多出一堆空分类，新用户一进来就有三个能直接用的。
+CREATE TABLE IF NOT EXISTS journal_categories (
+  id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  name       TEXT        NOT NULL,
+  -- 文件夹颜色（#d3b583 这种；空串 = 前端用默认色）
+  color      TEXT        NOT NULL DEFAULT '',
+  sort       INTEGER     NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 同一个人不许有同名分类（大小写不敏感，中文没差）
+CREATE UNIQUE INDEX IF NOT EXISTS journal_categories_user_name_idx
+  ON journal_categories (user_id, lower(name));
+
+-- 条目挂分类（可空 = 未分类）+ 置顶
+ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS category_id BIGINT
+  REFERENCES journal_categories (id) ON DELETE SET NULL;
+ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false;
+-- 列表排序：置顶的永远在最前（同组内还是按最后改动时间倒序）
+CREATE INDEX IF NOT EXISTS journal_entries_user_pin_idx
+  ON journal_entries (user_id, pinned DESC, updated_at DESC);
+
 -- ---------------------------------------------------------------- App 推送（FCM）
 -- 手机 App 的推送 token（2026-10-15 用户：「加入 app 推送」）。
 --

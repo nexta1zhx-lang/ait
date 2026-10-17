@@ -20,11 +20,15 @@
  */
 import {computed, onMounted, ref, watch} from 'vue'
 import {
+  createJournalCategory,
   deleteJournalEntry,
   fetchJournal,
+  fetchJournalCategories,
+  pinJournalEntry,
   polishJournal,
   saveJournalEntry,
   type Contract,
+  type JournalCategory,
   type JournalCoin,
   type JournalEntry
 } from '../api'
@@ -61,6 +65,19 @@ const calOpen = ref(false)
 /** 面板里翻到哪一年 */
 const calYear = ref(new Date().getFullYear())
 
+/** 分类（用户 2026-10-18：「添加分类……分类可以有不同的颜色表示不同文件夹」） */
+const categories = ref<JournalCategory[]>([])
+/** 当前筛选的分类（null = 全部） */
+const category = ref<number | null>(null)
+/** 分类面板开着没有 */
+const catOpen = ref(false)
+/** 新分类可选的颜色（跟后端 `CATEGORY_COLORS` 同一套） */
+const CATEGORY_COLORS = ['#f0b429', '#72d6a0', '#e08aa8', '#7aa2f7', '#c792ea', '#f07178']
+
+/** 新增分类的草稿（默认取一个冷色，跟预设那三个错开） */
+const newCatName = ref('')
+const newCatColor = ref(CATEGORY_COLORS[3]!)
+
 /** 筛选下拉要 `Contract[]`，这里只有币名 —— 补一个 `symbol` 就行（下拉只认 `base`） */
 const coinOptions = computed<Contract[]>(() =>
   myCoins.value.map(base => ({base, symbol: `${base}USDT`}))
@@ -89,6 +106,7 @@ async function load(reset = true): Promise<void> {
       coin: coin.value || undefined,
       q: q.value.trim() || undefined,
       month: month.value || undefined,
+      category: category.value || undefined,
       limit: PAGE,
       offset
     })
@@ -144,6 +162,63 @@ function pickMonth(m: number | ''): void {
 /** 当前筛选的那个月（显示在图标旁边） */
 const monthChip = computed(() => (month.value ? monthLabel(month.value) : ''))
 
+/* ---------------- 分类 ---------------- */
+
+async function loadCategories(): Promise<void> {
+  try {
+    const r = await fetchJournalCategories()
+    categories.value = r.categories
+  } catch {
+    /* 分类拉不到不影响看条目：顶栏那颗按钮就只显示「全部」 */
+  }
+}
+
+/** 当前筛选的那个分类（顶栏按钮上显示名字 + 颜色点） */
+const currentCat = computed(
+  () => categories.value.find(c => c.id === category.value) ?? null
+)
+
+/** 选一个分类（null = 全部）→ 关面板 + 重新拉第一页 */
+function pickCategory(id: number | null): void {
+  category.value = id
+  catOpen.value = false
+  void load()
+}
+
+function toggleCat(): void {
+  catOpen.value = !catOpen.value
+  if (catOpen.value) calOpen.value = false
+}
+
+/** 新增一个分类：建完直接选中它 */
+async function addCategory(): Promise<void> {
+  const name = newCatName.value.trim()
+  if (!name) {
+    showToast('先起个名字', 'bad')
+    return
+  }
+  try {
+    const r = await createJournalCategory({name, color: newCatColor.value})
+    categories.value = [...categories.value, r.category]
+    newCatName.value = ''
+    pickCategory(r.category.id)
+    showToast(`已新增分类「${r.category.name}」`)
+  } catch (e) {
+    showToast(`没加上：${(e as Error).message}`, 'bad')
+  }
+}
+
+/** 置顶 / 取消置顶（列表顺序会跟着变，所以直接重拉第一页） */
+async function togglePin(e: JournalEntry): Promise<void> {
+  try {
+    await pinJournalEntry(e.id, !e.pinned)
+    await load()
+    showToast(e.pinned ? '已取消置顶' : '已置顶')
+  } catch (err) {
+    showToast(`没改成：${(err as Error).message}`, 'bad')
+  }
+}
+
 function toggleCal(): void {
   calOpen.value = !calOpen.value
   if (calOpen.value && month.value) calYear.value = Number(month.value.slice(0, 4))
@@ -160,7 +235,10 @@ watch(q, () => {
   qTimer = setTimeout(() => void load(), 180)
 })
 
-onMounted(() => void load())
+onMounted(() => {
+  void load()
+  void loadCategories()
+})
 
 function toggle(e: JournalEntry): void {
   openId.value = openId.value === e.id ? null : e.id
@@ -198,6 +276,8 @@ const editing = ref<{
   title: string
   body: string
   coins: JournalCoin[]
+  /** 挂哪个分类（null = 未分类）；默认跟着当前筛选走 */
+  categoryId: number | null
 } | null>(null)
 const saving = ref(false)
 /** 「加一个币」那颗下拉的当前值（选完就清空，它只是个选择器） */
@@ -249,7 +329,13 @@ function undoPolish(): void {
 const swapContracts = computed(() => contracts.value.filter(c => c.symbol.endsWith('USDT')))
 
 function startNew(): void {
-  editing.value = {id: null, title: '', body: '', coins: []}
+  editing.value = {
+    id: null,
+    title: '',
+    body: '',
+    coins: [],
+    categoryId: category.value
+  }
   comboPick.value = ''
   bodyBackup.value = ''
 }
@@ -259,7 +345,8 @@ function startEdit(e: JournalEntry): void {
     id: e.id,
     title: e.title,
     body: e.body,
-    coins: e.coins.map(c => ({...c}))
+    coins: e.coins.map(c => ({...c})),
+    categoryId: e.category?.id ?? null
   }
   comboPick.value = ''
   bodyBackup.value = ''
@@ -305,7 +392,8 @@ async function submit(): Promise<void> {
       id: ed.id,
       title: ed.title,
       body: ed.body,
-      coins: ed.coins
+      coins: ed.coins,
+      categoryId: ed.categoryId
     })
     editing.value = null
     /* 存完回到第一页（时间是刚改的，一定在最上面），并把它展开 */
@@ -348,6 +436,78 @@ async function remove(e: JournalEntry): Promise<void> {
       用户 2026-10-18：「币种选择在左边字体放小，搜日记占剩余位置」。
     -->
     <div class="j-bar">
+      <!--
+        分类（用户 2026-10-18：「分类图标在币种选择旁，点击左侧弹出层可新增分类或选择某一个分类过滤」）。
+        图标 + 当前分类名；点开是一条**贴着左边**的弹层：全部 / 各分类 / 新增。
+      -->
+      <div class="j-cat-wrap">
+        <button
+          type="button"
+          class="ghost tiny j-cat"
+          :class="{on: !!category}"
+          :title="currentCat ? `只看「${currentCat.name}」` : '按分类看'"
+          @click="toggleCat"
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h4l2 2.4h6.6a2.2 2.2 0 0 1 2.2 2.2v7.2a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2Z" />
+          </svg>
+          <i v-if="currentCat" class="j-catdot" :style="{background: currentCat.color || 'var(--muted)'}" />
+        </button>
+
+        <div v-if="catOpen" class="j-cat-mask" @click="catOpen = false" />
+        <div v-if="catOpen" class="j-cat-panel">
+          <button
+            type="button"
+            class="j-cat-item"
+            :class="{sel: category === null}"
+            @click="pickCategory(null)"
+          >
+            <i class="j-catdot" style="background: var(--muted); opacity: 0.5" />
+            <span>全部</span>
+          </button>
+          <button
+            v-for="c in categories"
+            :key="c.id"
+            type="button"
+            class="j-cat-item"
+            :class="{sel: category === c.id}"
+            @click="pickCategory(c.id)"
+          >
+            <i class="j-catdot" :style="{background: c.color || 'var(--muted)'}" />
+            <span>{{ c.name }}</span>
+          </button>
+
+          <div class="j-cat-new">
+            <input
+              v-model="newCatName"
+              type="text"
+              maxlength="16"
+              placeholder="新分类…"
+              @keydown.enter.prevent="addCategory"
+            />
+            <div class="j-cat-colors">
+              <button
+                v-for="c in CATEGORY_COLORS"
+                :key="c"
+                type="button"
+                class="j-cat-swatch"
+                :class="{on: newCatColor === c}"
+                :style="{background: c}"
+                :title="`用这个颜色`"
+                @click="newCatColor = c"
+              />
+            </div>
+            <button type="button" class="ghost tiny j-cat-add" title="新增分类" @click="addCategory">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                   stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
       <SymbolCombo
         plain
         class="j-flt"
@@ -358,7 +518,7 @@ async function remove(e: JournalEntry): Promise<void> {
         @pick="v => (coin = v)"
       />
       <div class="j-search">
-        <input v-model="q" type="text" placeholder="搜日记" />
+        <input v-model="q" type="text" placeholder="搜经验" />
         <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
           ✕
         </button>
@@ -421,8 +581,31 @@ async function remove(e: JournalEntry): Promise<void> {
         <article v-for="e in g.items" :key="e.id" class="j-entry" :class="{open: openId === e.id}">
           <div class="j-head" @click="toggle(e)">
             <i class="j-dot" :class="{on: openId === e.id}" />
-            <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
+            <span class="j-t">
+              <!-- 分类：一个文件夹色点（用户：「分类可以有不同的颜色表示不同文件夹」） -->
+              <i
+                v-if="e.category"
+                class="j-catdot"
+                :style="{background: e.category.color || 'var(--muted)'}"
+                :title="e.category.name"
+              />
+              <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
+            </span>
             <span class="j-time">{{ timeLabel(e.at) }}</span>
+            <!-- 置顶：钉在头上一颗针（置顶的排在最前） -->
+            <button
+              type="button"
+              class="j-pin"
+              :class="{on: e.pinned}"
+              :title="e.pinned ? '取消置顶' : '置顶'"
+              @click.stop="togglePin(e)"
+            >
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9.5 3.8h5l-.9 5 2.9 2.9v1.2H7.5v-1.2l2.9-2.9-.9-5Z" />
+                <path d="M12 12.9V20" />
+              </svg>
+            </button>
             <span class="j-caret dim" :class="{up: openId === e.id}">▾</span>
             <span v-if="e.coins.length" class="j-badges">
               <span v-for="c in e.coins" :key="c.base" class="j-badge">{{ c.base }}</span>
@@ -479,9 +662,9 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <p v-else-if="!loading" class="j-empty dim">
       {{
-        q || coin || month
-          ? `这个${month && !q && !coin ? '月份' : '筛选'}下没有日记。`
-          : '还没有日记。点右边那颗加号记一条 —— 不用天天写，想到就记。'
+        q || coin || month || category
+          ? `这个${month && !q && !coin && !category ? '月份' : '筛选'}下没有记录。`
+          : '还没有记录。点右边那颗加号记一条 —— 不用天天写，想到就记。'
       }}
     </p>
 
@@ -497,6 +680,32 @@ async function remove(e: JournalEntry): Promise<void> {
         <span class="rk">标题</span>
         <div class="ctl">
           <input v-model="editing.title" type="text" placeholder="可不填" maxlength="120" />
+        </div>
+      </div>
+
+      <!-- 分类：一条一条选，跟币种一样都属于「这条挂了什么」 -->
+      <div class="j-sec">
+        <p class="j-sec-t">分类 <span class="dim">（不选就是未分类）</span></p>
+        <div class="j-cat-pick">
+          <button
+            type="button"
+            class="j-cat-chip"
+            :class="{on: editing.categoryId === null}"
+            @click="editing.categoryId = null"
+          >
+            未分类
+          </button>
+          <button
+            v-for="c in categories"
+            :key="c.id"
+            type="button"
+            class="j-cat-chip"
+            :class="{on: editing.categoryId === c.id}"
+            @click="editing.categoryId = c.id"
+          >
+            <i class="j-catdot" :style="{background: c.color || 'var(--muted)'}" />
+            {{ c.name }}
+          </button>
         </div>
       </div>
 
@@ -660,7 +869,7 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 .j-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: baseline;
   column-gap: 8px;
   row-gap: 4px;
@@ -879,6 +1088,160 @@ async function remove(e: JournalEntry): Promise<void> {
   width: 100%;
   margin-top: 8px;
   font-size: 12px;
+}
+
+/* ---------------- 分类（顶栏那颗按钮 + 左侧弹层） ---------------- */
+.j-cat-wrap {
+  position: relative;
+  flex: none;
+}
+.j-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+}
+.j-cat.on {
+  color: var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+}
+.j-cat-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+.j-cat-panel {
+  position: absolute;
+  z-index: 21;
+  top: calc(100% + 6px);
+  /* 按钮就在最左边，弹层也往左贴（用户：「点击左侧弹出层」） */
+  left: 0;
+  width: 200px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  max-height: 62vh;
+  overflow-y: auto;
+}
+.j-cat-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+}
+.j-cat-item.sel {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+}
+/* 文件夹色点 */
+.j-catdot {
+  flex: none;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.j-cat-new {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.j-cat-new input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.j-cat-colors {
+  display: flex;
+  gap: 3px;
+}
+.j-cat-swatch {
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+}
+.j-cat-swatch.on {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text) 16%, transparent);
+}
+.j-cat-add {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 6px;
+}
+
+/* 条目头：分类点 + 标题，最右一颗置顶针 */
+.j-t {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.j-pin {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  opacity: 0.5;
+}
+.j-pin.on {
+  color: var(--blue);
+  opacity: 1;
+}
+@media (hover: hover) {
+  .j-pin:hover {
+    opacity: 1;
+  }
+}
+
+/* 编辑器里的分类胶囊 */
+.j-cat-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.j-cat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.j-cat-chip.on {
+  color: var(--blue);
+  border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+  background: color-mix(in srgb, var(--blue) 12%, transparent);
 }
 /*
  * Markdown 的默认间距是给**结论卡**调的（段落 11px、列表 12px、条目 5px），

@@ -1,7 +1,8 @@
-# 日记（想到就写 → 一行搜索 + 币种筛选）
+# 经验（想到就写 → 一行搜索 + 币种 / 分类筛选 + 置顶）
 
-> 状态（2026-10-18）：已上线。入口在「开单分析」左侧一级 tab 的**第 4 格「日记」**
-> （`LEFT_TABS` 里 `auto` 之后，见 [analyze.ts](../frontend/src/analyze.ts)）。
+> 状态（2026-10-18）：**模块改名为「经验」**（用户：「日记改名为经验」），
+> 入口在「开单分析」左侧一级 tab（`?t=journal`，值没改）。
+> 同一天还加了**分类**（带颜色的文件夹）和**置顶**。
 
 ---
 
@@ -22,17 +23,21 @@
 | 「可以加符号，提示词放在数据库中，提示词写的间距小一点」 | 润色提示词搬进 `ai_docs`（kind=`polish`），「我的 → AI 提示词 → 日记润色」里改；默认那份**一行一条、不空行**，并允许 ✅ ⚠️ ⬆ 这类符号 |
 | 「弹窗选择币种的选择框高度短一点」 | `.j-add` 里那颗币种输入框收到 27px 高 |
 | 「动画改为展开动画，整体年月分割日记，顶部添加日历图标，筛选某个月份的」 | 展开用 `grid-template-rows: 0fr → 1fr` 做**高度动画**；列表按「2026 年 10 月」分段；顶部一颗日历图标按月筛（面板是 12 个月 + 「看全部」） |
+| 「日记改名为经验 添加分类和置顶功能」 | 一级 tab 叫「经验」（`value` 仍是 `journal`）；每条可挂一个分类、可置顶（置顶排最前）；条目头上一个文件夹色点 + 一颗针 |
+| 「分类图标在币种选择旁，点击左侧弹出层可新增分类或选择某一个分类过滤」 | 顶栏最左一颗文件夹图标；点开是贴左的弹层：全部 / 各分类 / 「新分类…」+ 6 个色板 + ＋（建完直接切过去） |
+| 「预设 仓位，经验，回忆录」 | 第一次列分类时自动种这三个（`#f0b429` / `#72d6a0` / `#e08aa8`），用户删光了不会再冒出来 |
 
 ⛔ 这一页**没有任何模型调用**，也不打交易所 —— 纯读库写库，随便刷。
 
 ---
 
-## 1. 两张表
+## 1. 三张表
 
 | 表 | 存什么 | 关键点 |
 |---|---|---|
-| `journal_entries` | `title` / `body` + `created_at` / `updated_at` | **没有「写哪天」**；`day` 是老字段，插入时写北京时间的今天，读的时候没人用 |
+| `journal_entries` | `title` / `body` + `created_at` / `updated_at` + `category_id` / `pinned` | **没有「写哪天」**；`day` 是老字段，插入时写北京时间的今天，读的时候没人用 |
 | `journal_coins` | 一篇挂了哪些币 + `at_ts`（定住的那一刻，可空） | `(entry_id, base)` 唯一；一条最多 20 个 |
+| `journal_categories` | `name` / `color`（`#rrggbb`）/ `sort` | 每个用户一套；`(user_id, lower(name))` 唯一（同名不许建两次） |
 
 表定义在 [schema.ts](../backend/src/db/schema.ts)，读写全在 [journals.ts](../backend/src/db/journals.ts)。
 
@@ -56,7 +61,10 @@
   前端只取后 11 位显示成 `10/18 14:32`，不再做时区换算。
 - `coin`：这个币出现在 `journal_coins` 里才算命中。
 - `q`：`title` 或 `body` 里**包含**这个词（`ILIKE`，`%` / `_` 已转义）。
-- 两个一起给 = 同时满足。一页 30 条，`count(*) OVER ()` 带回总数，页面显示「还有 N 条」。
+- `category=<id>`：只看挂在这个分类下的条目。
+- 两个 / 三个 / 四个一起给 = 同时满足。一页 30 条，`count(*) OVER ()` 带回总数，页面显示「还有 N 条」。
+- **排序固定 `pinned DESC, updated_at DESC`** —— 置顶的永远在最前；置顶那一下**不动 `updated_at`**
+  （列表里那个时间是「最后改内容的时刻」，拨一下置顶就变会让人以为内容刚改过）。
 - 返回值里还有 `coins`：**写进过日记的全部币**（去重、按字母排）—— 筛选下拉的选项。
 
 > ⚠️ 空关键词不能用 `ILIKE '%'` 短路：`title` 是可空列，`NULL ILIKE '%'` 还是 NULL，
@@ -116,9 +124,12 @@
 
 | 方法 | 路径 | 干什么 |
 |---|---|---|
-| GET | `/api/journal/entries?coin=&q=&month=&limit=&offset=` | 按最后改动时间倒序列出（`month` 只看某个月） |
-| POST | `/api/journal/entries` | 新建 / 更新一条（带 `id` 就是更新；**不传时间**，服务器给 `now()`） |
+| GET | `/api/journal/entries?coin=&q=&month=&category=&limit=&offset=` | 置顶优先、再按最后改动时间倒序列出 |
+| POST | `/api/journal/entries` | 新建 / 更新一条（带 `id` 就是更新；**不传时间**，服务器给 `now()`；可带 `categoryId`） |
 | DELETE | `/api/journal/entries/:id` | 删一条 |
+| POST | `/api/journal/entries/:id/pin` | 置顶 / 取消置顶（body `{pinned}`） |
+| GET | `/api/journal/categories` | 分类列表（第一次自动种预设三个） |
+| POST | `/api/journal/categories` | 新增分类（`{name, color?}`；没给颜色就按调色板轮流给） |
 | POST | `/api/journal/polish` | 把正文交给模型整理（**不落库**，只回文本；提示词取自 `ai_docs` kind=polish） |
 
 挂币的每一项形如 `{base, at}`，`at` 是北京时间 `YYYY-MM-DD HH:mm`（空串 = 没定时刻）。

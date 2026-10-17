@@ -168,10 +168,11 @@ export const LEFT_TABS = [
    *    `LeftTab` 里仍留着 `'test'`（`testMode` 的判据、老状态回收都要认它）。
    */
   /*
-   * 交易日记（用户 2026-10-18：「日记模块可以加入某些币种，总结」）。
+   * 经验（用户 2026-10-18：「日记模块可以加入某些币种，总结」→ 同日改名「经验」，
+   * 并加了分类 / 置顶）。`value` 仍是 `'journal'`（老链接 `?t=journal` 不变）。
    * 表结构 / 筛选口径见 `docs/JOURNAL.md`。
    */
-  {value: 'journal' as const, label: '日记'},
+  {value: 'journal' as const, label: '经验'},
   {value: 'kb' as const, label: '知识库'},
   {value: 'add' as const, label: '添加案例'}
 ]

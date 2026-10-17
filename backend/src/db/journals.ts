@@ -35,6 +35,13 @@ export interface JournalCoin {
   at: string
 }
 
+export interface JournalCategory {
+  id: number
+  name: string
+  /** 文件夹颜色（`#rrggbb`；空串 = 前端用默认色） */
+  color: string
+}
+
 export interface JournalEntry {
   id: number
   /** 这条**最后一次改动**的时刻（北京时间 `YYYY-MM-DD HH:mm`）—— 列表就显示它 */
@@ -42,6 +49,10 @@ export interface JournalEntry {
   title: string
   body: string
   coins: JournalCoin[]
+  /** 挂的分类（null = 未分类） */
+  category: JournalCategory | null
+  /** 置顶（置顶的永远排在列表最前） */
+  pinned: boolean
   createdAt: string
   updatedAt: string
 }
@@ -62,6 +73,8 @@ interface EntryRow {
   created_at: Date | string
   updated_at: Date | string
   coins: unknown
+  category: unknown
+  pinned: boolean | null
   total?: string | number
 }
 
@@ -94,6 +107,14 @@ function coinsOf(v: unknown): JournalCoin[] {
   return out
 }
 
+function categoryOf(v: unknown): JournalCategory | null {
+  if (!v || typeof v !== 'object') return null
+  const o = v as {id?: unknown; name?: unknown; color?: unknown}
+  const id = Number(o.id)
+  if (!Number.isFinite(id) || id <= 0) return null
+  return {id, name: String(o.name ?? ''), color: String(o.color ?? '')}
+}
+
 function mapEntry(r: EntryRow): JournalEntry {
   return {
     id: Number(r.id),
@@ -101,6 +122,8 @@ function mapEntry(r: EntryRow): JournalEntry {
     title: r.title ?? '',
     body: r.body ?? '',
     coins: coinsOf(r.coins),
+    category: categoryOf(r.category),
+    pinned: r.pinned === true,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at)
   }
@@ -110,7 +133,9 @@ function mapEntry(r: EntryRow): JournalEntry {
 const ENTRY_COLUMNS = `
   e.id,
   to_char(e.updated_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS at,
-  e.title, e.body, e.created_at, e.updated_at,
+  e.title, e.body, e.created_at, e.updated_at, e.pinned,
+  (SELECT jsonb_build_object('id', k.id, 'name', k.name, 'color', k.color)
+     FROM journal_categories k WHERE k.id = e.category_id) AS category,
   COALESCE((SELECT jsonb_agg(jsonb_build_object(
                      'base', c.base,
                      'at', COALESCE(to_char(c.at_ts AT TIME ZONE 'Asia/Shanghai',
@@ -145,7 +170,15 @@ function monthRange(month: string): {from: string; to: string} | null {
 
 export async function listJournalEntries(
   userId: number,
-  opts: {coin?: string; q?: string; month?: string; limit?: number; offset?: number} = {}
+  opts: {
+    coin?: string
+    q?: string
+    month?: string
+    /** 只看某个分类（分类 id；null / 0 = 全部） */
+    category?: number | null
+    limit?: number
+    offset?: number
+  } = {}
 ): Promise<JournalList> {
   const coin = opts.coin ? normalizeBase(opts.coin) : ''
   const q = String(opts.q ?? '').trim().slice(0, 80)
@@ -153,6 +186,7 @@ export async function listJournalEntries(
   const limit = Math.min(Math.max(Number(opts.limit) || JOURNAL_PAGE, 1), 200)
   const offset = Math.max(Number(opts.offset) || 0, 0)
   const range = monthRange(String(opts.month ?? '').trim())
+  const categoryId = Math.max(0, Number(opts.category) || 0) || null
 
   const rows = await query<EntryRow>(
     `SELECT ${ENTRY_COLUMNS}, count(*) OVER () AS total
@@ -163,9 +197,19 @@ export async function listJournalEntries(
         AND ($3::text = '' OR e.title ILIKE $3 ESCAPE '\\' OR e.body ILIKE $3 ESCAPE '\\')
         AND ($6::timestamptz IS NULL OR e.updated_at >= $6::timestamptz)
         AND ($7::timestamptz IS NULL OR e.updated_at < $7::timestamptz)
-      ORDER BY e.updated_at DESC, e.id DESC
+        AND ($8::bigint IS NULL OR e.category_id = $8::bigint)
+      ORDER BY e.pinned DESC, e.updated_at DESC, e.id DESC
       LIMIT $4 OFFSET $5`,
-    [userId, coin, like, limit, offset, range?.from ?? null, range?.to ?? null]
+    [
+      userId,
+      coin,
+      like,
+      limit,
+      offset,
+      range?.from ?? null,
+      range?.to ?? null,
+      categoryId
+    ]
   )
 
   const coinRows = await query<{base: string}>(
@@ -193,7 +237,14 @@ export async function listJournalEntries(
  */
 export async function saveJournalEntry(
   userId: number,
-  input: {id?: number | null; title?: string; body?: string; coins?: unknown}
+  input: {
+    id?: number | null
+    title?: string
+    body?: string
+    coins?: unknown
+    /** 挂到哪个分类（null / 0 = 未分类） */
+    categoryId?: number | null
+  }
 ): Promise<JournalEntry> {
   const title = String(input.title ?? '').slice(0, MAX_TITLE)
   const body = String(input.body ?? '').slice(0, MAX_BODY)
@@ -214,22 +265,33 @@ export async function saveJournalEntry(
     if (coins.length >= MAX_JOURNAL_COINS) break
   }
 
+  /* 分类：只认自己的，且必须真的存在（不合法就当未分类，别把整条保存搞挂） */
+  let categoryId: number | null = null
+  const wantCategory = Number(input.categoryId) || 0
+  if (wantCategory > 0) {
+    const own = await queryOne<{id: string}>(
+      'SELECT id FROM journal_categories WHERE id = $1 AND user_id = $2',
+      [wantCategory, userId]
+    )
+    if (own) categoryId = Number(own.id)
+  }
+
   let id = Number(input.id ?? 0) || 0
   if (id > 0) {
     const row = await queryOne<{id: string}>(
       `UPDATE journal_entries
-          SET title = $3, body = $4, updated_at = now()
+          SET title = $3, body = $4, category_id = $5, updated_at = now()
         WHERE id = $1 AND user_id = $2
         RETURNING id`,
-      [id, userId, title, body]
+      [id, userId, title, body, categoryId]
     )
     if (!row) throw new Error('这条日记不存在（或者不是你的）')
   } else {
     const row = await queryOne<{id: string}>(
-      `INSERT INTO journal_entries (user_id, day, title, body)
-       VALUES ($1, (now() AT TIME ZONE 'Asia/Shanghai')::date, $2, $3)
+      `INSERT INTO journal_entries (user_id, day, title, body, category_id)
+       VALUES ($1, (now() AT TIME ZONE 'Asia/Shanghai')::date, $2, $3, $4)
        RETURNING id`,
-      [userId, title, body]
+      [userId, title, body, categoryId]
     )
     if (!row) throw new Error('日记没写进去')
     id = Number(row.id)
@@ -252,6 +314,98 @@ export async function saveJournalEntry(
   )
   if (!saved) throw new Error('保存后读不回来')
   return mapEntry(saved)
+}
+
+/**
+ * 置顶 / 取消置顶。
+ *
+ * ⚠️ **不动 `updated_at`**：列表里那个时间是「最后改内容的时刻」，
+ *    单纯拨一下置顶就把它改掉会让人以为内容刚改过。
+ */
+export async function setJournalPinned(
+  userId: number,
+  id: number,
+  pinned: boolean
+): Promise<boolean> {
+  const rows = await query<{id: string}>(
+    'UPDATE journal_entries SET pinned = $3 WHERE id = $1 AND user_id = $2 RETURNING id',
+    [id, userId, pinned]
+  )
+  return rows.length > 0
+}
+
+/* ---------------- 分类 ---------------- */
+
+export const MAX_CATEGORY_NAME = 16
+
+/**
+ * 预设三个分类的颜色（用户 2026-10-18：「预设 仓位，经验，回忆录」）。
+ * 后面新加的分类按 `CATEGORY_COLORS` 的顺序轮着取色，不重复。
+ */
+export const DEFAULT_CATEGORIES: {name: string; color: string}[] = [
+  {name: '仓位', color: '#f0b429'},
+  {name: '经验', color: '#72d6a0'},
+  {name: '回忆录', color: '#e08aa8'}
+]
+
+export const CATEGORY_COLORS = ['#f0b429', '#72d6a0', '#e08aa8', '#7aa2f7', '#c792ea', '#f07178']
+
+/**
+ * 第一次进「经验」页时把这套预设种下去。
+ *
+ * ⚠️ 只在**一条分类都没有**时种：否则用户把预设删光了、下次进来又冒出来。
+ */
+async function ensureDefaultCategories(userId: number): Promise<void> {
+  const row = await queryOne<{n: string}>(
+    'SELECT count(*)::text AS n FROM journal_categories WHERE user_id = $1',
+    [userId]
+  )
+  if (Number(row?.n ?? 0) > 0) return
+  for (let i = 0; i < DEFAULT_CATEGORIES.length; i++) {
+    const c = DEFAULT_CATEGORIES[i]!
+    await query(
+      `INSERT INTO journal_categories (user_id, name, color, sort)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT DO NOTHING`,
+      [userId, c.name, c.color, i]
+    )
+  }
+}
+
+export async function listJournalCategories(userId: number): Promise<JournalCategory[]> {
+  await ensureDefaultCategories(userId)
+  const rows = await query<{id: string; name: string; color: string}>(
+    `SELECT id, name, color FROM journal_categories
+      WHERE user_id = $1 ORDER BY sort, id`,
+    [userId]
+  )
+  return rows.map(r => ({id: Number(r.id), name: r.name, color: r.color ?? ''}))
+}
+
+export async function createJournalCategory(
+  userId: number,
+  input: {name?: unknown; color?: unknown}
+): Promise<JournalCategory> {
+  const name = String(input.name ?? '').trim().slice(0, MAX_CATEGORY_NAME)
+  if (!name) throw new Error('分类得有个名字')
+  const wanted = String(input.color ?? '').trim()
+  let color = /^#[0-9a-fA-F]{6}$/.test(wanted) ? wanted.toLowerCase() : ''
+  if (!color) {
+    const n = await queryOne<{n: string}>(
+      'SELECT count(*)::text AS n FROM journal_categories WHERE user_id = $1',
+      [userId]
+    )
+    color = CATEGORY_COLORS[Number(n?.n ?? 0) % CATEGORY_COLORS.length]!
+  }
+  const row = await queryOne<{id: string; name: string; color: string}>(
+    `INSERT INTO journal_categories (user_id, name, color, sort)
+     VALUES ($1, $2, $3, (SELECT COALESCE(max(sort), 0) + 1 FROM journal_categories WHERE user_id = $1))
+     ON CONFLICT (user_id, lower(name)) DO NOTHING
+     RETURNING id, name, color`,
+    [userId, name, color]
+  )
+  if (!row) throw new Error(`「${name}」已经有了`)
+  return {id: Number(row.id), name: row.name, color: row.color ?? ''}
 }
 
 export async function deleteJournalEntry(userId: number, id: number): Promise<boolean> {
