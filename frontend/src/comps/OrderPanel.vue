@@ -1639,31 +1639,35 @@ onMounted(async () => {
             class="ord-pos-side"
             :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
           >
-            <div class="ord-pos-row">
-              <span class="ord-bar">
-                <input
-                  v-model.number="posPct"
-                  type="range"
-                  min="1"
-                  max="100"
-                  step="1"
-                  :style="{'--fill': posFillPct + '%'}"
-                  aria-label="买入仓位百分比"
-                />
-              </span>
-              <b class="ord-pos-num">{{ posPct }}%</b>
-            </div>
-            <div class="ord-pos-quick">
-              <button
-                v-for="v in POS_PCTS"
-                :key="v"
-                type="button"
-                :class="{on: v === posPct}"
-                :title="`用掉可用额度的 ${v}%`"
-                @click="posPct = v"
-              >
-                {{ v }}%
-              </button>
+            <!-- 左边那一个字（用户 2026-10-18：「…左侧加『仓位』」）—— 两行共用一个标签 -->
+            <span class="ord-pos-lb">仓位</span>
+            <div class="ord-pos-body">
+              <div class="ord-pos-row">
+                <span class="ord-bar">
+                  <input
+                    v-model.number="posPct"
+                    type="range"
+                    min="1"
+                    max="100"
+                    step="1"
+                    :style="{'--fill': posFillPct + '%'}"
+                    aria-label="买入仓位百分比"
+                  />
+                </span>
+                <b class="ord-pos-num">{{ posPct }}%</b>
+              </div>
+              <div class="ord-pos-quick">
+                <button
+                  v-for="v in POS_PCTS"
+                  :key="v"
+                  type="button"
+                  :class="{on: v === posPct}"
+                  :title="`用掉可用额度的 ${v}%`"
+                  @click="posPct = v"
+                >
+                  {{ v }}%
+                </button>
+              </div>
             </div>
           </div>
         </div>

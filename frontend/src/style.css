@@ -5813,10 +5813,33 @@ body.fixed-viewport .split {
  *    再宽左边的「97.57USDT」就被挤到换行了。
  * ⚠️ 高度固定（滑条 22px 命中区不撑高它）——用户 2026-10-05 定的「下单区域高度固定」。
  */
+/*
+ * 右边这一块（用户 2026-10-18：先「**滑动条和快捷两行布局放右侧**」，
+ * 再「滚动条要大于下面的快捷比例」、「**快捷区往里面去一点**，左侧加『仓位』」）：
+ *   `仓位 │ ——o———— 100%`
+ *   `     │ [25%][50%][75%][100%]`
+ * 左边一个「仓位」标签（两行共用），里面是 body 两行。
+ *
+ * ⚠️ 滑条要比下面那排快捷**明显宽**：快捷不再平分整列，各自定宽、靠右对齐。
+ */
 .ord-pos-side {
   flex: 0 0 auto;
-  width: 46%;
-  max-width: 170px;
+  width: 62%;
+  max-width: 220px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 那一个字：竖着跟两行居中对齐 */
+.ord-pos-lb {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+/* 里面两行（滑条一行、快捷一行） */
+.ord-pos-body {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -5844,21 +5867,23 @@ body.fixed-viewport .split {
   text-align: right;
   color: var(--text);
 }
+/* 快捷比例那一排：靠右，右边跟上面那个 `100%` 对齐（滑条因此比它宽） */
 .ord-pos-quick {
   display: flex;
+  justify-content: flex-end;
   gap: 4px;
 }
-/* 快捷比例：小胶囊，四颗平分这一列；选中的那颗用主色边（跟「订单设置」那几格一个语言） */
+/* 快捷比例：小胶囊，各自定宽不再平分；选中的那颗用主色边（跟「订单设置」那几格一个语言） */
 .ord-pos-quick button {
-  flex: 1 1 0;
+  flex: 0 0 auto;
   min-width: 0;
-  padding: 2px 0;
+  padding: 1px 3px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 9px;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
   text-align: center;
