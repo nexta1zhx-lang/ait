@@ -58,10 +58,11 @@ const openId = ref<number | null>(null)
 const q = ref('')
 const coin = ref('')
 /**
- * 只看某个月（`YYYY-MM`，空 = 全部）。
- * 用户 2026-10-18：「整体年月分割日记，顶部添加日历图标，筛选某个月份的」。
+ * 只看某几个月（`YYYY-MM[]`，空 = 全部）。
+ * 用户 2026-10-18：「整体年月分割日记，顶部添加日历图标，筛选某个月份的」→
+ * 同一天又补「**可以选择多月份**」⇒ 从单值改成数组，点月份是**加选 / 取消**。
  */
-const month = ref('')
+const months = ref<string[]>([])
 /** 日历那个小面板开着没有 */
 const calOpen = ref(false)
 /** 面板里翻到哪一年 */
@@ -107,7 +108,7 @@ async function load(reset = true): Promise<void> {
     const r = await fetchJournal({
       coin: coin.value || undefined,
       q: q.value.trim() || undefined,
-      month: month.value || undefined,
+      months: months.value.length ? months.value : undefined,
       category: category.value || undefined,
       limit: PAGE,
       offset
@@ -159,17 +160,28 @@ function shiftCalYear(delta: number): void {
   calYear.value += delta
 }
 
-function pickMonth(m: number | ''): void {
-  if (m === '') {
-    month.value = ''
-  } else {
-    month.value = `${calYear.value}-${String(m).padStart(2, '0')}`
-  }
+/** 点一个月：加选 / 取消（不关面板 —— 要多选） */
+function pickMonth(m: number): void {
+  const key = `${calYear.value}-${String(m).padStart(2, '0')}`
+  months.value = months.value.includes(key)
+    ? months.value.filter(x => x !== key)
+    : [...months.value, key]
+}
+
+/** 「看全部」：清掉月份筛选并关面板 */
+function clearMonths(): void {
+  months.value = []
   calOpen.value = false
 }
 
 /** 当前筛选的那个月（显示在图标旁边） */
-const monthChip = computed(() => (month.value ? monthLabel(month.value) : ''))
+/** 顶栏那颗日历按钮上的提示：单月显示「2026 年 10 月」，多月显示「N 个月」 */
+const monthChip = computed(() => {
+  const list = months.value
+  if (!list.length) return ''
+  if (list.length === 1) return monthLabel(list[0]!)
+  return `${list.length} 个月`
+})
 
 /* ---------------- 分类 ---------------- */
 
@@ -322,12 +334,12 @@ async function togglePin(e: JournalEntry): Promise<void> {
 function toggleCal(): void {
   calOpen.value = !calOpen.value
   if (calOpen.value) catOpen.value = false
-  if (calOpen.value && month.value) calYear.value = Number(month.value.slice(0, 4))
+  if (calOpen.value && months.value.length) calYear.value = Number(months.value[0]!.slice(0, 4))
 }
 
 /* 币种 / 月份筛选：立刻重拉 */
 watch(coin, () => void load())
-watch(month, () => void load())
+watch(months, () => void load(), {deep: true})
 
 /* 关键词：等一下再发（边打边搜，但别一个字一发） */
 let qTimer: ReturnType<typeof setTimeout> | null = null
@@ -705,8 +717,8 @@ async function remove(e: JournalEntry): Promise<void> {
         <button
           type="button"
           class="ghost tiny j-cal"
-          :class="{on: !!month}"
-          :title="month ? `只看 ${monthChip}（点一下换）` : '按月份看'"
+          :class="{on: months.length > 0}"
+          :title="months.length ? `只看 ${monthChip}（点一下换）` : '按月份看'"
           @click="toggleCal"
         >
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
@@ -737,13 +749,13 @@ async function remove(e: JournalEntry): Promise<void> {
               :key="m"
               type="button"
               class="j-cal-m"
-              :class="{sel: month === `${calYear}-${String(m).padStart(2, '0')}`}"
+              :class="{sel: months.includes(`${calYear}-${String(m).padStart(2, '0')}`)}"
               @click="pickMonth(m)"
             >
               {{ m }} 月
             </button>
           </div>
-          <button type="button" class="ghost j-cal-all" @click="pickMonth('')">看全部</button>
+          <button type="button" class="ghost j-cal-all" @click="clearMonths">看全部</button>
         </section>
       </Teleport>
 
@@ -783,15 +795,21 @@ async function remove(e: JournalEntry): Promise<void> {
               type="button"
               class="j-dot"
               :class="{on: openId === e.id, pinned: e.pinned}"
-              :style="e.category ? {background: e.category.color} : {}"
+              :style="
+                e.pinned
+                  ? {color: e.category?.color || 'var(--blue)'}
+                  : e.category
+                    ? {background: e.category.color}
+                    : {}
+              "
               :title="e.pinned ? '取消置顶' : '置顶'"
               @click.stop="togglePin(e)"
             >
-              <svg v-if="e.pinned" viewBox="0 0 24 24" width="11" height="11" fill="none"
-                   stroke="currentColor" stroke-width="1.9" stroke-linecap="round"
-                   stroke-linejoin="round" aria-hidden="true">
-                <path d="M9.5 3.8h5l-.9 5 2.9 2.9v1.2H7.5v-1.2l2.9-2.9-.9-5Z" />
-                <path d="M12 12.9V20" />
+              <!-- 置顶：**实心针**（染成分类的颜色），底下不留圆点 -->
+              <svg v-if="e.pinned" viewBox="0 0 24 24" width="13" height="13"
+                   fill="currentColor" aria-hidden="true">
+                <path d="M9.1 3.2h5.8l-.7 5.2 2.9 2.8v1.6H6.9v-1.6l2.9-2.8-.7-5.2Z" />
+                <path d="M11.1 13.4h1.8V20.6h-1.8Z" />
               </svg>
             </button>
             <span class="j-t">
@@ -854,8 +872,8 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <p v-else-if="!loading" class="j-empty dim">
       {{
-        q || coin || month || category
-          ? `这个${month && !q && !coin && !category ? '月份' : '筛选'}下没有记录。`
+        q || coin || months.length || category
+          ? `这个${months.length && !q && !coin && !category ? '月份' : '筛选'}下没有记录。`
           : '还没有记录。点右边那颗加号记一条 —— 不用天天写，想到就记。'
       }}
     </p>
@@ -1069,23 +1087,12 @@ async function remove(e: JournalEntry): Promise<void> {
  * 展开 / 激活：**整条变成一张浮起来的卡**（不再是给选中行刷个底色）——
  * 用户 2026-10-18：「点击激活背景换个样式，设计一下不用拘束之前的风格」。
  */
+/*
+ * 展开：**不再铺背景卡**（用户 2026-10-18：「展开不要加背景框了」）——
+ * 就地把正文摊开，只上下留一点呼吸。
+ */
 .j-entry.open {
-  /* ⚠️ 用**负外边距**往外扩会把卡片顶出内容区（用户 2026-10-18 报过），
-     所以卡片就老老实实占满这一条，只上下留一点呼吸 */
-  margin: 5px 0;
-  padding: 5px 0;
-  border-radius: 14px;
-  transition:
-    background 0.18s ease,
-    box-shadow 0.18s ease;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--panel-2) 92%, transparent),
-    color-mix(in srgb, var(--panel-2) 55%, transparent)
-  );
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--blue) 20%, transparent),
-    0 8px 22px rgba(0, 0, 0, 0.28);
+  margin: 4px 0;
 }
 .j-entry.open .j-head {
   background: transparent;
@@ -1253,6 +1260,22 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-cal.on {
   color: var(--blue);
   border-color: color-mix(in srgb, var(--blue) 45%, transparent);
+}
+/* 底部弹层里的年份那一行：别再扁着（用户 2026-10-18：「按月份的年字体区域扁了点」） */
+.j-cal-sheet .j-cal-head {
+  margin-bottom: 10px;
+  padding: 4px 0 6px;
+}
+.j-cal-sheet .j-cal-head b {
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}
+.j-cal-sheet .j-cal-nav {
+  padding: 6px 12px;
+  font-size: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 /* 底部弹层里的月份格子：竖向空间够，格子做大一点 */
 .j-cal-sheet .j-cal-grid {

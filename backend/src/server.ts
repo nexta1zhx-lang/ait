@@ -3827,7 +3827,11 @@ async function route(
       const list = await listJournalEntries(me.id, {
         coin: str(url.searchParams.get('coin') ?? ''),
         q: str(url.searchParams.get('q') ?? ''),
-        month: str(url.searchParams.get('month') ?? ''),
+        /* 月份可以多选：`months=2026-09,2026-10`（老的 `month=` 也认） */
+        months: str(url.searchParams.get('months') ?? url.searchParams.get('month') ?? '')
+          .split(',')
+          .map(m => m.trim())
+          .filter(Boolean),
         category: Number(url.searchParams.get('category') ?? 0) || null,
         limit: Number(url.searchParams.get('limit') ?? 0) || undefined,
         offset: Number(url.searchParams.get('offset') ?? 0) || 0

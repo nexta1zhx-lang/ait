@@ -2626,7 +2626,8 @@ export const fetchJournal = (
   opts: {
     coin?: string
     q?: string
-    month?: string
+    /** 只看某几个月（`YYYY-MM`，可以多个） */
+    months?: string[]
     /** 只看某个分类（分类 id） */
     category?: number
     limit?: number
@@ -2636,7 +2637,7 @@ export const fetchJournal = (
   const qs = new URLSearchParams()
   if (opts.coin) qs.set('coin', opts.coin)
   if (opts.q) qs.set('q', opts.q)
-  if (opts.month) qs.set('month', opts.month)
+  if (opts.months?.length) qs.set('months', opts.months.join(','))
   if (opts.category) qs.set('category', String(opts.category))
   if (opts.limit) qs.set('limit', String(opts.limit))
   if (opts.offset) qs.set('offset', String(opts.offset))

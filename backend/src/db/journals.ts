@@ -173,7 +173,8 @@ export async function listJournalEntries(
   opts: {
     coin?: string
     q?: string
-    month?: string
+    /** 只看某几个月（`YYYY-MM`，可以给多个 —— 用户 2026-10-18：「可以选择多月份」） */
+    months?: string[]
     /** 只看某个分类（分类 id；null / 0 = 全部） */
     category?: number | null
     limit?: number
@@ -185,7 +186,11 @@ export async function listJournalEntries(
   const like = q ? `%${q.replace(/[%_\\]/g, m => `\\${m}`)}%` : ''
   const limit = Math.min(Math.max(Number(opts.limit) || JOURNAL_PAGE, 1), 200)
   const offset = Math.max(Number(opts.offset) || 0, 0)
-  const range = monthRange(String(opts.month ?? '').trim())
+  const ranges = (opts.months ?? [])
+    .map(m => monthRange(String(m).trim()))
+    .filter((r): r is {from: string; to: string} => r !== null)
+  const froms = ranges.length ? ranges.map(r => r.from) : null
+  const tos = ranges.length ? ranges.map(r => r.to) : null
   const categoryId = Math.max(0, Number(opts.category) || 0) || null
 
   const rows = await query<EntryRow>(
@@ -195,8 +200,10 @@ export async function listJournalEntries(
         AND ($2::text = '' OR EXISTS (
               SELECT 1 FROM journal_coins c WHERE c.entry_id = e.id AND c.base = $2))
         AND ($3::text = '' OR e.title ILIKE $3 ESCAPE '\\' OR e.body ILIKE $3 ESCAPE '\\')
-        AND ($6::timestamptz IS NULL OR e.updated_at >= $6::timestamptz)
-        AND ($7::timestamptz IS NULL OR e.updated_at < $7::timestamptz)
+        AND ($6::timestamptz[] IS NULL OR EXISTS (
+              SELECT 1
+                FROM unnest($6::timestamptz[], $7::timestamptz[]) AS mr(a, b)
+               WHERE e.updated_at >= mr.a AND e.updated_at < mr.b))
         AND ($8::bigint IS NULL OR e.category_id = $8::bigint)
       ORDER BY e.pinned DESC, e.updated_at DESC, e.id DESC
       LIMIT $4 OFFSET $5`,
@@ -206,8 +213,8 @@ export async function listJournalEntries(
       like,
       limit,
       offset,
-      range?.from ?? null,
-      range?.to ?? null,
+      froms,
+      tos,
       categoryId
     ]
   )
