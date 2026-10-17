@@ -4396,6 +4396,172 @@ body.fixed-viewport .split {
   background: #26c6da;
 }
 
+/*
+ * ---------------- K 线画线（2026-10-17） ----------------
+ *
+ * 用户 2026-10-17：「改为划线模式，点击 k 线顶部出现常用的 k 线画图线」
+ * 「新增显示隐藏划线的功能」「a 和 l 放在坐标轴右下对角那里」
+ * 「点击画的线可以添加超过该线提醒」。
+ */
+
+/* 周期行最右那颗笔（划线开关） */
+.chart-head .tk-draw {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+.chart-head .tk-draw svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chart-head .tk-draw.on {
+  color: var(--blue);
+  border-color: var(--accent-line);
+  background: var(--blue-soft);
+}
+
+/* 画图工具条：图的上面一行（不压在画布上，见模板里那段说明） */
+.draw-bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  overflow-x: auto;
+}
+.draw-bar button {
+  flex: none;
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.draw-bar button.active {
+  background: var(--blue-soft);
+  color: var(--blue);
+  border-color: var(--accent-line);
+}
+.draw-bar button:disabled {
+  opacity: 0.45;
+}
+.draw-bar .draw-sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 2px;
+}
+@media (hover: hover) {
+  .draw-bar button:not(:disabled):hover {
+    color: var(--text);
+    border-color: var(--blue);
+    filter: none;
+  }
+}
+
+/* 画线时接管指针的透明层（跟 `.range-layer` 一个套路） */
+.draw-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/*
+ * 点中一条线之后的小弹层。
+ * ⚠️ 用 translate 让「点的那个位置」落在弹层**下边缘中间**：手指点的地方不被自己挡住。
+ */
+.draw-pop {
+  position: absolute;
+  z-index: 8;
+  transform: translate(-50%, 10px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 108px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(12, 16, 22, 0.94);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.draw-pop .dp-price {
+  padding: 1px 6px 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--blue);
+  font-variant-numeric: tabular-nums;
+}
+.draw-pop button {
+  padding: 5px 8px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+}
+.draw-pop button.dp-del {
+  color: var(--bad);
+}
+@media (hover: hover) {
+  .draw-pop button:hover {
+    background: var(--panel-2);
+  }
+}
+
+/*
+ * A / L：坐标轴的**右下角**（用户 2026-10-17：「a 和 l 放在坐标轴右下对角那里」）。
+ * 摆成横的一排塞进「时间轴 + 价格轴」相交那一格空位里 —— 竖着排会盖住轴上的价格数字。
+ */
+.axis-tools {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 4;
+  display: flex;
+  gap: 3px;
+}
+.axis-tools button {
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  font-size: 11px;
+  font-weight: var(--fw-bold);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: rgba(12, 16, 22, 0.72);
+  color: var(--muted);
+}
+.axis-tools button.active {
+  background: var(--blue-soft);
+  color: var(--blue);
+  border-color: var(--accent-line);
+}
+@media (hover: hover) {
+  .axis-tools button:hover:not(.active) {
+    color: var(--text);
+    border-color: var(--blue);
+    filter: none;
+  }
+}
+
 .chart-tools {
   display: flex;
   gap: 6px;

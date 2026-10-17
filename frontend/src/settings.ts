@@ -32,6 +32,8 @@ interface Stored {
   autoStopOn?: boolean
   /** 自动止损的触发距离（**百分点**，默认 4）—— 见 `autoStopPct` */
   autoStopPct?: number
+  /** 用户画的线（水平线 / 趋势线 / 矩形）显不显示。缺省 = 显示 */
+  chartShowDraw?: boolean
   /** 订单设置（2026-10-06）：这四样画不画在 K 线上。缺省 = 都画 */
   chartShowPosition?: boolean
   chartShowHistory?: boolean
@@ -59,6 +61,7 @@ function read(): Stored {
         testOrder: v.testOrder !== false,
         autoStopOn: v.autoStopOn !== false,
         autoStopPct: Number.isFinite(v.autoStopPct) ? Number(v.autoStopPct) : undefined,
+        chartShowDraw: v.chartShowDraw !== false,
         chartShowPosition: v.chartShowPosition !== false,
         chartShowHistory: v.chartShowHistory !== false,
         chartShowOrders: v.chartShowOrders !== false,
@@ -241,6 +244,12 @@ export function autoStopOf(): number {
  * ⚠️ 默认**四条都开**：这四样都是自己账户的仓位 / 委托，看不看得见由用户决定，
  *    他自己的东西默认该看得见（不想看就在配置里关掉，关掉的项也不再去取数）。
  */
+/**
+ * 用户自己画的线（2026-10-17「新增显示隐藏划线的功能」）—— 一眼看全图时把那几条
+ * 压掉用。缺省**显示**：刚画完就看不见会以为没画上。
+ */
+export const chartShowDraw = ref(saved.chartShowDraw !== false)
+
 export const chartShowPosition = ref(saved.chartShowPosition !== false)
 export const chartShowLiq = ref(saved.chartShowLiq !== false)
 export const chartShowOrders = ref(saved.chartShowOrders !== false)
@@ -299,6 +308,7 @@ watch(
     testOrder,
     autoStopOn,
     autoStopPct,
+    chartShowDraw,
     chartShowPosition,
     chartShowLiq,
     chartShowOrders,
@@ -318,6 +328,7 @@ watch(
           testOrder: testOrder.value,
           autoStopOn: autoStopOn.value,
           autoStopPct: autoStopPct.value,
+          chartShowDraw: chartShowDraw.value,
           chartShowPosition: chartShowPosition.value,
           chartShowLiq: chartShowLiq.value,
           chartShowOrders: chartShowOrders.value,

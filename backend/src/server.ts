@@ -135,6 +135,16 @@ import {MAX_PINS, listPins, togglePin} from './db/pins'
 import {BLACKLIST_HOURS, listBlacklist, lockBase, lockedUntil} from './db/blacklist'
 import {getStatsSettings, saveStatsSettings} from './db/stats-settings'
 import {getScanParams, saveScanParams} from './db/scan-settings'
+import {
+  createKlineAlert,
+  deleteKlineAlert,
+  getKlineDrawings,
+  listKlineAlerts,
+  normalizeBase,
+  rearmKlineAlert,
+  saveKlineDrawings
+} from './db/kline-alerts'
+import {noteAlertChanged, startPriceAlerts} from './price-alerts'
 import {pickCandidates} from './scan/rules'
 import {
   MARKET_TYPES,
@@ -3693,6 +3703,82 @@ async function route(
     }
   }
 
+  /* ---- K 线画线 + 穿线提醒（2026-10-17） ----
+   *
+   * 用户 2026-10-17：「k 线界面…改为划线模式…点击画的线可以添加超过该线提醒，
+   * 在自动化预测显示所有的提醒」。
+   *
+   * · 画线存库（`kline_drawings`）：手机和电脑看的是同一套线；
+   * · 提醒存库 + **服务器自己盯价**（`price-alerts.ts`）：网页没开也会响。
+   *
+   * ⚠️ `symbol` 一律收成**基础币**（`normalizeBase`：`DOGE` / `doge` / `DOGEUSDT` 都进同一格），
+   *    盯价那边再拼成币安原始交易对。
+   */
+  if (p === '/api/kline/drawings') {
+    const symbol = normalizeBase(url.searchParams.get('symbol') ?? '')
+    if (method === 'GET') {
+      if (!symbol) return sendJson(res, 400, {error: '缺 symbol'})
+      return sendJson(res, 200, {
+        symbol,
+        items: await getKlineDrawings(me.id, symbol),
+        error: null
+      })
+    }
+    if (method === 'PUT' || method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      const sym = normalizeBase(body?.symbol ?? symbol)
+      const items = Array.isArray(body?.items) ? (body.items as unknown[]) : null
+      if (!sym) return sendJson(res, 400, {error: '缺 symbol'})
+      if (!items) return sendJson(res, 400, {error: 'items 要是数组'})
+      /* 一条线最多几十字节，几十条也就几 KB —— 再大基本是有人乱塞，直接拒 */
+      if (items.length > 200) return sendJson(res, 400, {error: '线太多了（上限 200 条）'})
+      await saveKlineDrawings(me.id, sym, items)
+      return sendJson(res, 200, {symbol: sym, count: items.length, error: null})
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  if (p === '/api/kline/alerts' || p.startsWith('/api/kline/alerts/')) {
+    const rest = p.slice('/api/kline/alerts'.length).replace(/^\//, '')
+    if (!rest && method === 'GET') {
+      return sendJson(res, 200, {alerts: await listKlineAlerts(me.id), error: null})
+    }
+    if (!rest && method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      const symbol = normalizeBase(body?.symbol)
+      const price = Number(body?.price)
+      const op = body?.op === 'below' ? 'below' : 'above'
+      if (!symbol) return sendJson(res, 400, {error: '缺 symbol'})
+      if (!Number.isFinite(price) || price <= 0) {
+        return sendJson(res, 400, {error: '价格要是正数'})
+      }
+      const alert = await createKlineAlert({
+        userId: me.id,
+        symbol,
+        price,
+        op,
+        note: str(body?.note).slice(0, 120)
+      })
+      /* 立刻捞进盯价那张表，不用等下一分钟的 reload */
+      await noteAlertChanged()
+      return sendJson(res, 200, {alert, error: null})
+    }
+    const id = Number(rest.split('/')[0])
+    if (!Number.isFinite(id) || id <= 0) return sendJson(res, 400, {error: 'id 不对'})
+    if (method === 'DELETE') {
+      const ok = await deleteKlineAlert(me.id, id)
+      if (ok) await noteAlertChanged()
+      return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这条提醒'})
+    }
+    /* 重新盯：响过的再挂回去（用户 2026-10-17：「这条我还想它下次再响」） */
+    if (method === 'POST' && rest.endsWith('/arm')) {
+      const ok = await rearmKlineAlert(me.id, id)
+      if (ok) await noteAlertChanged()
+      return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这条提醒'})
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
   /* ---- 用量统计 ---- */
   if (p === '/api/usage' || p === '/api/usage/summary') {
     const days = url.searchParams.get('days')
@@ -6480,6 +6566,13 @@ async function main(): Promise<void> {
    * 这样前端切「15 分钟 / 1 小时」时**立刻**就有历史曲线，不用自己攒。
    */
   startSampling()
+
+  /*
+   * K 线画线的穿线提醒（2026-10-17）：**服务器自己盯价**，网页没开也响。
+   * 盯的是 `kline-stream` 那条全市场行情（`!ticker@arr`，零权重）；
+   * 它同时也让那条流常开 —— 前端没在看行情时提醒照样有效。
+   */
+  startPriceAlerts()
 
   /*
    * 清掉过期的登录会话（启动一次 + 每天一次就够）。

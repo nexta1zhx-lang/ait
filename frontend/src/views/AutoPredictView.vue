@@ -26,11 +26,15 @@
  * ⚠️ 后面几段（定时扫描 → 快讯式判定 → App 通知）还没接：这里只解决"看清挑出来的是哪些币、
  *    参数怎么改"，以及"点一下去看图"。
  */
-import {computed, onMounted, ref, watch} from 'vue'
+import {computed, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {
+  deleteKlineAlert,
+  fetchKlineAlerts,
   fetchScanPicks,
   fetchScanSettings,
+  rearmKlineAlert,
   saveScanSettings,
+  type KlineAlert,
   type ScanParams,
   type ScanPick,
   type ScanPicks
@@ -130,7 +134,7 @@ const RULES = [
  * ⚠️ 不做成 URL 参数：这一页本身就是 `/analyze?t=auto` 的一格，再加一层查询参数
  *    会跟上面那层 tab 的 `?t=` 打架（`analyze.ts` 那套只认一层）。
  */
-const tab = ref<'scan' | 'ai'>('scan')
+const tab = ref<'scan' | 'ai' | 'alerts'>('scan')
 
 /** 展开了哪个会话（一次只展开一个，手上一屏放得下两个都会把页面拉得很长） */
 const expandId = ref<number | null>(null)
@@ -186,7 +190,60 @@ watch(tab, t => {
     expandId.value = null
     void refreshAi()
   }
+  if (t === 'alerts') void loadAlerts()
 })
+
+/* ---------------- 画线提醒（2026-10-17） ---------------- */
+
+/**
+ * 用户 2026-10-17：「点击画的线可以添加超过该线提醒，在**自动化预测**显示所有的提醒」。
+ *
+ * 这一格就是那块的台账：还在盯的排前面，响过的留着看「当时多少价响的」。
+ * 判定在服务器（`backend/src/price-alerts.ts`）—— **网页没开也会响**，
+ * 所以这里只是读列表 / 删除 / 重新盯，不用在前端盯着价格算。
+ */
+const alerts = ref<KlineAlert[]>([])
+const alertsBusy = ref(false)
+/** 这一格开着的时候每 30 秒刷一次（响过的能立刻看到「已触发」） */
+let alertsTimer: ReturnType<typeof setInterval> | null = null
+
+const activeAlerts = computed(() => alerts.value.filter(a => a.status === 'active'))
+
+async function loadAlerts(): Promise<void> {
+  alertsBusy.value = true
+  try {
+    alerts.value = (await fetchKlineAlerts()).alerts
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    alertsBusy.value = false
+  }
+}
+
+async function dropAlert(id: number): Promise<void> {
+  try {
+    await deleteKlineAlert(id)
+    alerts.value = alerts.value.filter(a => a.id !== id)
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
+async function armAlert(id: number): Promise<void> {
+  try {
+    await rearmKlineAlert(id)
+    await loadAlerts()
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
+const alertDir = (a: KlineAlert): string => (a.op === 'below' ? '跌破' : '上穿')
+
+/** 提醒价的小数位：跟这个价本身量级走（0.0812 显示 4 位、83000 显示 1 位） */
+function alertPrice(v: number | null): string {
+  return v === null ? '—' : fmt(v, v >= 100 ? 2 : v >= 1 ? 4 : 6)
+}
 
 /* ---------------- 数据 ---------------- */
 
@@ -213,9 +270,18 @@ async function loadPicks(): Promise<void> {
   }
 }
 
+onBeforeUnmount(() => {
+  if (alertsTimer) clearInterval(alertsTimer)
+  alertsTimer = null
+})
+
 onMounted(async () => {
-  /* 两格的数据都在进页时拉一次：切过去就是现成的，不用等 */
+  /* 三格的数据都在进页时拉一次：切过去就是现成的，不用等 */
   void refreshPersist(true)
+  void loadAlerts()
+  alertsTimer = setInterval(() => {
+    if (tab.value === 'alerts') void loadAlerts()
+  }, 30_000)
   try {
     params.value = (await fetchScanSettings()).params
   } catch (e) {
@@ -285,13 +351,16 @@ function pctClass(v: number): string {
   <div class="col auto warm-skin">
     <div v-if="error" class="error">{{ error }}</div>
 
-    <!-- 两格：筛选的币种 / AI 分析（持久化分析那批会话） -->
+    <!-- 三格：筛选的币种 / AI 分析（持久化分析那批会话）/ 画线提醒 -->
     <div class="seg auto-seg">
       <button type="button" :class="{active: tab === 'scan'}" @click="tab = 'scan'">
         筛选的币种 <span class="tag">{{ picks.length }}</span>
       </button>
       <button type="button" :class="{active: tab === 'ai'}" @click="tab = 'ai'">
         AI 分析 <span class="tag">{{ aiRows.length }}</span>
+      </button>
+      <button type="button" :class="{active: tab === 'alerts'}" @click="tab = 'alerts'">
+        提醒 <span class="tag">{{ activeAlerts.length }}</span>
       </button>
     </div>
 
@@ -344,6 +413,76 @@ function pctClass(v: number): string {
               <td class="base">{{ p.base }}</td>
               <td class="dim">{{ reason(p) }}</td>
               <td class="r num" :class="pctClass(p.pct24)">{{ pct(p.pct24) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 画线提醒：K 线图上点一条线加的「上穿 / 跌破」提醒（服务器自己盯价） -->
+    <section v-else-if="tab === 'alerts'" class="panel">
+      <div class="sec-head">
+        <h2>
+          画线提醒
+          <span class="tag">{{ activeAlerts.length }} 条在盯</span>
+        </h2>
+        <div class="sec-actions">
+          <button class="ghost tiny" :disabled="alertsBusy" title="重新拉一次" @click="loadAlerts">
+            {{ alertsBusy ? '…' : '刷新' }}
+          </button>
+        </div>
+      </div>
+
+      <p class="meta-line">
+        在 K 线上点一条线 → 「上穿 / 下穿提醒」。判定在服务器，网页关掉也会响
+        （App 推送 + Telegram）；点一行去看那个币的 K 线。
+      </p>
+
+      <p v-if="!alerts.length" class="dim">
+        还没有提醒 —— 到 K 线图上画一条线，点它一下就能加。
+      </p>
+
+      <div v-else class="tbl-wrap">
+        <table class="pick-table">
+          <thead>
+            <tr>
+              <th>币种</th>
+              <th>方向</th>
+              <th class="r">价位</th>
+              <th class="r">状态</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="a in alerts"
+              :key="a.id"
+              :title="`${a.symbol} · 看 K 线`"
+              @click="openKline(a.symbol)"
+            >
+              <td class="base">{{ a.symbol }}</td>
+              <td class="dim">{{ alertDir(a) }}</td>
+              <td class="r num">{{ alertPrice(a.price) }}</td>
+              <td class="r">
+                <span v-if="a.status === 'active'" class="al-on">盯着</span>
+                <span v-else class="al-done">
+                  已触发 {{ alertPrice(a.triggeredPrice) }}
+                  <span class="dim">{{ a.triggeredAt ? bjTime(a.triggeredAt).slice(5) : '' }}</span>
+                </span>
+              </td>
+              <td class="al-acts">
+                <button
+                  v-if="a.status === 'triggered'"
+                  class="ghost tiny"
+                  title="这条再挂回去，等下一穿"
+                  @click.stop="armAlert(a.id)"
+                >
+                  重新盯
+                </button>
+                <button class="ghost tiny" title="删掉这条提醒" @click.stop="dropAlert(a.id)">
+                  删
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -919,6 +1058,24 @@ function pctClass(v: number): string {
 
 .pick-table .num {
   font-variant-numeric: tabular-nums;
+}
+
+/* 提醒那一格：状态两色 + 操作列贴右（点按钮不要顺带跳 K 线，见 `@click.stop`） */
+.al-on {
+  color: var(--blue);
+}
+.al-done {
+  color: var(--ok);
+  font-variant-numeric: tabular-nums;
+}
+.pick-table .al-acts {
+  width: 1%;
+  padding-left: 0;
+  white-space: nowrap;
+  text-align: right;
+}
+.pick-table .al-acts button {
+  margin-left: 4px;
 }
 
 .up {

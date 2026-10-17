@@ -3,22 +3,26 @@ import {computed, onBeforeUnmount, onMounted, ref, shallowRef, watch} from 'vue'
 import * as LWC from 'lightweight-charts'
 import {
   cancelTradeOrder,
+  createKlineAlert,
   fetchCandles,
+  fetchKlineAlerts,
+  fetchKlineDrawings,
   klineStream,
   placeStopOrder,
+  saveKlineDrawings,
   type Candle,
   type LevelSR,
   type TradeFill,
   type TradeOpenOrder,
   type TradePositionRow
 } from '../api'
-import IconCalendar from './IconCalendar.vue'
 import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
 import {freshLivePrice, livePrice, setLivePrice} from '../ticker'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
+  chartShowDraw,
   chartShowHistory,
   chartShowLiq,
   chartShowOrders,
@@ -51,11 +55,17 @@ import {positionsFallbackAt} from '../positions'
 // 字体栈只有 `style.css` 那一份，这里从 CSS 变量读（见 `fonts.ts`）
 import {monoStack, whenFontsReady} from '../fonts'
 import {createOverlayLines} from '../overlay-lines'
-import TimeModal from './TimeModal.vue'
+import {
+  createDrawings,
+  hitTest,
+  type DrawingItem,
+  type DrawPoint,
+  type DrawShape
+} from '../chart-drawings'
+import {showToast} from '../toast'
 import StopSheet from './StopSheet.vue'
 import {
   bjInputToMs,
-  bjInputValue,
   bjShort,
   bjTime,
   decimalsFor,
@@ -79,6 +89,10 @@ const props = defineProps<{
    *
    * 选中的这一刻会摆在图的**正中间**，左右各 `CENTER_BARS` 根。
    * 只决定「看哪一段」，**不影响 AI 判断用的数据**。
+   *
+   * ⚠️ 2026-10-17 起**图上没有入口了**（用户：「日期选择功能去掉」——那颗日历和它的
+   *    时间弹窗都拆了，那个位置换成了划线）。属性留着：`centered` / `barsToLoad` 那套
+   *    逻辑还在，将来要接「从某个时刻起看」时不用重写。
    */
   from?: string
   /**
@@ -229,11 +243,7 @@ function endMs(): number {
  */
 const centered = computed(() => fromMs.value > 0 && !testMode.value)
 
-function clearRange() {
-  emit('update:from', '')
-}
-
-/* ---------------- 时间弹窗（选年月日时分） ---------------- */
+/* ---------------- 周期 ---------------- */
 
 const TF_MS: Record<string, number> = {
   '1m': 60_000,
@@ -267,21 +277,6 @@ function barsToLoad(): number {
    *    这里换个算法，提前取好的那份就对不上了（`candles.ts` 的 memo key 里带 limit）。
    */
   return KLINE_BARS
-}
-
-const pickerOpen = ref(false)
-
-/** 打开弹窗时给的初始值：选过就用它，没选过就按「最近 DEFAULT_BARS 根」猜一个 */
-const pickerInitial = computed(
-  () => fromMs.value || Math.max(endMs() - tfMs() * DEFAULT_BARS, 0)
-)
-
-function openPicker() {
-  pickerOpen.value = true
-}
-
-function onPickTime(ms: number) {
-  emit('update:from', bjInputValue(ms))
 }
 
 const TFS = [
@@ -589,6 +584,8 @@ function ensureChart(): boolean {
   refs = {chart, candle, volume, ema42}
   /* 叠加线（仓位 / 强平 / 挂单）挂在蜡烛系列上：横线压在蜡烛**下面**（见 `../overlay-lines.ts`） */
   overlayLines.attach(candle)
+  /* 用户画的线挂在同一个系列上，但**盖在蜡烛上面**（见 `../chart-drawings.ts`） */
+  drawPrim.attach(candle)
 
   /* 标签跟线一起动（见 `labelSyncTick`）：从图建好那刻起每帧盯一下指纹 */
   labelSyncKey = ''
@@ -2586,10 +2583,14 @@ function onChartPointerDown(e: PointerEvent): void {
   userPanned = true
   /* 手指落到图上 = 不看标签了，那颗「✕」收起来（跟点标签自己一下一个效果） */
   hideCancelX()
-  tapFrom =
-    e.pointerType === 'touch'
-      ? {x: e.clientX, y: e.clientY, at: Date.now()}
-      : null
+  /* 点空白处 = 收掉上一条线的弹层和高亮 */
+  if (hitMenu.value) hitMenu.value = null
+  if (drawSelected.value) {
+    drawSelected.value = null
+    renderDrawings()
+  }
+  /* 鼠标也要记：桌面端点一条线同样要能弹「加提醒」（见 `onChartPointerUp`） */
+  tapFrom = {x: e.clientX, y: e.clientY, at: Date.now()}
 }
 
 function onChartPointerMove(e: PointerEvent): void {
@@ -2617,8 +2618,16 @@ function onChartPointerMove(e: PointerEvent): void {
 function onChartPointerUp(e: PointerEvent): void {
   const from = tapFrom
   tapFrom = null
-  if (!from || e.pointerType !== 'touch') return
+  if (!from) return
   if (Date.now() - from.at > TAP_MS) return
+  if (
+    Math.abs(e.clientX - from.x) > TAP_SLOP ||
+    Math.abs(e.clientY - from.y) > TAP_SLOP
+  )
+    return
+  /* 点到画的线了 ⇒ 弹「上穿 / 下穿提醒 + 删除」（鼠标和手指一样） */
+  if (tapDrawing(e)) return
+  if (e.pointerType !== 'touch') return
   /* 已经钉着 = 这一下是「取消」，不是「再看这一根」 */
   if (tapPinned) return clearPinnedPointer()
   showAtPointer(e.clientX, e.clientY)
@@ -3341,6 +3350,19 @@ function onKeydown(e: KeyboardEvent) {
     setPicking(false)
     return
   }
+  /* 划线模式 / 点出来的小弹层：Esc 也收（跟上面那两个模式一个规矩） */
+  if (drawTool.value !== 'off') {
+    drawTool.value = 'off'
+    draft.value = null
+    renderDrawings()
+    return
+  }
+  if (hitMenu.value) {
+    hitMenu.value = null
+    drawSelected.value = null
+    renderDrawings()
+    return
+  }
   if (!rangeMode.value) return
   dragFromX.value = null
   dragToX.value = null
@@ -3619,6 +3641,256 @@ function drawPoint() {
   if (selLine.value !== x) selLine.value = x
 }
 
+/* ---------------- 用户画的线（2026-10-17） ---------------- */
+
+/**
+ * 划线模式（用户 2026-10-17：「k 线界面…改为划线模式，点击 k 线顶部出现常用的
+ * k 线画图线」）。
+ *
+ * 三种最常用的：**水平线**（一条价，也是「超过该线提醒」最自然的载体）、
+ * **趋势线**（两点连一条斜线）、**矩形**（圈一段区间）。
+ *
+ * 存在服务端（`kline_drawings`，一个币一份）：手机上画的，电脑上也看得见。
+ * 这里管读写 / 命中 / 弹层；真正画在画布上的是 `chart-drawings.ts` 那个 primitive。
+ */
+const DRAW_COLOR = '#58a6ff'
+
+/** 顶上那排画图工具露不露出来（点周期行那颗笔） */
+const drawOpen = ref(false)
+/** 当前拿的是哪把工具；`off` = 只能点线看它（加提醒 / 删除） */
+const drawTool = ref<'off' | 'hline' | 'trend' | 'rect'>('off')
+const drawings = ref<DrawingItem[]>([])
+const drawSelected = ref<string | null>(null)
+/** 点中一条线后的小弹层（坐标是 `.chart-wrap` 里的像素） */
+const hitMenu = ref<{id: string; price: number; x: number; y: number} | null>(null)
+/** 正在拖的那条（松手才落进 `drawings`） */
+const draft = ref<{kind: 'hline' | 'trend' | 'rect'; a: DrawPoint; b: DrawPoint} | null>(null)
+/** 这个币还在盯的提醒价（右轴标签上挂个小铃铛） */
+const alertPrices = ref<number[]>([])
+
+const drawPrim = createDrawings()
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+
+function isDrawingItem(v: unknown): v is DrawingItem {
+  const o = v as DrawingItem
+  if (!o || typeof o.id !== 'string') return false
+  if (o.kind === 'hline') return Number.isFinite(Number(o.p))
+  if (o.kind !== 'trend' && o.kind !== 'rect') return false
+  return (
+    !!o.a &&
+    !!o.b &&
+    Number.isFinite(Number(o.a.t)) &&
+    Number.isFinite(Number(o.a.p)) &&
+    Number.isFinite(Number(o.b.t)) &&
+    Number.isFinite(Number(o.b.p))
+  )
+}
+
+/** 这个价上挂着还在盯的提醒吗（右轴标签用） */
+function hasAlertAt(p: number): boolean {
+  return alertPrices.value.some(a => Math.abs(a - p) <= Math.abs(p) * 1e-9)
+}
+
+/** 把 `drawings` 换算成 primitive 要的形状（藏起来的线一条都不给） */
+function renderDrawings(): void {
+  const shapes: DrawShape[] = []
+  if (chartShowDraw.value) {
+    for (const it of drawings.value) {
+      if (it.kind === 'hline') {
+        const p = Number(it.p)
+        shapes.push({
+          id: it.id,
+          kind: 'hline',
+          price: p,
+          color: DRAW_COLOR,
+          axis: `${priceText(p)}${hasAlertAt(p) ? ' 🔔' : ''}`
+        })
+      } else if (it.a && it.b) {
+        shapes.push({id: it.id, kind: it.kind, a: it.a, b: it.b, color: DRAW_COLOR})
+      }
+    }
+  }
+  drawPrim.set(shapes, drawSelected.value)
+  const d = draft.value
+  if (!chartShowDraw.value || !d) drawPrim.setPreview(null)
+  else if (d.kind === 'hline')
+    drawPrim.setPreview({id: '__draft', kind: 'hline', price: d.a.p, color: DRAW_COLOR})
+  else drawPrim.setPreview({id: '__draft', kind: d.kind, a: d.a, b: d.b, color: DRAW_COLOR})
+}
+
+/**
+ * 存库（落一条就存一次，去抖 500ms —— 连着画几条只发一份）。
+ * ⚠️ 币种和内容都在**排队的这一刻**拍下来：500ms 内切了币，
+ *    等待中的那一份仍然属于上一个币，不能拿新币的线去盖旧币。
+ */
+function scheduleSaveDrawings(): void {
+  const symbol = props.symbol
+  const items = JSON.parse(JSON.stringify(drawings.value)) as DrawingItem[]
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    void saveKlineDrawings(symbol, items).catch((e: Error) => {
+      showToast(`线没存上：${e.message}`, 'bad')
+    })
+  }, 500)
+}
+
+async function loadDrawings(): Promise<void> {
+  const symbol = props.symbol
+  try {
+    const r = await fetchKlineDrawings(symbol)
+    if (symbol !== props.symbol) return // 中途换币了，这份过期
+    drawings.value = (r.items as unknown[]).filter(isDrawingItem)
+  } catch {
+    /* 拉不到就先空着（不影响看图），下次换币 / 重进再试 */
+    drawings.value = []
+  }
+  drawSelected.value = null
+  hitMenu.value = null
+  renderDrawings()
+}
+
+/** 这个币还在盯的提醒（只为了在线的右端挂个铃铛） */
+async function loadAlertMarks(): Promise<void> {
+  const symbol = String(props.symbol ?? '').toUpperCase()
+  try {
+    const r = await fetchKlineAlerts()
+    alertPrices.value = r.alerts
+      .filter(a => a.status === 'active' && a.symbol === symbol)
+      .map(a => a.price)
+  } catch {
+    alertPrices.value = []
+  }
+  renderDrawings()
+}
+
+function toggleDrawOpen(): void {
+  drawOpen.value = !drawOpen.value
+  if (!drawOpen.value) drawTool.value = 'off'
+  hitMenu.value = null
+}
+
+function pickTool(t: 'hline' | 'trend' | 'rect'): void {
+  drawTool.value = drawTool.value === t ? 'off' : t
+  drawSelected.value = null
+  hitMenu.value = null
+  renderDrawings()
+}
+
+function removeDrawing(id: string): void {
+  hitMenu.value = null
+  drawSelected.value = null
+  drawings.value = drawings.value.filter(d => d.id !== id)
+  renderDrawings()
+  scheduleSaveDrawings()
+}
+
+function clearDrawings(): void {
+  if (!drawings.value.length) return
+  if (!window.confirm(`清掉 ${props.symbol} 上的 ${drawings.value.length} 条线？（提醒不受影响）`))
+    return
+  drawings.value = []
+  drawSelected.value = null
+  hitMenu.value = null
+  renderDrawings()
+  scheduleSaveDrawings()
+}
+
+/** 在图上某处加一条「上穿 / 下穿这个价」的提醒（服务器盯，网页没开也响） */
+async function addAlertAt(price: number, op: 'above' | 'below'): Promise<void> {
+  hitMenu.value = null
+  try {
+    await createKlineAlert({symbol: props.symbol, price, op})
+    showToast(
+      `${op === 'above' ? '上穿' : '下穿'} ${priceText(price)} 提醒已加 —— 服务器盯着，关掉页面也会响`
+    )
+    await loadAlertMarks()
+  } catch (e) {
+    showToast(`提醒没加上：${(e as Error).message}`, 'bad')
+  }
+}
+
+/** 指针位置 → 图上的（时间, 价）；落在坐标轴 / 图外给 null */
+function pointAt(e: {clientX: number; clientY: number}): DrawPoint | null {
+  if (!refs || !chartEl.value) return null
+  const r = chartEl.value.getBoundingClientRect()
+  const x = e.clientX - r.left
+  const y = e.clientY - r.top
+  const pane = refs.chart.paneSize?.() ?? {width: r.width, height: r.height}
+  if (x < 0 || y < 0 || x > pane.width || y > pane.height) return null
+  const p = Number(refs.candle.coordinateToPrice(y))
+  const t = Number(refs.chart.timeScale().coordinateToTime(x))
+  if (!Number.isFinite(p) || !Number.isFinite(t)) return null
+  return {t, p}
+}
+
+function onDrawDown(e: PointerEvent): void {
+  const p = pointAt(e)
+  if (!p) return
+  ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+  draft.value = {kind: drawTool.value === 'off' ? 'hline' : drawTool.value, a: p, b: p}
+  renderDrawings()
+}
+
+function onDrawMove(e: PointerEvent): void {
+  const d = draft.value
+  if (!d) return
+  const p = pointAt(e)
+  if (!p) return
+  draft.value = {...d, b: p}
+  renderDrawings()
+}
+
+function onDrawUp(): void {
+  const d = draft.value
+  draft.value = null
+  if (!d) return renderDrawings()
+  const id = `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+  if (d.kind === 'hline') {
+    drawings.value = [...drawings.value, {id, kind: 'hline', p: d.a.p}]
+  } else {
+    /* 点一下没拖动 = 误触（斜线 / 方块得有长度） */
+    if (Math.abs(d.b.t - d.a.t) === 0 && Math.abs(d.b.p - d.a.p) === 0) return renderDrawings()
+    drawings.value = [...drawings.value, {id, kind: d.kind, a: d.a, b: d.b}]
+  }
+  /* 画完就放下工具：接着就能点这条线加提醒 */
+  drawTool.value = 'off'
+  renderDrawings()
+  scheduleSaveDrawings()
+}
+
+/**
+ * 图上的「点一下」：点到画线了就弹那三个动作。
+ *
+ * @returns 真的点到线了（调用方就别再当成「点图看信息」）
+ */
+function tapDrawing(e: {clientX: number; clientY: number}): boolean {
+  if (!refs || !chartEl.value) return false
+  if (drawTool.value !== 'off' || !chartShowDraw.value || !drawings.value.length) return false
+  const r = chartEl.value.getBoundingClientRect()
+  const x = e.clientX - r.left
+  const y = e.clientY - r.top
+  const hit = hitTest(drawings.value, x, y, {
+    xOf: t => {
+      const v = refs!.chart.timeScale().timeToCoordinate(t)
+      return v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v)
+    },
+    yOf: p => {
+      const v = refs!.candle.priceToCoordinate(p)
+      return v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v)
+    },
+    priceAt: yy => {
+      const v = Number(refs!.candle.coordinateToPrice(yy))
+      return Number.isFinite(v) ? v : null
+    }
+  })
+  if (!hit) return false
+  drawSelected.value = hit.id
+  hitMenu.value = {id: hit.id, price: hit.price, x, y}
+  renderDrawings()
+  return true
+}
+
 /* ---------------- 生命周期 ---------------- */
 
 onMounted(load)
@@ -3666,6 +3938,19 @@ watch(() => props.active, on => {
   syncOrphanTimer()
 })
 watch(() => props.symbol, load)
+/*
+ * 画的线跟着币走：换币就换一套（存在服务端，手机和电脑同一套）。
+ * ⚠️ 提醒价那几个铃铛一起重拉 —— 别的设备加的提醒也要在右轴上看得到。
+ */
+onMounted(() => {
+  void loadDrawings()
+  void loadAlertMarks()
+})
+watch(() => props.symbol, () => {
+  void loadDrawings()
+  void loadAlertMarks()
+})
+watch(chartShowDraw, renderDrawings)
 watch(() => props.timeframe, load)
 watch(() => props.from, load)
 // 进 / 出测试模式都要重画：右端从「现在」换成那一刻，或换回来
@@ -3731,6 +4016,9 @@ onBeforeUnmount(() => {
   stopOverlayResume = null
   /* 画叠加线的那个 primitive 挂在蜡烛系列上，图拆掉之前先摘下来 */
   overlayLines.detach()
+  drawPrim.detach()
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = null
   try {
     refs?.chart.remove()
   } catch {
@@ -3772,6 +4060,23 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <slot name="head-end" />
+        <!--
+          划线（用户 2026-10-17：「k 线界面…改为划线模式，点击 k 线顶部出现常用的
+          k 线画图线」）。点它 → 图顶上那排工具露出来（水平线 / 趋势线 / 矩形 + 显隐 + 清空）。
+        -->
+        <button
+          type="button"
+          class="ghost tiny tk-draw"
+          :class="{on: drawOpen}"
+          :title="drawOpen ? '收起画图工具' : '划线：在图上画线，点线可以加提醒'"
+          aria-label="划线"
+          @click="toggleDrawOpen"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 20h4L19 9l-4-4L4 16v4Z" />
+            <path d="M14 6l4 4" />
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -3782,8 +4087,84 @@ onBeforeUnmount(() => {
       ⚠️ 图下面那块**下单模块**（`OrderPanel`，槽 `#bottom`，在本元素之外）也自己吃横向手势
       （它在自己的根上标了 `data-no-swipe`）—— 横划是切「开单 / 仓位」，不是切一级 tab。
     -->
+    <!--
+      画图工具条（点周期行那颗笔露出来）：**排在图的上面一行**，不压在画布上 ——
+      图左上角那行「开 / 高 / 低 / 收」就在最上沿，浮层压过去正好糊住它。
+    -->
+    <div v-if="drawOpen" class="draw-bar">
+      <button
+        type="button"
+        :class="{active: drawTool === 'hline'}"
+        title="水平线：在图上点一下就画一条这个价的线"
+        @click="pickTool('hline')"
+      >
+        水平线
+      </button>
+      <button
+        type="button"
+        :class="{active: drawTool === 'trend'}"
+        title="趋势线：按住从一个点拖到另一个点"
+        @click="pickTool('trend')"
+      >
+        趋势线
+      </button>
+      <button
+        type="button"
+        :class="{active: drawTool === 'rect'}"
+        title="矩形：按住拖出一个区间"
+        @click="pickTool('rect')"
+      >
+        矩形
+      </button>
+      <span class="draw-sep" />
+      <button
+        type="button"
+        :class="{active: chartShowDraw}"
+        :title="chartShowDraw ? '隐藏画的线' : '显示画的线'"
+        @click="chartShowDraw = !chartShowDraw"
+      >
+        {{ chartShowDraw ? '隐藏' : '显示' }}
+      </button>
+      <button
+        type="button"
+        :disabled="!drawings.length"
+        title="清掉这个币上的所有线（提醒不受影响）"
+        @click="clearDrawings"
+      >
+        清空
+      </button>
+    </div>
+
     <div ref="wrapEl" class="chart-wrap" data-no-swipe :class="{fading}">
       <div ref="chartEl" class="chart"></div>
+
+      <!-- 画线时接管指针（跟 `.range-layer` 一个套路：平时不吃事件） -->
+      <div
+        v-if="drawTool !== 'off'"
+        class="draw-layer"
+        @pointerdown="onDrawDown"
+        @pointermove="onDrawMove"
+        @pointerup="onDrawUp"
+        @pointercancel="onDrawUp"
+      />
+
+      <!-- 点中一条线：加提醒 / 删掉这条 -->
+      <div
+        v-if="hitMenu"
+        class="draw-pop"
+        :style="{left: hitMenu.x + 'px', top: hitMenu.y + 'px'}"
+      >
+        <div class="dp-price">{{ priceText(hitMenu.price) }}</div>
+        <button type="button" @click="addAlertAt(hitMenu.price, 'above')">
+          上穿提醒
+        </button>
+        <button type="button" @click="addAlertAt(hitMenu.price, 'below')">
+          下穿提醒
+        </button>
+        <button type="button" class="dp-del" @click="removeDrawing(hitMenu.id)">
+          删除这条线
+        </button>
+      </div>
       <!--
         换币 / 换周期的指示灯：三颗灯一颗一颗亮过去（`style.css` 的 `.kl-dots`）。
         以前是整块变淡，用户觉得像蒙了层遮罩 —— 现在只加这一条灯带。
@@ -3889,66 +4270,13 @@ onBeforeUnmount(() => {
           picking ? pointTip : '在图上横向拖一段 —— 松手就选好了，按 Esc 取消'
         }}
       </div>
-    </div>
 
-    <!--
-      图表下面**就这一行**：左边「看哪一刻」，中间指标开关，右边 A / L。
-      （原来「阳线 / 阴线」那两个图例项去掉了 —— 红绿一目了然，白占地方）
-    -->
-    <div class="chart-foot">
-      <div class="foot-left">
-        <button
-          type="button"
-          class="time-pick"
-          :class="{set: fromMs > 0}"
-          :title="
-            fromMs
-              ? `以 ${bjTime(fromMs)} 为中心，左右各 ${CENTER_BARS} 根；点一下改时间`
-              : `看某一刻：点一下选时间（那一刻摆在正中间，左右各 ${CENTER_BARS} 根）`
-          "
-          @click="openPicker"
-        >
-          <IconCalendar />
-        </button>
-        <span v-if="fromMs" class="foot-time">{{ bjTime(fromMs) }}</span>
-        <span
-          v-if="testMode"
-          class="until-tag"
-          :title="`只画已收盘的 K 线；设的测试点是 ${bjTime(untilMs)}`"
-        >
-          K 线到 {{ bjTime(lastClosedMs) }}
-        </span>
-        <button
-          v-if="from"
-          type="button"
-          class="ghost tiny"
-          title="清掉时间，看最新的 K 线"
-          @click="clearRange"
-        >
-          回到最新
-        </button>
-      </div>
-
-      <!-- 挂单读不到 / 只拿到快照时的提示（正常不渲染） -->
-      <span v-if="ordNote" class="ord-note" :title="ordNote.title">{{
-        ordNote.text
-      }}</span>
-
-      <!-- 指标开关（点一下显示 / 隐藏） -->
-      <div ref="legendEl" class="legend">
-        <span
-          v-for="l in LEGEND"
-          :key="l.key"
-          :data-toggle="l.key"
-          :class="{off: !VISIBLE[l.key]}"
-          :title="l.tip"
-          @click="toggleLegend(l.key)"
-        >
-          <i class="dot" :class="l.dot" />{{ l.label }}
-        </span>
-      </div>
-
-      <div class="chart-tools">
+      <!--
+        A / L 摆到**坐标轴那个右下角**（用户 2026-10-17：「a 和 l 放在坐标轴右下对角那里」）。
+        它们原来在图下面那行最右边 —— 那行现在留给图例，这两颗贴到轴上，
+        离它们改的东西（价格轴的范围 / 刻度）更近。
+      -->
+      <div class="axis-tools">
         <button
           type="button"
           title="自动布局（线性坐标 + 适配全部）"
@@ -3967,18 +4295,34 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!--
+      图表下面那行：指标开关（成交量 / EMA42 / 压力 / 支撑）。
+      2026-10-17 起左边的「看哪一刻」去掉了（用户：「日期选择功能去掉」），
+      A / L 也挪到了坐标轴右下角。
+    -->
+    <div class="chart-foot">
+      <!-- 挂单读不到 / 只拿到快照时的提示（正常不渲染） -->
+      <span v-if="ordNote" class="ord-note" :title="ordNote.title">{{
+        ordNote.text
+      }}</span>
+
+      <!-- 指标开关（点一下显示 / 隐藏） -->
+      <div ref="legendEl" class="legend">
+        <span
+          v-for="l in LEGEND"
+          :key="l.key"
+          :data-toggle="l.key"
+          :class="{off: !VISIBLE[l.key]}"
+          :title="l.tip"
+          @click="toggleLegend(l.key)"
+        >
+          <i class="dot" :class="l.dot" />{{ l.label }}
+        </span>
+      </div>
+    </div>
+
     <!-- 底部：#bottom 给外层塞东西（分析页塞的是 1天/3天/…/1年 涨幅那一行） -->
     <slot name="bottom" />
-
-    <!-- 选时间：弹窗里选年月日时分，选完就把那一刻摆到图的中间 -->
-    <TimeModal
-      v-model="pickerOpen"
-      kind="point"
-      title="选一个时间"
-      :hint="`以这一刻为中心，左右各 ${CENTER_BARS} 根 K 线。`"
-      :initial="pickerInitial"
-      @confirm="onPickTime"
-    />
 
     <!--
       拖动仓位线 / 挂单线松手后弹的确认单（用户 2026-10-06）——

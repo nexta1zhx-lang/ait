@@ -432,6 +432,40 @@ CREATE TABLE IF NOT EXISTS persist_alerts (
 );
 CREATE INDEX IF NOT EXISTS persist_alerts_user_idx ON persist_alerts (user_id, id DESC);
 
+-- ---------------------------------------------------------------- K 线画线与提醒（2026-10-17）
+-- 用户 2026-10-17：「k 线界面…改为划线模式…点击画的线可以添加超过该线提醒，
+-- 在自动化预测显示所有的提醒」。
+--
+-- · kline_drawings —— 每个用户每个币一份：整份数组一次读写（图上也就几条线），
+--   存库而不是 localStorage，手机和电脑画的是同一套。
+-- · kline_alerts  —— 提醒由**服务器**盯价（网页没开也要响，走 App 推送 / Telegram）：
+--   status = active 等着穿线，triggered 已经响过（留着做记录，可以重新盯）。
+--   symbol 是**基础币**（DOGE），跟 K 线页的 symbol 同一个口径；
+--   币安原始交易对由 price-alerts.ts 现拼（DOGE + USDT）。
+CREATE TABLE IF NOT EXISTS kline_drawings (
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  symbol     TEXT        NOT NULL,
+  items      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS kline_alerts (
+  id              BIGSERIAL     PRIMARY KEY,
+  user_id         BIGINT        NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  symbol          TEXT          NOT NULL,
+  price           NUMERIC(24,8) NOT NULL,
+  -- above = 涨过这条线，below = 跌破这条线
+  op              TEXT          NOT NULL DEFAULT 'above',
+  note            TEXT          NOT NULL DEFAULT '',
+  status          TEXT          NOT NULL DEFAULT 'active',
+  created_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),
+  triggered_at    TIMESTAMPTZ,
+  triggered_price NUMERIC(24,8)
+);
+CREATE INDEX IF NOT EXISTS kline_alerts_user_idx   ON kline_alerts (user_id, id DESC);
+CREATE INDEX IF NOT EXISTS kline_alerts_active_idx ON kline_alerts (status);
+
 -- ---------------------------------------------------------------- App 推送（FCM）
 -- 手机 App 的推送 token（2026-10-15 用户：「加入 app 推送」）。
 --

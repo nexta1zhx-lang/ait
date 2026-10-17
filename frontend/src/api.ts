@@ -2512,6 +2512,58 @@ export const saveScanSettings = (input: ScanParams) =>
 export const fetchScanPicks = (at?: number) =>
   get<ScanPicks>(`/api/scan/picks${at ? `?at=${at}` : ''}`)
 
+/* ---------------- K 线画线 + 穿线提醒（2026-10-17） ---------------- */
+
+/**
+ * 一条提醒 —— **字段与后端 `db/kline-alerts.ts` 的 `KlineAlert` 一一对应**。
+ *
+ * 用户 2026-10-17：「点击画的线可以添加超过该线提醒，在自动化预测显示所有的提醒」。
+ * `op`：`above` = 涨过这条线，`below` = 跌破这条线。
+ */
+export interface KlineAlert {
+  id: number
+  /** 基础币（DOGE）—— 跟 K 线页的 `symbol` 同一个口径 */
+  symbol: string
+  price: number
+  op: 'above' | 'below'
+  note: string
+  /** active = 还在盯；triggered = 已经响过（可以重新盯） */
+  status: 'active' | 'triggered'
+  createdAt: string
+  triggeredAt: string | null
+  /** 响的那一刻是多少价 */
+  triggeredPrice: number | null
+}
+
+/** 这个币画的线（原样存，形状由 `chart-drawings.ts` 定义） */
+export const fetchKlineDrawings = (symbol: string) =>
+  get<{symbol: string; items: unknown[]; error: string | null}>(
+    `/api/kline/drawings?symbol=${encodeURIComponent(symbol)}`
+  )
+
+export const saveKlineDrawings = (symbol: string, items: unknown[]) =>
+  put<{symbol: string; count: number; error: string | null}>('/api/kline/drawings', {
+    symbol,
+    items
+  })
+
+export const fetchKlineAlerts = () =>
+  get<{alerts: KlineAlert[]; error: string | null}>('/api/kline/alerts')
+
+export const createKlineAlert = (input: {
+  symbol: string
+  price: number
+  op: 'above' | 'below'
+  note?: string
+}) => post<{alert: KlineAlert; error: string | null}>('/api/kline/alerts', input)
+
+export const deleteKlineAlert = (id: number) =>
+  del<{ok: boolean; error: string | null}>(`/api/kline/alerts/${id}`)
+
+/** 响过的再挂回去（还是那条线、那个价，重新等下一穿） */
+export const rearmKlineAlert = (id: number) =>
+  post<{ok: boolean; error: string | null}>(`/api/kline/alerts/${id}/arm`, {})
+
 /* ---------------- 持久化分析（2026-10-15） ---------------- */
 
 /**
