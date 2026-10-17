@@ -43,6 +43,103 @@
   </head>
   <body>
     <div id="app"></div>
+
+    <!--
+      ★ 2026-10-17：**JS 没跑起来时的兜底页**。
+
+      用户报：「APP 常驻在后台，但一打开直接黑屏，什么内容都没有」。
+      原生那一层（`MainActivity`）已经接管了「页面根本拉不下来」和「渲染进程被杀」两种；
+      这一块管**第三种**：HTML 拿到了、脚本也跑了，但**挂载之前就出错了**
+      （比如某个模块初始化时抛错）—— 那样 `#app` 一直是空的，body 又是深色底，
+      屏幕上就是一片黑，而且**永远不动**。
+
+      所以：脚本起不来 / 12 秒还没挂载 ⇒ 把这块露出来，给一句人话 + 一个「重新加载」。
+      ⚠️ 必须是**内联**的（这段要能在所有 bundle 都挂掉时还活着），样式也内联。
+      ⚠️ 别把它做成默认可见：正常启动时它一直是 `hidden`（挂载成功后 `main.ts` 会
+         主动删掉它，连 DOM 都不留）。
+    -->
+    <div id="boot-fallback" hidden>
+      <div class="bf-box">
+        <h1>页面没起来</h1>
+        <p class="bf-msg" id="boot-fallback-msg">
+          界面脚本没加载成功 —— 多半是网络刚断了一下。
+        </p>
+        <button type="button" onclick="location.reload()">重新加载</button>
+      </div>
+    </div>
+    <style>
+      #boot-fallback {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #121316;
+        color: #e8eaf0;
+        font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Noto Sans SC', sans-serif;
+        text-align: center;
+      }
+      #boot-fallback[hidden] {
+        display: none;
+      }
+      #boot-fallback h1 {
+        font-size: 17px;
+        font-weight: 600;
+        margin: 0 0 8px;
+      }
+      #boot-fallback .bf-msg {
+        color: #8b949e;
+        font-size: 13px;
+        margin: 0 0 18px;
+        word-break: break-word;
+      }
+      #boot-fallback button {
+        font: inherit;
+        font-size: 14px;
+        padding: 9px 22px;
+        border-radius: 8px;
+        border: 1px solid #2e3540;
+        background: #1b1f26;
+        color: #e8eaf0;
+      }
+    </style>
+    <script>
+      /*
+       * 看门狗：12 秒还没挂载就把兜底页露出来。
+       * `main.ts` 挂成功后会 `window.__caBooted = true` 并把这块整个删掉。
+       */
+      ;(function () {
+        var shown = false
+        function show(msg) {
+          if (shown) return
+          shown = true
+          var el = document.getElementById('boot-fallback')
+          if (!el) return
+          if (msg) {
+            var m = document.getElementById('boot-fallback-msg')
+            if (m) m.textContent = msg
+          }
+          el.hidden = false
+        }
+        window.__caBoot = show
+        window.setTimeout(function () {
+          if (!window.__caBooted) show()
+        }, 12000)
+        /* 脚本层面的错（模块 404 / 语法错 / 初始化抛错）也当场露出来，别等 12 秒 */
+        window.addEventListener('error', function (e) {
+          if (window.__caBooted) return
+          var t = e && e.target
+          if (t && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
+            show('界面文件没下载下来 —— 网络断了，或者刚发过版。')
+            return
+          }
+          var msg = e && e.message ? String(e.message) : ''
+          show(msg ? '界面脚本报错：' + msg.slice(0, 120) : '')
+        }, true)
+      })()
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -156,6 +156,50 @@ addEventListener(
  * ⚠️ 「本地有 token 但已经失效（被踢 / 过期）」那一路由 `initAuth()` 自己补
  *   —— 见那边的说明，不然表现就是「明明开了 DEV_AUTO_LOGIN 还是弹登录页」。
  */
+/**
+ * 挂载成功后把 `index.html` 里那块**兜底页**摘掉。
+ *
+ * 那块只是「脚本没跑起来」时的遮羞布（见 `index.html` 里那段说明）——
+ * 挂上了就一点都不该留（包括它的样式和看门狗）。
+ */
+function clearBootFallback(): void {
+  ;(window as unknown as {__caBooted?: boolean}).__caBooted = true
+  document.getElementById('boot-fallback')?.remove()
+}
+
+/*
+ * **渲染层出错时别让屏幕变成一片黑**（2026-10-17，用户：「一打开直接黑屏，什么内容都没有」）。
+ *
+ * Vue 的默认行为是：某个组件在 render / 生命周期里抛出未捕获的错误 ⇒ 那个组件**整棵被卸载**。
+ * 根组件（`App.vue`）出问题就是「全屏空」，而 body 是深色底 —— 看着就是黑屏。
+ *
+ * 这里做两件事：
+ *   ① `app.config.errorHandler`：记一行日志（真机上看不到控制台，日志里至少有个线索），
+ *      并且**只要整棵树是空的**就把兜底页露出来给个「重新加载」；
+ *   ② `unhandledrejection`：同上（我们大量用 async，抛在 `await` 后面的错不走 `error` 事件）。
+ *
+ * ⚠️ 只在「确实什么都没画出来」时才露兜底页 —— 单个面板出错不该顶掉整个界面。
+ */
+app.config.errorHandler = (err, _inst, info) => {
+  console.error(`[vue] ${info || '渲染出错'}：`, err)
+  const empty = !document.querySelector('#app')?.firstElementChild
+  if (empty) {
+    ;(window as unknown as {__caBoot?: (msg?: string) => void}).__caBoot?.(
+      '界面出错了，重新加载一下就好。'
+    )
+  }
+}
+
+window.addEventListener('unhandledrejection', e => {
+  console.error('[js] 未处理的 Promise 拒绝：', (e as PromiseRejectionEvent).reason)
+  const empty = !document.querySelector('#app')?.firstElementChild
+  if (empty) {
+    ;(window as unknown as {__caBoot?: (msg?: string) => void}).__caBoot?.(
+      '界面出错了，重新加载一下就好。'
+    )
+  }
+})
+
 void devAutoLogin().then(() => {
   /*
    * App 推送（FCM）：只有原生壳里才做事（Web 上是空操作）。
@@ -165,4 +209,5 @@ void devAutoLogin().then(() => {
   /* App 后台提醒（前台服务 + 本地通知）：只有原生壳里才做事 */
   bindWatch()
   app.mount('#app')
+  clearBootFallback()
 })
