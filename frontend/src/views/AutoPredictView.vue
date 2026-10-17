@@ -64,7 +64,7 @@ import {
   testMode
 } from '../analyze'
 import AnalysisDetail from '../comps/AnalysisDetail.vue'
-import SlideTabs from '../comps/SlideTabs.vue'
+import SubTabs from '../comps/SubTabs.vue'
 import AnswerBody from '../comps/AnswerBody.vue'
 import PredictHistory from '../comps/PredictHistory.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
@@ -166,7 +166,7 @@ const RULES = [
  */
 const tab = autoTab
 
-/** 换格（`SlideTabs` 的 `update:modelValue`）—— 显式写出来，别在模板里给 ref 别名赋值 */
+/** 换格（`SubTabs` 的 `update:modelValue`）—— 显式写出来，别在模板里给 ref 别名赋值 */
 function setTab(v: AutoTab): void {
   autoTab.value = v
 }
@@ -423,9 +423,9 @@ function pctClass(v: number): string {
     <!--
       四格（用户 2026-10-18 定的顺序）：币种监测 / AI分析 / 自动分析 / 提醒。
       ★ 「AI分析」就是原来一级 tab「预测结果」整格搬进来的那一格。
-      ★ 滑块指示式：格子按文字自己撑开，滑块跟着选中那格的宽度走（见 `comps/SlideTabs.vue`）。
+      ★ 二级 tab：一排纯文字 + 选中那颗淡琥珀高亮（见 `comps/SubTabs.vue`）。
     -->
-    <SlideTabs :model-value="tab" :options="TAB_OPTIONS" @update:model-value="setTab" />
+    <SubTabs :model-value="tab" :options="TAB_OPTIONS" @update:model-value="setTab" />
 
     <section v-if="tab === 'scan'" class="panel">
       <div class="sec-head">
