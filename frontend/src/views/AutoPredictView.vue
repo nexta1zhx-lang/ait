@@ -64,6 +64,7 @@ import {
   testMode
 } from '../analyze'
 import AnalysisDetail from '../comps/AnalysisDetail.vue'
+import SlideTabs from '../comps/SlideTabs.vue'
 import AnswerBody from '../comps/AnswerBody.vue'
 import PredictHistory from '../comps/PredictHistory.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
@@ -165,9 +166,20 @@ const RULES = [
  */
 const tab = autoTab
 
-/** 四格的固定顺序（滑块按它在轨道里挪） */
-const TAB_ORDER: AutoTab[] = ['scan', 'live', 'ai', 'alerts']
-const tabIndex = computed(() => Math.max(0, TAB_ORDER.indexOf(tab.value)))
+/** 换格（`SlideTabs` 的 `update:modelValue`）—— 显式写出来，别在模板里给 ref 别名赋值 */
+function setTab(v: AutoTab): void {
+  autoTab.value = v
+}
+
+/** 四格（用户 2026-10-18 定的顺序）；计数当徽标挂在后面 */
+const TAB_OPTIONS = computed<
+  {value: AutoTab; label: string; badge?: string | number}[]
+>(() => [
+  {value: 'scan', label: '币种监测', badge: picks.value.length},
+  {value: 'live', label: 'AI分析'},
+  {value: 'ai', label: '自动分析', badge: aiRows.value.length},
+  {value: 'alerts', label: '提醒', badge: activeAlerts.value.length}
+])
 
 /* ---------------- 「AI分析」那一格（原一级 tab「预测结果」） ---------------- */
 
@@ -411,24 +423,9 @@ function pctClass(v: number): string {
     <!--
       四格（用户 2026-10-18 定的顺序）：币种监测 / AI分析 / 自动分析 / 提醒。
       ★ 「AI分析」就是原来一级 tab「预测结果」整格搬进来的那一格。
-      ★ 样式是**滑块指示式**（用户 2026-10-18）：一条胶囊轨道 + 一颗会滑过去的滑块，
-        不再是一格一颗独立胶囊。滑块位置靠 `--seg-i`（第几格）算，见下面 `.auto-seg`。
+      ★ 滑块指示式：格子按文字自己撑开，滑块跟着选中那格的宽度走（见 `comps/SlideTabs.vue`）。
     -->
-    <div class="seg auto-seg" :style="{'--seg-i': tabIndex}">
-      <span class="seg-thumb" aria-hidden="true"></span>
-      <button type="button" :class="{active: tab === 'scan'}" @click="tab = 'scan'">
-        币种监测 <span class="tag">{{ picks.length }}</span>
-      </button>
-      <button type="button" :class="{active: tab === 'live'}" @click="tab = 'live'">
-        AI分析
-      </button>
-      <button type="button" :class="{active: tab === 'ai'}" @click="tab = 'ai'">
-        自动分析 <span class="tag">{{ aiRows.length }}</span>
-      </button>
-      <button type="button" :class="{active: tab === 'alerts'}" @click="tab = 'alerts'">
-        提醒 <span class="tag">{{ activeAlerts.length }}</span>
-      </button>
-    </div>
+    <SlideTabs :model-value="tab" :options="TAB_OPTIONS" @update:model-value="setTab" />
 
     <section v-if="tab === 'scan'" class="panel">
       <div class="sec-head">
@@ -1024,83 +1021,6 @@ function pctClass(v: number): string {
 <style scoped>
 .auto {
   gap: 10px;
-}
-
-/*
- * 四格滑块指示式（用户 2026-10-18：「改为滑块指示式」）。
- *
- * 一条胶囊轨道（`.auto-seg`）+ 一颗滑块（`.seg-thumb`），选中哪格滑块滑到哪格 ——
- * 不再是一格一颗独立胶囊。四格等宽，滑块宽度 = 轨道内宽的四分之一，
- * 位移直接 `translateX(格序号 × 100%)`（100% 是滑块自己的宽，所以正好挪一格）。
- *
- * ⚠️ 全站 `button` 默认 `padding: 9px 20px`，这里必须写死小值，否则四格撑爆（踩过）。
- * ⚠️ `.seg` 自带的外壳（边框 / 底色 / `overflow` / 格间竖线）要一条条盖掉。
- */
-.auto-seg {
-  position: relative;
-  display: flex;
-  width: 100%;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-xs);
-  background: var(--panel-2);
-  overflow: visible;
-}
-
-.auto-seg button {
-  flex: 1 1 0;
-  position: relative;
-  z-index: 1;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-height: 30px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: var(--fw-mid);
-  white-space: nowrap;
-  transition: color 0.18s ease;
-}
-
-.auto-seg button:last-child {
-  border: 0;
-}
-
-/* 选中那格：底色由滑块给，这里只把字染成琥珀 */
-.auto-seg button.active {
-  background: transparent;
-  color: var(--accent);
-}
-
-/* 计数小标签：滑块滑到它底下时跟着染色，别留一圈灰边 */
-.auto-seg button.active .tag {
-  color: var(--accent);
-  border-color: var(--accent-line);
-  background: rgba(255, 193, 107, 0.08);
-}
-
-/*
- * 滑块：**淡琥珀色块 + 一圈细边**，不做亮渐变（用户 2026-10-18：「太亮了」）。
- * 圆角跟轨道同一档小圆角（用户同一天：「圆角太大」）。
- */
-.seg-thumb {
-  position: absolute;
-  top: 3px;
-  bottom: 3px;
-  left: 3px;
-  width: calc((100% - 6px) / 4);
-  border: 1px solid var(--accent-line);
-  border-radius: 6px;
-  background: var(--accent-soft);
-  transform: translateX(calc(var(--seg-i, 0) * 100%));
-  transition: transform 0.24s cubic-bezier(0.4, 0.1, 0.2, 1);
-  pointer-events: none;
 }
 
 /* 「AI分析」那一格：测试标识 + 分析过程 + 结论卡 + 预测历史，竖着排 */
