@@ -1020,7 +1020,7 @@ function pctClass(v: number): string {
 
 <style scoped>
 .auto {
-  gap: 10px;
+  gap: 6px;
 }
 
 /* 「AI分析」那一格：测试标识 + 分析过程 + 结论卡 + 预测历史，竖着排 */

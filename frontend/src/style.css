@@ -7264,7 +7264,11 @@ button.badge:disabled {
    */
   .tab-row {
     margin: 0;
-    padding: 4px 0 2px;
+    padding: 2px 0 0;
+  }
+  /* 一级 tab 行 → 内容区：默认 12px 太空（用户 2026-10-18：「上下间距小点」） */
+  .split > .col {
+    gap: 6px;
   }
   .tab-row .seg {
     width: auto;

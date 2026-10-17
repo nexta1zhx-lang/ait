@@ -41,7 +41,7 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
 .sub-tabs {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
   max-width: 100%;
   /* 窄屏挤不下时自己横着滚，不把页面撑破 */
   overflow-x: auto;
@@ -57,8 +57,8 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 30px;
-  padding: 0 10px;
+  height: 28px;
+  padding: 0 7px;
   border: 0;
   border-radius: 6px;
   background: transparent;
