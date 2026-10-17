@@ -5948,9 +5948,12 @@ body.fixed-viewport .split {
 
 .ord-read .ord-r {
   display: flex;
-  flex-direction: column;
-  /* 靠右：标签和数值都贴右边（用户 2026-10-18：「靠右侧显示」） */
-  align-items: flex-end;
+  /* 横向：标签和数值**同一行**（用户 2026-10-18：「标题文字横向显示」） */
+  flex-direction: row;
+  align-items: baseline;
+  gap: 5px;
+  /* 靠右：整对贴右边（用户 2026-10-18：「靠右侧显示」） */
+  justify-content: flex-end;
   text-align: right;
   gap: 0;
   min-width: 0;
