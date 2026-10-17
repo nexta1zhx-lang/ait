@@ -8,9 +8,13 @@
 import {computed} from 'vue'
 import {renderMarkdown} from '../markdown'
 
-const props = defineProps<{text: string}>()
+const props = defineProps<{
+  text: string
+  /** 单个换行也断行（日记那种「一行一句」的手写正文要它） */
+  softBreaks?: boolean
+}>()
 
-const html = computed(() => renderMarkdown(props.text))
+const html = computed(() => renderMarkdown(props.text, {softBreaks: props.softBreaks}))
 </script>
 
 <template>

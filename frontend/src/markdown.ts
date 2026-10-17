@@ -53,8 +53,14 @@ function tableRow(line: string): string {
   return cells.join(' · ')
 }
 
-/** 把一段 Markdown 渲染成**安全的** HTML */
-export function renderMarkdown(text: string): string {
+/**
+ * 把一段 Markdown 渲染成**安全的** HTML。
+ *
+ * @param opts.softBreaks 单个换行也当断行（`<br>`）。默认 `false` = 按标准 Markdown
+ *   把连续几行并成一段 —— 但**日记正文是人手写的"一行一句"**，并成一大段就散了，
+ *   所以日记那边传 `true`（2026-10-18）。
+ */
+export function renderMarkdown(text: string, opts: {softBreaks?: boolean} = {}): string {
   const src = (text ?? '').replace(/\r\n?/g, '\n')
   const out: string[] = []
   const lines = src.split('\n')
@@ -67,7 +73,7 @@ export function renderMarkdown(text: string): string {
 
   const flushPara = (): void => {
     if (!para.length) return
-    out.push(`<p>${inline(para.join(' '))}</p>`)
+    out.push(`<p>${inline(para.join(opts.softBreaks ? '\n' : ' ')).replace(/\n/g, '<br>')}</p>`)
     para = []
   }
   const flushList = (): void => {

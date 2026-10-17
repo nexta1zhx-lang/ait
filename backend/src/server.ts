@@ -158,7 +158,13 @@ import {
   saveKlineDrawings
 } from './db/kline-alerts'
 import {noteAlertChanged, startPriceAlerts} from './price-alerts'
-import {deleteJournalEntry, listJournalEntries, saveJournalEntry} from './db/journals'
+import {
+  deleteJournalEntry,
+  listJournalEntries,
+  MAX_BODY,
+  saveJournalEntry
+} from './db/journals'
+import {polishText} from './llm/polish'
 import {pickCandidates} from './scan/rules'
 import {
   MARKET_TYPES,
@@ -3842,6 +3848,35 @@ async function route(
     if (!Number.isFinite(id) || id <= 0) return sendJson(res, 400, {error: 'id 不对'})
     const ok = await deleteJournalEntry(me.id, id)
     return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这条日记'})
+  }
+
+  /* 日记正文交给模型润色（用户 2026-10-18：「标题旁加个 ai 的图标，可以美化正文部分」）。
+   *
+   * 只改写法、不改事实；**不落库** —— 结果回给前端做预览，用户点「用这段」才随正常保存写进去。
+   * 记账走 `recordUsage`（kind='polish'），跟别的模型调用一个口径。
+   */
+  if (p === '/api/journal/polish' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const text = str(body.text).trim().slice(0, MAX_BODY)
+    if (!text) return sendJson(res, 400, {error: '先写点正文再美化'})
+    try {
+      const resolved = await resolveUserLlm(me.id)
+      const config = loadConfig({llm: resolved.llm})
+      const r = await polishText(text, config)
+      await recordUsage({
+        userId: me.id,
+        llmKeyId: resolved.keyId,
+        kind: 'polish',
+        model: r.model,
+        usage: r.usage,
+        attempts: r.attempts,
+        latencyMs: r.latencyMs
+      })
+      return sendJson(res, 200, {text: r.text, error: null})
+    } catch (e) {
+      return sendJson(res, 200, {text: '', error: (e as Error).message})
+    }
   }
 
   /* ---- 用量统计 ---- */

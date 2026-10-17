@@ -2631,6 +2631,14 @@ export const saveJournalEntry = (input: {
 export const deleteJournalEntry = (id: number) =>
   del<{ok: boolean; error: string | null}>(`/api/journal/entries/${id}`)
 
+/**
+ * 让模型把正文整理一遍（只改写法、不改事实）。
+ *
+ * ⚠️ **不落库**：回来的文本只用于预览，用户点「用这段」再由正常保存写进去。
+ */
+export const polishJournal = (text: string) =>
+  post<{text: string; error: string | null}>('/api/journal/polish', {text})
+
 /* ---------------- 持久化分析（2026-10-15） ---------------- */
 
 /**

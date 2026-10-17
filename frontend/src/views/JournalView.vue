@@ -22,6 +22,7 @@ import {computed, onMounted, ref, watch} from 'vue'
 import {
   deleteJournalEntry,
   fetchJournal,
+  polishJournal,
   saveJournalEntry,
   type Contract,
   type JournalCoin,
@@ -33,6 +34,7 @@ import {contracts} from '../store'
 import {leftTab, prefetchSymbol, pickSymbol, chartFrom, MOBILE_MAX} from '../analyze'
 import SymbolCombo from '../comps/SymbolCombo.vue'
 import DateTimePick from '../comps/DateTimePick.vue'
+import AnswerBody from '../comps/AnswerBody.vue'
 
 /* ---------------- 列表 + 筛选 ---------------- */
 
@@ -137,12 +139,53 @@ const saving = ref(false)
 /** 「加一个币」那颗下拉的当前值（选完就清空，它只是个选择器） */
 const comboPick = ref('')
 
+/* ---------------- AI 美化正文 ---------------- */
+
+/** 模型整理出来的候选稿（**不落库**，用户点「用这段」才换成正文） */
+const polishDraft = ref('')
+const polishing = ref(false)
+const polishErr = ref('')
+
+async function beautify(): Promise<void> {
+  const ed = editing.value
+  if (!ed || polishing.value) return
+  const text = ed.body.trim()
+  if (!text) {
+    showToast('先写点正文再美化', 'bad')
+    return
+  }
+  polishing.value = true
+  polishErr.value = ''
+  try {
+    const r = await polishJournal(text)
+    if (r.error || !r.text) throw new Error(r.error || '模型没有返回内容')
+    polishDraft.value = r.text
+  } catch (e) {
+    polishErr.value = (e as Error).message
+  } finally {
+    polishing.value = false
+  }
+}
+
+function applyPolish(): void {
+  if (!editing.value) return
+  editing.value.body = polishDraft.value
+  polishDraft.value = ''
+  showToast('已换成整理后的版本')
+}
+
+function dropPolish(): void {
+  polishDraft.value = ''
+  polishErr.value = ''
+}
+
 /** 合约清单（`SymbolCombo` 要）—— 只保留 swap，跟别的页面一致 */
 const swapContracts = computed(() => contracts.value.filter(c => c.symbol.endsWith('USDT')))
 
 function startNew(): void {
   editing.value = {id: null, title: '', body: '', coins: []}
   comboPick.value = ''
+  dropPolish()
 }
 
 function startEdit(e: JournalEntry): void {
@@ -153,10 +196,12 @@ function startEdit(e: JournalEntry): void {
     coins: e.coins.map(c => ({...c}))
   }
   comboPick.value = ''
+  dropPolish()
 }
 
 function closeEditor(): void {
   editing.value = null
+  dropPolish()
 }
 
 function addCoin(v: string): void {
@@ -265,18 +310,22 @@ async function remove(e: JournalEntry): Promise<void> {
     <!-- 条目：最近改动的在上，时间精确到分钟 -->
     <div v-if="entries.length" class="j-list">
       <article v-for="e in entries" :key="e.id" class="j-entry">
-        <div class="j-head" @click="toggle(e)">
+        <div class="j-head" :class="{open: openId === e.id}" @click="toggle(e)">
           <i class="j-dot" :class="{on: openId === e.id}" />
           <span class="j-time">{{ timeLabel(e.at) }}</span>
           <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
+          <span class="j-caret dim">{{ openId === e.id ? '▴' : '▾' }}</span>
+          <!--
+            币放在**第二行**，不跟标题抢宽度 —— 手机上一行塞两三个长币名，
+            标题就被挤成「按…」（展开后下面本来就逐条列着所有币）。
+          -->
           <span v-if="e.coins.length" class="j-badges">
             <span v-for="c in e.coins" :key="c.base" class="j-badge">{{ c.base }}</span>
           </span>
-          <span class="j-caret dim">{{ openId === e.id ? '▴' : '▾' }}</span>
         </div>
 
         <div v-if="openId === e.id" class="j-body-wrap">
-          <p v-if="e.body" class="j-body">{{ e.body }}</p>
+          <AnswerBody v-if="e.body" class="j-body" :text="e.body" soft-breaks />
           <ul v-if="e.coins.length" class="j-notes">
             <li v-for="c in e.coins" :key="c.base">
               <button
@@ -368,13 +417,51 @@ async function remove(e: JournalEntry): Promise<void> {
       </div>
 
       <div class="j-sec">
-        <p class="j-sec-t">正文</p>
+        <p class="j-sec-t j-body-head">
+          <span>正文</span>
+          <button
+            type="button"
+            class="j-ai"
+            :class="{on: polishing}"
+            :disabled="polishing"
+            title="AI 美化：只改写法，不改事实（币种、时间、数字都原样留着）"
+            @click="beautify"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                 stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3.5l1.7 4.3 4.3 1.7-4.3 1.7L12 15.5l-1.7-4.3L6 9.5l4.3-1.7L12 3.5Z" />
+              <path d="M18.5 15l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1Z" />
+            </svg>
+            <span v-if="polishing">美化中…</span>
+          </button>
+        </p>
         <textarea
           v-model="editing.body"
           class="j-body-input"
           rows="7"
           placeholder="怎么想的就怎么写 —— 一行一句也行"
         />
+
+        <!-- AI 整理出来的候选稿（不落库）：看一眼，觉得好再替换 -->
+        <div v-if="polishing || polishDraft || polishErr" class="j-polish">
+          <div class="j-polish-h">
+            <span class="j-polish-t">AI 整理后</span>
+            <button
+              v-if="polishDraft"
+              type="button"
+              class="j-polish-use"
+              @click="applyPolish"
+            >
+              用这段
+            </button>
+            <button type="button" class="ghost tiny" title="不要这段" @click="dropPolish">
+              ✕
+            </button>
+          </div>
+          <p v-if="polishing" class="dim j-polish-wait">等一下，正在整理…</p>
+          <p v-else-if="polishErr" class="j-polish-err">{{ polishErr }}</p>
+          <AnswerBody v-else :text="polishDraft" soft-breaks />
+        </div>
       </div>
 
       <div class="j-submit">
@@ -440,37 +527,67 @@ async function remove(e: JournalEntry): Promise<void> {
   padding: 6px 8px;
 }
 
-/* 条目 */
+/* 条目：一条时间轴往下走，每条一个圆点 */
 .j-list {
+  position: relative;
   display: flex;
   flex-direction: column;
+  padding-left: 14px;
+}
+.j-list::before {
+  content: '';
+  position: absolute;
+  left: 2.5px;
+  top: 20px;
+  bottom: 22px;
+  width: 1px;
+  background: linear-gradient(
+    color-mix(in srgb, var(--border) 90%, transparent),
+    color-mix(in srgb, var(--border) 25%, transparent)
+  );
 }
 .j-entry {
-  border-top: 1px solid var(--line);
-}
-.j-entry:first-child {
-  border-top: none;
+  position: relative;
 }
 .j-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 8px;
-  padding: 10px 2px;
+  column-gap: 8px;
+  row-gap: 4px;
+  margin: 2px 0;
+  padding: 8px 8px 8px 4px;
+  border-radius: 8px;
   cursor: pointer;
+  transition: background 0.14s;
 }
-/* 圆点：展开的那条亮起来（「加点区分样式整体」） */
+@media (hover: hover) {
+  .j-head:hover {
+    background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+  }
+}
+.j-head.open {
+  background: color-mix(in srgb, var(--panel-2) 55%, transparent);
+}
+/* 圆点：钉在左边那条时间轴上；展开的那条亮起来 + 加光圈 */
 .j-dot {
-  flex: none;
+  position: absolute;
+  left: -14px;
+  top: 15px;
   width: 6px;
   height: 6px;
-  margin-right: -2px;
   border-radius: 50%;
-  background: var(--border);
-  align-self: center;
-  transition: background 0.15s;
+  background: var(--muted);
+  opacity: 0.55;
+  transition:
+    background 0.15s,
+    box-shadow 0.15s,
+    opacity 0.15s;
 }
 .j-dot.on {
   background: var(--blue);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
 }
 .j-time {
   flex: none;
@@ -488,11 +605,17 @@ async function remove(e: JournalEntry): Promise<void> {
   white-space: nowrap;
 }
 .j-badges {
+  grid-column: 2 / 4;
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
-  flex: none;
+  min-width: 0;
 }
 .j-badge {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10px;
   padding: 1px 5px;
   border-radius: 4px;
@@ -504,15 +627,21 @@ async function remove(e: JournalEntry): Promise<void> {
   font-size: 11px;
 }
 .j-body-wrap {
-  padding: 0 2px 12px 2px;
+  position: relative;
+  margin: 0 0 10px;
+  padding: 2px 10px 10px 11px;
+  border-left: 2px solid color-mix(in srgb, var(--blue) 45%, transparent);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in srgb, var(--panel-2) 45%, transparent);
 }
 .j-body {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 13px;
-  line-height: 1.7;
-  white-space: pre-wrap;
+  line-height: 1.75;
   word-break: break-word;
-  color: var(--text);
+}
+.j-body:last-child {
+  margin-bottom: 0;
 }
 .j-notes {
   margin: 0 0 10px;
@@ -561,12 +690,77 @@ async function remove(e: JournalEntry): Promise<void> {
 
 /* 弹层里的币行 */
 .j-sec {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 .j-sec-t {
   margin: 0 0 6px;
   font-size: 12px;
   color: var(--muted);
+}
+/* 「正文」那行：左边是字，右边是 AI 那一下 */
+.j-body-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.j-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  border-radius: 999px;
+}
+.j-ai:hover {
+  background: color-mix(in srgb, var(--blue) 18%, transparent);
+}
+.j-ai.on {
+  opacity: 0.6;
+}
+.j-ai:disabled {
+  cursor: default;
+}
+
+/* AI 整理出来的候选稿：一眼能分清「这不是我写的」 */
+.j-polish {
+  margin-top: 8px;
+  padding: 8px 10px 10px;
+  border: 1px dashed color-mix(in srgb, var(--blue) 40%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--blue) 6%, transparent);
+}
+.j-polish-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.j-polish-t {
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  color: var(--blue);
+}
+.j-polish-use {
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11.5px;
+  color: #1a1a1a;
+  background: var(--blue);
+  border: 0;
+  border-radius: 999px;
+}
+.j-polish-wait {
+  margin: 0;
+  font-size: 12px;
+}
+.j-polish-err {
+  margin: 0;
+  font-size: 12px;
+  color: var(--bad);
 }
 .j-body-input {
   width: 100%;
