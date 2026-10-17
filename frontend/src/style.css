@@ -5937,7 +5937,11 @@ body.fixed-viewport .split {
   /* 两列：数量已经单独一块了，这里只剩「所需保证金 / 账户可用」 */
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
-  margin-bottom: 6px;
+  /*
+   * 2026-10-18 用户：「所需和账户可用放在**快捷选择下面**」⇒ 这块挪进了
+   * 「当前可开价值」那张卡里（不再是卡外单独一行）：上边留一行间隔、去掉外边距。
+   */
+  margin: 4px 0 0;
 }
 
 .ord-read .ord-r {
