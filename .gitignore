@@ -40,3 +40,6 @@ data/marketcap-ranks.json
 
 # 编辑器本地配置（每个人那份不一样，不进仓库）
 .vscode/
+
+# 排查 K 线时临时扒下来的上游数据（`.tmp_kline/`：币安接口的原样返回，几十 MB）
+.tmp_kline/
