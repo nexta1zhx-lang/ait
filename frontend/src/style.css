@@ -5831,35 +5831,33 @@ body.fixed-viewport .split {
 }
 
 /*
- * 头部那条**仓位百分比滑条**（用户 2026-10-18：「滑动条放在杠杆旁」）：
- * `10x  ——o———— 100%   [账户]` —— 贴在杠杆右边，账户那颗靠 `margin-left: auto` 顶到最右。
- * 币种多 / 账户名长的时候它先让位（`min-width: 60px` 是还能拖的下限）。
+ * **仓位百分比滑条**那个框（用户 2026-10-18：「滑动条放在杠杆旁」→「**滑动条放在下面
+ * 一个框内**」）：从头部那一行挪出来，单独一张描边小卡、贴着头行下面，
+ * 跟「当前可开价值」那张卡上下并排 —— 不跟杠杆 / 账户挤同一行。
+ *
+ * ⚠️ 高度固定成一行（滑条 22px 的命中区不撑高它）：用户 2026-10-05 定的
+ *    「下单区域高度固定」，上面的 K 线不能被顶来顶去。
  */
-.ord-pos-head {
-  /*
-   * ⚠️ 2026-10-18 用户：「**长度加长**」—— 不给上限，让它把杠杆和账户之间那段**整条占满**
-   *    （原来封顶 170px）。账户那颗本来就 `margin-left: auto`，所以它自然被顶到最右。
-   *   `min-width: 60px` 是还能拖的下限（币种多 / 账户名长时它先让位）。
-   */
-  flex: 1 1 auto;
-  min-width: 60px;
-  max-width: none;
+.ord-pos-box {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-left: 2px;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 10px);
 }
-.ord-pos-head .ord-bar {
+.ord-pos-box .ord-bar {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
 }
-.ord-pos-head-num {
+.ord-pos-num {
   flex: 0 0 auto;
-  min-width: 30px;
+  min-width: 34px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: var(--fw-mid);
   font-variant-numeric: tabular-nums;
   text-align: right;

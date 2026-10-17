@@ -1449,29 +1449,6 @@ onMounted(async () => {
         {{ lev }}x
       </button>
       <!--
-        **仓位百分比滑条**（用户 2026-10-18：「滑动条放在杠杆旁」）—— 就挨着那颗 `10x`。
-        只在「没持仓」（= 开单那一块）时有意义，仓位那块不显示它。
-        `flex: 1 1 auto` + `min-width: 0`：这一行挤的时候它先让位（币种多 / 账户名长）。
-      -->
-      <label
-        v-if="!opened"
-        class="ord-pos-head"
-        :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
-      >
-        <span class="ord-bar">
-          <input
-            v-model.number="posPct"
-            type="range"
-            min="1"
-            max="100"
-            step="1"
-            :style="{'--fill': posFillPct + '%'}"
-            aria-label="买入仓位百分比"
-          />
-        </span>
-        <b class="ord-pos-head-num">{{ posPct }}%</b>
-      </label>
-      <!--
         ⚠️ 这里原来挂着一枚常驻的「真单」章（只在「配置 → 测试下单」关掉时出现）。
         用户 2026-10-07：「**提示层真单的那种去掉，都是真单**」「也去掉，那个章现在
         只是噪音」⇒ 整颗删掉。测试单那一档的标记照旧（只有真·测试单才标）。
@@ -1496,6 +1473,31 @@ onMounted(async () => {
         而且它平的是**整个账户**，摆在这个「只管当前币」的面板里本来就容易被误触。
       -->
     </div>
+
+    <!--
+      **仓位百分比滑条**（用户 2026-10-18：「滑动条放在杠杆旁」→「**滑动条放在下面一个框内**」）：
+      从头部那一行挪出来，单独一个描边框、贴着头行下面 —— 跟「当前可开价值」那张卡
+      是两张独立的卡，不再挤在杠杆和账户中间。
+      只在「没持仓」（= 开单那一块）时有意义，仓位那块不显示它。
+    -->
+    <label
+      v-if="!opened"
+      class="ord-pos-box"
+      :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
+    >
+      <span class="ord-bar">
+        <input
+          v-model.number="posPct"
+          type="range"
+          min="1"
+          max="100"
+          step="1"
+          :style="{'--fill': posFillPct + '%'}"
+          aria-label="买入仓位百分比"
+        />
+      </span>
+      <b class="ord-pos-num">{{ posPct }}%</b>
+    </label>
 
     <div class="ord-body">
     <div class="ord-page">
