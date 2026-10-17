@@ -466,6 +466,49 @@ CREATE TABLE IF NOT EXISTS kline_alerts (
 CREATE INDEX IF NOT EXISTS kline_alerts_user_idx   ON kline_alerts (user_id, id DESC);
 CREATE INDEX IF NOT EXISTS kline_alerts_active_idx ON kline_alerts (status);
 
+-- ---------------------------------------------------------------- 交易日记（2026-10-18）
+-- 用户 2026-10-18：「想再加一个模块。日记模块可以加入某些币种，总结」→「是我手动写日记。
+-- 也不一定是日记，有可能是一周才写一次。最后，都是按月给我汇总到一起」。
+--
+-- 三条口径（细节见 db/journals.ts 文件头）：
+--   · **条目式**（journal_entries）：哪天想写就写一条，一周一条也行 —— 所以没有
+--     「一天只能一篇」的唯一约束；
+--   · **挂币**（journal_coins）：一条日记可以带几个币，每个币后面跟一句自己的话；
+--   · **按月汇总**（journal_months）：月视图把这个月的条目、提到的币、这些币那个月的
+--     涨跌和我的盈亏汇到一页，外加一段自己写的「月度总结」。
+-- ⚠️ day 用 DATE（不带时区）：它就是「哪一天」这件事本身，统计时按北京时间的月份窗口去捞。
+CREATE TABLE IF NOT EXISTS journal_entries (
+  id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  day        DATE        NOT NULL,
+  title      TEXT        NOT NULL DEFAULT '',
+  body       TEXT        NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS journal_entries_user_day_idx ON journal_entries (user_id, day DESC);
+
+CREATE TABLE IF NOT EXISTS journal_coins (
+  entry_id BIGINT NOT NULL REFERENCES journal_entries (id) ON DELETE CASCADE,
+  -- 基础币（DOGE）—— 跟置顶 / 黑名单 / 提醒同一个口径
+  base     TEXT   NOT NULL,
+  -- 这条日记里对这个币的一句话
+  note     TEXT   NOT NULL DEFAULT '',
+  sort     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (entry_id, base)
+);
+-- 「这个币在历次日记里被怎么说的」走这条
+CREATE INDEX IF NOT EXISTS journal_coins_base_idx ON journal_coins (base);
+
+CREATE TABLE IF NOT EXISTS journal_months (
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- 'YYYY-MM'（北京时间那一个月）
+  month      TEXT        NOT NULL,
+  summary    TEXT        NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, month)
+);
+
 -- ---------------------------------------------------------------- App 推送（FCM）
 -- 手机 App 的推送 token（2026-10-15 用户：「加入 app 推送」）。
 --

@@ -29,6 +29,7 @@ import StepsPanel from '../comps/StepsPanel.vue'
 import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import HistoryView from './HistoryView.vue'
+import JournalView from './JournalView.vue'
 import AutoPredictView from './AutoPredictView.vue'
 import PredictHistory from '../comps/PredictHistory.vue'
 import AnswerBody from '../comps/AnswerBody.vue'
@@ -815,6 +816,11 @@ const summary = computed(() => markdownToPlain(judge.value?.line ?? '', 42))
         <!-- ②' 自动化预测：扫描参数（可调参数） + 这一轮筛出来的币种（2026-10-12） -->
         <div v-else-if="leftTab === 'auto'" class="scroll-body">
           <AutoPredictView />
+        </div>
+
+        <!-- ②'' 交易日记（2026-10-18）：条目式 + 按月汇总，纯读库不花钱 -->
+        <div v-else-if="leftTab === 'journal'" class="scroll-body">
+          <JournalView />
         </div>
 
         <!-- ③ 知识库：2026-10-10 从「我的 → 复盘」挪进来，替掉原来的「历史分析」 -->

@@ -2575,6 +2575,95 @@ export const deleteKlineAlert = (id: number) =>
 export const rearmKlineAlert = (id: number) =>
   post<{ok: boolean; error: string | null}>(`/api/kline/alerts/${id}/arm`, {})
 
+/* ---------------- 交易日记（2026-10-18） ---------------- */
+
+/**
+ * 日记 —— **字段与后端 `db/journals.ts` 的 `JournalEntry` / `JournalMonth` 一一对应**。
+ *
+ * 用户 2026-10-18：「日记模块可以加入某些币种，总结」→「是我手动写日记。也不一定是日记，
+ * 有可能是一周才写一次。最后，都是按月给我汇总到一起」。
+ */
+export interface JournalCoin {
+  base: string
+  /** 这个币在我这篇里的一句话 */
+  note: string
+}
+
+export interface JournalEntry {
+  id: number
+  /** `YYYY-MM-DD`（北京时间） */
+  day: string
+  title: string
+  body: string
+  coins: JournalCoin[]
+  createdAt: string
+  updatedAt: string
+}
+
+/** 月视图里「一个币」的统计 */
+export interface JournalCoinStat {
+  base: string
+  /** 这个月有几篇提到它 */
+  mentions: number
+  /** 这个月涨跌幅（%），拿不到是 null */
+  pct: number | null
+  /** 这个月我在它上面成交几笔 */
+  fills: number
+  /** 这个月我在它上面的净盈亏（已实现 − 手续费） */
+  pnl: number
+}
+
+/** 一个月的全部（条目 + 统计 + 月度总结） */
+export interface JournalMonth {
+  month: string
+  entries: JournalEntry[]
+  summary: string
+  stats: {
+    entries: number
+    coins: JournalCoinStat[]
+    fills: number
+    pnl: number
+    /** 交易过、但这个月一篇都没写的币（按成交笔数多的在前，页面只露前几个） */
+    missing: {base: string; fills: number}[]
+    /** 写到了、但这个月没交易过的币 */
+    idle: string[]
+  }
+}
+
+export const fetchJournal = (month: string) =>
+  get<JournalMonth & {error: string | null}>(
+    `/api/journal?month=${encodeURIComponent(month)}`
+  )
+
+/** 有日记的月份（新的在前）*/
+export const fetchJournalMonths = () =>
+  get<{months: string[]; error: string | null}>('/api/journal/months')
+
+/** 新建 / 更新一条（带 `id` 就是更新）。回来的是这条 + 它所在的那个月的最新全份 */
+export const saveJournalEntry = (input: {
+  id?: number | null
+  day: string
+  title?: string
+  body?: string
+  coins?: JournalCoin[]
+}) => post<JournalMonth & {entry: JournalEntry; error: string | null}>('/api/journal/entries', input)
+
+export const deleteJournalEntry = (id: number) =>
+  del<{ok: boolean; error: string | null}>(`/api/journal/entries/${id}`)
+
+/** 存月度总结（自己写的那段） */
+export const saveJournalSummary = (month: string, summary: string) =>
+  put<{ok: boolean; month: string; error: string | null}>('/api/journal/summary', {
+    month,
+    summary
+  })
+
+/** 这个币在历次日记里被怎么说的（跨月反查） */
+export const fetchJournalCoin = (base: string) =>
+  get<{base: string; entries: JournalEntry[]; error: string | null}>(
+    `/api/journal/coin?base=${encodeURIComponent(base)}`
+  )
+
 /* ---------------- 持久化分析（2026-10-15） ---------------- */
 
 /**

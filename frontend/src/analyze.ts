@@ -173,6 +173,12 @@ export const LEFT_TABS = [
    */
   /* 用户 2026-10-12：「新建一个页面叫自动化预测 在预测历史后面」 */
   {value: 'auto' as const, label: '自动化预测'},
+  /*
+   * 交易日记（用户 2026-10-18：「日记模块可以加入某些币种，总结」）。
+   * 放在「自动化预测」后面 —— 用户选的就是「自动化预测旁边加一格」。
+   * 表结构 / 月统计口径 / 缺口提示见 `docs/JOURNAL.md`。
+   */
+  {value: 'journal' as const, label: '日记'},
   {value: 'kb' as const, label: '知识库'},
   {value: 'add' as const, label: '添加案例'}
 ]

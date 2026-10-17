@@ -158,6 +158,14 @@ import {
   saveKlineDrawings
 } from './db/kline-alerts'
 import {noteAlertChanged, startPriceAlerts} from './price-alerts'
+import {
+  coinHistory,
+  deleteJournalEntry,
+  getJournalMonth,
+  journalMonths,
+  saveJournalEntry,
+  saveJournalMonth
+} from './db/journals'
 import {pickCandidates} from './scan/rules'
 import {
   MARKET_TYPES,
@@ -585,6 +593,16 @@ function fileMd5(file: string): string {
 /** 北京时间 YYYY-MM-DD */
 function bjDate(ms: number): string {
   return new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
+}
+
+/** 「今天」是哪一天（北京时间，`YYYY-MM-DD`）—— 日记的默认日期 */
+function bjDayNow(): string {
+  return bjDate(Date.now())
+}
+
+/** 「这个月」是哪个月（北京时间，`YYYY-MM`）—— 日记默认停在当月 */
+function bjMonthNow(): string {
+  return bjDayNow().slice(0, 7)
 }
 
 /** 文件的大小 / 时间 / md5；清单里写了但文件不在（本地没打包）时返回 0 */
@@ -3792,6 +3810,83 @@ async function route(
       return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这条提醒'})
     }
     return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
+  /* ---- 交易日记（2026-10-18） ----
+   *
+   * 用户：「日记模块可以加入某些币种，总结」→「是我手动写日记…最后，都是按月给我汇总到一起」。
+   *
+   *   GET    /api/journal?month=2026-10   一个月的全部（条目 + 统计 + 月度总结）
+   *   POST   /api/journal/entries         新建 / 更新一条（带 id 就是更新）
+   *   DELETE /api/journal/entries/:id
+   *   PUT    /api/journal/summary         存月度总结
+   *   GET    /api/journal/coin?base=DOGE  这个币在历次日记里被怎么说的（跨月）
+   *   GET    /api/journal/months          有哪些月份写过（前端画 ◀ ▶ 用）
+   *
+   * ⚠️ 全是纯读库 + 写库：**不打交易所、不计权重、不调模型**（总结是自己写的）。
+   */
+  if (p === '/api/journal' && method === 'GET') {
+    const month = String(url.searchParams.get('month') ?? '').trim() || bjMonthNow()
+    try {
+      return sendJson(res, 200, {...(await getJournalMonth(me.id, month)), error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (p === '/api/journal/months' && method === 'GET') {
+    return sendJson(res, 200, {months: await journalMonths(me.id), error: null})
+  }
+
+  if (p === '/api/journal/coin' && method === 'GET') {
+    const base = String(url.searchParams.get('base') ?? '').trim()
+    if (!base) return sendJson(res, 400, {error: '缺 base'})
+    try {
+      return sendJson(res, 200, {base, entries: await coinHistory(me.id, base), error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (p === '/api/journal/entries' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const r = await saveJournalEntry(me.id, {
+        id: Number(body.id) || null,
+        day: str(body.day) || bjDayNow(),
+        title: str(body.title),
+        body: str(body.body),
+        coins: body.coins
+      })
+      return sendJson(res, 200, {
+        entry: r.entry,
+        /* 顺手把这个月最新的全份带回去 —— 前端不用再拉一次 */
+        ...(await getJournalMonth(me.id, r.month)),
+        error: null
+      })
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (p.startsWith('/api/journal/entries/') && method === 'DELETE') {
+    const id = Number(p.slice('/api/journal/entries/'.length))
+    if (!Number.isFinite(id) || id <= 0) return sendJson(res, 400, {error: 'id 不对'})
+    const ok = await deleteJournalEntry(me.id, id)
+    return sendJson(res, ok ? 200 : 404, {ok, error: ok ? null : '没这条日记'})
+  }
+
+  if (p === '/api/journal/summary' && method === 'PUT') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const month = str(body.month) || bjMonthNow()
+    try {
+      await saveJournalMonth(me.id, month, str(body.summary))
+      return sendJson(res, 200, {ok: true, month, error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
   }
 
   /* ---- 用量统计 ---- */
