@@ -5792,8 +5792,10 @@ body.fixed-viewport .split {
 .ord-quota-foot {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+  /* 两栏都按内容宽、从左边排起（用户 2026-10-18：「**所需和可用靠左**」）——
+     不再用 `space-between` 把右栏顶到卡片最右边 */
+  justify-content: flex-start;
+  gap: 22px;
   margin-top: 3px;
 }
 
@@ -5802,7 +5804,7 @@ body.fixed-viewport .split {
  * ⚠️ 行距 4px 跟右栏 `.ord-read` 一致 —— 改一处必须改另一处，否则四个小字错行。
  */
 .ord-quota-left {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
