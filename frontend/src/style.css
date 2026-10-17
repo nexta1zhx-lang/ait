@@ -3166,6 +3166,17 @@ body.fixed-viewport .split {
 }
 
 /*
+ * 一级 tab 的字比 `.seg` 默认那档（12px，给周期 / 榜单那种小控件用的）大一档：
+ * 用户 2026-10-18「是不是一级 tab 字太小了」—— 桌面 13px、手机 15px（见窄屏那一节），
+ * 二级 tab（内容区里那排）13px，这样主次才拉得开。
+ * ⚠️ 只动 `.tab-row` 里的，别去改全局 `.seg`（周期行、榜单、二级 tab 都会跟着变）。
+ */
+.tab-row .seg button {
+  font-size: 13px;
+  padding: 6px 11px;
+}
+
+/*
  * 「模型余额」徐标：**只在窄屏露**（用户 2026-10-04：「移动端 在开单分析顶部
  * tab 栏最右侧加上 模型余额 fixed 固定」）。
  * 宽屏顶栏本来就有账号区（`AccountBar`），不重复摆。
@@ -7280,17 +7291,18 @@ button.badge:disabled {
     /* 靠左：按自己的文字宽度排，不拉伸、不分摊整行 */
     flex: 0 0 auto;
     /* 下面那点内边距是给下划线留的位置 */
-    padding: 6px 2px 9px;
+    padding: 4px 2px 9px;
     border: 0;
     border-radius: 0;
-    font-size: 13px;
+    /* 手机上一级 tab 放到 15px（用户 2026-10-18：「一级 tab 字太小了」） */
+    font-size: 15px;
     font-weight: var(--fw-mid);
     text-align: left;
     background: transparent;
     color: var(--muted);
   }
   .tab-row .seg button + button {
-    margin-left: 18px;
+    margin-left: 16px;
   }
   /* 这一块原来是实心亮蓝（全屏最刺眼的一处）→ 淡底纹 → 现在什么都不铺 */
   .tab-row .seg button.active {
@@ -7303,7 +7315,7 @@ button.badge:disabled {
     position: absolute;
     left: 50%;
     bottom: 0;
-    width: 18px;
+    width: 20px;
     height: 2px;
     border-radius: 999px;
     background: var(--blue);
