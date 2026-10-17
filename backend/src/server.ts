@@ -80,7 +80,20 @@ import {
   usageSummary
 } from './db/usage'
 import {deleteAnalysis, listAnalyses, saveAnalysis} from './db/analyses'
-import {MAX_QUESTION_CHARS, askData} from './ask/run'
+import {MAX_QUESTION_CHARS, askData, type AskAnswer} from './ask/run'
+import {
+  askThreadHistory,
+  appendAskTurn,
+  createAskThread,
+  deleteAskThread,
+  getAskThread,
+  importAskThreads,
+  listAskThreads,
+  ownsAskThread,
+  renameAskThread,
+  type ImportedThread,
+  type NewAskTurn
+} from './db/ask-threads'
 import {
   ADMIN_USERNAME,
   accountForTotp,
@@ -6116,15 +6129,63 @@ async function route(
         error: `问题太长了（上限 ${MAX_QUESTION_CHARS} 字）`
       })
 
-    // 多轮追问：只认形状对得上的那几轮，其余丢掉（别让前端塞进来的东西进 prompt）
-    const history = askHistory(body.history)
-
+    /*
+     * 会话（2026-10-17）：给了 `threadId` 就用它 —— **多轮历史从库里取**（不信前端
+     * 塞进来的那份）；没给就现开一个（标题 = 这一句问题），跟流式那条同一个口径。
+     */
+    const asked = Number(body.threadId) || 0
+    let threadId = asked && (await ownsAskThread(me.id, asked)) ? asked : 0
     try {
+      if (!threadId) threadId = await createAskThread(me.id, question)
+      const history = await askThreadHistory(me.id, threadId)
       const out = await askData({userId: me.id, question, history})
-      return sendJson(res, 200, out)
+      await saveAskTurn(me.id, threadId, question, out)
+      return sendJson(res, 200, {...out, threadId})
     } catch (e) {
-      return sendJson(res, 200, {error: (e as Error).message})
+      return sendJson(res, 200, {error: (e as Error).message, threadId})
     }
+  }
+
+  /* ---- 数据问答的会话（2026-10-17）：多设备能续上 ---- */
+  if (p === '/api/ask/threads') {
+    if (method === 'GET') {
+      const threads = await listAskThreads(me.id)
+      return sendJson(res, 200, {threads})
+    }
+    if (method === 'POST') {
+      const body = await readJsonBody(req).catch(() => ({}) as Record<string, unknown>)
+      const id = await createAskThread(me.id, str(body.title) || '新的对话')
+      return sendJson(res, 200, {id})
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+  if (p === '/api/ask/threads/import') {
+    if (method !== 'POST')
+      return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    const out = await importAskThreads(me.id, importThreads(body.threads))
+    return sendJson(res, 200, out)
+  }
+  if (p.startsWith('/api/ask/threads/')) {
+    const m = p.match(/^\/api\/ask\/threads\/(\d+)$/)
+    if (!m) return sendJson(res, 404, {error: 'Not Found'})
+    const id = Number(m[1])
+    if (method === 'GET') {
+      const thread = await getAskThread(me.id, id)
+      return sendJson(res, thread ? 200 : 404, thread ?? {error: '会话不存在'})
+    }
+    if (method === 'PATCH') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      const ok = await renameAskThread(me.id, id, str(body.title))
+      return sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '会话不存在'})
+    }
+    if (method === 'DELETE') {
+      const ok = await deleteAskThread(me.id, id)
+      return sendJson(res, ok ? 200 : 404, ok ? {ok: true} : {error: '会话不存在'})
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
   }
 
   /*
@@ -6283,6 +6344,82 @@ const server = http.createServer((req, res) => {
 })
 
 /**
+ * 把一次问答的结果落进 `ask_turns`（2026-10-17）。
+ *
+ * ⚠️ 这是**旁路**：存不上不能把这一问搞挂（用户已经拿到回答了）——
+ *    跟 `recordUsage` 一个道理，失败只写日志。
+ * ⚠️ 终止（`aborted`）也存：半截回答 + `stopped=true`，重开时跟刚才看到的一致。
+ */
+async function saveAskTurn(
+  userId: number,
+  threadId: number,
+  question: string,
+  out: AskAnswer
+): Promise<void> {
+  const turn: NewAskTurn = {
+    question,
+    answer: out.answer,
+    steps: out.steps,
+    unverified: !out.verified,
+    model: out.model,
+    costUsd: out.costUsd,
+    latencyMs: out.latencyMs,
+    ok: Boolean(out.answer) && !out.aborted,
+    stopped: out.aborted,
+    error: ''
+  }
+  try {
+    await appendAskTurn(userId, threadId, turn)
+  } catch (e) {
+    console.error('[ask] 会话落库失败：', (e as Error).message)
+  }
+}
+
+/**
+ * 前端 localStorage 里那批旧会话 → `importAskThreads` 认的形状。
+ *
+ * 只认形状对得上的（别让浏览器里乱七八糟的东西直接进库），一轮都没有的会话丢掉。
+ * `createdAt` 用原来的时间：左侧的「今天 / 昨天 / 7 天内」分组才不会全挤到今天。
+ */
+function importThreads(raw: unknown): ImportedThread[] {
+  if (!Array.isArray(raw)) return []
+  const list: ImportedThread[] = []
+  for (const item of raw) {
+    const o = item as Record<string, unknown>
+    if (!o || typeof o !== 'object') continue
+    const turns: NewAskTurn[] = []
+    for (const t of Array.isArray(o.turns) ? o.turns : []) {
+      const x = t as Record<string, unknown>
+      if (!x || typeof x.question !== 'string') continue
+      turns.push({
+        question: x.question.slice(0, 500),
+        answer: typeof x.answer === 'string' ? x.answer : '',
+        steps: Array.isArray(x.steps) ? x.steps : [],
+        unverified: Boolean(x.unverified),
+        model: typeof x.model === 'string' ? x.model : '',
+        costUsd: Number(x.costUsd) || 0,
+        latencyMs: Number(x.latencyMs) || 0,
+        ok: Boolean(x.ok),
+        stopped: Boolean(x.stopped),
+        error: typeof x.error === 'string' ? x.error : '',
+        createdAt: Number(x.createdAt) || undefined
+      })
+    }
+    if (!turns.length) continue
+    list.push({
+      title:
+        typeof o.title === 'string' && o.title.trim()
+          ? o.title.slice(0, 60)
+          : turns[0]!.question.slice(0, 20),
+      createdAt: Number(o.createdAt) || undefined,
+      updatedAt: Number(o.updatedAt) || undefined,
+      turns
+    })
+  }
+  return list
+}
+
+/**
  * 「数据问答」收到的历史轮次 —— 只认形状对得上的那几轮，其余丢掉
  *（别让前端塞进来的东西进 prompt）。POST 与流式两条路共用。
  */
@@ -6338,6 +6475,8 @@ async function handleAskStream(
   /* 问题与历史：POST 从 body 取（正常路径），GET 从 query 取（命令行 / 老页面） */
   let question = ''
   let history: unknown = []
+  /** 会话 id（0 = 还没有，现开一个）—— 见下面「会话落库」那段 */
+  let threadId = 0
   if (req.method === 'POST') {
     const body = await readJsonBody(req).catch(() => null)
     if (!body) {
@@ -6347,6 +6486,7 @@ async function handleAskStream(
     }
     question = str(body.question).trim()
     history = body.history
+    threadId = Number(body.threadId) || 0
   } else {
     question = (url.searchParams.get('q') ?? '').trim()
     try {
@@ -6390,19 +6530,46 @@ async function handleAskStream(
     if (!closed) send('heartbeat', {})
   }, 20_000)
 
+  /*
+   * 会话（2026-10-17）：**先落一个壳**再开跑。
+   *
+   * 为什么在跑之前建：这一问可能要十几秒，建会话是毫秒级；先建好就能
+   *   ① 立刻把 id 推给前端（`thread` 事件）—— 中途终止 / 断线也认得是哪个会话；
+   *   ② 顺手把标题定成这一句问题（后端 `appendAskTurn` 只在标题还是占位时才动它）。
+   * ⚠️ 给了 `threadId` 但**不是这个人的**（改过 url / 删掉了）⇒ 当没给，现开一个，
+   *    别报到别人会话里去。
+   */
+  let threadTitle = ''
+  try {
+    if (!threadId || !(await ownsAskThread(user.id, threadId))) {
+      threadId = await createAskThread(user.id, question)
+    }
+    const head = await getAskThread(user.id, threadId)
+    threadTitle = head?.title ?? ''
+    if (!closed) send('thread', {id: threadId, title: threadTitle})
+  } catch (e) {
+    // 建会话失败也不拦着这一问（回答本身不依赖它）
+    console.error('[ask] 建会话失败：', (e as Error).message)
+    threadId = 0
+  }
+
   try {
     const out = await askData(
       {
         userId: user.id,
         question,
-        history: askHistory(history),
+        /* 会话里已经有几轮 ⇒ 历史**从库里取**（不信前端塞进来的那份） */
+        history: threadId
+          ? await askThreadHistory(user.id, threadId).catch(() => askHistory(history))
+          : askHistory(history),
         signal: ac.signal
       },
       e => {
         if (!closed) send(e.type, e)
       }
     )
-    if (!closed) send('done', out)
+    if (threadId) await saveAskTurn(user.id, threadId, question, out)
+    if (!closed) send('done', {...out, threadId})
   } catch (e) {
     /*
      * 用户终止时 `signal` 会把请求打断，于是这里会收到一个 abort 错误 ——

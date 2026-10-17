@@ -3784,6 +3784,13 @@ export interface AskReply {
     completionTokens: number
     totalTokens: number
   }
+  /**
+   * 这一问落在哪个会话里（2026-10-17 起服务端存档）。
+   *
+   * 新建的会话由**后端**在建好后立刻用 `thread` 事件推下来（见 `onThread`），
+   * `done` 里再带一次 —— 就算中途漏了那个事件，收尾也认得这个 id。
+   */
+  threadId?: number
 }
 
 /** 多轮追问带回去的那几轮（后端只认 role + content） */
@@ -3807,13 +3814,21 @@ export interface AskTurn {
  */
 export function askStream(
   question: string,
+  /** 历史：**只有第一次问答（还没有会话）才用得上** —— 有会话时后端从库里取 */
   history: AskTurn[],
+  /** 落到哪个会话；`0` / 不传 = 后端现开一个 */
+  threadId: number,
   handlers: {
     onRound?: (round: number, max: number) => void
     onStep?: (step: AskStep) => void
     onDelta?: (text: string) => void
     /** 这一轮的文字作废（只是旁白，不是回答）*/
     onDrop?: () => void
+    /**
+     * 会话（2026-10-17）：开跑**之前**就会来一发 —— 新建的会话这时才有 id，
+     * 前端拿它把本地那条「草稿会话」换成真的（中途终止也能认住是哪个会话）。
+     */
+    onThread?: (t: {id: number; title: string}) => void
     onDone: (reply: AskReply) => void
     onError: (message: string) => void
   }
@@ -3864,6 +3879,11 @@ export function askStream(
     else if (name === 'step' && d?.step) handlers.onStep?.(d.step as AskStep)
     else if (name === 'delta' && d?.text) handlers.onDelta?.(String(d.text))
     else if (name === 'drop') handlers.onDrop?.()
+    else if (name === 'thread')
+      handlers.onThread?.({
+        id: Number(d?.id) || 0,
+        title: String(d?.title ?? '')
+      })
     else if (name === 'done') {
       finish()
       if (d) handlers.onDone(d as unknown as AskReply)
@@ -3894,7 +3914,7 @@ export function askStream(
             ? {Authorization: `Bearer ${authToken.value}`}
             : {})
         },
-        body: JSON.stringify({question, history}),
+        body: JSON.stringify({question, history, threadId}),
         signal: ac.signal
       })
       if (!res.ok) {
@@ -3948,9 +3968,90 @@ export function askStream(
     }
   })()
 
-  /** 对外返回的「终止」：断掉这次 fetch（后端会跟着 `res.close` → abort） */
+    /** 对外返回的「终止」：断掉这次 fetch（后端会跟着 `res.close` → abort） */
   return finish
 }
+
+/* ---------------- 数据问答的会话（2026-10-17，服务端存档） ---------------- */
+
+/** 左侧列表里的一条会话（**不带**问答正文，点开才拉） */
+export interface AskThreadBrief {
+  id: number
+  title: string
+  /** 毫秒时间戳 */
+  createdAt: number
+  updatedAt: number
+  /** 这个会话有几轮 */
+  turns: number
+}
+
+/** 存下来的一轮问答 */
+export interface StoredAskTurn {
+  id: number
+  question: string
+  answer: string
+  /** 取值过程（工具名 / 参数 / 行数 / 耗时） */
+  steps: AskStep[]
+  unverified: boolean
+  model: string
+  costUsd: number
+  latencyMs: number
+  ok: boolean
+  stopped: boolean
+  /** 出错的原因（正常是空串） */
+  error: string
+  createdAt: number
+}
+
+export interface StoredAskThread extends AskThreadBrief {
+  turnsList: StoredAskTurn[]
+}
+
+/** 会话列表（按最近更新倒序） */
+export const listAskThreads = () =>
+  get<{threads: AskThreadBrief[]}>('/api/ask/threads')
+
+/** 开一个空会话（正常路径是「问第一句时后端自己开」，这个给「先点新对话再慢慢想」用） */
+export const createAskThread = (title: string) =>
+  post<{id: number}>('/api/ask/threads', {title})
+
+/** 打开一个会话：正文 + 最后 60 轮 */
+export const getAskThread = (id: number) =>
+  get<StoredAskThread>(`/api/ask/threads/${id}`)
+
+export const renameAskThread = (id: number, title: string) =>
+  patchReq<{ok: boolean}>(`/api/ask/threads/${id}`, {title})
+
+export const deleteAskThread = (id: number) =>
+  del<{ok: boolean}>(`/api/ask/threads/${id}`)
+
+/**
+ * 把浏览器里那批旧会话搬进库里（**一次性迁移**，见 `ask.ts` 的 `loadAsk`）。
+ *
+ * 不给 `id`：服务端按数组顺序新建，`createdAt` 用原来那个 —— 左侧的
+ * 「今天 / 昨天 / 7 天内」分组才不会全挤到「今天」。
+ */
+export const importAskThreads = (
+  threads: {
+    title: string
+    createdAt?: number
+    updatedAt?: number
+    turns: {
+      question: string
+      answer: string
+      unverified?: boolean
+      model?: string
+      costUsd?: number
+      latencyMs?: number
+      ok?: boolean
+      stopped?: boolean
+      error?: string
+      createdAt?: number
+    }[]
+  }[]
+) =>
+  post<{threads: number; turns: number}>('/api/ask/threads/import', {threads})
+
 /**
  * 问一句（**非流式**的老路，POST /api/ask）。
  *

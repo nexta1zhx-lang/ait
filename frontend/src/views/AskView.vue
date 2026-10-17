@@ -34,6 +34,7 @@ import {
   sideOpen,
   threadGroups,
   toggleSide,
+  turnsLoading,
   type AskExchange
 } from '../ask'
 
@@ -81,7 +82,14 @@ const open = ref<Set<string>>(new Set())
 const msgs = ref<HTMLElement | null>(null)
 const tail = ref<HTMLElement | null>(null)
 
-onMounted(loadAsk)
+/*
+ * 会话现在在**服务端**（2026-10-17），`loadAsk` 变成异步：拉列表 → 再拉当前那条的正文。
+ * ⚠️ `onMounted` 不吃 Promise：漏个 catch 会在控制台留一条 unhandled rejection
+ *    （而且那一屏还是空的，看着像"历史全没了"）。
+ */
+onMounted(() => {
+  void loadAsk().catch(() => undefined)
+})
 
 function keyOf(i: number): string {
   return `${activeThread.value?.id ?? ''}#${i}`
@@ -146,7 +154,12 @@ watch(
 //    收抽屉是**用户点了某一条**才做的事，写在点击处理里（`pickThread`）。
 watch(
   () => activeThread.value?.id,
-  () => {
+  (id, prev) => {
+    /*
+     * 0 → 非 0 = **同一屏**（草稿刚被后端落库）：这时候重置展开状态会把
+     * 用户正开着的「取值过程」收起来，也白跳一次滚动。
+     */
+    if (!prev && id) return
     open.value = new Set()
     void toBottom(false)
   }
@@ -157,7 +170,7 @@ function closeDrawerOnNarrow(): void {
   if (window.innerWidth <= 900) closeSideQuietly()
 }
 
-function pickThread(id: string): void {
+function pickThread(id: number): void {
   selectThread(id)
   closeDrawerOnNarrow()
 }
@@ -283,8 +296,17 @@ const title = computed(() => activeThread.value?.title || '数据问答')
 
         <div class="col">
           <div ref="msgs" class="msgs">
+          <!--
+            正文还没拉下来（点开一条历史会话时那一下）。
+            ⚠️ 必须先判这个再判空 —— 不然「正在读」会先闪成「这个会话是空的」，
+               用户会以为内容丢了。
+          -->
+          <section v-if="turnsLoading && !activeTurns.length" class="panel lead">
+            <p class="hint dim">正在打开这个对话…</p>
+          </section>
+
           <!-- 空会话：说明它能查什么 + 几句能直接点的 -->
-          <section v-if="!activeTurns.length" class="panel lead">
+          <section v-else-if="!activeTurns.length" class="panel lead">
             <p class="hint">
               问你自己库里的数据 —— <b>预测历史 / 知识库 / 日线行情 / 成交 / 盈亏 /
               资金流水 / 资产持仓 / 挂单 / C2C / AI 用量 / 持久化跟踪</b>。

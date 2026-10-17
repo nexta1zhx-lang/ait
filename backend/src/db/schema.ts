@@ -541,8 +541,7 @@ ALTER TABLE knowledge ALTER COLUMN label DROP NOT NULL;
 CREATE INDEX IF NOT EXISTS knowledge_tags_idx      ON knowledge USING GIN (tags);
 CREATE INDEX IF NOT EXISTS knowledge_move_type_idx ON knowledge (move_type);
 
--- ──────────────────────────────── 案例来源（2026-10-16，幂等）
--- manual = 我在 K 线上画一段收录的；position = 从「持仓 / 仓位历史」一键导入的。
+-- ──────────────────────────────── 案例来源（2026-10-16，幂等）-- manual = 我在 K 线上画一段收录的；position = 从「持仓 / 仓位历史」一键导入的。
 -- 老记录一律算 manual（那时候还没有别的来源）。
 ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
 -- 从仓位导入时那笔仓位的事实（方向 / 开平仓价 / 净盈亏 / 持仓时长 / 杠杆）。
@@ -550,6 +549,40 @@ ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'man
 ALTER TABLE knowledge ADD COLUMN IF NOT EXISTS pos JSONB NOT NULL DEFAULT '{}'::jsonb;
 -- 卡片上的「来源」筛选按 (user_id, source) 走
 CREATE INDEX IF NOT EXISTS knowledge_source_idx ON knowledge (user_id, source);
+
+-- ------------------------------------------------- 数据问答的会话（2026-10-17）
+-- 用户：「现在服务器数据问答的数据有保存在数据库吗」→ 要存（多设备能续上）。
+-- 以前问题 / 回答只在浏览器 localStorage 里，服务端只记了一条 llm_usage。
+-- 见 db/ask-threads.ts；数量封顶（每人 100 个会话 / 每个 60 轮）在那边做。
+CREATE TABLE IF NOT EXISTS ask_threads (
+  id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- 标题 = 第一句问题（截 20 字）；用户重命名过就不再用问题顶
+  title      TEXT        NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ask_threads_user_idx ON ask_threads (user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS ask_turns (
+  id         BIGSERIAL     PRIMARY KEY,
+  -- 归属靠父表：这一列不带 user_id，也就不会出现「轮次和会话归属不一致」
+  thread_id  BIGINT        NOT NULL REFERENCES ask_threads (id) ON DELETE CASCADE,
+  question   TEXT          NOT NULL,
+  answer     TEXT          NOT NULL DEFAULT '',
+  -- 取值过程（工具名 / 参数 / 行数 / 耗时），原始 AskStep[]
+  steps      JSONB         NOT NULL DEFAULT '[]'::jsonb,
+  -- 没查库就答（判据，重开也要能标出来）
+  unverified BOOLEAN       NOT NULL DEFAULT false,
+  model      TEXT          NOT NULL DEFAULT '',
+  cost_usd   NUMERIC(16,6) NOT NULL DEFAULT 0,
+  latency_ms INTEGER       NOT NULL DEFAULT 0,
+  ok         BOOLEAN       NOT NULL DEFAULT false,
+  stopped    BOOLEAN       NOT NULL DEFAULT false,
+  error      TEXT          NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ask_turns_thread_idx ON ask_turns (thread_id, id);
 
 -- ---------------------------------------------------------- 币种表（合约列表）
 -- 整份币种清单存一行（id=1）：只有「整体读 / 整体换」的需求，不按行查，

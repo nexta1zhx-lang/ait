@@ -1,5 +1,5 @@
 /**
- * 「数据问答」的**前端那份状态**（2026-10-16）。
+ * 「数据问答」的前端那份状态。
  *
  * 为什么放模块作用域：`MeView` 里除「交易所账户 / 账户统计」之外的格子都是
  * **切走就卸载**（见那里的说明），会话要是挂在组件里，切一下 tab 就全没了。
@@ -7,11 +7,33 @@
  * 结构：**多会话**（`AskThread[]`，每个会话一串问答）—— 就是主流聊天应用那套
  *（左侧历史 / 今天·昨天·7 天内分组 / 可折叠），用户 2026-10-16 要的。
  *
- * ⚠️ 落 localStorage 只存**问题和回答**，不存「取值过程」：那是一跑一变的快照，
- *    再打开时摆一堆过期的工具调用反而误导人（`unverified` 例外，它是个判据）。
+ * ★ 2026-10-17：**会话改成存服务器**（用户：「现在服务器数据问答的数据有保存在数据库吗」→
+ *   选「要存 —— 多设备能续上，服务端留一份」）。以前只往 `llm_usage` 记一条花费，
+ *   问题 / 回答全在浏览器 localStorage 里，换设备就没了。
+ *
+ *   口径：
+ *   · **服务端是唯一权威** —— 这里不再把会话写回 localStorage（只留「侧栏折叠」和
+ *     一次性迁移用的旧 key）。两边都存必然打架（哪边新？谁覆盖谁？）。
+ *   · **正文懒加载**：列表只拿 id / 标题 / 时间，点开某个会话才 `GET /api/ask/threads/:id`
+ *     （一个聊了很久的会话可能上百轮，进页面就全拉一遍没意义）。
+ *   · 新建的会话**先在本地当草稿**（`id = 0`）：问第一句时后端才建真的，
+ *     建好立刻用 `thread` 事件把 id 推回来（见 `onThread`）—— 这样点「新对话」
+ *     不会在库里留一堆空会话。
+ *   · 老浏览器里那批会话**一次性搬进库**（`migrateLegacy`），搬完删掉本地那两个 key。
  */
 import {computed, ref} from 'vue'
-import {askStream, type AskReply, type AskStep, type AskTurn} from './api'
+import {
+  askStream,
+  deleteAskThread,
+  getAskThread,
+  importAskThreads,
+  listAskThreads,
+  type AskReply,
+  type AskStep,
+  type AskThreadBrief,
+  type AskTurn,
+  type StoredAskTurn
+} from './api'
 
 /** 一轮问答 */
 export interface AskExchange {
@@ -38,17 +60,23 @@ export interface AskExchange {
 
 /** 一个会话（左侧列表里的一条） */
 export interface AskThread {
-  id: string
+  /** 服务端的 id；**`0` = 还没落库的草稿**（问第一句时后端才建） */
+  id: number
   /** 标题 = 第一句问题（截断），跟主流聊天应用一样 */
   title: string
   createdAt: number
   updatedAt: number
   turns: AskExchange[]
+  /** 正文拉下来了没（点开才拉；草稿 / 刚问完的那条是 `true`） */
+  loaded: boolean
 }
 
-const KEY = 'ca_ask_threads'
-/** 老格式（v1）：一整个扁平时间线，没有会话的概念 —— 迁移时包成一条 */
+/** 老的前端存档（2026-10-16 ~ 10-17：会话只在这个浏览器的 localStorage 里） */
+const KEY_LEGACY = 'ca_ask_threads'
+/** 更老的格式（v1）：一整个扁平时间线，没有会话的概念 —— 迁移时包成一条 */
 const KEY_OLD = 'ca_ask_log'
+/** 搬完了打个标：不然每次进页面都拿同一批本地数据往库里塞一份 */
+const KEY_IMPORTED = 'ca_ask_imported_v1'
 /*
  * ⚠️ 折叠状态这个 key 特意从 `ca_ask_side` 换成 `_v2`：v1 那份里存着**代码自己写的**
  *    `0`（第一版在窄屏挂载时会「自动收起」并**持久化**），于是刷新回来永远是收起的
@@ -56,13 +84,12 @@ const KEY_OLD = 'ca_ask_log'
  */
 const KEY_SIDE = 'ca_ask_side_v2'
 
-/** 最多留多少个会话 / 每个会话最多多少轮（localStorage 不该变成数据库） */
-const KEEP_THREADS = 50
-const KEEP_TURNS = 60
-
 export const askThreads = ref<AskThread[]>([])
-export const activeId = ref<string>('')
+/** 当前会话的 id（`0` = 草稿 / 没有会话） */
+export const activeId = ref<number>(0)
 export const askBusy = ref(false)
+/** 正在拉某个会话的正文（切过去时先转圈，别显示成「这个会话是空的」） */
+export const turnsLoading = ref(false)
 
 /**
  * 左侧历史栏展开着吗。
@@ -108,97 +135,149 @@ export const threadGroups = computed<{label: GroupLabel; items: AskThread[]}[]>(
     .filter(g => g.items.length > 0)
 })
 
-/* ---------------- 存取 ---------------- */
+/* ---------------- 形状 ---------------- */
 
-function shapeTurn(raw: unknown): AskExchange | null {
-  const o = raw as Partial<AskExchange> | null
-  if (!o || typeof o.question !== 'string') return null
+function emptyTurn(question: string): AskExchange {
   return {
-    question: o.question,
-    answer: String(o.answer ?? ''),
-    // 「取值过程」是当时的快照，不恢复（见文件头那段）；但「没查库」这个**判据**要留着 ——
-    // 丢了的话一条没查库的回答重开后会看着跟正常回答一样
+    question,
+    answer: '',
     steps: [],
-    unverified: Boolean(o.unverified),
-    error: String(o.error ?? ''),
-    model: String(o.model ?? ''),
-    costUsd: Number(o.costUsd) || 0,
-    latencyMs: Number(o.latencyMs) || 0,
-    ok: Boolean(o.ok),
-    stopped: Boolean(o.stopped),
+    unverified: false,
+    error: '',
+    model: '',
+    costUsd: 0,
+    latencyMs: 0,
+    ok: false,
+    stopped: false,
+    streaming: true,
+    round: 0,
+    roundMax: 0
+  }
+}
+
+/** 库里那一轮 → 前端这一轮（**取值过程也恢复**：现在它是存下来的，不是过期的现场快照） */
+function shapeStored(t: StoredAskTurn): AskExchange {
+  return {
+    question: String(t.question ?? ''),
+    answer: String(t.answer ?? ''),
+    steps: Array.isArray(t.steps) ? t.steps : [],
+    unverified: Boolean(t.unverified),
+    error: String(t.error ?? ''),
+    model: String(t.model ?? ''),
+    costUsd: Number(t.costUsd) || 0,
+    latencyMs: Number(t.latencyMs) || 0,
+    ok: Boolean(t.ok),
+    stopped: Boolean(t.stopped),
     streaming: false,
     round: 0,
     roundMax: 0
   }
 }
 
-function shapeThread(raw: unknown): AskThread | null {
-  const o = raw as Partial<AskThread> | null
-  if (!o || typeof o.id !== 'string') return null
-  const turns = (Array.isArray(o.turns) ? o.turns : [])
-    .map(shapeTurn)
-    .filter((t): t is AskExchange => t !== null)
-    .slice(-KEEP_TURNS)
-  const createdAt = Number(o.createdAt) || Date.now()
+function shapeBrief(t: AskThreadBrief): AskThread {
   return {
-    id: o.id,
-    title: String(o.title ?? '').slice(0, 40) || '未命名',
-    createdAt,
-    updatedAt: Number(o.updatedAt) || createdAt,
-    turns
+    id: Number(t.id),
+    title: String(t.title ?? '') || '未命名',
+    createdAt: Number(t.createdAt) || Date.now(),
+    updatedAt: Number(t.updatedAt) || Number(t.createdAt) || Date.now(),
+    turns: [],
+    loaded: false
   }
 }
 
-/** 起一个能排序、不撞的 id（时间戳 36 进制 + 4 位随机，够用） */
-function newId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-}
+/* ---------------- 存取 ---------------- */
 
-/** 启动时读一次（`AskView` 挂载时调） */
-export function loadAsk(): void {
-  if (askThreads.value.length) return
-  let list: AskThread[] = []
+/** 老的 localStorage 存档 → 投给后端一次（一次性） */
+async function migrateLegacy(): Promise<boolean> {
+  let payload: Parameters<typeof importAskThreads>[0] = []
   try {
-    const raw = localStorage.getItem(KEY)
+    if (localStorage.getItem(KEY_IMPORTED) === '1') return false
+    const raw = localStorage.getItem(KEY_LEGACY)
     if (raw) {
       const parsed = JSON.parse(raw)
       if (Array.isArray(parsed))
-        list = parsed.map(shapeThread).filter((t): t is AskThread => t !== null)
+        payload = parsed
+          .map((t: Record<string, unknown>) => ({
+            title: String(t?.title ?? '') || '未命名',
+            createdAt: Number(t?.createdAt) || undefined,
+            updatedAt: Number(t?.updatedAt) || undefined,
+            turns: (Array.isArray(t?.turns) ? t.turns : []).map(
+              (x: Record<string, unknown>) => ({
+                question: String(x?.question ?? ''),
+                answer: String(x?.answer ?? ''),
+                unverified: Boolean(x?.unverified),
+                model: String(x?.model ?? ''),
+                costUsd: Number(x?.costUsd) || 0,
+                latencyMs: Number(x?.latencyMs) || 0,
+                ok: Boolean(x?.ok),
+                stopped: Boolean(x?.stopped),
+                error: String(x?.error ?? ''),
+                // 老数据没有逐轮时间：用那条会话的更新时间当近似（只影响排序兜底）
+                createdAt: Number(t?.updatedAt) || undefined
+              })
+            )
+          }))
+          .filter(t => t.turns.length > 0)
     }
-    /*
-     * 老格式（v1，扁平时间线）迁移：包成一条会话，叫「之前的对话」。
-     * 迁完把老 key 删掉 —— 不删的话下次它还在，会被反复迁一遍。
-     */
-    if (!list.length) {
+    /* v1（扁平时间线）→ 包成一条「之前的对话」 */
+    if (!payload.length) {
       const old = localStorage.getItem(KEY_OLD)
       if (old) {
         const parsed = JSON.parse(old)
-        if (Array.isArray(parsed)) {
-          const turns = parsed
-            .map(shapeTurn)
-            .filter((t): t is AskExchange => t !== null)
-          if (turns.length) {
-            const now = Date.now()
-            list = [
-              {
-                id: newId(),
-                title: '之前的对话',
-                createdAt: now,
-                updatedAt: now,
-                turns
-              }
-            ]
-          }
+        if (Array.isArray(parsed) && parsed.length) {
+          payload = [
+            {
+              title: '之前的对话',
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              turns: parsed.map((x: Record<string, unknown>) => ({
+                question: String(x?.question ?? ''),
+                answer: String(x?.answer ?? ''),
+                unverified: Boolean(x?.unverified),
+                model: String(x?.model ?? ''),
+                costUsd: Number(x?.costUsd) || 0,
+                latencyMs: Number(x?.latencyMs) || 0,
+                ok: Boolean(x?.ok),
+                stopped: Boolean(x?.stopped),
+                error: String(x?.error ?? '')
+              }))
+            }
+          ]
         }
-        localStorage.removeItem(KEY_OLD)
       }
     }
   } catch {
     /* 隐私模式 / 内容坏了：当没存过 */
+    return false
   }
 
-  askThreads.value = list.slice(-KEEP_THREADS)
-  activeId.value = askThreads.value.at(-1)?.id ?? ''
+  if (!payload.length) {
+    // 没东西可搬：直接打标，别每次进页面都翻一遍 localStorage
+    try {
+      localStorage.setItem(KEY_IMPORTED, '1')
+    } catch {
+      /* 忽略 */
+    }
+    return false
+  }
+
+  try {
+    await importAskThreads(payload)
+    try {
+      localStorage.removeItem(KEY_LEGACY)
+      localStorage.removeItem(KEY_OLD)
+      localStorage.setItem(KEY_IMPORTED, '1')
+    } catch {
+      /* 忽略（下次会再搬一次 —— 服务端多一份重复历史，比丢历史好） */
+    }
+    return true
+  } catch {
+    /* 网络不好 / 未登录：下次进来再搬 */
+    return false
+  }
+}
+
+function readSide(): void {
   try {
     const s = localStorage.getItem(KEY_SIDE)
     if (s === '1') sideOpen.value = true
@@ -208,42 +287,107 @@ export function loadAsk(): void {
   }
 }
 
-function save(): void {
+/** 启动时拉一次（`AskView` 挂载时调） */
+export async function loadAsk(): Promise<void> {
+  readSide()
+
+  let list: AskThreadBrief[] = []
   try {
-    localStorage.setItem(KEY, JSON.stringify(askThreads.value.slice(-KEEP_THREADS)))
+    list = (await listAskThreads()).threads
   } catch {
-    /* 写不进去也不影响这一屏 */
+    /* 网络 / 未登录：这一屏先空着，问一句时后端自己会建会话 */
+    return
+  }
+
+  // 库里空的 → 看看这个浏览器里还有没有老存档，有就搬进去（只搬一次）
+  if (!list.length && (await migrateLegacy())) {
+    try {
+      list = (await listAskThreads()).threads
+    } catch {
+      list = []
+    }
+  }
+
+  askThreads.value = list.map(shapeBrief)
+  // 保留当前选中（刷新时不该跳走）；没有就选最近那条
+  const keep = askThreads.value.find(t => t.id === activeId.value)
+  activeId.value = keep?.id ?? askThreads.value[0]?.id ?? 0
+  if (activeId.value) await loadThread(activeId.value)
+}
+
+/** 拉一个会话的正文（已经拉过的跳过；`force` 时重拉） */
+export async function loadThread(id: number, force = false): Promise<void> {
+  const t = askThreads.value.find(x => x.id === id)
+  if (!t || t.id === 0) return
+  if (t.loaded && !force) return
+
+  turnsLoading.value = true
+  try {
+    const d = await getAskThread(id)
+    t.turns = (d.turnsList ?? []).map(shapeStored)
+    t.title = d.title || t.title
+    t.createdAt = Number(d.createdAt) || t.createdAt
+    t.updatedAt = Number(d.updatedAt) || t.updatedAt
+    t.loaded = true
+  } catch (e) {
+    /*
+     * 404 = 这条会话已经不在了（另一台设备删了 / 库里清过）⇒ 本地也删掉，
+     * 别让它挂在左侧、点开永远是空的。
+     */
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/不存在|404/.test(msg)) {
+      askThreads.value = askThreads.value.filter(x => x.id !== id)
+      if (activeId.value === id) activeId.value = askThreads.value[0]?.id ?? 0
+    }
+  } finally {
+    turnsLoading.value = false
   }
 }
 
 /* ---------------- 会话操作 ---------------- */
 
-/** 开一个新会话并切过去 */
+/** 开一个新会话并切过去（**本地草稿**，问第一句时后端才建真的） */
 export function newThread(): AskThread {
   const now = Date.now()
+  /*
+   * 已经有一条空草稿就复用 —— 连点两下「新对话」不该攒出两条空会话
+   * （服务端不会存它们，但左侧列表会多两条一样的「新的对话」）。
+   */
+  const draft = askThreads.value.find(t => t.id === 0 && !t.turns.length)
+  if (draft) {
+    activeId.value = 0
+    return draft
+  }
   const t: AskThread = {
-    id: newId(),
+    id: 0,
     title: '新的对话',
     createdAt: now,
     updatedAt: now,
-    turns: []
+    turns: [],
+    loaded: true
   }
-  askThreads.value = [...askThreads.value, t].slice(-KEEP_THREADS)
-  activeId.value = t.id
-  save()
+  askThreads.value = [t, ...askThreads.value]
+  activeId.value = 0
   return t
 }
 
-export function selectThread(id: string): void {
+export function selectThread(id: number): void {
   activeId.value = id
-  save()
+  if (id) void loadThread(id)
 }
 
-export function deleteThread(id: string): void {
+export async function deleteThread(id: number): Promise<void> {
   if (id === activeId.value) stopAsk()
+  // 草稿还没落库：本地删掉就完事
+  if (id) {
+    try {
+      await deleteAskThread(id)
+    } catch {
+      /* 删不掉也先收起来：下次进来它还在，比卡着好 */
+    }
+  }
   askThreads.value = askThreads.value.filter(t => t.id !== id)
-  if (activeId.value === id) activeId.value = askThreads.value.at(-1)?.id ?? ''
-  save()
+  if (activeId.value === id) activeId.value = askThreads.value[0]?.id ?? 0
 }
 
 /** 侧栏展开 / 收起（**用户按的**才记） */
@@ -284,7 +428,7 @@ let userStopped = false
  *
  * ⚠️⚠️ 这个是 2026-10-16 补的，补之前「终止」按了像没反应 —— 原因是：
  *    终止 = 关掉 SSE 连接，而**关了之后 `onDone` / `onError` 一个都不会再来**，
- *    于是收尾那几行（`streaming=false` / `askBusy=false` / 存盘）永远不执行：
+ *    于是收尾那几行（`streaming=false` / `askBusy=false`）永远不执行：
  *    界面一直停在「正在查库」、输入框一直禁用，再按一次终止也没用（`stopStream` 已置空）。
  *    所以终止必须**自己**把这一轮收掉，不能指望那条流再回话。
  */
@@ -298,6 +442,7 @@ let currentFinish: (() => void) | null = null
  *    连接一断就 `AbortController.abort()`，正在等的大模型请求和剩下的工具调用都停。
  *    所以这里不用再单独发一个"取消"请求。
  * ⚠️ 但**前端自己也要收尾**（见 `currentFinish` 那段）：关连接不会带回任何回调。
+ * ⚠️ 后端会把这一轮**照样存下来**（半截回答 + `stopped`）：重开时看到的跟刚才一致。
  */
 export function stopAsk(): void {
   if (!stopStream && !currentFinish) return
@@ -312,18 +457,18 @@ export function stopAsk(): void {
  *
  * 历史只带**答得出来**的那几轮：把错误气泡当成上下文喂回去，
  * 只会让模型跟着一起绕。
+ * ⚠️ 有了会话 id 之后后端**从库里取历史**（不信前端这份）；这里带的那份只在
+ *    「还没有会话」时用得上（而那时多半是空的）。
  */
 export async function ask(question: string): Promise<void> {
   const q = question.trim()
   if (!q || askBusy.value) return
 
-  // 还没有会话（或当前会话被删了）→ 现开一个
+  // 还没有会话（或当前会话被删了）→ 现开一个草稿
   const thread = activeThread.value ?? newThread()
-  const id = thread.id
-  const target = askThreads.value.find(t => t.id === id)!
-  const isFirst = target.turns.length === 0
+  const isFirst = thread.turns.length === 0
 
-  const history: AskTurn[] = target.turns
+  const history: AskTurn[] = thread.turns
     .filter(t => t.ok && t.answer)
     .slice(-6)
     .flatMap(t => [
@@ -331,30 +476,13 @@ export async function ask(question: string): Promise<void> {
       {role: 'assistant' as const, content: t.answer}
     ])
 
-  target.turns = [
-    ...target.turns,
-    {
-      question: q,
-      answer: '',
-      steps: [],
-      unverified: false,
-      error: '',
-      model: '',
-      costUsd: 0,
-      latencyMs: 0,
-      ok: false,
-      stopped: false,
-      streaming: true,
-      round: 0,
-      roundMax: 0
-    }
-  ].slice(-KEEP_TURNS)
+  thread.turns = [...thread.turns, emptyTurn(q)]
   // 第一句问题就是标题（跟主流聊天应用一样）
-  if (isFirst) target.title = q.slice(0, 20)
-  target.updatedAt = Date.now()
+  if (isFirst) thread.title = q.slice(0, 20)
+  thread.updatedAt = Date.now()
 
   // 拿数组里那一份（不是刚 push 的裸对象）来改，Vue 才盯得到
-  const entry = askThreads.value.find(t => t.id === id)!.turns.at(-1)!
+  const entry = thread.turns.at(-1)!
   askBusy.value = true
   userStopped = false
 
@@ -381,11 +509,25 @@ export async function ask(question: string): Promise<void> {
       stopStream = null
       userStopped = false
       askBusy.value = false
-      save()
+      thread.loaded = true
       resolve()
     }
     currentFinish = finish
-    stopStream = askStream(q, history, {
+    stopStream = askStream(q, history, thread.id, {
+      /*
+       * 后端把会话建好了（草稿拿到了真 id）。
+       *
+       * ⚠️ 这是「同一屏」的替换：`activeId` 从 0 变成真 id 时，`AskView` 那个
+       *    「换会话就重置展开状态」的 watcher 会看到 id 变了 —— 那边专门跳过
+       *    0 → 非 0 这一跳（不然跑着跑着「取值过程」会被收起来）。
+       */
+      onThread: t => {
+        if (!t.id) return
+        const wasDraft = thread.id === 0
+        thread.id = t.id
+        if (t.title) thread.title = t.title
+        if (wasDraft && activeId.value === 0) activeId.value = t.id
+      },
       onRound: (round, max) => {
         entry.round = round
         entry.roundMax = max
@@ -417,8 +559,12 @@ export async function ask(question: string): Promise<void> {
         // 后端也可能自己判定被终止（它听的是连接断开，比前端更准）
         if (res.aborted) entry.stopped = true
         entry.ok = Boolean(entry.answer) && !entry.stopped
-        const th = askThreads.value.find(t => t.id === id)
-        if (th) th.updatedAt = Date.now()
+        // 兜底：`thread` 事件万一没收到，`done` 里还带了一份 id
+        if (res.threadId && thread.id === 0) {
+          thread.id = res.threadId
+          if (activeId.value === 0) activeId.value = res.threadId
+        }
+        thread.updatedAt = Date.now()
         finish()
       },
       onError: message => {
