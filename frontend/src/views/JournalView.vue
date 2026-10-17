@@ -200,6 +200,12 @@ function pickCategory(id: number | null): void {
   void load()
 }
 
+/** 颜色只露一颗：点一下换下一个（用户 2026-10-18：「只显示一个点击切换」） */
+function cycleColor(): void {
+  const i = CATEGORY_COLORS.indexOf(newCatColor.value)
+  newCatColor.value = CATEGORY_COLORS[(i + 1) % CATEGORY_COLORS.length]!
+}
+
 function toggleCat(): void {
   catOpen.value = !catOpen.value
   if (catOpen.value) calOpen.value = false
@@ -485,28 +491,42 @@ async function remove(e: JournalEntry): Promise<void> {
           <i v-if="currentCat" class="j-catdot" :style="{background: currentCat.color || 'var(--muted)'}" />
         </button>
 
-        <div v-if="catOpen" class="j-cat-mask" @click="catOpen = false" />
-        <div v-if="catOpen" class="j-cat-panel">
-          <button
-            type="button"
-            class="j-cat-item"
-            :class="{sel: category === null}"
-            @click="pickCategory(null)"
-          >
-            <i class="j-catdot" style="background: var(--muted); opacity: 0.5" />
-            <span>全部</span>
-          </button>
-          <button
-            v-for="c in categories"
-            :key="c.id"
-            type="button"
-            class="j-cat-item"
-            :class="{sel: category === c.id}"
-            @click="pickCategory(c.id)"
-          >
-            <i class="j-catdot" :style="{background: c.color || 'var(--muted)'}" />
-            <span>{{ c.name }}</span>
-          </button>
+      </div>
+
+      <!--
+        分类弹层：从底部起来（用户 2026-10-18：「分类弹出框在最下方」）。
+        颜色只露一颗，点它轮着换（同一天：「颜色选择只显示一个点击切换」）。
+      -->
+      <Teleport to="body">
+        <div v-if="catOpen" class="sheet-mask" @click="catOpen = false" />
+        <section v-if="catOpen" class="sheet j-cat-sheet" role="dialog" aria-label="分类">
+          <header class="sheet-head">
+            <b>分类</b>
+            <button class="ghost tiny" title="关掉" @click="catOpen = false">✕</button>
+          </header>
+
+          <div class="j-cat-list">
+            <button
+              type="button"
+              class="j-cat-item"
+              :class="{sel: category === null}"
+              @click="pickCategory(null)"
+            >
+              <i class="j-catdot" style="background: var(--muted); opacity: 0.5" />
+              <span>全部</span>
+            </button>
+            <button
+              v-for="c in categories"
+              :key="c.id"
+              type="button"
+              class="j-cat-item"
+              :class="{sel: category === c.id}"
+              @click="pickCategory(c.id)"
+            >
+              <i class="j-catdot" :style="{background: c.color || 'var(--muted)'}" />
+              <span>{{ c.name }}</span>
+            </button>
+          </div>
 
           <div class="j-cat-new">
             <input
@@ -516,18 +536,13 @@ async function remove(e: JournalEntry): Promise<void> {
               placeholder="新分类…"
               @keydown.enter.prevent="addCategory"
             />
-            <div class="j-cat-colors">
-              <button
-                v-for="c in CATEGORY_COLORS"
-                :key="c"
-                type="button"
-                class="j-cat-swatch"
-                :class="{on: newCatColor === c}"
-                :style="{background: c}"
-                :title="`用这个颜色`"
-                @click="newCatColor = c"
-              />
-            </div>
+            <button
+              type="button"
+              class="j-cat-swatch"
+              :style="{background: newCatColor}"
+              title="换个颜色"
+              @click="cycleColor"
+            />
             <button type="button" class="ghost tiny j-cat-add" title="新增分类" @click="addCategory">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                    stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
@@ -535,10 +550,9 @@ async function remove(e: JournalEntry): Promise<void> {
               </svg>
             </button>
           </div>
-        </div>
-      </div>
+        </section>
+      </Teleport>
 
-      <!-- 日历：只看某个月 -->
       <div class="j-cal-wrap">
         <button
           type="button"
@@ -860,12 +874,13 @@ async function remove(e: JournalEntry): Promise<void> {
   position: relative;
   display: flex;
   flex-direction: column;
-  padding-left: 14px;
+  /* 左边让出圆点 + 一点呼吸（用户：「左侧球和左右加点距离」） */
+  padding-left: 18px;
 }
 .j-list::before {
   content: '';
   position: absolute;
-  left: 5px;
+  left: 6px;
   top: 20px;
   bottom: 22px;
   width: 1px;
@@ -929,8 +944,10 @@ async function remove(e: JournalEntry): Promise<void> {
  */
 .j-dot {
   position: absolute;
-  left: -14px;
-  top: 9px;
+  /* 离标题再远一点（用户 2026-10-18：「左侧球和左右加点距离」） */
+  left: -18px;
+  /* 跟标题那一行垂直居中（标题 13px / 行高约 19.5 ⇒ 头内 8 + 9.75 − 5.5 ≈ 12） */
+  top: 12px;
   width: 11px;
   height: 11px;
   padding: 0;
@@ -957,8 +974,8 @@ async function remove(e: JournalEntry): Promise<void> {
   color: var(--blue);
   width: 15px;
   height: 15px;
-  left: -16px;
-  top: 7px;
+  left: -20px;
+  top: 10px;
 }
 @media (hover: hover) {
   .j-dot:hover {
@@ -1051,15 +1068,17 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-group:first-child {
   margin-top: 2px;
 }
+/* 收缩箭头：做大一点（用户 2026-10-18：「收缩图标大一点」） */
 .j-group-caret {
-  width: 9px;
-  font-size: 9px;
+  width: 14px;
+  font-size: 13px;
   line-height: 1;
-  opacity: 0.7;
+  opacity: 0.85;
 }
-/* 条数：收起时也能看出里面有多少 */
+/* 条数：贴到最右边（用户：「多少条放在最右侧」），收起时也能看出里面有多少 */
 .j-group-n {
-  font-size: 10px;
+  margin-left: auto;
+  font-size: 10.5px;
   font-weight: 400;
   opacity: 0.6;
   font-variant-numeric: tabular-nums;
@@ -1160,25 +1179,11 @@ async function remove(e: JournalEntry): Promise<void> {
   color: var(--blue);
   border-color: color-mix(in srgb, var(--blue) 45%, transparent);
 }
-.j-cat-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-}
-.j-cat-panel {
-  position: absolute;
-  z-index: 21;
-  top: calc(100% + 6px);
-  /* 按钮已经挪到日历左边，弹层往左展开 */
-  right: 0;
-  width: 200px;
-  padding: 6px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
-  max-height: 62vh;
-  overflow-y: auto;
+/* 底部弹层里那一列分类 */
+.j-cat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .j-cat-item {
   display: flex;
@@ -1209,36 +1214,30 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-cat-new {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 6px;
-  padding-top: 6px;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid var(--border);
 }
 .j-cat-new input {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 5px 7px;
+  padding: 7px 9px;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text);
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 8px;
 }
-.j-cat-colors {
-  display: flex;
-  gap: 3px;
-}
+/* 只露这一颗：点它轮着换颜色 */
 .j-cat-swatch {
-  width: 13px;
-  height: 13px;
+  flex: none;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border: 1px solid transparent;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
   border-radius: 50%;
-}
-.j-cat-swatch.on {
-  border-color: var(--text);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text) 16%, transparent);
 }
 .j-cat-add {
   display: inline-flex;
