@@ -97,7 +97,16 @@ function recentTable(rows: UsageRow[]): string[] {
     ).padStart(2, '0')}`
     const cost = formatUsd(r.costUsd)
     out.push(
-      `  ${when}  ${pad(r.kind === 'extract' ? '案例提炼' : '开单分析', 10)}${fit(
+      `  ${when}  ${pad(
+        r.kind === 'extract'
+          ? '案例提炼（旧）'
+          : r.kind === 'ask'
+            ? 'AI 助手'
+            : r.kind === 'polish'
+              ? '日记提炼'
+              : '开单分析',
+        10
+      )}${fit(
         (r.symbol ?? '—') + (r.timeframe ? ' ' + r.timeframe : ''),
         18
       )}${rpad(formatTokens(r.promptTokens), 8)}+${rpad(

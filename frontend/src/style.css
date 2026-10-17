@@ -2885,6 +2885,23 @@ body.fixed-viewport .split {
 }
 
 /*
+ * AI 助手那一格（用户 2026-10-18：「数据问答改叫 ai 助手到开单分析中」——
+ * 从「我的」搬来，见 `AnalyzeView` 的 `leftTab === 'ask'`）。
+ *
+ * 它不像别的格那样「外层滚」：`AskView` 自己是「左侧历史 + 右侧对话 + 底部输入框」，
+ * 滚动得留给消息区（外层一滚，输入框就被顶出屏幕）。所以这里只是一个**不滚的
+ * flex 容器**，把 `.ask` 拉伸到满高 —— 别写 `height: 100%`：父级高度是 flex 分出来的，
+ * 百分比撑不起来（`MeView` 那边踩过，整格只有内容那么高）。
+ */
+.ask-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/*
  * [分析块] 「分析过程 + 分析结论」那一坨（`AnalyzeView` 的预测结果 / 测试格）。
  *
  * ★ 2026-10-13 用户把这两颗的脾气分开定死：

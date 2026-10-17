@@ -231,7 +231,7 @@ CREATE INDEX IF NOT EXISTS ai_doc_versions_idx
 -- 价目快照存在 price 里，这样以后官方调价也不会篡改历史记录。
 CREATE TABLE IF NOT EXISTS llm_usage (
   id                BIGSERIAL    PRIMARY KEY,
-  -- judge = 开单分析；ask = 数据问答；polish = 日记润色
+  -- judge = 开单分析；ask = AI 助手（2026-10-18 前叫数据问答）；polish = 日记提炼
   kind              TEXT         NOT NULL,
   model             TEXT         NOT NULL,
   symbol            TEXT,

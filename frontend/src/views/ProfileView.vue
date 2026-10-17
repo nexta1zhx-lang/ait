@@ -46,6 +46,9 @@ import {askConfirm} from '../confirm'
 import {shellInfo, type ShellInfo} from '../native'
 import SegTabs from '../comps/SegTabs.vue'
 import ExchangeKeys from '../comps/ExchangeKeys.vue'
+import LlmConfigView from './LlmConfigView.vue'
+import UsageView from './UsageView.vue'
+import PromptsView from './PromptsView.vue'
 
 /*
  * 用户 2026-10-04（本轮）：「个人信息下添加交易所内容（可新增交易所和 key，
@@ -76,26 +79,37 @@ import ExchangeKeys from '../comps/ExchangeKeys.vue'
  *     后面，列表给了高度上限（`max-height: 46vh`）自己滚；
  *   · 整页挂 `.warm-skin` + 胶囊分段 tab，跟「交易所账户 / 账户统计」统一风格。
  */
-type ProfTab = 'account' | 'exchange'
+/**
+ * 这一页的五段。
+ *
+ * ★ 2026-10-18 用户：「模型配置去掉，下面模块挪到个人信息中」——
+ *   原来独立一级 tab「模型配置」（`ModelPaneView`）里的**密钥配置 / 用量统计 /
+ *   AI 提示词**三段并进这一页，排在「账户信息 / 交易所」后面。
+ *   二级 tab 仍由 `MeView` 记进地址栏 `?t=`（跟「管理」那一格同一套）。
+ */
+export type ProfTab = 'account' | 'exchange' | 'keys' | 'usage' | 'prompts'
 
 /**
- * 顶上那条分段 tab。
- * ★ 2026-10-11（用户：「登录设备 tab 去掉，内容放到账户信息下面」）——
- *   原来第四格是「登录设备」，现在那一段并进「账户信息」里的最后一张卡，
- *   tab 只剩三格。⚠️ 这一段不在地址栏里（`tab` 就是组件内的 ref），所以没有老链接要兜。
- */
-/*
- * ★ 2026-10-12：「模型配置」那一格搬走了 —— 用户「ai 提示词 tab 改为模型配置，
- *   个人信息中的模型配置内容提出到这个页面和 ai 提示词合并改为 3 个子 tab」。
- *   现在它在「我的 → 模型配置」（`ModelPaneView`：密钥配置 / 用量统计 / AI 提示词），
- *   这一页只剩账户信息 / 交易所两格。
+ * 顶上那条分段 tab（五格）。
+ *
+ * ★ 2026-10-11：用户「登录设备 tab 去掉，内容放到账户信息下面」⇒ 那一段并进
+ *   「账户信息」里的最后一张卡。
+ * ★ 2026-10-18：用户「模型配置去掉，下面模块挪到个人信息中」⇒ 原来独立一级格
+ *   「模型配置」整格删掉，它的三段（密钥配置 / 用量统计 / AI 提示词）搬进来，
+ *   排在账户信息 / 交易所后面。二级 tab 由 `MeView` 记进地址栏 `?t=`。
  */
 const TABS: {value: ProfTab; label: string}[] = [
   {value: 'account', label: '账户信息'},
-  {value: 'exchange', label: '交易所'}
+  {value: 'exchange', label: '交易所'},
+  {value: 'keys', label: '密钥配置'},
+  {value: 'usage', label: '用量统计'},
+  {value: 'prompts', label: 'AI 提示词'}
 ]
 
-const tab = ref<ProfTab>('account')
+const props = defineProps<{tab?: ProfTab}>()
+const emit = defineEmits<{'update:tab': [ProfTab]}>()
+
+const tab = computed<ProfTab>(() => props.tab ?? 'account')
 
 const name = ref('')
 const nameBusy = ref(false)
@@ -444,7 +458,12 @@ async function changePw(): Promise<void> {
 
 <template>
   <div class="profile warm-skin">
-    <SegTabs class="prof-tabs" v-model="tab" :options="TABS" />
+    <SegTabs
+      class="prof-tabs"
+      :model-value="tab"
+      :options="TABS"
+      @update:model-value="v => emit('update:tab', v as ProfTab)"
+    />
 
     <section v-if="tab === 'account'" class="panel who">
       <span class="avatar">{{ (user?.username ?? '?').slice(0, 1) }}</span>
@@ -492,6 +511,13 @@ async function changePw(): Promise<void> {
 
     <!-- 交易所：绑多套 Key（用户 2026-10-04 新增，独立成一个 tab） -->
     <ExchangeKeys v-if="tab === 'exchange'" />
+    <!--
+      模型配置那三段（用户 2026-10-18：「模型配置去掉，下面模块挪到个人信息中」）——
+      跟原来 `ModelPaneView` 里一模一样的三块，切走即卸载（都没有轮询 / 订阅）。
+    -->
+    <LlmConfigView v-else-if="tab === 'keys'" />
+    <UsageView v-else-if="tab === 'usage'" />
+    <PromptsView v-else-if="tab === 'prompts'" />
 
 
     <!-- 登录设备：★ 2026-10-11 整段挪到「账户信息」那格的末尾（原来是独立的第四个 tab） -->

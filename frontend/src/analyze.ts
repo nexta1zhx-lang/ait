@@ -141,7 +141,13 @@ export const LEFT_TABS = [
    * 并加了分类 / 置顶）。`value` 仍是 `'journal'`（老链接 `?t=journal` 不变）。
    * 表结构 / 筛选口径见 `docs/JOURNAL.md`。
    */
-  {value: 'journal' as const, label: '经验'}
+  {value: 'journal' as const, label: '经验'},
+  /*
+   * AI 助手（用户 2026-10-18：「数据问答改叫 ai 助手到开单分析中」）——
+   * 原来在「我的」那一格，现在搬到这一页当一级 tab（看盘时随手问一句更顺）。
+   * 页面仍是 `views/AskView.vue`，会话在 `../ask.ts` 的模块作用域里。
+   */
+  {value: 'ask' as const, label: 'AI 助手'}
   /*
    * ⚠️ 2026-10-18 用户：「知识库模块整个去掉……仓位到知识库、划线进入知识库全部去掉」——
    *    原来的「知识库」「添加案例」两格连同后端一起删了，这里不再摆。

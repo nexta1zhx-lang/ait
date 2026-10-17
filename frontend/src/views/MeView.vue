@@ -23,10 +23,8 @@ import {useScrollMemory} from '../scroll'
 import {asyncPane} from '../async-pane'
 import PaneShell from '../comps/PaneShell.vue'
 import ExchangeAccountLivePanel from '../comps/ExchangeAccountLivePanel.vue'
-import ProfileView from './ProfileView.vue'
-import AskView from './AskView.vue'
+import ProfileView, {type ProfTab} from './ProfileView.vue'
 import AdminView from './AdminView.vue'
-import ModelPaneView, {type ModelTab} from './ModelPaneView.vue'
 import {user} from '../session'
 
 /*
@@ -42,7 +40,14 @@ const AccountStatsView = asyncPane(() => import('./AccountStatsView.vue'), {
   label: '账户统计'
 })
 
-type Pane = 'exchange' | 'stats' | 'ask' | 'profile' | 'model' | 'admin'
+/**
+ * 一级 tab 的取值。
+ *
+ * ★ 2026-10-18 用户四点：①「数据问答改叫 ai 助手到开单分析中」→ `ask` 搬去
+ *   `AnalyzeView`（这里只留老链接兜底）②「模型配置去掉，下面模块挪到个人信息中」
+ *   → `model` 那一格没了，三段并进 `ProfileView` 的二级 tab。
+ */
+type Pane = 'exchange' | 'stats' | 'profile' | 'admin'
 
 /** 「管理」里那四段：用户管理 / 服务器 / 代理订阅 / 远程桌面 */
 export type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk'
@@ -58,20 +63,16 @@ const PANES: {value: Pane; label: string}[] = [
   {value: 'exchange', label: '交易所账户'},
   {value: 'stats', label: '账户统计'},
   /*
-   * ★ 2026-10-16：用户「新功能 —— 问 AI，它读我的问题、去库里取数、再回答我」。
-   *   入口放「我的」，单一个 tab。工具和 SQL 写死在 `backend/src/ask/tools.ts`，
-   *   页面见 `views/AskView.vue`。
+   * ★ 2026-10-18：用户「数据问答改叫 ai 助手到开单分析中」——
+   *   这一格从「我的」**搬去开单分析**（`LEFT_TABS` 里那格「AI 助手」），这里不再摆。
+   *
+   * ★ 同日：「模型配置去掉，下面模块挪到个人信息中」——
+   *   原来独立的一级格「模型配置」整格删掉，它的三段（密钥配置 / 用量统计 /
+   *   AI 提示词）挪进「个人信息」当二级 tab。
    */
-  {value: 'ask', label: '数据问答'},
   {value: 'profile', label: '个人信息'},
-  /*
-   * ★ 2026-10-12：用户「ai 提示词 tab 改为模型配置，个人信息中的模型配置内容提出到这个页面
-   *   和 ai 提示词合并改为 3 个子 tab（密钥配置 / 用量统计 / AI 提示词）」——
-   *   所以这一格的标签改成「模型配置」，内容交给 `ModelPaneView` 挂三段。
-   */
-  {value: 'model', label: '模型配置'},
-  // 只有管理员看得到。里面还有二级 tab：用户管理 / 服务器
-  {value: 'admin', label: '管理'}
+  // 只有管理员看得到（用户 2026-10-18：「管理改为系统管理」）。里面还有二级 tab：用户管理 / 服务器
+  {value: 'admin', label: '系统管理'}
 ]
 
 /** 非管理员看不到「管理」那一段 */
@@ -88,18 +89,32 @@ function readPane(v: unknown): Pane {
   //    「复盘」那半（`?p=replay&r=…`）已经拆走（预测历史 / 知识库 去开单分析，
   //    账户统计留在这一页），`router.ts` 会把它们转成新写法 —— 这里再兜一层，
   //    别渲染出空白。
-  // ★ 2026-10-12：`llm`（模型配置）/ `usage`（用量）/ `prompts`（AI 提示词）现在都是
-  //   「模型配置」这一格里的子 tab —— 具体落哪一段由下面 `applyRoute()` 决定
-  if (v === 'llm' || v === 'usage' || v === 'prompts') return 'model'
+  /*
+   * ★ 2026-10-18：`llm` / `usage` / `prompts` / `model` 现在都落到**个人信息**里
+   *   （那三段并进了它的二级 tab），具体落哪一段由 `applyRoute()` 决定；
+   *   `ask`（数据问答）已经搬到开单分析，`applyRoute()` 会把老链接转过去。
+   */
+  if (
+    v === 'llm' ||
+    v === 'usage' ||
+    v === 'prompts' ||
+    v === 'model'
+  )
+    return 'profile'
   if (v === 'replay') return 'stats'
-  if (v === 'stats' || v === 'ask' || v === 'profile' || v === 'model' || v === 'admin')
-    return v
+  if (v === 'stats' || v === 'profile' || v === 'admin') return v
+  if (v === 'ask') return 'exchange'
   return 'exchange'
 }
 
-/** 「模型配置」那三段：密钥配置（默认）/ 用量统计 / AI 提示词 */
-function readModelTab(v: unknown): ModelTab {
-  return v === 'usage' || v === 'prompts' ? v : 'keys'
+/**
+ * 「个人信息」里那五段的二级 tab（★ 2026-10-18：密钥配置 / 用量统计 / AI 提示词
+ * 从原「模型配置」搬了进来，跟账户信息 / 交易所排在一起）。
+ */
+function readProfTab(v: unknown): ProfTab {
+  return v === 'exchange' || v === 'keys' || v === 'usage' || v === 'prompts'
+    ? v
+    : 'account'
 }
 
 /** 管理页里当前看的是哪一段；只有 `?t=server|proxy|rustdesk` 才算那几段，其余都当用户管理 */
@@ -125,7 +140,8 @@ const pane = ref<Pane>(readPane(route.query.p))
 const rootRef = ref<{$el?: HTMLElement} | null>(null)
 useScrollMemory(() => rootRef.value?.$el ?? null)
 const adminTab = ref<AdminTab>('users')
-const modelTab = ref<ModelTab>('keys')
+/** 「个人信息」里当前看的是哪一段（账户信息 / 交易所 / 密钥配置 / 用量统计 / AI 提示词） */
+const profTab = ref<ProfTab>('account')
 
 /**
  * 交易所账户那一格**只要进来过一次就一直留着**（`v-show` 藏起来，不卸载）。
@@ -194,20 +210,28 @@ function applyRoute(): void {
   // （它没有 `?t=`，所以要单独兜一下）
   adminTab.value = raw === 'status' ? 'server' : readAdminTab(route.query.t)
   /*
-   * 模型配置那三段的子 tab：
-   *   · `?p=prompts`（老链接 = 「AI 提示词」那一格）→ 落在 **AI 提示词** 那一段；
-   *   · `?p=usage`（更老的「用量」独立页）→ 落在 **用量统计**；
-   *   · 其余（`?p=model` / `?p=llm`）→ 默认 **密钥配置**。
-   * `?t=` 写了就听它的（刷新 / 分享链接靠这个）。
+   * 「个人信息」的二级 tab（★ 2026-10-18 起含密钥配置 / 用量统计 / AI 提示词）：
+   *   · `?t=` 写了就听它的（刷新 / 分享链接靠这个）；
+   *   · `?p=prompts`（老链接 = 「AI 提示词」那一格）→ 落在 **AI 提示词**；
+   *   · `?p=usage`（更老的「用量」独立页）、`?p=model` / `?p=llm` → 落在**用量统计 / 密钥配置**。
    */
-  modelTab.value =
+  profTab.value =
     route.query.t !== undefined
-      ? readModelTab(route.query.t)
+      ? readProfTab(route.query.t)
       : raw === 'prompts'
         ? 'prompts'
         : raw === 'usage'
           ? 'usage'
-          : 'keys'
+          : raw === 'model' || raw === 'llm'
+            ? 'keys'
+            : 'account'
+  /*
+   * 老链接 `/me?p=ask`（数据问答）→ 它现在在**开单分析**里，直接转过去
+   * （用户 2026-10-18：「数据问答改叫 ai 助手到开单分析中」）。
+   */
+  if (raw === 'ask' && route.path === '/me') {
+    void router.replace({path: '/analyze', query: {t: 'ask'}})
+  }
 }
 
 applyRoute()
@@ -216,7 +240,7 @@ applyRoute()
 watch([() => route.query.p, () => route.query.t], applyRoute)
 
 /** 只把字符串型的 query 带下去（`?id=` 那种要留着，抽屉靠它自动弹） */
-function writeQuery(p: Pane, t: AdminTab, m: ModelTab = modelTab.value): void {
+function writeQuery(p: Pane, t: AdminTab, m: ProfTab = profTab.value): void {
   const q: Record<string, string> = {}
   for (const [k, val] of Object.entries(route.query)) {
     if (typeof val === 'string') q[k] = val
@@ -224,11 +248,11 @@ function writeQuery(p: Pane, t: AdminTab, m: ModelTab = modelTab.value): void {
   q.p = p
   /*
    * 二级 tab 只在**非默认**那种情况下写进地址栏：
-   *   · 管理：只有「服务器 / 代理订阅」才写（`?t=users` 是多余的）；
-   *   · 模型配置：只有「用量统计 / AI 提示词」才写（默认是「密钥配置」）。
+   *   · 系统管理：只有「服务器 / 代理订阅」才写（`?t=users` 是多余的）；
+   *   · 个人信息：只有非「账户信息」那段才写（默认那格不用写）。
    */
   if (p === 'admin' && (t === 'server' || t === 'proxy')) q.t = t
-  else if (p === 'model' && m !== 'keys') q.t = m
+  else if (p === 'profile' && m !== 'account') q.t = m
   else delete q.t
   void router.replace({query: q})
 }
@@ -244,9 +268,9 @@ function setAdminTab(v: AdminTab): void {
   writeQuery('admin', v)
 }
 
-function setModelTab(v: ModelTab): void {
-  modelTab.value = v
-  writeQuery('model', adminTab.value, v)
+function setProfTab(v: ProfTab): void {
+  profTab.value = v
+  writeQuery('profile', adminTab.value, v)
 }
 </script>
 
@@ -256,9 +280,7 @@ function setModelTab(v: ModelTab): void {
     :class="{
       'no-bar': pane === 'exchange' || pane === 'stats',
       // 统计那格底部要留出底栏的高度（它自己滚到最后一段，别被底栏压住）
-      'stats-pane': pane === 'stats',
-      // 数据问答那格底部是输入框，同样别被窄屏的固定底栏压住
-      'ask-pane': pane === 'ask'
+      'stats-pane': pane === 'stats'
     }"
     :model-value="pane"
     :options="panes"
@@ -294,13 +316,15 @@ function setModelTab(v: ModelTab): void {
       它们没有交易所那套「留着别重拉」的诉求（列表类，重挂一次很便宜），
       但各自的订阅 / 轮询必须停（`ServerStatusView` 就在轮询）。
     -->
-    <ProfileView v-if="pageAlive && pane === 'profile'" />
     <!--
-      数据问答：**切走即卸载**（列表类，重挂很便宜）—— 会话本身在 `../ask.ts` 的
-      模块作用域里活着，所以切回来还在。⚠️ 必须独立 `v-if`，别接进上面那条
-      `v-else-if` 链子（原因见 `ProfileView` 那段）。
+      个人信息（★ 2026-10-18 起还挂着密钥配置 / 用量统计 / AI 提示词三段）——
+      二级 tab 状态在 `profTab`、写进地址栏 `?t=`。
     -->
-    <AskView v-if="pageAlive && pane === 'ask'" />
+    <ProfileView
+      v-if="pageAlive && pane === 'profile'"
+      :tab="profTab"
+      @update:tab="setProfTab"
+    />
     <!-- 「管理」里再分两个 tab：用户管理 / 服务器；ServerStatusView 是 v-if 里挂的，
          切到用户管理那半就卸载 → 它自己的轮询和图表会一起停掉 -->
     <AdminView
@@ -308,17 +332,7 @@ function setModelTab(v: ModelTab): void {
       :tab="adminTab"
       @update:tab="setAdminTab"
     />
-    <!--
-      模型配置（密钥配置 / 用量统计 / AI 提示词 三段）：切走即卸载 —— 三段都没有
-      轮询 / 订阅，重挂很便宜（用量那段会重拉一次统计）。
-      ⚠️ 必须是**独立的 `v-if`**，跟在 AdminView 那个 `v-else-if` 后面 ——
-         原因跟上面 `ProfileView` 那段一样（别接进那条链子里）。
-    -->
-    <ModelPaneView
-      v-if="pageAlive && pane === 'model'"
-      :tab="modelTab"
-      @update:tab="setModelTab"
-    />
+
   </PaneShell>
 </template>
 
@@ -342,23 +356,5 @@ function setModelTab(v: ModelTab): void {
  */
 .tabpane.stats-pane :deep(.tabpane-body) {
   padding-bottom: calc(var(--tabbar-h, 59px) + env(safe-area-inset-bottom) + 18px);
-}
-/*
- * 数据问答那格：**自己不滚**（`AskView` 内部是「左侧历史 + 右侧对话 + 底部输入框」，
- * 两块各自滚）。整页滚的话输入框会被推走、侧栏也跟着动，那套布局就散了。
- *
- * ⚠️ 这里把它变成 **flex 容器**，让 `.ask` 作为 flex 项被**拉伸**到满高 ——
- *    第一版写的是 `.ask { height: 100% }`，实测**没撑起来**（百分比高度要求父级是
- *    "确定高度"，而 `.tabpane-body` 的高度是 flex 分出来的，各引擎处理不一致）：
- *    表现是整格只有内容那么高、下面空一块，窄屏抽屉跟着变短、上下露出间距。
- *    拉伸不吃百分比那一套，稳。
- * ⚠️ 顺手把 `PaneShell` 给滚动条留的 12px 内边距收掉 —— 这一格不用它的滚动条。
- */
-.tabpane.ask-pane :deep(.tabpane-body) {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  padding-right: 0;
-  margin-right: 0;
 }
 </style>

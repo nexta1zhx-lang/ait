@@ -18,7 +18,7 @@ import {bjTime, cny, int, ms, pct, tok, usd} from '../format'
 
 /**
  * 用量统计。原来是一个独立页签，之后并进「模型配置」；★ 2026-10-12 起它是
- * 「我的 → 模型配置」里的**第二个子 tab**（`ModelPaneView`：密钥配置 / 用量统计 / AI 提示词）。
+ * 「我的 → 个人信息」里的第二个子 tab（账户信息 / 交易所 / 密钥配置 / **用量统计** / AI 提示词）。
  *
  * `keyId` 是"只看哪把密钥"（父组件传进来）—— 统计可以跟密钥绑定分开看。
  */
@@ -28,11 +28,17 @@ const props = withDefaults(defineProps<{keyId?: number | null}>(), {
 
 /* ---------------- 筛选 ---------------- */
 
+/*
+ * ★ 2026-10-18 用户：「用量统计没有案例了有日记提炼改一下」——
+ *   「案例提炼」那档换成**日记提炼**（`polish`，日记正文美化），
+ *   「数据问答」跟着改名成 **AI 助手**（它已经搬到开单分析，见 `LEFT_TABS`）。
+ *   `extract`（老的知识库提炼）不再出现在筛选项里，只作为历史记录留在列表标签上。
+ */
 const KINDS = [
   {value: '' as const, label: '全部用途'},
   {value: 'judge' as const, label: '开单分析'},
-  {value: 'extract' as const, label: '案例提炼'},
-  {value: 'ask' as const, label: '数据问答'}
+  {value: 'polish' as const, label: '日记提炼'},
+  {value: 'ask' as const, label: 'AI 助手'}
 ]
 
 /*
@@ -53,7 +59,7 @@ const bjShift = (day: string, n: number): string => {
 
 const from = ref(bjShift(bjToday(), -29))
 const to = ref(bjToday())
-const kind = ref<'' | 'judge' | 'extract' | 'ask'>('')
+const kind = ref<'' | 'judge' | 'polish' | 'ask'>('')
 
 const rangeText = computed(() =>
   from.value === to.value ? from.value : `${from.value} ~ ${to.value}`
@@ -422,7 +428,7 @@ const symbolText = (r: UsageRow) =>
         </span>
       </div>
       <p class="hint" style="margin-top: 10px">
-        缓存命中比未命中便宜几十倍。规则和知识库前缀不变时命中率会自然升高 ——
+        缓存命中比未命中便宜几十倍。规则前缀不变时命中率会自然升高 ——
         改一次规则会短暂掉下去再回升。
       </p>
     </section>

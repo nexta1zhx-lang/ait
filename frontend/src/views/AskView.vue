@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 「我的 → 数据问答」（2026-10-16）。
+ * 「开单分析 → AI 助手」（2026-10-16 建，2026-10-18 从「我的 → 数据问答」搬过来并改名）。
  *
  * 布局照主流聊天应用那套（用户 2026-10-16：「界面要和现有市场上的类似，
  * 左侧聊天历史，可折叠」）：**左边历史栏 + 右边对话**，历史栏能收起来。
@@ -10,8 +10,9 @@
  * 折叠状态记在 `../ask.ts`（localStorage），切页面回来还是上次那样。
  *
  * 模型能做的只有「选工具 + 给参数」，工具和 SQL 写死在
- * `backend/src/ask/tools.ts`（12 个：预测历史 / 知识库 / 日线 / 用量 / 持久化 /
- * 成交 / 盈亏 / 流水 / 资产 / 挂单 / C2C）。
+ * `backend/src/ask/tools.ts`（预测历史 / **经验（交易日记）** / 日线 / 用量 / 持久化 /
+ * 成交 / 盈亏 / 流水 / 资产 / 挂单 / C2C —— 知识库那个 2026-10-18 随模块一起删了，
+ * 它留下的「用户自己的话」现在只有「经验」，见 `journal_entries`）。
  *
  * 两条刻意的取舍：
  *  ① **「取值过程」摊开摆**（工具中文名 + 区间 + 行数 + 耗时，流式下一条条长出来）。
@@ -38,13 +39,16 @@ import {
   type AskExchange
 } from '../ask'
 
-/** 建议问题 —— 每个都能落到那 12 个工具里的一个 */
+/**
+ * 建议问题 —— 每个都能落到 `backend/src/ask/tools.ts` 里的一个工具。
+ * ⚠️ 原来有一条「知识库里我关于 BTC 总结过什么？」，知识库模块 2026-10-18 删了
+ *    （工具也一起没了），留着点下去只会得到「查不到」，所以撤掉。
+ */
 const SUGGEST = [
   '最近 30 天我做了多少单？',
   '最近 7 天的分析里「可做」占多少？',
   '我这周做了哪些单？赚了还是亏了？',
   '我现在有多少钱、什么仓？',
-  '知识库里我关于 BTC 总结过什么？',
   '我这个月花了多少 AI 费用？'
 ]
 
@@ -216,7 +220,7 @@ function whenText(ts: number): string {
     : d.toLocaleDateString('zh-CN', {month: '2-digit', day: '2-digit'})
 }
 
-const title = computed(() => activeThread.value?.title || '数据问答')
+const title = computed(() => activeThread.value?.title || 'AI 助手')
 </script>
 
 <template>
@@ -308,8 +312,8 @@ const title = computed(() => activeThread.value?.title || '数据问答')
           <!-- 空会话：说明它能查什么 + 几句能直接点的 -->
           <section v-else-if="!activeTurns.length" class="panel lead">
             <p class="hint">
-              问你自己库里的数据 —— <b>预测历史 / 知识库 / 日线行情 / 成交 / 盈亏 /
-              资金流水 / 资产持仓 / 挂单 / C2C / AI 用量 / 持久化跟踪</b>。
+              问你自己库里的数据 —— <b>预测历史 / 经验（交易日记）/ 日线行情 / 成交 /
+              盈亏 / 资金流水 / 资产持仓 / 挂单 / C2C / AI 用量 / 持久化跟踪</b>。
               它只会查这些，查不到会直说，不会编。
             </p>
             <div class="chips">

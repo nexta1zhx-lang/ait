@@ -26,6 +26,7 @@ import {
   netOf
 } from '../db/exchange-store'
 import {listC2cOrderHistory} from '../db/exchange-analytics'
+import {listJournalEntries} from '../db/journals'
 import {listPositionHistory, type PositionCycle} from '../data/position-history'
 // 档位现算 —— 用的就是持久化提醒 / 前端颜色那一个判定，两边必须一致
 import {verdictLabel, verdictOf, type Verdict} from '../analysis/verdict'
@@ -114,6 +115,25 @@ export const TOOL_SPECS: AskToolSpec[] = [
         ...rangeProps,
         symbol: {type: 'string', description: '只看某个币，如 BTC'},
         limit: {type: 'number', description: `最多几条，默认 20，上限 ${MAX_ROWS}`}
+      }
+    }
+  },
+  {
+    name: 'journal_entries',
+    label: '读经验（交易日记）',
+    description:
+      '读「经验」里**用户自己写的**日记条目（标题 / 正文 / 分类 / 挂的币种 / 最后改动时间），' +
+      '可按币种、关键词、月份筛，按时间倒序。' +
+      '问「我之前总结过什么」「关于 BTC 我记了什么」「我的经验里有没有提到过…」这类问题用它。\n' +
+      '⚠️ 这里面只有**用户自己的话**，没有行情 / 成交数据 —— ' +
+      '要数字去查别的工具，别把日记里的说法当行情事实。',
+    parameters: {
+      type: 'object',
+      properties: {
+        symbol: {type: 'string', description: '只看挂了某个币的日记，如 BTC'},
+        q: {type: 'string', description: '关键词（在标题和正文里搜）'},
+        months: {type: 'string', description: '月份，YYYY-MM；多个用逗号隔开'},
+        limit: {type: 'number', description: `最多几条，默认 10，上限 ${MAX_ROWS}`}
       }
     }
   },
@@ -399,6 +419,8 @@ export async function runTool(
       return analysisStats(args, ctx, today)
     case 'recent_analyses':
       return recentAnalyses(args, ctx, today)
+    case 'journal_entries':
+      return journalEntries(args, ctx)
     case 'market_klines':
       return marketKlines(args, ctx, today)
     case 'usage_cost':
@@ -582,6 +604,55 @@ async function recentAnalyses(
   }
 }
 
+
+/**
+ * 读「经验」（交易日记）。
+ *
+ * 知识库模块 2026-10-18 删掉之后，**用户自己写的那些东西只剩「经验」这一处**了
+ * （用户：「没有知识库了叫经验」）—— 所以给它一个只读工具，
+ * 模型问「我以前怎么总结的」时能真去翻，而不是凭印象编。
+ */
+async function journalEntries(
+  args: Record<string, unknown>,
+  ctx: AskToolContext
+): Promise<AskToolResult> {
+  const symbol = normalizeSymbol(args.symbol)
+  const q = String(args.q ?? '')
+    .trim()
+    .slice(0, 60)
+  const months = String(args.months ?? '')
+    .split(',')
+    .map(m => m.trim())
+    .filter(Boolean)
+  const limit = clampInt(args.limit, 10, MAX_ROWS)
+  const list = await listJournalEntries(ctx.userId, {
+    coin: symbol || undefined,
+    q: q || undefined,
+    months,
+    limit
+  })
+  const entries = (list.entries ?? []).slice(0, limit).map(e => ({
+    时间: e.at,
+    标题: e.title || '（无标题）',
+    币种: e.coins.map(c => c.base).join(' / ') || '—',
+    分类: e.category?.name ?? '未分类',
+    正文: String(e.body ?? '').slice(0, 600)
+  }))
+  return {
+    data: {
+      命中条数: list.total ?? entries.length,
+      条件是: {
+        ...(symbol ? {币种: symbol} : {}),
+        ...(q ? {关键词: q} : {}),
+        ...(months.length ? {月份: months.join(',')} : {})
+      },
+      条数: entries.length,
+      条目: entries
+    },
+    rows: entries.length,
+    detail: `经验：${entries.length} 条`
+  }
+}
 
 async function marketKlines(
   args: Record<string, unknown>,

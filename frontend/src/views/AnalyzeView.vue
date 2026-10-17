@@ -29,6 +29,7 @@ import OrderPanel from '../comps/OrderPanel.vue'
 import JournalView from './JournalView.vue'
 import BanSheet from '../comps/BanSheet.vue'
 import AutoPredictView from './AutoPredictView.vue'
+import AskView from './AskView.vue'
 import {
   ensurePins,
   isPinnedBase,
@@ -694,6 +695,16 @@ onDeactivated(() => {
         <!-- ②'' 交易日记（2026-10-18）：条目式 + 按月汇总，纯读库不花钱 -->
         <div v-else-if="leftTab === 'journal'" class="scroll-body">
           <JournalView />
+        </div>
+
+        <!--
+          ②''' AI 助手（用户 2026-10-18：「数据问答改叫 ai 助手到开单分析中」）——
+          从「我的」搬过来的那一格。⚠️ 用 `.ask-body` 不是 `.scroll-body`：
+          它自己要「左侧历史 + 右侧对话 + 底部输入框」占满一屏，滚动交给消息区
+          （外层一滚输入框就被顶出屏幕了）。
+        -->
+        <div v-else-if="leftTab === 'ask'" class="ask-body">
+          <AskView />
         </div>
 
       </div>

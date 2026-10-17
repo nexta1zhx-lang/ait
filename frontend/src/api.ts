@@ -3472,10 +3472,16 @@ function usageQs(q: UsageQuery, extra: Record<string, string | number> = {}) {
   return p.toString()
 }
 
+/**
+ * 用途的中文名（用量列表 / 图表都用它）。
+ * ★ 2026-10-18：`polish`（日记提炼）自己一档；`ask` 改叫 **AI 助手**；
+ *   `extract` 是**老数据**（知识库提炼，模块已删），只在历史记录里还能看到。
+ */
 export const KIND_TEXT: Record<string, string> = {
   judge: '开单分析',
-  extract: '案例提炼',
-  ask: '数据问答'
+  polish: '日记提炼',
+  ask: 'AI 助手',
+  extract: '案例提炼（旧）'
 }
 
 export const fetchUsageSummary = (q: UsageQuery, recent = 10) =>

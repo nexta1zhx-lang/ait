@@ -3,11 +3,18 @@ import {TokenUsage, costOf, emptyUsage} from '../llm/pricing'
 
 export type UsageKind = 'judge' | 'extract' | 'ask' | 'polish'
 
+/**
+ * 用途的中文名。
+ * ★ 2026-10-18 用户：「用量统计没有案例了有日记提炼改一下」——
+ *   `polish` 改叫**日记提炼**（它现在就是日记正文那段美化），`ask` 跟着改叫 **AI 助手**
+ *   （原来的「数据问答」整格搬进了开单分析）。`extract` 只剩**老数据**（知识库提炼，
+ *   模块已删），标个「旧」免得跟现在这几档混起来。
+ */
 export const KIND_LABEL: Record<string, string> = {
   judge: '开单分析',
-  extract: '案例提炼',
-  ask: '数据问答',
-  polish: '日记润色'
+  polish: '日记提炼',
+  ask: 'AI 助手',
+  extract: '案例提炼（旧）'
 }
 
 export interface RecordUsageInput {
