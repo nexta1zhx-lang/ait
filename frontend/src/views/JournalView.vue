@@ -667,9 +667,13 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-caret.up {
   transform: rotate(180deg);
 }
-/* 展开的正文：就是一页纸，**不加左侧色块、不加背景**（用户明确不要） */
+/*
+ * 展开的正文：就是一页纸，**不加左侧色块、不加背景**（用户明确不要）。
+ * 但要有**边距**（用户 2026-10-18：「正文加边距」）—— 左右各 10px，
+ * 跟卡片边缘拉开，读起来才不像贴着框。
+ */
 .j-body-wrap {
-  padding: 0 6px 12px 2px;
+  padding: 2px 10px 12px 10px;
   animation: j-body-in 0.18s ease-out;
 }
 /*
@@ -691,6 +695,33 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-body :deep(> p:last-child) {
   margin-top: 0;
 }
+/* 正文里那几样 Markdown 的观感：日记这页自己定，不去改结论卡那套 */
+.j-body :deep(strong) {
+  font-weight: 650;
+  color: var(--text);
+}
+.j-body :deep(h3),
+.j-body :deep(h4) {
+  margin: 9px 0 4px;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.45;
+  color: var(--text);
+}
+.j-body :deep(li::marker) {
+  color: var(--muted);
+}
+.j-body :deep(hr) {
+  margin: 10px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.j-body :deep(code) {
+  padding: 0 4px;
+  font-size: 0.92em;
+  border-radius: 4px;
+  background: var(--panel-2);
+}
 .j-body {
   margin: 0;
   font-size: 13px;
@@ -700,14 +731,23 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-body:last-child {
   margin-bottom: 0;
 }
+/*
+ * 币种区：跟正文之间**拉一条分割线**（用户 2026-10-18：「币种区加分割」）。
+ * 有没有正文都成立 —— 只有币的时候那条线就顶在最上面当个小标题栏。
+ */
 .j-notes {
-  margin: 0 0 10px;
-  padding: 0;
+  margin: 10px 0 10px;
+  padding: 9px 0 0;
+  border-top: 1px solid var(--border);
   list-style: none;
   display: flex;
   flex-direction: column;
   gap: 5px;
   font-size: 12.5px;
+}
+/* 正文和币种之间的间距再给足一点 */
+.j-body + .j-notes {
+  margin-top: 12px;
 }
 .j-notes li {
   display: flex;
@@ -717,6 +757,7 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-acts {
   display: flex;
   gap: 6px;
+  padding-top: 2px;
 }
 .j-act {
   display: inline-flex;
