@@ -314,9 +314,9 @@ async function remove(e: JournalEntry): Promise<void> {
       <article v-for="e in entries" :key="e.id" class="j-entry" :class="{open: openId === e.id}">
         <div class="j-head" :class="{open: openId === e.id}" @click="toggle(e)">
           <i class="j-dot" :class="{on: openId === e.id}" />
-          <span class="j-time">{{ timeLabel(e.at) }}</span>
           <span class="j-title" :class="{dim: !e.title}">{{ e.title || e.body.split('\n')[0] }}</span>
-          <span class="j-caret dim">{{ openId === e.id ? '▴' : '▾' }}</span>
+          <span class="j-time">{{ timeLabel(e.at) }}</span>
+          <span class="j-caret dim" :class="{up: openId === e.id}">▾</span>
           <!--
             币放在**第二行**，不跟标题抢宽度 —— 手机上一行塞两三个长币名，
             标题就被挤成「按…」（展开后下面本来就逐条列着所有币）。
@@ -546,7 +546,7 @@ async function remove(e: JournalEntry): Promise<void> {
 }
 .j-head {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: baseline;
   column-gap: 8px;
   row-gap: 4px;
@@ -566,9 +566,12 @@ async function remove(e: JournalEntry): Promise<void> {
  * 用户 2026-10-18：「点击激活背景换个样式，设计一下不用拘束之前的风格」。
  */
 .j-entry.open {
-  margin: 4px -8px;
-  padding: 0 8px;
+  /* ⚠️ 用**负外边距**往外扩会把卡片顶出内容区（用户 2026-10-18 报过），
+     所以卡片就老老实实占满这一条，只上下留一点呼吸 */
+  margin: 5px 0;
+  padding: 5px 0;
   border-radius: 14px;
+  animation: j-card-in 0.16s ease-out;
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--panel-2) 92%, transparent),
@@ -601,9 +604,26 @@ async function remove(e: JournalEntry): Promise<void> {
   opacity: 1;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 22%, transparent);
 }
-/* 展开那条整块往外扩了 8px，圆点得跟着挪回来，才跟别条在同一条竖线上 */
-.j-entry.open .j-dot {
-  left: -6px;
+/* 展开的正文滑进来；卡片本身也淡入一下（用户 2026-10-18：「加入动画」） */
+@keyframes j-card-in {
+  from {
+    opacity: 0.35;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes j-body-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .j-time {
   flex: none;
@@ -621,7 +641,8 @@ async function remove(e: JournalEntry): Promise<void> {
   white-space: nowrap;
 }
 .j-badges {
-  grid-column: 2 / 4;
+  grid-column: 1 / -1;
+  padding-left: 2px;
   display: inline-flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -641,15 +662,39 @@ async function remove(e: JournalEntry): Promise<void> {
 .j-caret {
   flex: none;
   font-size: 11px;
+  transition: transform 0.18s ease-out;
+}
+.j-caret.up {
+  transform: rotate(180deg);
 }
 /* 展开的正文：就是一页纸，**不加左侧色块、不加背景**（用户明确不要） */
 .j-body-wrap {
-  padding: 0 4px 12px 6px;
+  padding: 0 6px 12px 2px;
+  animation: j-body-in 0.18s ease-out;
+}
+/*
+ * Markdown 的默认间距是给**结论卡**调的（段落 11px、列表 12px、条目 5px），
+ * 放到日记这种「一行一句」的短段落上太空了 —— 这里整体收一半
+ * （用户 2026-10-18：「md 格式的间距都这么大吗」）。
+ */
+.j-body :deep(p) {
+  margin: 0 0 6px;
+}
+.j-body :deep(ul),
+.j-body :deep(ol) {
+  margin: 2px 0 6px;
+  padding-left: 17px;
+}
+.j-body :deep(li) {
+  margin-bottom: 2px;
+}
+.j-body :deep(> p:last-child) {
+  margin-top: 0;
 }
 .j-body {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 13px;
-  line-height: 1.75;
+  line-height: 1.65;
   word-break: break-word;
 }
 .j-body:last-child {
