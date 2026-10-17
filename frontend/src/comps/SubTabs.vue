@@ -63,7 +63,8 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  /* 跟「我的 → 管理 / 模型配置」那排二级 tab 同一档（11.5px），比一级（13px）小一号 */
+  font-size: 11.5px;
   font-weight: 400;
   white-space: nowrap;
   transition: color 0.16s ease;
@@ -88,9 +89,4 @@ const emit = defineEmits<{(e: 'update:modelValue', v: T): void}>()
   opacity: 0.9;
 }
 
-@media (max-width: 900px) {
-  .sub-tabs button {
-    font-size: 13px;
-  }
-}
 </style>
