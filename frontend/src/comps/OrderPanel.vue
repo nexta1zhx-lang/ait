@@ -1474,31 +1474,6 @@ onMounted(async () => {
       -->
     </div>
 
-    <!--
-      **仓位百分比滑条**（用户 2026-10-18：「滑动条放在杠杆旁」→「**滑动条放在下面一个框内**」）：
-      从头部那一行挪出来，单独一个描边框、贴着头行下面 —— 跟「当前可开价值」那张卡
-      是两张独立的卡，不再挤在杠杆和账户中间。
-      只在「没持仓」（= 开单那一块）时有意义，仓位那块不显示它。
-    -->
-    <label
-      v-if="!opened"
-      class="ord-pos-box"
-      :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
-    >
-      <span class="ord-bar">
-        <input
-          v-model.number="posPct"
-          type="range"
-          min="1"
-          max="100"
-          step="1"
-          :style="{'--fill': posFillPct + '%'}"
-          aria-label="买入仓位百分比"
-        />
-      </span>
-      <b class="ord-pos-num">{{ posPct }}%</b>
-    </label>
-
     <div class="ord-body">
     <div class="ord-page">
       <!--
@@ -1656,6 +1631,34 @@ onMounted(async () => {
           下面是快捷比例（25 / 50 / 75 / 100）。杠杆仍在币种行那颗 `10x` 上点着切换。
         -->
         <div class="ord-quota">
+          <!--
+            **仓位百分比滑条**（用户 2026-10-18：「滑动条放在杠杆旁」→「滑动条放在下面
+            一个框内」→「**和下面在一个框**」）：就摆在这一张卡的**最上面一行**，
+            跟「当前可开价值 / 数量 / 快捷比例」同一个框，不再另起一张小卡。
+          -->
+          <label
+            class="ord-pos-box"
+            :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
+          >
+            <span class="ord-bar">
+              <input
+                v-model.number="posPct"
+                type="range"
+                min="1"
+                max="100"
+                step="1"
+                :style="{'--fill': posFillPct + '%'}"
+                aria-label="买入仓位百分比"
+              />
+            </span>
+            <b class="ord-pos-num">{{ posPct }}%</b>
+          </label>
+
+          <!--
+            **上下布局**（用户 2026-10-18：「和下面在一个框」→「上下布局」）：
+            滑条一行 → 标签 / 大号数字 / 数量三行 → 快捷比例一行，全部竖着排，
+            不再左右分列、也没有那条竖线。
+          -->
           <div class="ord-quota-main">
             <!-- 用户 2026-10-14：「价值那一行…加上文字，**当前可开价值**」 -->
             <span class="ord-quota-lb">当前可开价值</span>
@@ -1674,29 +1677,21 @@ onMounted(async () => {
             >
           </div>
 
-          <!--
-            右侧两行：① 滑条（拖 = 用掉多少可用额度，右边跟一个 %）；
-            ② 快捷比例。用户 2026-10-18：「滑动条和快捷两行布局放右侧」。
-            ⚠️ 100% = 把可用保证金用满（跟以前完全一样），所以默认别改。
-          -->
+          <!-- 快捷比例：最下面一行，四颗平分整张卡的宽度 -->
           <div
-            class="ord-pos-side"
+            class="ord-pos-quick"
             :title="`这一单用掉多少可用额度：${fmt(orderNotional, 2)} / ${roomText} USDT`"
           >
-            <div class="ord-pos-body">
-              <div class="ord-pos-quick">
-                <button
-                  v-for="v in POS_PCTS"
-                  :key="v"
-                  type="button"
-                  :class="{on: v === posPct}"
-                  :title="`用掉可用额度的 ${v}%`"
-                  @click="posPct = v"
-                >
-                  {{ v }}%
-                </button>
-              </div>
-            </div>
+            <button
+              v-for="v in POS_PCTS"
+              :key="v"
+              type="button"
+              :class="{on: v === posPct}"
+              :title="`用掉可用额度的 ${v}%`"
+              @click="posPct = v"
+            >
+              {{ v }}%
+            </button>
           </div>
         </div>
 
