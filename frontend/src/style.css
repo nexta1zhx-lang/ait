@@ -7294,8 +7294,12 @@ button.badge:disabled {
     padding: 4px 2px 9px;
     border: 0;
     border-radius: 0;
-    /* 手机上一级 tab 放到 15px（用户 2026-10-18：「一级 tab 字太小了」） */
-    font-size: 15px;
+    /*
+     * 手机上一级 tab 14px —— 跟二级 tab（`comps/SlideTabs.vue`）**同一档**：
+     * 用户 2026-10-18 先嫌 13 太小、后来又说「一级和二级字体大小再统一协调一下」，
+     * 于是两边都定 14px，主次靠**字重**分（一级 600，二级 400）而不是靠字号差。
+     */
+    font-size: 14px;
     font-weight: var(--fw-mid);
     text-align: left;
     background: transparent;

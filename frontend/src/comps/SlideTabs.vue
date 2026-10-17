@@ -155,9 +155,19 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--muted);
   font-size: 13px;
-  font-weight: var(--fw-mid);
+  font-weight: 400;
   white-space: nowrap;
   transition: color 0.18s ease;
+}
+
+/*
+ * 手机：跟一级 tab 同档 14px（用户 2026-10-18：「一级和二级字体大小再统一协调一下」）。
+ * 一级靠 600 的字重压过这一排，所以这里保持 400，选中只换颜色。
+ */
+@media (max-width: 900px) {
+  .slide-tabs button {
+    font-size: 14px;
+  }
 }
 
 .slide-tabs button.on {
