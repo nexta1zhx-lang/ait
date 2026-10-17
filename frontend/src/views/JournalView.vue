@@ -559,7 +559,7 @@ async function remove(e: JournalEntry): Promise<void> {
         @pick="v => (coin = v)"
       />
       <div class="j-search">
-        <input v-model="q" type="text" placeholder="搜经验" />
+        <input v-model="q" type="text" placeholder="搜专家经验" />
         <button v-if="q" type="button" class="ghost tiny j-search-x" title="清掉搜索" @click="q = ''">
           ✕
         </button>
@@ -880,9 +880,9 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <!-- 编辑器（底部弹层，跟「扫描参数」同一套 `.sheet`） -->
     <div v-if="editing" class="sheet-mask" @click="closeEditor" />
-    <section v-if="editing" class="sheet" role="dialog" aria-label="写日记">
+    <section v-if="editing" class="sheet" role="dialog" aria-label="写专家经验">
       <header class="sheet-head">
-        <b>{{ editing.id ? '编辑日记' : '写一条' }}</b>
+        <b>{{ editing.id ? '编辑专家经验' : '写一条' }}</b>
         <button class="ghost tiny" title="关掉（不保存）" @click="closeEditor">✕</button>
       </header>
 
