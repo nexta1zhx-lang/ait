@@ -25,6 +25,7 @@ import {
   type DocKind,
   type TonePreset
 } from '../api'
+import {askConfirm} from '../confirm'
 import {bjTime} from '../format'
 import {refreshConfig} from '../store'
 import SelectPick from '../comps/SelectPick.vue'
@@ -203,6 +204,8 @@ async function addDoc(kind: DocKind) {
  */
 const toneOpen = ref(false)
 const toneId = ref('')
+/** 新建语气时那一格「名字」（`openTonePicker` / 那个输入框都用它 —— 原来漏了声明，点了就报错） */
+const toneName = ref('')
 /** 语气预设（**后端**给的：`GET /api/ai-docs` 的 `tones`） */
 const tones = ref<TonePreset[]>([])
 
@@ -307,8 +310,20 @@ async function move(d: AiDoc, dir: -1 | 1) {
   }
 }
 
+/**
+ * 删掉一份提示词。
+ *
+ * ⚠️ 走站内那份确认框（`askConfirm`），别用 `window.confirm`：系统那种改不了样式，
+ *    手机上还会被浏览器弹成一条横幅（用户 2026-10-17：「清掉用自己弹窗，不要系统级」）。
+ */
 async function remove(d: AiDoc) {
-  if (!window.confirm(`确定删掉「${d.name}」？（它的历史版本会一起删）`)) return
+  const ok = await askConfirm({
+    title: `删掉「${d.name}」？`,
+    body: [{t: '它的历史版本会一起删，找不回来。', tone: 'warn'}],
+    okText: '删掉',
+    danger: true
+  })
+  if (!ok) return
   try {
     await deleteAiDoc(d.id)
     if (current.value?.id === d.id) closeView()
@@ -346,9 +361,12 @@ async function lookVersion(v: AiDocVersion) {
 }
 
 async function restore(v: AiDocVersion) {
-  if (!window.confirm(`把「${v.name}」恢复到 ${bjTime(v.savedAt)} 那一版？`)) {
-    return
-  }
+  const ok = await askConfirm({
+    title: `把「${v.name}」恢复到这个版本？`,
+    body: [{t: `${bjTime(v.savedAt)} 那一版`, tone: 'num'}, '现在的内容会先留一版历史，恢复错了还能回去。'],
+    okText: '恢复'
+  })
+  if (!ok) return
   try {
     await restoreAiVersion(v.id)
     await refreshAssembly()
