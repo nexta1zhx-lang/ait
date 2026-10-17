@@ -209,6 +209,14 @@ let alertsTimer: ReturnType<typeof setInterval> | null = null
 
 const activeAlerts = computed(() => alerts.value.filter(a => a.status === 'active'))
 
+/** 顶部那三个过滤条件（全部 / 未提醒 / 已提醒） */
+const alertFilter = ref<'all' | 'active' | 'done'>('all')
+const filteredAlerts = computed(() => {
+  const f = alertFilter.value
+  if (f === 'all') return alerts.value
+  return alerts.value.filter(a => (f === 'active') === (a.status === 'active'))
+})
+
 async function loadAlerts(): Promise<void> {
   alertsBusy.value = true
   try {
@@ -433,17 +441,33 @@ function pctClass(v: number): string {
         </div>
       </div>
 
-      <p class="meta-line">
-        在 K 线上点一条线 → 「上穿 / 下穿提醒」。判定在服务器，网页关掉也会响
-        （App 推送 + Telegram）；点一行去看那个币的 K 线。
-      </p>
+      <!-- 顶部过滤条件（用户 2026-10-17：「顶部添过滤条件」） -->
+      <div class="seg al-filter">
+        <button type="button" :class="{active: alertFilter === 'all'}" @click="alertFilter = 'all'">
+          全部 <span class="tag">{{ alerts.length }}</span>
+        </button>
+        <button
+          type="button"
+          :class="{active: alertFilter === 'active'}"
+          @click="alertFilter = 'active'"
+        >
+          未提醒 <span class="tag">{{ activeAlerts.length }}</span>
+        </button>
+        <button
+          type="button"
+          :class="{active: alertFilter === 'done'}"
+          @click="alertFilter = 'done'"
+        >
+          已提醒 <span class="tag">{{ alerts.length - activeAlerts.length }}</span>
+        </button>
+      </div>
 
-      <p v-if="!alerts.length" class="dim">
-        还没有提醒 —— 到 K 线图上画一条线，点它一下就能加。
+      <p v-if="!filteredAlerts.length" class="dim">
+        {{ alerts.length ? '这个筛选下没有提醒。' : '还没有提醒 —— 到 K 线图上画一条线，点它一下就能加。' }}
       </p>
 
       <div v-else class="tbl-wrap">
-        <table class="pick-table">
+        <table class="pick-table al-table">
           <thead>
             <tr>
               <th>币种</th>
@@ -455,32 +479,69 @@ function pctClass(v: number): string {
           </thead>
           <tbody>
             <tr
-              v-for="a in alerts"
+              v-for="a in filteredAlerts"
               :key="a.id"
               :title="`${a.symbol} · 看 K 线`"
               @click="openKline(a.symbol)"
             >
               <td class="base">{{ a.symbol }}</td>
-              <td class="dim">{{ alertDir(a) }}</td>
-              <td class="r num">{{ alertPrice(a.price) }}</td>
-              <td class="r">
-                <span v-if="a.status === 'active'" class="al-on">盯着</span>
-                <span v-else class="al-done">
-                  已触发 {{ alertPrice(a.triggeredPrice) }}
-                  <span class="dim">{{ a.triggeredAt ? bjTime(a.triggeredAt).slice(5) : '' }}</span>
+              <!-- 方向也用图标（上穿 ↗ / 下穿 ↘），窄屏才塞得下 -->
+              <td>
+                <span class="al-dir" :title="alertDir(a)">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path v-if="a.op === 'above'" d="M6 18 18 6M18 6h-7M18 6v7" />
+                    <path v-else d="M6 6l12 12M18 18h-7M18 18v-7" />
+                  </svg>
                 </span>
               </td>
+              <td class="r num">{{ alertPrice(a.price) }}</td>
+              <!-- 状态只用图标（用户 2026-10-17：「状态用图标，已提醒未提醒」） -->
+              <td class="r">
+                <span
+                  v-if="a.status === 'active'"
+                  class="al-ico on"
+                  :title="`未提醒（在盯 ${alertPrice(a.price)}）`"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 16V11a6 6 0 0 1 12 0v5l1.6 2H4.4L6 16Z" />
+                    <path d="M10 20.5h4" />
+                  </svg>
+                </span>
+                <span
+                  v-else
+                  class="al-ico done"
+                  :title="`已提醒 ${alertPrice(a.triggeredPrice)}${
+                    a.triggeredAt ? ' · ' + bjTime(a.triggeredAt).slice(5) : ''
+                  }`"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 12.5 10 17.5 19.5 7" />
+                  </svg>
+                </span>
+              </td>
+              <!-- 动作也只用图标：重新盯 / 删除 -->
               <td class="al-acts">
                 <button
                   v-if="a.status === 'triggered'"
-                  class="ghost tiny"
-                  title="这条再挂回去，等下一穿"
+                  class="al-btn"
+                  title="重新盯（再挂回去等下一穿）"
+                  aria-label="重新盯"
                   @click.stop="armAlert(a.id)"
                 >
-                  重新盯
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20 12a8 8 0 1 1-2.4-5.7" />
+                    <path d="M20 4.5V10h-5.5" />
+                  </svg>
                 </button>
-                <button class="ghost tiny" title="删掉这条提醒" @click.stop="dropAlert(a.id)">
-                  删
+                <button
+                  class="al-btn del"
+                  title="删掉这条提醒"
+                  aria-label="删除"
+                  @click.stop="dropAlert(a.id)"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 7h16M9.5 7V4.8h5V7M6.5 7l.9 13h9.2l.9-13" />
+                  </svg>
                 </button>
               </td>
             </tr>
@@ -1060,22 +1121,99 @@ function pctClass(v: number): string {
   font-variant-numeric: tabular-nums;
 }
 
-/* 提醒那一格：状态两色 + 操作列贴右（点按钮不要顺带跳 K 线，见 `@click.stop`） */
-.al-on {
+/*
+ * 提醒那一格（2026-10-17 用户：「提示小字去掉，状态用图标，已提醒未提醒，
+ * 删除换图标，顶部添过滤条件」）—— 所以这里只有图标，没有文案。
+ */
+.al-filter {
+  margin-bottom: 10px;
+}
+
+/* 窄屏上五列要塞得下：这表格的内边距比通用那张再小一号 */
+.al-table th,
+.al-table td {
+  padding: 9px 6px;
+}
+.al-table .base {
+  white-space: nowrap;
+}
+.al-dir {
+  display: inline-flex;
+  color: var(--muted);
+}
+.al-dir svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.al-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+}
+.al-ico svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* 未提醒 = 蓝色铃铛；已提醒 = 绿色勾 */
+.al-ico.on {
   color: var(--blue);
+  background: var(--blue-soft);
 }
-.al-done {
+.al-ico.done {
   color: var(--ok);
-  font-variant-numeric: tabular-nums;
 }
+
 .pick-table .al-acts {
   width: 1%;
   padding-left: 0;
   white-space: nowrap;
   text-align: right;
 }
-.pick-table .al-acts button {
+.al-btn {
+  width: 26px;
+  height: 24px;
   margin-left: 4px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.al-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.al-btn.del {
+  color: var(--bad);
+}
+@media (hover: hover) {
+  .al-btn:hover {
+    color: var(--text);
+    border-color: var(--blue);
+    filter: none;
+  }
 }
 
 .up {

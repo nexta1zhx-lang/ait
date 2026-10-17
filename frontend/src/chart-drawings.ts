@@ -40,11 +40,26 @@ export interface DrawingItem {
   /** 趋势线 / 矩形的两个端点 */
   a?: DrawPoint
   b?: DrawPoint
+  /** 颜色（`#rrggbb`）。不填 = 默认蓝（老数据就是没这一项） */
+  color?: string
+  /** 挂在这条线上的提醒（用户 2026-10-17：「已经有提醒点击就取消」） */
+  alertId?: number
+  /** 那条提醒的方向，画铃铛时不用再去查 */
+  alertOp?: 'above' | 'below'
 }
 
 /** 画的时候要用的形状：坐标已经算好，或者由调用方现算 */
 export type DrawShape =
-  | {id: string; kind: 'hline'; price: number; color: string; axis?: string}
+  | {
+      id: string
+      kind: 'hline'
+      price: number
+      color: string
+      /** 线右端那枚价标签 */
+      axis?: string
+      /** 挂着还在等的提醒 ⇒ 价标签左边画个铃铛 */
+      alert?: boolean
+    }
   | {id: string; kind: 'trend'; a: DrawPoint; b: DrawPoint; color: string}
   | {id: string; kind: 'rect'; a: DrawPoint; b: DrawPoint; color: string}
 
@@ -100,22 +115,25 @@ export function createDrawings(): DrawingsApi {
           ctx.lineTo(w, yy)
           ctx.stroke()
           /*
-           * 线右端那枚小标签（价 + 有提醒时的铃铛）。
+           * 线右端那枚小标签（价；挂着提醒时左边多一个小铃铛）。
            * ⚠️ 不用 `priceAxisViews()` 挂到价格轴上：那层的字是库按刻度自己排的，
            *    实测会被刻度文字压住看不见（而且位置只差几像素就更糟）。画在画布右端最稳。
            */
           if (it.axis) {
             const padX = 4
             const h = 13
+            const bellW = it.alert ? 11 : 0
             ctx.font = '10px var(--mono, monospace)'
             const tw = ctx.measureText(it.axis).width
-            const bx = w - tw - padX * 2 - 2
+            const bw = tw + padX * 2 + bellW
+            const bx = w - bw - 2
             const by = yy - h / 2
             ctx.fillStyle = 'rgba(12,16,22,0.78)'
-            ctx.fillRect(bx, by, tw + padX * 2, h)
+            ctx.fillRect(bx, by, bw, h)
             ctx.fillStyle = it.color
+            if (it.alert) drawBell(ctx, bx + 6.5, yy, it.color)
             ctx.textBaseline = 'middle'
-            ctx.fillText(it.axis, bx + padX, yy)
+            ctx.fillText(it.axis, bx + padX + bellW, yy)
           }
         } else {
           const x1 = xOf(it.a.t)
@@ -198,6 +216,47 @@ export function createDrawings(): DrawingsApi {
       refs = null
     }
   }
+}
+
+/**
+ * 价标签左边那枚**小铃铛**（用户 2026-10-17：「提醒图标换个 svg 那种简单的」）。
+ *
+ * 不用 emoji（🔔）：画布上它跟轴上的字不是一套字形，深浅也不受控。这里手画一个
+ * 线稿铃铛 —— 跟界面里那些 SVG 图标一个味道，颜色跟着线的颜色走。
+ */
+function drawBell(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  color: string
+): void {
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = 1
+  ctx.lineJoin = 'round'
+  ctx.beginPath()
+  /* 钟体：肩 → 腰 → 底 */
+  ctx.moveTo(cx - 3.1, cy + 1.9)
+  ctx.lineTo(cx - 3.1, cy - 0.4)
+  ctx.quadraticCurveTo(cx - 3.1, cy - 3.6, cx, cy - 3.6)
+  ctx.quadraticCurveTo(cx + 3.1, cy - 3.6, cx + 3.1, cy - 0.4)
+  ctx.lineTo(cx + 3.1, cy + 1.9)
+  ctx.stroke()
+  /* 底座那条横线 */
+  ctx.beginPath()
+  ctx.moveTo(cx - 4, cy + 1.9)
+  ctx.lineTo(cx + 4, cy + 1.9)
+  ctx.stroke()
+  /* 小锤 */
+  ctx.beginPath()
+  ctx.arc(cx, cy + 3.3, 0.9, 0, Math.PI * 2)
+  ctx.fill()
+  /* 顶上的小提手 */
+  ctx.beginPath()
+  ctx.arc(cx, cy - 3.6, 0.7, Math.PI, 0)
+  ctx.stroke()
+  ctx.restore()
 }
 
 /** `#rrggbb` → `rgba(...,a)`（矩形要半透明填充） */

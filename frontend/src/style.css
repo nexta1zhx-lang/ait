@@ -4399,82 +4399,105 @@ body.fixed-viewport .split {
 /*
  * ---------------- K 线画线（2026-10-17） ----------------
  *
- * 用户 2026-10-17：「改为划线模式，点击 k 线顶部出现常用的 k 线画图线」
- * 「新增显示隐藏划线的功能」「a 和 l 放在坐标轴右下对角那里」
- * 「点击画的线可以添加超过该线提醒」。
+ * 用户 2026-10-17 定的那一版：
+ *   · 「编辑图标放在底部」「隐藏放在底部常驻用图标」——两颗常驻在图下面那行；
+ *   · 「划线的线用图标表示」——三把工具都是图标（不写字）；
+ *   · 「只有编辑模式可以点击线，按住线可拖拽，可以自定义颜色」；
+ *   · 「提醒图标换个 svg 那种简单的」——铃铛是画布上手画的线稿（见 `chart-drawings.ts`）。
  */
 
-/* 周期行最右那颗笔（划线开关） */
-.chart-head .tk-draw {
-  flex: 0 0 auto;
-  width: 30px;
+/* 图下面那行（常驻：编辑 / 显示隐藏） */
+.draw-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+/*
+ * K 线区域**里面**的顶上那一排（只在编辑模式出现：三把工具 + 清空）。
+ * ⚠️ 用户 2026-10-17：「放在 k 线区域的顶部…**不占位置**」⇒ 绝对定位浮在图上，
+ *    靠右上角：左上是「开 / 高 / 低 / 收」那行图例，压过去就看不见了。
+ */
+.draw-top {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(12, 16, 22, 0.86);
+  backdrop-filter: blur(3px);
+}
+
+/* 两处共用的图标按钮 */
+.dt-ico {
+  width: 28px;
   height: 26px;
   padding: 0;
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
   color: var(--muted);
 }
-.chart-head .tk-draw svg {
+.dt-ico svg {
   width: 16px;
   height: 16px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.7;
+  stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.chart-head .tk-draw.on {
+/* 图标里那几个小圆点 / 方框用底色填，别变成实心坨 */
+.dt-ico svg circle,
+.dt-ico svg rect {
+  fill: var(--panel-2);
+}
+/* 打开着 / 正拿着的那把：染蓝（跟周期行那套 `.seg .active` 一个意思） */
+.dt-ico.on,
+.dt-ico.active {
   color: var(--blue);
   border-color: var(--accent-line);
   background: var(--blue-soft);
 }
-
-/* 画图工具条：图的上面一行（不压在画布上，见模板里那段说明） */
-.draw-bar {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-bottom: 6px;
-  padding: 5px 6px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-2);
-  overflow-x: auto;
+.dt-ico.on svg circle,
+.dt-ico.on svg rect,
+.dt-ico.active svg circle,
+.dt-ico.active svg rect {
+  fill: var(--blue-soft);
 }
-.draw-bar button {
-  flex: none;
-  padding: 3px 9px;
-  font-size: 11px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
+.dt-ico.off {
+  opacity: 0.55;
 }
-.draw-bar button.active {
-  background: var(--blue-soft);
-  color: var(--blue);
-  border-color: var(--accent-line);
-}
-.draw-bar button:disabled {
-  opacity: 0.45;
-}
-.draw-bar .draw-sep {
-  flex: none;
-  width: 1px;
-  height: 16px;
-  background: var(--border);
-  margin: 0 2px;
+.dt-ico:disabled {
+  opacity: 0.4;
 }
 @media (hover: hover) {
-  .draw-bar button:not(:disabled):hover {
+  .dt-ico:not(:disabled):hover {
     color: var(--text);
     border-color: var(--blue);
     filter: none;
   }
 }
 
-/* 画线时接管指针的透明层（跟 `.range-layer` 一个套路） */
+.draw-sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
+/* 画线 / 拖线时接管指针的透明层（跟 `.range-layer` 一个套路） */
 .draw-layer {
   position: absolute;
   inset: 0;
@@ -4484,8 +4507,8 @@ body.fixed-viewport .split {
 }
 
 /*
- * 点中一条线之后的小弹层。
- * ⚠️ 用 translate 让「点的那个位置」落在弹层**下边缘中间**：手指点的地方不被自己挡住。
+ * 点中一条线之后的面板：颜色一排 + 提醒 / 删除。
+ * `translate(-50%, 10px)` 让手指点的地方落在面板**上边中间**，不被自己挡住。
  */
 .draw-pop {
   position: absolute;
@@ -4493,22 +4516,55 @@ body.fixed-viewport .split {
   transform: translate(-50%, 10px);
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 108px;
-  padding: 6px;
+  gap: 5px;
+  min-width: 148px;
+  padding: 7px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(12, 16, 22, 0.94);
+  border-radius: 9px;
+  background: rgba(12, 16, 22, 0.95);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
 }
-.draw-pop .dp-price {
-  padding: 1px 6px 3px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--blue);
-  font-variant-numeric: tabular-nums;
+
+/* 自定义颜色那一格：原生取色器藏在圆点后面（点圆点就开系统取色盘） */
+.draw-pop .dp-colors {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.draw-pop .dp-swatch {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  overflow: hidden;
+}
+.draw-pop .dp-swatch.sel {
+  border-color: var(--text);
+}
+.draw-pop .dp-custom {
+  background: conic-gradient(#e35561, #f5c451, #5eba89, #58a6ff, #c084fc, #e35561);
+}
+.draw-pop .dp-custom input {
+  position: absolute;
+  inset: -6px;
+  width: 200%;
+  height: 200%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.draw-pop .dp-row {
+  display: flex;
+  gap: 4px;
 }
 .draw-pop button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 5px 8px;
   font-size: 12px;
   text-align: left;
@@ -4516,6 +4572,21 @@ body.fixed-viewport .split {
   border-radius: 5px;
   background: transparent;
   color: var(--text);
+  white-space: nowrap;
+}
+.draw-pop button svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* 「取消提醒」那颗：已经在盯了，用蓝色（跟线上的铃铛同一个语义） */
+.draw-pop button.dp-on {
+  color: var(--blue);
 }
 .draw-pop button.dp-del {
   color: var(--bad);
