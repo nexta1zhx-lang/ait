@@ -768,14 +768,17 @@ function sameLevels(a: Levels, b: Levels): boolean {
  *      之后又定了线的样式（2026-10-06 晚）：
  *        · 当前价格 —— **淡白色虚线**、贴 y 轴（就是蜡烛系列自带那条 last price 线）
  *        · 仓位     —— **多绿 / 空红、实线**，左侧标签显示**盈利价值**
- *        · 挂单     —— **多绿 / 空红虚线**，左侧标签显示**止损 / 止盈 + 预计收益 + 数量%**
+ *        · 挂单     —— **止损红 / 止盈绿虚线**（加仓那种普通委托才按多空分绿红），
+ *                      左侧标签显示**止损 / 止盈 + 预计收益 + 数量%**
  *
  * 四样**各画各的**，跟上面「压力 / 支撑」那两条线**分开存** ——
  * 那两条是「按可见窗口现算」的、跟着平移每帧重画；这几条是账户数据，
  * **只在账户真的变了才变**（`orderLineList()` 现算一份，画线与左标签都按它来）。
  *
- * 颜色：仓位 / 挂单**按多空分绿红**（用户点名要的），跟蜡烛同一对绿红 ——
- * 靠**线型**分开（仓位实线、挂单虚线、强平红虚线）；强平的红比仓位那根更扎眼。
+ * 颜色：仓位**按多空分绿红**（用户点名要的），跟蜡烛同一对绿红；
+ * 挂单按**性质**分（止损红 / 止盈绿，2026-10-19 用户：「仓位止损线应该是红色」），
+ * 只有加仓那种普通委托才按多空分绿红 —— 靠**线型**分开
+ * （仓位实线、挂单虚线、强平红虚线）；强平的红比仓位那根更扎眼。
  *
  * 2026-10-07 又一版（用户：「止损止盈和仓位的价格都放坐标轴上颜色要对应层级最低
  * 1.仓位拖动时，原有的仓位不动，只是多条虚线去拉 方向和仓位价值不要加竖线
@@ -902,6 +905,22 @@ function orderKind(o: TradeOpenOrder): 'stop' | 'profit' | 'plain' {
   if (t.includes('TAKE_PROFIT')) return 'profit'
   if (t.includes('STOP')) return 'stop'
   return 'plain'
+}
+
+/**
+ * 图上一条挂单横线用什么颜色。
+ *
+ * 用户 2026-10-19：「k线中，仓位止损线应该是红色」——
+ * 以前一律按**单子的买卖方向**染（买绿 / 卖红），于是**空头的止损**（买单）
+ * 画成绿的，跟「止损 = 红线」的直觉拧着。改成按**单子性质**：
+ * 止损红 / 止盈绿（跟挂单页 `.o-ty.stop` / `.o-ty.profit` 同一个口径），
+ * 只有加仓那种普通委托才按多空分绿红。
+ */
+function orderLineColor(o: TradeOpenOrder): string {
+  const kind = orderKind(o)
+  if (kind === 'stop') return SIDE_COLOR.short
+  if (kind === 'profit') return SIDE_COLOR.long
+  return sideColor(o.side === 'buy' ? 'long' : 'short')
 }
 
 /**
@@ -1061,8 +1080,8 @@ function orderLineList(): OrderLine[] {
       const target = orderTargetPos(o)
       out.push({
         p: px,
-        /* 挂单：**多（买）绿、空（卖）红，虚线**（用户 2026-10-06） */
-        color: sideColor(o.side === 'buy' ? 'long' : 'short'),
+        /* 挂单：**止损红 / 止盈绿、虚线**（普通委托才按多空分绿红） */
+        color: orderLineColor(o),
         dashed: true,
         label: lab.label,
         labelColor: lab.color,
@@ -1737,7 +1756,14 @@ function drawDragPreview(): void {
     const cur = lastLines[dragLineIdx]
     if (cur) {
       const next = lastLines.slice()
-      next[dragLineIdx] = {...cur, price: px, dashed: true, axis: priceText(px)}
+      next[dragLineIdx] = {
+        ...cur,
+        price: px,
+        dashed: true,
+        axis: priceText(px),
+        /* 拖过现价就会从止盈变止损（反之亦然），线的颜色跟着变 */
+        color: isProfit ? SIDE_COLOR.long : SIDE_COLOR.short
+      }
       overlayLines.set(next)
     }
     /* ② 标签：原来那枚跟着走 + 文字换成新的（拖到哪、预计盈亏就是多少） */
@@ -1755,10 +1781,10 @@ function drawDragPreview(): void {
   }
 
   /* 仓位线：另起一条虚线 + 另起一枚标签（原线 / 原标签一根手指都不碰） */
-  /* 预览虚线：颜色按「平仓单的方向」走（多头的平仓单是卖单 = 红，跟挂单那套一致） */
+  /* 预览虚线：止盈绿 / 止损红（跟挂单那几条一个口径） */
   overlayLines.setPreview({
     price: px,
-    color: sideColor(long ? 'short' : 'long'),
+    color: isProfit ? SIDE_COLOR.long : SIDE_COLOR.short,
     dashed: true,
     axis: priceText(px)
   })
