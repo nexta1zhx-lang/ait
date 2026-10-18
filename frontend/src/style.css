@@ -4189,7 +4189,10 @@ body.fixed-viewport .split {
   color: inherit;
 }
 
-/* 涨跌色：跟行情条那颗大字同一个口径（24h 涨跌），两块看着才是同一个颜色 */
+/*
+ * 涨跌色：跟**最近一跳的方向**走（涨绿跌红，见 `paintTone`）——
+ * 24h 还在涨、但眼下在跌的时候，这颗价也要是红的（用户 2026-10-18）。
+ */
 .cur-label.up {
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 62%, transparent);
@@ -4325,29 +4328,6 @@ body.fixed-viewport .split {
 
 .ord-labels .olb.show-x .olb-x {
   display: block;
-}
-
-/*
- * 每条**能拖的线**外面那层透明命中条（用户 2026-10-18：「点击仓位线也可以实现拖动」）。
- * 线本身只有 1px，手指按不准 ⇒ 上下各撑 4.5px（共 9px）吃事件；
- * 其余区域 `pointer-events: none`，横向滚动 / 缩放照旧。
- */
-.line-hits {
-  position: absolute;
-  inset: 0;
-  z-index: 23;
-  pointer-events: none;
-}
-
-.line-hits .line-hit {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 9px;
-  margin-top: -4.5px;
-  pointer-events: auto;
-  cursor: ns-resize;
-  touch-action: none;
 }
 
 /* 标签整体可以点（露出 ✕）/ 可以拖 */
@@ -6190,8 +6170,13 @@ body.fixed-viewport .split {
 /*
  * 合约里一分钱都没有：把「0」标红（并挂一句「先去划转」的 title，见模板）。
  *（用户 2026-10-05：「我怎么开仓位」—— 光一个 0 看不出下一步该干嘛。）
+ *
+ * ⚠️ 类名是 `zero` **不是 `empty`**：全站 `.empty` 是「空态块」
+ *    （`font-size: 12px` + `padding: 22px 0` + 居中，见上面 `.empty`）——
+ *    挂到这颗数值上会把行高撑大、字号也被改掉，账户可用为 0 时这一格就明显变样
+ *    （用户 2026-10-18：「账户可用为 0 的时候字体变大了，还原一致」）。
  */
-.ord-read .ord-r b.empty {
+.ord-read .ord-r b.zero {
   color: var(--bad);
 }
 

@@ -376,6 +376,10 @@ function chartAt(at: string): string {
  */
 function goCoin(base: string, at: string, fallbackAt: string): void {
   prefetchSymbol(base)
+  /*
+   * ⚠️ 顺序不能反：`pickSymbol` 会清空 `chartFrom`（换币回到最近行情，见 analyze.ts），
+   *    所以「定在那一刻」必须写在它**后面** —— 只对这一次跳转生效。
+   */
   pickSymbol(base)
   const when = chartAt(at) || chartAt(fallbackAt)
   if (when) chartFrom.value = when

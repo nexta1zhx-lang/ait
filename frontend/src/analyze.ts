@@ -412,6 +412,17 @@ watch(leftTab, v => {
 /** 换币种：清掉上一只币的结论 */
 export function pickSymbol(v: string): void {
   symbol.value = v
+  /*
+   * ★ 换币就把「定在哪一刻」清掉，回到最近行情。
+   *
+   * `chartFrom` 是给**专家经验里点某个币**用的（跳过去看它被记下的那一刻，见
+   * `JournalView.goCoin`）—— 那是一次性的落点，不该在之后每次换币时继续生效。
+   * 不清的话：在专家经验里选过一次时间，之后切任何币都会停在那一段、还居中
+   * （用户 2026-10-18：「每次切换任何币种，都会显示在那个周的位置」）。
+   *
+   * ⚠️ `goCoin` 是「先 pickSymbol 再写 chartFrom」的顺序 —— 这里清掉不会影响那次跳转。
+   */
+  chartFrom.value = ''
   result.value = null
   steps.value = []
   error.value = ''

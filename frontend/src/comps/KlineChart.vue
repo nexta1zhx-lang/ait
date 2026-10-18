@@ -1420,7 +1420,6 @@ function renderOrdLabels(lines: OrderLine[]): void {
     if (item.el.title !== lv.labelTitle) item.el.title = lv.labelTitle
   }
   if (!sameShape) equalizeLabelWidth()
-  rebuildLineHits()
   positionOrdLabels()
 }
 
@@ -1448,60 +1447,6 @@ function equalizeLabelWidth(): void {
     it.el.style.minWidth = it.parts.length > 1 ? `${max}px` : ''
 }
 
-/* ---------------- 直接按住「线」也能拖 ----------------
- *
- * 用户 2026-10-18：「点击仓位线也可以实现拖动」—— 以前只有左边那枚标签能拖，
- * 手指得先找到标签；线本身只有 1px，按不准。
- * 做法：每条**能拖**的线盖一条 9px 高的透明命中条（只在上下 4.5px 内吃事件，
- * 不吃横向滚动 / 缩放 —— 其余地方照旧交给图）。
- */
-const lineHitHost = ref<HTMLElement | null>(null)
-let lineHits: {idx: number; el: HTMLElement}[] = []
-
-/** 命中条的条数 / 指向变了就重建（每次 `renderOrdLabels` 末尾调） */
-function rebuildLineHits(): void {
-  const host = lineHitHost.value
-  if (!host) return
-  const want = ordLabels.filter(it => it.drag).map(it => it.lineIdx)
-  const same =
-    want.length === lineHits.length && want.every((v, i) => lineHits[i]!.idx === v)
-  if (same) return
-  host.innerHTML = ''
-  lineHits = []
-  for (let k = 0; k < ordLabels.length; k++) {
-    const item = ordLabels[k]!
-    if (!item.drag) continue
-    const el = document.createElement('div')
-    el.className = 'line-hit'
-    el.title = '按住上下拖：仓位线拖出止盈/止损，挂单线拖动=改单'
-    el.addEventListener('pointerdown', e => ordLabelDown(e, k))
-    el.addEventListener('pointermove', ordLabelMove)
-    el.addEventListener('pointerup', ordLabelUp)
-    el.addEventListener('pointercancel', ordLabelCancel)
-    host.appendChild(el)
-    lineHits.push({idx: item.lineIdx, el})
-  }
-}
-
-/** 命中条跟着线的 y 走（跟标签同一个价、同一次重排里摆） */
-function positionLineHits(): void {
-  if (!refs || !lineHits.length) return
-  for (const h of lineHits) {
-    const item = ordLabels.find(it => it.lineIdx === h.idx)
-    if (!item) {
-      h.el.style.display = 'none'
-      continue
-    }
-    const y = refs.candle.priceToCoordinate(item.price)
-    if (y === null || y === undefined || !Number.isFinite(y)) {
-      h.el.style.display = 'none'
-      continue
-    }
-    h.el.style.display = ''
-    h.el.style.top = `${y}px`
-  }
-}
-
 /** 平移 / 缩放 / 价格轴动过之后，把左侧标签摆到对应的 y 上 */
 function positionOrdLabels(): void {
   if (!refs) return
@@ -1514,7 +1459,6 @@ function positionOrdLabels(): void {
     item.el.style.display = ''
     item.el.style.top = y + 'px'
   }
-  positionLineHits()
   positionDragPreview()
 }
 
@@ -2088,6 +2032,13 @@ function scheduleOverlayPull(): void {
 /**
  * 关掉某一样时得**立刻**把它从图上抹掉（不然要等下一次数据到达才消失），
  * 所以四个开关任一变化都重画一遍，并按需要补拉数据。
+ *
+ * ⚠️ 这里必须把「15 秒切页窗口」清掉（`lastPullAt = 0`）：
+ *    ① 四样全关会走 `clearTradeOverlay()`，`overlaySymbol` 被清空、持仓订阅也解绑；
+ *       若 15 秒内又勾回来，`pullOverlay()` 会被窗口直接挡回 ——
+ *       图上一直空白（用户 2026-10-18：「配置里勾选仓位 / 强平，显示不对」）。
+ *    ② 刚进页面就打开「订单历史 / 仓位委托」，也会被进页面那一发占住的窗口挡住。
+ *    这两种情况都没有后续触发点，不主动清窗口就会一直不显示。
  */
 watch(
   [chartShowPosition, chartShowLiq, chartShowOrders, chartShowHistory],
@@ -2095,6 +2046,8 @@ watch(
     if (!overlayEnabled()) clearTradeOverlay()
     renderOrderLines()
     syncOrphanTimer()
+    /* 开关 = 人明确要看 / 不看，不受「切页回来 15 秒内不重拉」那条限制 */
+    lastPullAt = 0
     void pullOverlay()
   }
 )
@@ -2388,20 +2341,52 @@ function renderCurLabel(): void {
  * 跟行情条那颗大字**同一个口径**（24h 涨跌），两边看起来才是同一个颜色；
  * 拿不到 24h 就退回「这根 K 线的方向」（收 ≥ 开 = 涨）。
  */
+/**
+ * 右轴现价框的涨跌色 —— 跟的是**最近一跳的方向**（涨绿跌红）。
+ *
+ * 用户 2026-10-18：「价格在跌，为什么还是绿色？应该是红色」——
+ * 24h 还是涨的、但眼下在跌的时候，右轴那颗价必须跟着**当下这一跳**变红。
+ * 还没收到过一跳（刚进页面 / 刚换币）才退回 24h 那颗大字的基色。
+ */
+const curTickDir = ref<'up' | 'down' | null>(null)
+let curTickPrev = 0
+/** 跟顶部大字同一个「现价」口径：优先 K 线 WS 的实时价，退回 1 秒行情 */
+const curLast = computed(() => freshLivePrice.value ?? ticker.value?.last ?? null)
+
+watch(curLast, v => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return
+  if (curTickPrev > 0 && n !== curTickPrev)
+    curTickDir.value = n > curTickPrev ? 'up' : 'down'
+  curTickPrev = n
+})
+
 function paintTone(): void {
   const el = curEl.value
   if (!el) return
-  const pct = ticker.value?.change24hPct
-  let up: boolean | null = null
-  if (pct !== null && pct !== undefined && Number.isFinite(Number(pct)))
-    up = Number(pct) >= 0
-  else {
-    const bar = candles[candles.length - 1]
-    if (bar) up = bar.close >= bar.open
+  let up: boolean | null =
+    curTickDir.value === null ? null : curTickDir.value === 'up'
+  if (up === null) {
+    const pct = ticker.value?.change24hPct
+    if (pct !== null && pct !== undefined && Number.isFinite(Number(pct)))
+      up = Number(pct) >= 0
   }
   el.classList.toggle('up', up === true)
   el.classList.toggle('down', up === false)
 }
+
+/* 涨跌翻转时立刻换色；不能只靠 `renderCurLabel()`（它只在重排时才跑） */
+watch(curTickDir, paintTone)
+watch(() => ticker.value?.change24hPct, paintTone)
+
+/* 换币后第一跳别拿上一个币的价格当基准 */
+watch(
+  () => props.symbol,
+  () => {
+    curTickPrev = 0
+    curTickDir.value = null
+  }
+)
 
 /**
  * 现价那**一小段**虚线：从最新那根 K 线的收盘价位置，一直画到右轴。
@@ -4752,8 +4737,6 @@ onBeforeUnmount(() => {
       </span>
       <span ref="cxTimeEl" class="cx-tag cx-time off"></span>
       <!-- 左侧标签：仓位的盈亏、挂单的止盈/止损 + 预计收益 + 数量% -->
-      <!-- 每条「能拖的线」的透明命中条（按住线就能拖，见 `rebuildLineHits`） -->
-      <div ref="lineHitHost" class="line-hits"></div>
       <div ref="ordLabelHost" class="ord-labels"></div>
       <div ref="infoEl" class="chart-info"></div>
 

@@ -1817,7 +1817,7 @@ onMounted(async () => {
                 "
               >
                 <em>账户可用</em>
-                <b :class="{empty: ready && available <= 0}"
+                <b :class="{zero: ready && available <= 0}"
                   >{{ availableText }}<i>USDT</i></b
                 >
               </span>
