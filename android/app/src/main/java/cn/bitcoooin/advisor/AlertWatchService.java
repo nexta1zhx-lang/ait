@@ -115,13 +115,18 @@ public class AlertWatchService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         /*
          * ⚠️ Android 14（API 34）起：`startForeground` 必须声明类型，
-         *    而且 Manifest 里要有对应的 `FOREGROUND_SERVICE_DATA_SYNC` 权限 ——
+         *    而且 Manifest 里要有对应的 `FOREGROUND_SERVICE_*` 权限 ——
          *    少一样就是 `MissingForegroundServiceTypeException` 直接崩。
-         *    我们干的活就是"周期性同步数据"，用 DATA_SYNC 最贴切。
+         *
+         * ★ 2026-10-18：类型从 **dataSync 改成 specialUse**。
+         *   targetSdk 36 ⇒ Android 15+ 给 dataSync 前台服务设了「24 小时累计 6 小时」上限，
+         *   到点会抛 `ForegroundServiceDidNotStopInTimeException` **把整个 App 崩掉**
+         *   （实测 App 跑了 6h02m 后崩溃，用户看到的就是「后台放久了打不开 / 黑屏」）。
+         *   我们做的是自用提醒轮询，specialUse 不受这个上限限制。
          */
         Notification ongoing = ongoingNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(ONGOING_ID, ongoing, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            startForeground(ONGOING_ID, ongoing, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
             startForeground(ONGOING_ID, ongoing);
         }
@@ -131,6 +136,32 @@ public class AlertWatchService extends Service {
         }
         /* 被系统杀掉之后不要自动重启（不然用户在界面上"关掉"之后它可能又活过来） */
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Android 15+ 前台服务超时回调（某类服务的额度用完时，系统先给这段宽限再动手）。
+     *
+     * ⚠️ 不实现的话，宽限期一过系统直接抛
+     *    `ForegroundServiceDidNotStopInTimeException` **崩掉整个 App**
+     *    （2026-10-18 实测：dataSync 跑到 6h02m 就是这么崩的）。
+     *    现在服务已经是 specialUse、正常走不到这里；留着是兜底 ——
+     *    真被叫到就优雅停掉，最多提醒暂停，绝不让 App 崩。
+     */
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        stopFromTimeout();
+    }
+
+    @Override
+    public void onTimeout(int startId) {
+        stopFromTimeout();
+    }
+
+    private void stopFromTimeout() {
+        running = false;
+        if (handler != null && loop != null) handler.removeCallbacks(loop);
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
     }
 
     @Override

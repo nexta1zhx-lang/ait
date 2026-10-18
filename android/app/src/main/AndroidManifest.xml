@@ -27,11 +27,21 @@
         <!--
           App 后台提醒（2026-10-16）：没有谷歌服务的机器上 FCM 用不了，
           改成 App 自己跑一个前台服务轮询 + 发本地通知。见 AlertWatchService.java。
+
+          ⚠️ 类型必须是 specialUse，**不能是 dataSync**（2026-10-18 实测踩崩）：
+             targetSdk 36 ⇒ Android 15+ 对 dataSync 前台服务有「24 小时累计 6 小时」上限，
+             到点系统会抛 ForegroundServiceDidNotStopInTimeException 把整个 App 崩掉
+             （实测正好 6h02m 后崩溃，表现为「后台放久了打不开 / 黑屏」）。
+             specialUse 不受这个上限约束；本 App 自用分发，不需要过 Google Play 的类型审核。
         -->
         <service
             android:name=".AlertWatchService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Polling the user's own trading alerts in the background; no push service is available on this device" />
+        </service>
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -51,7 +61,8 @@
     <!-- App 后台提醒 -->
     <!-- 前台服务：必须自己声明类型；Android 14+ 起还要对应的 FOREGROUND_SERVICE_* 权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 后台提醒用 specialUse（dataSync 会被 Android 15+ 的 6 小时上限崩掉，见上面 service 的注释） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Android 13+ 的通知权限：**不申请的话通知会被静默丢掉**（代码不报错、用户看不到） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 重启后能自己接着盯（可选，但没它的话重启就得手动开一次） -->
