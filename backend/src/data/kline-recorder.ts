@@ -240,6 +240,16 @@ interface Agg {
   partial: boolean
   /** 下一根该来的 1m 开盘时间（对不上就是漏了分钟） */
   nextMs: number
+  /**
+   * 这个桶里**吃到过真有成交的 1m** 没有（2026-10-18 加）。
+   *
+   * 币安对「这一分钟没有成交」也会给一根 k 线，但那根是 `O=H=L=C=上一根收盘` 的
+   * **占位**（`v=0`、`n=0`），不是成交价。把它并进高周期的高低点，就会做出
+   * 「5m 的最高价比它自己某一分钟还低」这种不可能的数据（实测近 3 天 387 个桶对不上
+   * 交易所，只吃有成交的分钟之后只剩 16 个）。
+   * 所以：占位分钟**只推进 `nextMs`**，不参与 OHLC / 量；整桶一根成交都没有就不落库。
+   */
+  traded: boolean
   open: number
   high: number
   low: number
@@ -602,8 +612,10 @@ export async function currentBar(
   /*
    * 累加器可用（这个桶的、且没缺过分钟）⇒ 直接用它 + 活的这根 1m（0 I/O）。
    */
+  /* 活的那根没成交（`v=0`）= 占位，只推进时间、不并进 OHLC（见 `Agg.traded`） */
+  const liveTraded = live.volume > 0
   if (agg && agg.bucket === bucket && !agg.partial) {
-    const mergeLive = live.openTime >= agg.nextMs
+    const mergeLive = liveTraded && live.openTime >= agg.nextMs
     return {
       timestamp: bucket,
       open: agg.open,
@@ -627,10 +639,10 @@ export async function currentBar(
       return {
         timestamp: bucket,
         open: fromDb.open,
-        high: Math.max(fromDb.high, live.high),
-        low: Math.min(fromDb.low, live.low),
-        close: live.close,
-        volume: fromDb.volume + live.volume
+        high: liveTraded ? Math.max(fromDb.high, live.high) : fromDb.high,
+        low: liveTraded ? Math.min(fromDb.low, live.low) : fromDb.low,
+        close: liveTraded ? live.close : fromDb.close,
+        volume: fromDb.volume + (liveTraded ? live.volume : 0)
       }
     }
   }
@@ -662,6 +674,8 @@ function push(
  *    ③ 巡检/续灌（`repairSweep` / `seedHistory`）兜底。
  */
 function rollup(st: SymState, openTime: number, bar: Bar): void {
+  /* 这一分钟有没有真成交（`v=0` 的那根是占位，见 `Agg.traded`） */
+  const traded = bar.volume > 0
   for (const it of HIGH_INTERVALS) {
     const ms = MS[it]
     const bucket = Math.floor(openTime / ms) * ms
@@ -676,22 +690,43 @@ function rollup(st: SymState, openTime: number, bar: Bar): void {
         bucket,
         partial: openTime !== bucket,
         nextMs: openTime + MIN_MS,
-        ...bar
+        traded,
+        // 占位分钟先当占位存着，等第一根真成交进来再整体换掉（见下面 `!agg.traded`）
+        ...bar,
+        ...(traded ? {} : {volume: 0, quoteVolume: 0, trades: 0, takerBuyVolume: 0})
       })
       continue
     }
     if (openTime !== agg.nextMs) agg.partial = true
     agg.nextMs = openTime + MIN_MS
-    agg.high = Math.max(agg.high, bar.high)
-    agg.low = Math.min(agg.low, bar.low)
-    agg.close = bar.close
-    agg.volume += bar.volume
-    agg.quoteVolume += bar.quoteVolume
-    agg.trades += bar.trades
-    agg.takerBuyVolume += bar.takerBuyVolume
+    if (traded) {
+      /* 桶里第一根真成交 ⇒ 之前的占位值整体作废，从这根起算 */
+      if (!agg.traded) {
+        agg.open = bar.open
+        agg.high = bar.high
+        agg.low = bar.low
+        agg.close = bar.close
+        agg.volume = bar.volume
+        agg.quoteVolume = bar.quoteVolume
+        agg.trades = bar.trades
+        agg.takerBuyVolume = bar.takerBuyVolume
+        agg.traded = true
+      } else {
+        agg.high = Math.max(agg.high, bar.high)
+        agg.low = Math.min(agg.low, bar.low)
+        agg.close = bar.close
+        agg.volume += bar.volume
+        agg.quoteVolume += bar.quoteVolume
+        agg.trades += bar.trades
+        agg.takerBuyVolume += bar.takerBuyVolume
+      }
+    }
     if (agg.bucket + ms <= openTime + MIN_MS) {
       if (agg.partial) {
         /* 残桶：不写（见 Agg.partial 的说明），启动那一段由 seed 的 REST 数据兜底 */
+        stats.partialAggs++
+      } else if (!agg.traded) {
+        /* 整个桶一根成交都没有 ⇒ 不写：占位值写进去就是一条假 K 线 */
         stats.partialAggs++
       } else {
         flushAgg(st, it, agg)
@@ -800,6 +835,9 @@ async function hydrateAggs(): Promise<void> {
         partial: missing,
         /* 下一根该来的 1m 接着库里最晚那根往下数 ⇒ 实时流一对接就知道有没有漏分钟 */
         nextMs: r.lastMs + MIN_MS,
+        /* 库里那几根 1m 里至少有一根真有成交（`sum1mInBucket` 的 OHLC 只吃 v>0）
+           ⇒ 这个桶的起点是有效值 */
+        traded: Number.isFinite(r.open),
         open: r.open,
         high: r.high,
         low: r.low,

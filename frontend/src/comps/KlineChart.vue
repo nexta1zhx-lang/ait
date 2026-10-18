@@ -19,7 +19,7 @@ import {
 import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
-import {freshLivePrice, livePrice, setLivePrice} from '../ticker'
+import {freshLivePrice, livePrice, nowTick, setLivePrice} from '../ticker'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
   chartDrawSnap,
@@ -340,6 +340,9 @@ const deltaEl = ref<HTMLElement | null>(null)
 const cxValEl = ref<HTMLElement | null>(null)
 /** 右轴上那枚「现价」标签（自己画的，见 `renderCurLabel`） */
 const curEl = ref<HTMLElement | null>(null)
+/** 现价框里的两行：上面价格、下面「距收线」（用户 2026-10-18：「价格和倒计时在一个框」） */
+const curPriceEl = ref<HTMLElement | null>(null)
+const curCloseEl = ref<HTMLElement | null>(null)
 /** 十字光标的两枚轴标签（价格 / 时间，自己画的，见 `paintCrosshairTags`） */
 const cxPriceEl = ref<HTMLElement | null>(null)
 const cxTimeEl = ref<HTMLElement | null>(null)
@@ -2262,12 +2265,46 @@ function renderCurLabel(): void {
     y === null || y === undefined || !Number.isFinite(y) || y < 0 || y > paneH
   el.classList.toggle('off', off)
   if (off) return
-  el.style.top = `${y}px`
+  /*
+   * 框里现在是**两行**（价格 / 距收线）——
+   * 让**价格那行**正对现价：整框垂直居中的话价格会被推高一截，
+   * 所以 top 往下补「第二行高度的一半」（框整体被 `translateY(-50%)` 居中）。
+   */
+  const secondH = curCloseEl.value?.offsetHeight ?? 0
+  el.style.top = `${y + secondH / 2}px`
   const axisW = axisWidth()
   el.style.width = axisW ? `${axisW}px` : ''
   /* 位数字跟右轴刻度同一套（`priceText` 就是图的 `priceFormatter`），别自己另定精度 */
   const text = priceText(price)
+  if (curPriceEl.value && curPriceEl.value.textContent !== text)
+    curPriceEl.value.textContent = text
+  renderCloseLine()
+}
+
+/** 「距收线」还剩多久：周期跟图上走，1 小时以上才带小时位 */
+function closeText(): string {
+  const ms = TF_MS[props.timeframe] ?? 3_600_000
+  const sec = Math.max(0, Math.ceil((ms - (nowTick.value % ms)) / 1000))
+  const hh = Math.floor(sec / 3600)
+  const mm = String(Math.floor((sec % 3600) / 60)).padStart(2, '0')
+  const ss = String(sec % 60).padStart(2, '0')
+  return `${props.timeframe} ${hh ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`}`
+}
+
+/** 第二行：「1h 05:02」（周期 + 距收线剩余） */
+function renderCloseLine(): void {
+  const el = curCloseEl.value
+  if (!el) return
+  const text = closeText()
   if (el.textContent !== text) el.textContent = text
+  /* 两个数字的宽度会变（`05:02` → `1:05:02`）⇒ 重新对齐一次价格行 */
+  const box = curEl.value
+  if (box && !box.classList.contains('off')) {
+    const price = candles.length ? candles[candles.length - 1]!.close : NaN
+    const y = refs && Number.isFinite(price) ? refs.candle.priceToCoordinate(price) : null
+    if (y !== null && y !== undefined && Number.isFinite(y))
+      box.style.top = `${y + (el.offsetHeight || 0) / 2}px`
+  }
 }
 
 /* ---------------- 左上角信息栏 ---------------- */
@@ -4213,6 +4250,9 @@ watch(() => props.active, syncAlertPoll, {immediate: true})
 watch(klineAlerts, syncAlertLinks)
 watch(chartShowDraw, renderDrawings)
 watch(() => props.timeframe, load)
+
+/* 收线倒计时每秒走一格；顺带把位置贴回现价（价格在两秒之间也会动） */
+watch(nowTick, () => renderCloseLine())
 watch(() => props.from, load)
 // 进 / 出测试模式都要重画：右端从「现在」换成那一刻，或换回来
 watch(() => props.until, load)
@@ -4536,7 +4576,14 @@ onBeforeUnmount(() => {
       </div>
       <div ref="levelHost" class="level-labels"></div>
       <!-- 右轴上的「现价」标签：库那枚关掉了（改不了底色 / 边框），自己画一个 -->
-      <span ref="curEl" class="cur-label off"></span>
+      <!--
+        右轴现价框：**上面价格、下面距收线**（用户 2026-10-18：「直接显示倒计时和
+        价格在一个框」）。两行同一个框，价格那行仍正对现价（见 `renderCurLabel`）。
+      -->
+      <span ref="curEl" class="cur-label off">
+        <b ref="curPriceEl" class="cl-p"></b>
+        <i ref="curCloseEl" class="cl-c"></i>
+      </span>
       <!--
         十字光标的轴标签（自己画的，见 `paintCrosshairTags`）：
         价格那枚里**装两行** —— 上面「离现价的百分比」、下面「触碰到的价」，

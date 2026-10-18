@@ -565,6 +565,13 @@ export async function sumClosed1m(
     close: number | null
     volume: number | null
   }>(
+    /*
+     * ⚠️ `volume > 0` 不是在偷懒：币安**没有成交的那一分钟**也会给一根 k 线，
+     *    但那根是 `O=H=L=C=上一根收盘` 的占位（`v=0`、`n=0`），不是成交价。
+     *    把它并进高周期的高低点，就会得到「5m 的高点比它自己某一分钟还低」这种
+     *    不可能的数据（2026-10-18 实测：近 3 天 387 个桶对不上交易所，滤掉这类占位后
+     *    只剩 16 个）。高周期一律只吃**真有成交**的分钟。
+     */
     `SELECT (array_agg(open  ORDER BY open_time ASC ))[1] AS open,
             max(high) AS high,
             min(low)  AS low,
@@ -572,7 +579,7 @@ export async function sumClosed1m(
             sum(volume) AS volume
        FROM candles
       WHERE exchange = $1 AND market_type = $2 AND symbol = $3 AND interval = '1m'
-        AND open_time >= $4 AND open_time < $5`,
+        AND open_time >= $4 AND open_time < $5 AND volume > 0`,
     [scope.exchange, scope.marketType, symbol, new Date(from), new Date(to)]
   )
   if (!row || row.open === null || row.close === null) return null
@@ -750,18 +757,23 @@ export async function sum1mInBucket(a: {
     trades: number
     taker_buy_volume: number
   }>(
+    /*
+     * ⚠️ OHLC / 量只吃 `volume > 0` 的分钟（无成交那根是占位，见 `sumClosed1m` 的说明）；
+     *    `bars` 仍然数**全部**行 —— 它是用来判「这个桶中间有没有漏分钟」的，
+     *    占位根说明那一分钟**确实有帧**（不该算洞）。
+     */
     `SELECT symbol,
             (extract(epoch FROM min(open_time)) * 1000)::bigint AS first_ms,
             (extract(epoch FROM max(open_time)) * 1000)::bigint AS last_ms,
             count(*) AS bars,
-            (array_agg(open  ORDER BY open_time ASC))[1]  AS open,
-            max(high) AS high,
-            min(low)  AS low,
-            (array_agg(close ORDER BY open_time DESC))[1] AS close,
-            sum(volume) AS volume,
-            sum(quote_volume) AS quote_volume,
-            sum(trades) AS trades,
-            sum(taker_buy_volume) AS taker_buy_volume
+            (array_agg(open  ORDER BY open_time ASC)  FILTER (WHERE volume > 0))[1]  AS open,
+            max(high) FILTER (WHERE volume > 0) AS high,
+            min(low)  FILTER (WHERE volume > 0) AS low,
+            (array_agg(close ORDER BY open_time DESC) FILTER (WHERE volume > 0))[1] AS close,
+            sum(volume) FILTER (WHERE volume > 0) AS volume,
+            sum(quote_volume) FILTER (WHERE volume > 0) AS quote_volume,
+            sum(trades) FILTER (WHERE volume > 0) AS trades,
+            sum(taker_buy_volume) FILTER (WHERE volume > 0) AS taker_buy_volume
        FROM candles
       WHERE exchange = $4 AND market_type = $5 AND interval = '1m'
         AND symbol = ANY($1::text[])
@@ -826,6 +838,9 @@ export async function rollupFrom1m(
       WHERE exchange = $6 AND market_type = $7 AND interval = '1m' AND symbol = ANY($3::text[])
         AND open_time >= to_timestamp($4 / 1000.0)
         AND open_time <  to_timestamp($5 / 1000.0)
+        /* 无成交的那一分钟是「上一根收盘」的占位（v=0），并进去会把高低点做错
+           —— 见 sumClosed1m 的说明（2026-10-18 实测 387 → 16） */
+        AND volume > 0
       GROUP BY exchange, market_type, symbol, pair,
                floor(extract(epoch FROM open_time) * 1000 / $2)
      ${fillOnly ? INSERT_MISSING_ONLY : UPSERT}`,

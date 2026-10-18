@@ -83,7 +83,7 @@ function back(): void {
   <div class="login">
     <div class="card">
       <h1>开单分析</h1>
-      <p class="sub">登录后才能看自己的预测历史、知识库和模型配置</p>
+      <p class="sub">登录后才能看自己的预测历史、专家经验和 AI 助手</p>
 
       <!-- 第二关：两步验证 -->
       <form v-if="ticket" @submit.prevent="verify">

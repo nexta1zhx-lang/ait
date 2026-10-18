@@ -4138,12 +4138,39 @@ body.fixed-viewport .split {
   pointer-events: none;
 }
 
-/* 现价：贴右边缘、跟价格居中对齐（`top` / `width` 由 JS 给） */
+/*
+ * 现价：贴右边缘、跟价格居中对齐（`top` / `width` 由 JS 给）。
+ *
+ * ★ 2026-10-18 用户：「直接显示倒计时和价格在一个框」——
+ *   框里两行：上面价格（`.cl-p`）、下面「1h 05:02」（`.cl-c`）。
+ *   `top` 由 JS 补上第二行高度的一半，让**价格那一行**仍然正对现价。
+ */
 .cur-label {
   right: 0;
   top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
   transform: translateY(-50%);
 }
+
+.cur-label .cl-p {
+  display: block;
+  line-height: 15px;
+  font-weight: var(--fw-bold);
+}
+
+/* 第二行：距收线。小一号、淡一档，别跟价格抢 */
+.cur-label .cl-c {
+  display: block;
+  font-style: normal;
+  font-size: 9.5px;
+  line-height: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
 
 /* 十字光标的价格：同样贴右轴（`top` / `width` 由 JS 给） */
 /*
@@ -5030,6 +5057,7 @@ body.fixed-viewport .split {
   color: var(--muted);
   letter-spacing: 0.04em;
 }
+
 
 .tk-head .tk-range-track {
   position: relative;

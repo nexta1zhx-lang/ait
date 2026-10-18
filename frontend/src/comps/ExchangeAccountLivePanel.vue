@@ -1996,13 +1996,68 @@ function stopLastPrices(): void {
   unbindLastPrices = null
 }
 
+/**
+ * 重新拉一遍账户列表，让「隐藏」生效（用户 2026-10-18：「交易所账户页面没有根据
+ * 隐藏控制」）。
+ *
+ * ⚠️ 原来只在 `onMounted` 拉一次 —— 可这一页在「我的」里是**缓存**的（`v-show`），
+ *    在「个人信息 → 交易所」把某套点「隐藏」之后切回来，还是旧列表、tab 也还在。
+ *    所以每次**变成可见**都重拉一次（只读库、不打交易所，很便宜）。
+ *
+ * 列表真变了才动订阅：退掉已隐藏那套的流、清掉它的快照残影、必要时改回「全部」。
+ */
+async function syncKeys(): Promise<void> {
+  let next: ExchangeKey[] = []
+  try {
+    next = (await fetchExchangeKeys()).keys ?? []
+  } catch {
+    // 网络抖一下不该把已有列表清空（下一轮激活再试）
+    return
+  }
+  const before = keys.value.map(k => k.id).join(',')
+  const after = next.map(k => k.id).join(',')
+  keys.value = next
+  if (before === after) return
+  const alive = new Set(next.map(k => k.id))
+  for (const id of Object.keys(parts.value).map(Number))
+    if (!alive.has(id)) {
+      const p = {...parts.value}
+      delete p[id]
+      parts.value = p
+    }
+  for (const id of Object.keys(partReasons.value).map(Number))
+    if (!alive.has(id)) {
+      const r = {...partReasons.value}
+      delete r[id]
+      partReasons.value = r
+    }
+  // 选中的那套没了（被隐藏 / 删了）⇒ 回到「全部」；只剩一套时直接选它
+  if (
+    picked.value !== 'all' &&
+    !next.some(k => String(k.id) === picked.value)
+  )
+    picked.value = next.length > 1 ? 'all' : String(next[0]?.id ?? '')
+  rebuild()
+  /*
+   * ⚠️ 这里**不**调 `startWork()`：调用方（`watch(live)`）拿到结果后会自己开一次，
+   *    两次会在同一拍里重建两遍流和定时器。列表变了的话，那一次 `startWork()`
+   *    已经是按新列表建订阅了。
+   */
+}
+
 /*
  * ⚠️ `immediate` 用默认的 false —— 挂载那一刻由 `onMounted` 自己决定要不要开工，
  *    那时 `keys` 还没到，这里跑了也是空转。
  */
 watch(live, on => {
-  if (on) startWork()
-  else stopWork()
+  if (!on) return stopWork()
+  /*
+   * 每次回到这一页都对齐一次账户列表（隐藏 / 新增 / 删除可能是在别的页做的），
+   * 顺序不能反：先拿到新列表，`startWork()` 里的订阅才是按新列表建的。
+   */
+  void syncKeys().then(() => {
+    if (live.value) startWork()
+  })
 })
 
 onMounted(async () => {
