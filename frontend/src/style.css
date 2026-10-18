@@ -3815,6 +3815,56 @@ body.fixed-viewport .split {
 }
 
 /*
+ * 首屏骨架（图表建好前占位）—— 用户 2026-10-18：「先出骨架/占位，图表和取数延后」。
+ * 绝对定位盖住画布区域，`pointer-events: none` 不吃手势；建图完成由 `chartReady` 摘掉。
+ */
+.chart-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 18;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: #0b0f14;
+  color: #5d646e;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.chart-skeleton .cs-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 46px;
+}
+
+.chart-skeleton .cs-bars i {
+  width: 7px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #2a313b, #161b21);
+  transform-origin: bottom;
+  animation: cs-pulse 1.2s ease-in-out infinite;
+}
+
+.chart-skeleton .cs-bars i:nth-child(1) { height: 18px; animation-delay: 0s; }
+.chart-skeleton .cs-bars i:nth-child(2) { height: 30px; animation-delay: 0.1s; }
+.chart-skeleton .cs-bars i:nth-child(3) { height: 44px; animation-delay: 0.2s; }
+.chart-skeleton .cs-bars i:nth-child(4) { height: 26px; animation-delay: 0.3s; }
+.chart-skeleton .cs-bars i:nth-child(5) { height: 38px; animation-delay: 0.4s; }
+.chart-skeleton .cs-bars i:nth-child(6) { height: 22px; animation-delay: 0.5s; }
+
+@keyframes cs-pulse {
+  0%, 100% { opacity: 0.35; transform: scaleY(0.85); }
+  50% { opacity: 0.95; transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-skeleton .cs-bars i { animation: none; opacity: 0.7; }
+}
+
+/*
  * 灯带：三颗灯一颗一颗亮过去，摆在图的**顶部居中**。
  * 用户 2026-10-10：「不要暗色的背景」「快放在顶部」⇒ 没有底衬药丸、没有边框，
  * 就三颗灯自己亮着（颜色用主色 `--blue`，压在蜡烛上也看得清）。

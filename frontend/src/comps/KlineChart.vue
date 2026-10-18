@@ -600,6 +600,7 @@ function ensureChart(): boolean {
   })
 
   refs = {chart, candle, volume, ema42}
+  chartReady.value = true
   /* 叠加线（仓位 / 强平 / 挂单）挂在蜡烛系列上：横线压在蜡烛**下面**（见 `../overlay-lines.ts`） */
   overlayLines.attach(candle)
   /* 用户画的线挂在同一个系列上，但**盖在蜡烛上面**（见 `../chart-drawings.ts`） */
@@ -870,6 +871,15 @@ interface DragRef {
  */
 const overlayLines = createOverlayLines()
 let orderMarkers: ReturnType<typeof LWC.createSeriesMarkers> | null = null
+
+/**
+ * 图表真的建好了吗（第一次 `ensureChart()` 成功）。
+ *
+ * 首屏在「骨架 → 真图」之间用它切换（用户 2026-10-18：「先出骨架/占位，
+ * 图表和取数延后」）：骨架占住同样的位置，等第一段 K 线到了再换成画布。
+ * 之后换币 / 换周期只走原有的三颗灯，不再回到骨架（图表已经存在）。
+ */
+const chartReady = ref(false)
 
 /** 涨跌色的 CSS 变量值（跟 `--ok` / `--bad` 同一对） */
 function sideColor(side: 'long' | 'short'): string {
@@ -4313,7 +4323,19 @@ function onDrawUp(e: PointerEvent): void {
 
 /* ---------------- 生命周期 ---------------- */
 
-onMounted(load)
+/*
+ * ★ 2026-10-18：**先出骨架，图表和取数延后一帧**。
+ *
+ * 首次进「开单分析 / K 线」时，建图 + 首段取数要 0.6~0.7 秒；以前这段同步工作
+ * 压在首帧上，用户看到的是「点了没反应」。现在先让骨架、tab、行情条画出来，
+ * 下一帧再 `load()`（真正建图/取数）—— 用户 2026-10-18：「先出骨架/占位，
+ * 图表和取数延后」。
+ */
+onMounted(() => {
+  requestAnimationFrame(() => {
+    setTimeout(() => void load(), 0)
+  })
+})
 /*
  * 实时推送：币种 / 周期 / 测试模式一变就重订（上游 WS → 后端 SSE → 这里）。
  *
@@ -4322,7 +4344,12 @@ onMounted(load)
  *    而且光听 `visibilitychange` 也**不够**：原生壳里切后台 / 锁屏不一定会发它，
  *    得靠 Capacitor 的 `appStateChange`（见 `native.ts` + `live.ts`）。
  */
-onMounted(startStream)
+onMounted(() => {
+  /* 跟 `load` 一起让位给首屏：连接不占首帧，晚一帧再订 */
+  requestAnimationFrame(() => {
+    setTimeout(startStream, 0)
+  })
+})
 watch([() => props.symbol, () => props.timeframe, testMode], startStream)
 // 「这一页被切走 / 切回来」也要断和重订（路由 KeepAlive 之后组件不卸载了）
 watch(() => props.active, startStream)
@@ -4515,6 +4542,15 @@ onBeforeUnmount(() => {
     -->
     <div ref="wrapEl" class="chart-wrap" data-no-swipe :class="{fading}">
       <div ref="chartEl" class="chart"></div>
+
+      <!--
+        首屏骨架：图表建好之前占住这块位置（见 `chartReady`）——
+        先出骨架 + tab + 行情条，建图和首段取数在下一帧做。
+      -->
+      <div v-if="!chartReady" class="chart-skeleton" aria-hidden="true">
+        <div class="cs-bars"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <span>K 线加载中…</span>
+      </div>
 
       <!--
         编辑模式下的那排工具（用户 2026-10-17：「点击编辑，划线的一排放在 k 线区域的顶部，
