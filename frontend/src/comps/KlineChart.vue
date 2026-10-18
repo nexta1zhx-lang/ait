@@ -342,6 +342,8 @@ const cxValEl = ref<HTMLElement | null>(null)
 const curEl = ref<HTMLElement | null>(null)
 /** 现价框里的两行：上面价格、下面「距收线」（用户 2026-10-18：「价格和倒计时在一个框」） */
 const curPriceEl = ref<HTMLElement | null>(null)
+/** 现价那一小段虚线：只从最新一根 K 线连到右轴（用户 2026-10-18） */
+const lastLineEl = ref<HTMLElement | null>(null)
 const curCloseEl = ref<HTMLElement | null>(null)
 /** 十字光标的两枚轴标签（价格 / 时间，自己画的，见 `paintCrosshairTags`） */
 const cxPriceEl = ref<HTMLElement | null>(null)
@@ -569,9 +571,15 @@ function ensureChart(): boolean {
      *    所以改成自己挂一个 HTML 的：见 `renderCurLabel()` + `.cur-label`。
      *    这条虚线照旧由库画（`priceLineVisible` 没关）。
      */
+    /*
+     * ★ 2026-10-18 用户：「当前 k 线的价格的虚线能否只和最新的 k 连接，不要整条虚线」——
+     *   库那条 last price 线是**横贯整幅图**的，这里关掉（`priceLineVisible: false`），
+     *   改由自己画一小段：从**最新那根 K 线**的 x 一直连到右轴（见 `renderCurLabel`）。
+     */
     priceLineColor: 'rgba(232,234,240,0.62)',
     priceLineStyle: LWC.LineStyle.Dashed,
     priceLineWidth: 1,
+    priceLineVisible: false,
     lastValueVisible: false
   })
 
@@ -2368,6 +2376,7 @@ function renderCurLabel(): void {
   const text = priceText(price)
   if (curPriceEl.value && curPriceEl.value.textContent !== text)
     curPriceEl.value.textContent = text
+  renderLastLine()
   /* 颜色跟着涨跌走（用户 2026-10-18：「和价格一个颜色，颜色根据价格涨跌变色」）*/
   paintTone()
   renderCloseLine()
@@ -2392,6 +2401,38 @@ function paintTone(): void {
   }
   el.classList.toggle('up', up === true)
   el.classList.toggle('down', up === false)
+}
+
+/**
+ * 现价那**一小段**虚线：从最新那根 K 线的收盘价位置，一直画到右轴。
+ *
+ * 用户 2026-10-18：「当前 k 线的价格的虚线能否只和最新的 k 连接，不要整条虚线」——
+ * 整条横线会把左侧的旧行情也切一刀，看着乱；只连最新那根，既指出「现价在这」，
+ * 又不挡图。位置跟 `.cur-label` 同一次重排里算（平移 / 缩放都会跟手）。
+ */
+function renderLastLine(): void {
+  const el = lastLineEl.value
+  if (!el || !refs) return
+  const bar = candles[candles.length - 1]
+  const price = bar ? bar.close : NaN
+  const y = Number.isFinite(price) ? refs.candle.priceToCoordinate(price) : null
+  const x = bar
+    ? refs.chart.timeScale().timeToCoordinate(Math.floor(bar.timestamp / 1000) as never)
+    : null
+  if (
+    y === null ||
+    y === undefined ||
+    x === null ||
+    x === undefined ||
+    !Number.isFinite(y) ||
+    !Number.isFinite(x)
+  ) {
+    el.classList.add('off')
+    return
+  }
+  el.classList.remove('off')
+  el.style.top = `${y}px`
+  el.style.left = `${Math.max(0, x)}px`
 }
 
 /** 「距收线」还剩多久：周期跟图上走，1 小时以上才带小时位 */
@@ -4694,6 +4735,8 @@ onBeforeUnmount(() => {
         右轴现价框：**上面价格、下面距收线**（用户 2026-10-18：「直接显示倒计时和
         价格在一个框」）。两行同一个框，价格那行仍正对现价（见 `renderCurLabel`）。
       -->
+      <!-- 现价那一小段虚线：最新一根 K 线 → 右轴（`renderLastLine`） -->
+      <span ref="lastLineEl" class="last-line off"></span>
       <span ref="curEl" class="cur-label off">
         <b ref="curPriceEl" class="cl-p"></b>
         <i ref="curCloseEl" class="cl-c"></i>

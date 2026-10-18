@@ -4139,6 +4139,24 @@ body.fixed-viewport .split {
 }
 
 /*
+ * 现价那一小段虚线（用户 2026-10-18：「只和最新的 k 连接，不要整条虚线」）。
+ * `left` / `top` 由 JS 给：left = 最新那根 K 线的 x，右边一直顶到价格轴。
+ * 只画一条 1px 虚线，不吃事件。
+ */
+.last-line {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  height: 0;
+  border-top: 1px dashed rgba(232, 234, 240, 0.62);
+  pointer-events: none;
+}
+
+.last-line.off {
+  display: none;
+}
+
+/*
  * 现价：贴右边缘、跟价格居中对齐（`top` / `width` 由 JS 给）。
  *
  * ★ 2026-10-18 用户：「直接显示倒计时和价格在一个框」——
