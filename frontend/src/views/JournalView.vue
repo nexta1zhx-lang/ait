@@ -128,6 +128,11 @@ async function load(reset = true): Promise<void> {
 const more = computed(() => entries.value.length < total.value)
 
 /** 条目按「最后改动时间」已经倒序了 —— 这里只是切段，段之间插一条「2026 年 10 月」 */
+/** 这些条目里出现过的币（顶部概览那格用） */
+const coinsSeen = computed(() => [
+  ...new Set(entries.value.flatMap(e => e.coins.map(c => c.base)))
+])
+
 const groups = computed(() => {
   const out: {key: string; label: string; items: JournalEntry[]}[] = []
   for (const e of entries.value) {
@@ -769,6 +774,32 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <div v-if="error" class="error">{{ error }}</div>
 
+    <!--
+      顶部概览（用户 2026-10-18：「专家经验页面太单调了，设计一下」）——
+      三格小统计 + 一排分类色标：一进来先看出「写了多少、碰过几个币、有哪些分类」，
+      点色标直接筛那一类（跟上面的分类弹层同一个 `category`）。
+    -->
+    <div v-if="entries.length || total" class="j-stat">
+      <div class="j-stat-cells">
+        <span><b>{{ total }}</b><i>条记录</i></span>
+        <span><b>{{ coinsSeen.length }}</b><i>个币</i></span>
+        <span><b>{{ categories.length }}</b><i>个分类</i></span>
+      </div>
+      <div v-if="categories.length" class="j-stat-cats">
+        <button
+          v-for="c in categories.slice(0, 8)"
+          :key="c.id"
+          type="button"
+          class="j-stat-chip"
+          :class="{on: category === c.id}"
+          @click="pickCategory(category === c.id ? null : c.id)"
+        >
+          <i :style="{background: c.color || 'var(--muted)'}" />
+          {{ c.name }}
+        </button>
+      </div>
+    </div>
+
     <!-- 条目：最近改动的在上，时间精确到分钟 -->
     <div v-if="entries.length" class="j-list">
       <template v-for="g in groups" :key="g.key">
@@ -783,6 +814,7 @@ async function remove(e: JournalEntry): Promise<void> {
           :key="e.id"
           class="j-entry"
           :class="{open: openId === e.id}"
+          :style="{'--jc': e.category?.color || 'transparent'}"
         >
           <div class="j-head" @click="toggle(e)">
             <!--
@@ -1064,8 +1096,86 @@ async function remove(e: JournalEntry): Promise<void> {
     color-mix(in srgb, var(--border) 25%, transparent)
   );
 }
+/* 卡片带一条**分类色**细边（用户 2026-10-18：「太单调了，设计一下」）——
+   颜色由模板的 `--jc` 给，没分类就透明 */
 .j-entry {
   position: relative;
+  border-left: 2px solid var(--jc, transparent);
+  border-radius: 8px;
+  transition: border-color 0.14s, background 0.14s;
+}
+.j-entry:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+/*
+ * 顶部概览（三格统计 + 分类色标）：一张淡卡片，跟下面的时间轴拉开层次。
+ * 点色标=筛这一类（再点一下取消），跟分类弹层是同一个状态。
+ */
+.j-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: linear-gradient(
+    120deg,
+    rgba(255, 255, 255, 0.035),
+    rgba(255, 255, 255, 0.012)
+  );
+}
+
+.j-stat-cells {
+  display: flex;
+  gap: 18px;
+}
+
+.j-stat-cells > span {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.j-stat-cells b {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: var(--fw-bold);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.j-stat-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.j-stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.j-stat-chip.on {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.j-stat-chip i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
 }
 .j-head {
   /* 左边那颗圆点挂在这上面 ⇒ 展开正文时它不会跟着跑 */

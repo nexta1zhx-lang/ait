@@ -7581,8 +7581,9 @@ button.badge:disabled {
     position: relative;
     /* 靠左：按自己的文字宽度排，不拉伸、不分摊整行 */
     flex: 0 0 auto;
-    /* 下面那点内边距是给下划线留的位置 */
-    padding: 4px 2px 9px;
+    /* 上下内边距跟「我的」那排（`PaneShell` 的 `.tabpane-tabs`）一致：6px / 9px，
+       否则两边 tab 高度差 2px、看着不一样大（用户 2026-10-18） */
+    padding: 6px 2px 9px;
     border: 0;
     border-radius: 0;
     /*
