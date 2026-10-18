@@ -4161,14 +4161,25 @@ body.fixed-viewport .split {
   font-weight: var(--fw-bold);
 }
 
-/* 第二行：距收线。小一号、淡一档，别跟价格抢 */
+/* 第二行：距收线。小一号，但**跟价格同色**（用户 2026-10-18：「倒计时和价格一个颜色」） */
 .cur-label .cl-c {
   display: block;
   font-style: normal;
   font-size: 9.5px;
   line-height: 12px;
   font-weight: 400;
-  color: var(--muted);
+  color: inherit;
+}
+
+/* 涨跌色：跟行情条那颗大字同一个口径（24h 涨跌），两块看着才是同一个颜色 */
+.cur-label.up {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 62%, transparent);
+}
+
+.cur-label.down {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 62%, transparent);
 }
 
 

@@ -19,7 +19,7 @@ import {
 import {CHART_BARS, KLINE_BARS} from '../analyze'
 import {loadCandles} from '../candles'
 import {emptyLevels, nearestLevels, type Levels} from '../levels'
-import {freshLivePrice, livePrice, nowTick, setLivePrice} from '../ticker'
+import {freshLivePrice, livePrice, nowTick, setLivePrice, ticker} from '../ticker'
 import {isForeground, onForegroundChange, onNetworkResume} from '../live'
 import {
   chartDrawSnap,
@@ -2278,7 +2278,30 @@ function renderCurLabel(): void {
   const text = priceText(price)
   if (curPriceEl.value && curPriceEl.value.textContent !== text)
     curPriceEl.value.textContent = text
+  /* 颜色跟着涨跌走（用户 2026-10-18：「和价格一个颜色，颜色根据价格涨跌变色」）*/
+  paintTone()
   renderCloseLine()
+}
+
+/**
+ * 现价框（价格 + 倒计时）的涨跌色。
+ *
+ * 跟行情条那颗大字**同一个口径**（24h 涨跌），两边看起来才是同一个颜色；
+ * 拿不到 24h 就退回「这根 K 线的方向」（收 ≥ 开 = 涨）。
+ */
+function paintTone(): void {
+  const el = curEl.value
+  if (!el) return
+  const pct = ticker.value?.change24hPct
+  let up: boolean | null = null
+  if (pct !== null && pct !== undefined && Number.isFinite(Number(pct)))
+    up = Number(pct) >= 0
+  else {
+    const bar = candles[candles.length - 1]
+    if (bar) up = bar.close >= bar.open
+  }
+  el.classList.toggle('up', up === true)
+  el.classList.toggle('down', up === false)
 }
 
 /** 「距收线」还剩多久：周期跟图上走，1 小时以上才带小时位 */
@@ -2288,7 +2311,8 @@ function closeText(): string {
   const hh = Math.floor(sec / 3600)
   const mm = String(Math.floor((sec % 3600) / 60)).padStart(2, '0')
   const ss = String(sec % 60).padStart(2, '0')
-  return `${props.timeframe} ${hh ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`}`
+  /* 只显示倒计时（用户 2026-10-18：「倒计时只显示倒计时即可」）*/
+  return hh ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
 /** 第二行：「1h 05:02」（周期 + 距收线剩余） */
