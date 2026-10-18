@@ -16,7 +16,12 @@
  *   ③ 挂单失败**只回报错误**，绝不影响已经成交的那一单（调用方只把结果附在响应里）。
  */
 import {createExchange, type ExchangeCredentials} from './exchange-account'
-import {isDualSide, listOpenOrders, placeStopOrder} from './exchange-trade'
+import {
+  isDualSide,
+  listOpenOrders,
+  placeStopOrder,
+  type OpenOrderRow
+} from './exchange-trade'
 import {getPositions, liveStateOf} from './position-cache'
 import {listOpenOrdersDb, upsertOpenOrder} from '../db/exchange-store'
 
@@ -367,29 +372,34 @@ export type TakeProfitInput = Omit<
  *
  * 失败**绝不能**影响已经成交的加仓单：调用方只把结果推给前端提示一句。
  */
-const tpResizeQueues = new Map<number, Promise<TakeProfitResult>>()
-
 /**
- * 加仓后止盈放大 —— **同一套 Key 串行**。
+ * 「改保护单数量」这类后台任务 **同一套 Key 串行**。
  *
- * 连着加两次仓时，两个后台任务会同时看到「旧止盈」⇒ 都去撤它：后一个撤到的是
- * 已被撤掉的单，失败回挂还可能多插一张。串行之后，第二个进来会重新读一次挂单，
- * 看到数量已经对上 ⇒ `unchanged`，什么都不做。
+ * 连着加两次仓 / 减仓时，两个后台任务会同时看到「旧的那张」⇒ 都去撤它：后一个
+ * 撤到的是已被撤掉的单，失败回挂还可能多插一张。串行之后，第二个进来会重新读一次
+ * 挂单，看到数量已经对上 ⇒ 什么都不做。
+ *
+ * 加仓（止盈放大）和减仓（止盈止损收数量）共用一条队列。
  */
-export function ensureTakeProfitFull(
-  input: TakeProfitInput
-): Promise<TakeProfitResult> {
-  const keyId = Number(input.keyId)
-  const prev = tpResizeQueues.get(keyId)
-  const run = (prev ? prev.catch(() => undefined) : Promise.resolve()).then(() =>
-    ensureTakeProfitFullNow(input)
-  )
-  tpResizeQueues.set(keyId, run)
+const protectQueues = new Map<number, Promise<unknown>>()
+
+function enqueueProtect<T>(keyId: number, fn: () => Promise<T>): Promise<T> {
+  const key = Number(keyId)
+  const prev = protectQueues.get(key)
+  const run = (prev ? prev.catch(() => undefined) : Promise.resolve()).then(fn)
+  protectQueues.set(key, run)
   const clear = (): void => {
-    if (tpResizeQueues.get(keyId) === run) tpResizeQueues.delete(keyId)
+    if (protectQueues.get(key) === run) protectQueues.delete(key)
   }
   run.then(clear, clear)
   return run
+}
+
+/** 加仓后止盈放大（串行，见 `enqueueProtect`） */
+export function ensureTakeProfitFull(
+  input: TakeProfitInput
+): Promise<TakeProfitResult> {
+  return enqueueProtect(input.keyId, () => ensureTakeProfitFullNow(input))
 }
 
 async function ensureTakeProfitFullNow(
@@ -479,6 +489,278 @@ async function ensureTakeProfitFullNow(
         })
       throw e
     }
+  } catch (e) {
+    return {ok: false, error: e instanceof Error ? e.message : String(e)}
+  }
+}
+
+/* ---------------- 减仓后把止盈 / 止损收到剩余仓位 ---------------- */
+
+export interface ProtectOrderChange {
+  /** 新单号 */
+  orderId?: string
+  /** 触发价（**不动**，只是报给前端） */
+  price?: number
+  /** 改之前多少张 */
+  from: number
+  /** 改成多少张（= 减仓后的剩余仓位） */
+  quantity: number
+}
+
+export interface ReduceProtectResult {
+  ok: boolean
+  /** 减仓后还剩多少张（全平 / 读不到仓位时不带） */
+  quantity?: number
+  /** 止盈收成了（没动就不带） */
+  tp?: ProtectOrderChange
+  /** 止损收成了（没动就不带） */
+  sl?: ProtectOrderChange
+  /** 什么都没做时的原因 */
+  skipped?: 'no-position' | 'no-orders' | 'unchanged'
+  /** 某一类有多张（分批止盈 / 多张止损）⇒ 不敢猜，原样留着 */
+  multiple?: ('tp' | 'sl')[]
+  error?: string
+}
+
+export type ReduceProtectInput = Omit<
+  AutoStopInput,
+  'pct' | 'keepPrice' | 'noCreate'
+>
+
+/** 减仓后把止盈 / 止损收到剩余仓位（串行，见 `enqueueProtect`） */
+export function ensureReduceProtection(
+  input: ReduceProtectInput
+): Promise<ReduceProtectResult> {
+  return enqueueProtect(input.keyId, () => ensureReduceProtectionNow(input))
+}
+
+/** 把一张条件单的数量改成 `quantity`（价格不动；自动止损的 source 标记跟着新单号走） */
+async function resizeProtectOrder(args: {
+  input: ReduceProtectInput
+  symbol: string
+  closing: 'buy' | 'sell'
+  posSide: 'LONG' | 'SHORT'
+  dual: boolean
+  order: OpenOrderRow
+  kind: 'profit' | 'stop'
+  quantity: number
+  source: string
+}): Promise<ProtectOrderChange> {
+  const {input, symbol, closing, posSide, dual, order, kind, quantity} = args
+  const from = Math.abs(Number(order.amount) || 0)
+  const price = Number(order.stopPrice) || 0
+  try {
+    const placed = await placeStopOrder(input.creds, input.keyId, {
+      symbol,
+      side: closing,
+      kind,
+      stopPrice: price,
+      quantity,
+      /* 双向持仓必须带 positionSide，否则会被当成 LONG */
+      posSide: dual ? posSide : undefined,
+      /* 撤旧挂新：`placeStopOrder` 看到 orderId 会先撤掉它 */
+      orderId: String(order.id),
+      test: false
+    })
+    /*
+     * 「这张是我们挂的自动止损」这个标记必须跟着**新单号**写回去 ——
+     * 不然下次加仓会把它当成手工单跳过，止损就再也不跟着均价/数量走了。
+     */
+    if (args.source && placed.orderId)
+      await upsertOpenOrder(input.userId, input.keyId, {
+        orderId: String(placed.orderId),
+        symbol,
+        side: closing,
+        type: placed.type,
+        posSide: dual ? posSide : 'BOTH',
+        price: null,
+        stopPrice: placed.stopPrice ?? price,
+        amount: placed.quantity ?? quantity,
+        filled: 0,
+        reduceOnly: order.reduceOnly,
+        time: Date.now(),
+        source: args.source
+      })
+    console.log(
+      `[减仓保护] ${symbol} ${kind === 'profit' ? '止盈' : '止损'} ${from} → ${placed.quantity}` +
+        `（剩余仓位）触发价 ${placed.stopPrice}` +
+        `${placed.canceled ? ` 撤旧单 ${placed.canceled}` : ''}`
+    )
+    return {
+      orderId: placed.orderId === undefined ? undefined : String(placed.orderId),
+      price: placed.stopPrice,
+      from,
+      quantity: placed.quantity ?? quantity
+    }
+  } catch (e) {
+    /* 撤旧挂新失败 ⇒ 尽力按原数量挂回去（别让这一侧裸奔），再把错报上去 */
+    await placeStopOrder(input.creds, input.keyId, {
+      symbol,
+      side: closing,
+      kind,
+      stopPrice: price,
+      quantity: from,
+      posSide: dual ? posSide : undefined,
+      test: false
+    }).catch(restoreErr => {
+      console.warn(
+        `[减仓保护] ${symbol} 改数量失败后，按原数量回挂也失败：` +
+          `${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`
+      )
+    })
+    throw e
+  }
+}
+
+/** 一张「要收数量」的保护单 */
+export interface ProtectShrink {
+  orderId: string
+  kind: 'profit' | 'stop'
+  label: 'tp' | 'sl'
+  stopPrice: number
+  from: number
+  quantity: number
+}
+
+export type ProtectShrinkPlan =
+  | {action: 'skip'; reason: 'no-orders' | 'unchanged'; multiple: ('tp' | 'sl')[]}
+  | {action: 'resize'; changes: ProtectShrink[]; multiple: ('tp' | 'sl')[]}
+
+/**
+ * 减仓后**哪些保护单要收、收到多少**（纯函数，便于本地拿假数据验）。
+ *
+ * 口径：只收 `from > 剩余仓位` 的那张，数量改成剩余仓位；价格不动。
+ * 某一类有多张（分批止盈 / 多张止损）⇒ 不敢猜，原样留着并在 `multiple` 里报出来。
+ */
+export function planProtectShrink(input: {
+  /** 减仓后剩余仓位 */
+  amount: number
+  /** 这个方向上的平仓条件单（调用方已按 symbol + 平仓侧 + posSide 筛过） */
+  orders: {id?: unknown; type?: unknown; amount?: unknown; stopPrice?: unknown}[]
+}): ProtectShrinkPlan {
+  const amount = Math.abs(Number(input.amount) || 0)
+  const isTp = (o: {type?: unknown}): boolean =>
+    String(o.type ?? '').toUpperCase().includes('TAKE_PROFIT')
+  const groups: {label: 'tp' | 'sl'; list: typeof input.orders}[] = [
+    {label: 'tp', list: input.orders.filter(isTp)},
+    {label: 'sl', list: input.orders.filter(o => !isTp(o))}
+  ]
+  const changes: ProtectShrink[] = []
+  const multiple: ('tp' | 'sl')[] = []
+  for (const g of groups) {
+    if (!g.list.length) continue
+    /* 分批止盈 / 多张止损：收哪一张都不对（可能收出个「半张裸奔」）⇒ 原样留着 */
+    if (g.list.length > 1) {
+      multiple.push(g.label)
+      continue
+    }
+    const o = g.list[0]!
+    const from = Math.abs(Number(o.amount) || 0)
+    const stopPrice = Number(o.stopPrice) || 0
+    /*
+     * 数量 0 = `closePosition`（本来就跟着仓位走）；
+     * 没有触发价 = 没法撤旧挂新；
+     * `from <= 剩余仓位` = 本来就是「部分止盈 / 止损」（或者已经收过了）⇒ 不动。
+     */
+    if (!(from > 0) || !(stopPrice > 0) || from <= amount + 1e-9) continue
+    changes.push({
+      orderId: String(o.id ?? ''),
+      kind: g.label === 'tp' ? 'profit' : 'stop',
+      label: g.label,
+      stopPrice,
+      from,
+      quantity: amount
+    })
+  }
+  if (!changes.length)
+    return {
+      action: 'skip',
+      reason: input.orders.length ? 'unchanged' : 'no-orders',
+      multiple
+    }
+  return {action: 'resize', changes, multiple}
+}
+
+async function ensureReduceProtectionNow(
+  input: ReduceProtectInput
+): Promise<ReduceProtectResult> {
+  const symbol = String(input.symbol ?? '').toUpperCase()
+  const before = Math.abs(Number(input.before) || 0)
+  try {
+    const pos = await readPositionAfter({...input, symbol}, before)
+    /*
+     * 全平：仓都没了，止盈止损该跟着撤 —— 那是 orphan sweep / 交易所的事，
+     * 这里**绝不能**再挂一张出去。
+     */
+    if (!pos) return {ok: false, skipped: 'no-position'}
+
+    const closing: 'buy' | 'sell' = input.side === 'long' ? 'sell' : 'buy'
+    const posSide = input.side === 'long' ? 'LONG' : 'SHORT'
+    const all = await listOpenOrders(input.creds, symbol)
+    /*
+     * 只认**平这个方向那一侧**的条件单：
+     *   · 多单的平仓单是 SELL，空单是 BUY；
+     *   · 双向持仓时 `posSide` 必须对得上（BOTH 是单向模式）；
+     *   · 类型只看 STOP / TAKE_PROFIT（普通开仓限价单不碰）。
+     */
+    const closingOrders = all.filter(
+      o =>
+        String(o.symbol ?? '').toUpperCase() === symbol &&
+        String(o.side ?? '').toLowerCase() === closing &&
+        (o.posSide === 'BOTH' || o.posSide === posSide) &&
+        (String(o.type ?? '').toUpperCase().includes('TAKE_PROFIT') ||
+          String(o.type ?? '').toUpperCase().includes('STOP'))
+    )
+    const plan = planProtectShrink({
+      amount: pos.amount,
+      orders: closingOrders
+    })
+    if (plan.action === 'skip')
+      return {
+        /* `unchanged` = 保护单已经不超过剩余仓位了 */
+        ok: plan.reason === 'unchanged',
+        skipped: plan.reason,
+        quantity: pos.amount,
+        multiple: plan.multiple.length ? plan.multiple : undefined
+      }
+
+    const dual =
+      input.dual ?? (await isDualSide(createExchange(input.creds), input.keyId))
+    /* 保留「自动止损」标记（见 `resizeProtectOrder` 里那段） */
+    const marks = new Map(
+      (await listOpenOrdersDb(input.userId, input.keyId)).map(o => [
+        String(o.orderId),
+        String(o.source ?? '')
+      ])
+    )
+    const out: ReduceProtectResult = {
+      ok: true,
+      quantity: pos.amount,
+      multiple: plan.multiple.length ? plan.multiple : undefined
+    }
+    for (const change of plan.changes) {
+      const o = closingOrders.find(x => String(x.id) === change.orderId)
+      if (!o) continue
+      try {
+        const done = await resizeProtectOrder({
+          input,
+          symbol,
+          closing,
+          posSide,
+          dual,
+          order: o,
+          kind: change.kind,
+          quantity: change.quantity,
+          source: marks.get(String(o.id)) ?? ''
+        })
+        if (change.label === 'tp') out.tp = done
+        else out.sl = done
+      } catch (e) {
+        out.ok = false
+        out.error = e instanceof Error ? e.message : String(e)
+      }
+    }
+    return out
   } catch (e) {
     return {ok: false, error: e instanceof Error ? e.message : String(e)}
   }

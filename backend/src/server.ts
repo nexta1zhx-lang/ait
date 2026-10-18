@@ -183,7 +183,12 @@ import {
 import {hydrateMarketsCache} from './data/ccxt-markets'
 import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
 import {listPositionHistory, positionMetaOf, type PositionMeta} from './data/position-history'
-import {ensureAutoStop, ensureTakeProfitFull, type AutoStopResult} from './data/auto-stop'
+import {
+  ensureAutoStop,
+  ensureReduceProtection,
+  ensureTakeProfitFull,
+  type AutoStopResult
+} from './data/auto-stop'
 import {RateBudgetError, takeWeight} from './util/rate-budget'
 import {
   assertOrderLimits,
@@ -1832,6 +1837,11 @@ async function handleExchangeStream(
     if (ev.type === 'auto-tp') {
       const {type: _t, ...rest} = ev
       return send('auto-tp', rest)
+    }
+    /* 减仓后止盈止损收数量（见平仓那段）—— 同样原样推 */
+    if (ev.type === 'auto-protect') {
+      const {type: _t, ...rest} = ev
+      return send('auto-protect', rest)
     }
     return send('backfill', {added: ev.added})
   })
@@ -5112,12 +5122,16 @@ async function route(
       const test = body.test !== false
       /*
        * 减仓要拿来当基准的「减之前有多少张」—— 必须在 `closePositions` **之前**取，
-       * 之后取到的已经是减完的数量（自动止损就按错的数去收了）。
+       * 之后取到的已经是减完的数量（止盈止损就按错的数去收了）。
        */
       const sym0 = str(body.symbol, '').toUpperCase()
       const wasPos = sym0
         ? liveStateOf(key.id)?.positions?.find(
-            p => String(p.raw ?? '').toUpperCase() === sym0
+            p =>
+              String(p.raw ?? '').toUpperCase() === sym0 &&
+              /* 双向持仓同一个币有两条 ⇒ 给了方向就按方向挑 */
+              (side === undefined ||
+                (p.side === 'short' ? 'short' : 'long') === side)
           )
         : undefined
       const r = await closePositions(
@@ -5135,26 +5149,22 @@ async function route(
       )
       if (!test) void reconcileKeyOrders(key.id)
       /*
-       * ★ 2026-10-15：**减仓之后把自动止损的数量收一下**（用户：「让它在减仓后也跟着收」）。
+       * ★ 2026-10-18（用户：「还有加仓加那么减仓呢，仓位止盈止损都要重新计算」）：
+       *   **减仓之后，止盈和止损的数量都收到「剩余仓位」**。
        *
-       * 三条口径（跟加仓那条路刻意不一样）：
-       *   · **触发价不动**（`keepPrice`）—— 减仓不改开仓均价，价本来就该原地待着；
-       *   · **只在已有自动止损时收**（`noCreate`）—— 用户撤了 / 关了，减仓不该又给他挂回来；
-       *   · 仓位减到 0 / 手工止损在 / 这个币压根没有自动单 ⇒ 跳过，什么都不做。
-       * 跟下单那边一样是**后台**的（平仓响应不等它），结果走 `auto-stop` 事件推给前端。
-       */
-      /*
-       * ⚠️ 这里**不看前端的 `autoStop` 配置**：收数量是「把已经挂着的那张改对」，
-       *    不是新挂一张 —— 所以只要那个币上还有**自己挂的**自动止损，就跟着收。
-       *    （跟下单那条路刻意不一样：那条会**新建**止损，得听配置。）
-       *    全平（`pct` 不传 / 100）也不用收 —— 仓都没了，止损跟着撤。
+       * 三条口径：
+       *   · **触发价一个都不动**（减仓不改开仓均价；止盈价也是用户定的）；
+       *   · 只收**超过**剩余仓位的那张（本来就是部分止盈 / 止损的，不动）；
+       *   · 全平 / 没有止盈止损 / 某一类有多张（分批）⇒ 不碰。
+       * 跟下单那边一样是**后台**的（平仓响应不等它），结果走 `auto-protect` 推给前端。
+       * ⚠️ 手工挂的止损也收 —— 用户要的是「仓位变了保护单就对得上」；只改数量，不改价。
        */
       const partial = pct !== undefined && pct > 0 && pct < 100
       if (!test && partial) {
         const sym = str(body.symbol, '').toUpperCase()
         if (sym) {
-
-          void ensureAutoStop({
+          const sideNow = side ?? (wasPos?.side === 'short' ? 'short' : 'long')
+          void ensureReduceProtection({
             userId: me.id,
             keyId: key.id,
             creds: {
@@ -5166,19 +5176,14 @@ async function route(
               sandbox: key.sandbox
             },
             symbol: sym,
-            /* `closePositions` 没给方向时按 long 兜底（一个币只有一条时不影响结果） */
-            side: side ?? 'long',
-            /* 只收数量：百分比用不到（触发价保持原样，见 `keepPrice`） */
-            pct: 0,
-            keepPrice: true,
-            noCreate: true,
+            side: sideNow,
             /* 减之前有多少张（见上面 `wasPos` 的取值时机） */
             before: Math.abs(Number(wasPos?.amount) || 0)
           })
-            .then(x => emit(key.id, {type: 'auto-stop', symbol: sym, ...x}))
+            .then(x => emit(key.id, {type: 'auto-protect', symbol: sym, ...x}))
             .catch(e => {
               emit(key.id, {
-                type: 'auto-stop',
+                type: 'auto-protect',
                 symbol: sym,
                 ok: false,
                 error: e instanceof Error ? e.message : String(e)

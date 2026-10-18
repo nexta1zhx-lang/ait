@@ -67,6 +67,7 @@ import {
   accountEquityOf,
   availableBalanceOf,
   bindPositions,
+  onAutoProtect,
   onAutoStop,
   onAutoTp,
   positionsAt,
@@ -216,7 +217,24 @@ const stopAutoTp = onAutoTp(r => {
   if (!r.ok && r.error) say(`${baseOf(r.symbol)} 止盈没改过来：${r.error}`, 'bad')
 })
 
+/**
+ * **减仓后止盈 / 止损收到剩余仓位**（后台改的，用户 2026-10-18：「仓位止盈止损都要
+ * 重新计算」）。只有真收过才提示；已经有部分止盈 / 多张的那种不动，也不打扰。
+ */
+const stopAutoProtect = onAutoProtect(r => {
+  const parts: string[] = []
+  if (r.tp) parts.push(`止盈 ${fmt(r.tp.quantity)}`)
+  if (r.sl) parts.push(`止损 ${fmt(r.sl.quantity)}`)
+  if (r.ok && parts.length) {
+    say(`${baseOf(r.symbol)} 减仓后已收到剩余仓位：${parts.join(' / ')}`, 'ok')
+    return
+  }
+  if (!r.ok && r.error)
+    say(`${baseOf(r.symbol)} 减仓后止盈止损没改过来：${r.error}`, 'bad')
+})
+
 onBeforeUnmount(() => {
+  stopAutoProtect()
   stopAutoTp()
   stopAutoStop()
   unbindPos?.()

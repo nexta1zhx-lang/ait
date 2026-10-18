@@ -485,6 +485,31 @@ export type ExchangeEvent =
       replaced?: string
       error?: string
     }
+  /**
+   * **减仓后止盈 / 止损收到剩余仓位**的结果（2026-10-18 用户：「仓位止盈止损都要
+   * 重新计算」）。跟 `auto-stop` 一样只是通知，没人订阅也照样收。
+   */
+  | {
+      type: 'auto-protect'
+      symbol: string
+      ok: boolean
+      quantity?: number
+      tp?: {
+        orderId?: string
+        price?: number
+        from: number
+        quantity: number
+      }
+      sl?: {
+        orderId?: string
+        price?: number
+        from: number
+        quantity: number
+      }
+      skipped?: string
+      multiple?: ('tp' | 'sl')[]
+      error?: string
+    }
   | {type: 'health'; deaf: boolean}
 
 /** key_id → 订阅者 */

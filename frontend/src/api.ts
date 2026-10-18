@@ -1950,7 +1950,9 @@ const EXCHANGE_EVENTS = [
   /** 自动止损挂完了（**后台挂**，见 `POST /api/exchange/trade/order` 的 `autoStop`） */
   'auto-stop',
   /** 加仓后止盈跟着放大到全部仓位（后台改，见同一个接口） */
-  'auto-tp'
+  'auto-tp',
+  /** 减仓后止盈 / 止损收到剩余仓位（后台改，见平仓接口） */
+  'auto-protect'
 ]
 
 export function exchangeStream(
@@ -1985,6 +1987,13 @@ export function exchangeStream(
      */
     autoTp?: (r: AutoTpPush) => void
     /**
+     * **减仓后止盈 / 止损收到剩余仓位**（后台改的）。
+     *
+     * 用户 2026-10-18：「还有加仓加那么减仓呢，仓位止盈止损都要重新计算」——
+     * 改完从常驻流推这条，面板补一句提示。
+     */
+    autoProtect?: (r: AutoProtectPush) => void
+    /**
      * 收到**任何**东西（数据事件或 20 秒一次的心跳）时回调。
      *
      * 用途：这套账户的流还活着 ⇒ 后端的定时采样会自己把快照推过来，
@@ -2013,6 +2022,8 @@ export function exchangeStream(
         else if (name === 'positions') on.positions?.(data as PositionsPatch)
         else if (name === 'auto-stop') on.autoStop?.(data as AutoStopPush)
         else if (name === 'auto-tp') on.autoTp?.(data as AutoTpPush)
+        else if (name === 'auto-protect')
+          on.autoProtect?.(data as AutoProtectPush)
       },
       onReconnect: on.reconnect,
       onAlive: on.alive
@@ -2272,6 +2283,34 @@ export interface AutoTpResult {
   /** 撤掉的旧止盈单号 */
   replaced?: string
   error?: string
+}
+
+/** 减仓后止盈 / 止损收数量的结果（字段跟后端 `ReduceProtectResult` 一一对应） */
+export interface AutoProtectPush extends AutoProtectResult {
+  symbol: string
+}
+
+export interface AutoProtectResult {
+  ok: boolean
+  /** 减仓后还剩多少张 */
+  quantity?: number
+  /** 止盈收成了（没动就不带） */
+  tp?: ProtectOrderChange
+  /** 止损收成了（没动就不带） */
+  sl?: ProtectOrderChange
+  /** 什么都没做时的原因 */
+  skipped?: 'no-position' | 'no-orders' | 'unchanged'
+  /** 某一类有多张（分批止盈 / 多张止损）⇒ 没敢动 */
+  multiple?: ('tp' | 'sl')[]
+  error?: string
+}
+
+/** 一张保护单被收成了多少（价格不动） */
+export interface ProtectOrderChange {
+  orderId?: string
+  price?: number
+  from: number
+  quantity: number
 }
 
 /** 后端复述回来的「实际发出去的参数」 */

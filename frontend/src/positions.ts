@@ -19,6 +19,7 @@ import {computed, ref} from 'vue'
 import {
   exchangeStream,
   fetchTradePositions,
+  type AutoProtectPush,
   type AutoStopPush,
   type AutoTpPush,
   type FuturesPosition,
@@ -120,6 +121,14 @@ const autoTpListeners = new Set<(r: AutoTpPush) => void>()
 export function onAutoTp(cb: (r: AutoTpPush) => void): () => void {
   autoTpListeners.add(cb)
   return () => autoTpListeners.delete(cb)
+}
+
+/** 订阅「减仓后止盈 / 止损收数量完了」（后台改的；见平仓接口） */
+const autoProtectListeners = new Set<(r: AutoProtectPush) => void>()
+
+export function onAutoProtect(cb: (r: AutoProtectPush) => void): () => void {
+  autoProtectListeners.add(cb)
+  return () => autoProtectListeners.delete(cb)
 }
 
 /** 每个 key 的订阅（引用计数到 0 才真的退订） */
@@ -320,6 +329,10 @@ function start(keyId: number): void {
       /* 加仓后止盈放大完了 ⇒ 同样转给订阅者 */
       autoTp: r => {
         for (const cb of autoTpListeners) cb(r)
+      },
+      /* 减仓后止盈止损收数量完了 ⇒ 同样转给订阅者 */
+      autoProtect: r => {
+        for (const cb of autoProtectListeners) cb(r)
       },
       /* 这套账户不参与统计（现货 / 没填 Key）→ 别留着上一份数据 */
       reject: () => clear(keyId),
