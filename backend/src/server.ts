@@ -183,7 +183,7 @@ import {
 import {hydrateMarketsCache} from './data/ccxt-markets'
 import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
 import {listPositionHistory, positionMetaOf, type PositionMeta} from './data/position-history'
-import {ensureAutoStop, type AutoStopResult} from './data/auto-stop'
+import {ensureAutoStop, ensureTakeProfitFull, type AutoStopResult} from './data/auto-stop'
 import {RateBudgetError, takeWeight} from './util/rate-budget'
 import {
   assertOrderLimits,
@@ -1827,6 +1827,11 @@ async function handleExchangeStream(
     if (ev.type === 'auto-stop') {
       const {type: _t, ...rest} = ev
       return send('auto-stop', rest)
+    }
+    /* 加仓后止盈放大（见下单那段）—— 同样原样推，面板拼一句提示 */
+    if (ev.type === 'auto-tp') {
+      const {type: _t, ...rest} = ev
+      return send('auto-tp', rest)
     }
     return send('backfill', {added: ev.added})
   })
@@ -4571,6 +4576,19 @@ async function route(
           side
         )
       }
+      /*
+       * **下单前**这个方向有多少张 —— 两个地方要用：
+       *   · 自动止损判断「这一单到底落地上没有」；
+       *   · 加仓后把已有止盈放大到全部仓位（用户 2026-10-15）。
+       * ⚠️ 必须 symbol + side 一起挑：双向持仓同一个币有两条。
+       */
+      const symBefore = str(body.symbol, 'BTCUSDT').toUpperCase()
+      const beforePos = liveStateOf(key.id)?.positions?.find(
+        p =>
+          String(p.raw ?? '').toUpperCase() === symBefore &&
+          (p.side === 'short' ? 'short' : 'long') === side
+      )
+      const beforeAmount = Math.abs(Number(beforePos?.amount) || 0)
       const order = await placeOrder(
         creds,
         key.id,
@@ -4596,16 +4614,11 @@ async function route(
        *   · **只挂开仓那一侧**（`reduceOnly` 的减仓单不挂，它本来就是往外跑的）；
        *   · 挂失败**绝不影响这一单**：结果只作为 `autoStop` 附带回报，`ok` 仍是 true
        *     —— 已经成交的单不能被一张止损的错说成失败。
-       *   ⚠️ 这里**等**它（而不是丢后台）：等着才能把「挂在哪、挂了多少」告诉用户，
-       *     「有没有保护」是他最想知道的那一句。
+       *   ⚠️ 2026-10-15 改成**丢后台**（见下面那段）：不再占这一单的响应，
+       *     挂完推 `auto-stop` 给面板补一句。
        */
       const autoPct = Number(body.autoStop ?? 0)
       if (!test && order.reduceOnly !== true && Number.isFinite(autoPct) && autoPct > 0) {
-        const sym = str(body.symbol, 'BTCUSDT').toUpperCase()
-        /* 下单前这个方向有多少张（加仓时要靠它判断新持仓已经到了）*/
-        const wasPos = liveStateOf(key.id)?.positions?.find(
-          p => String(p.raw ?? '').toUpperCase() === sym
-        )
         /*
          * ★ 2026-10-15（用户：「后台挂」）：**丢到后台去挂，不占这一单的响应**。
          *
@@ -4618,16 +4631,44 @@ async function route(
           userId: me.id,
           keyId: key.id,
           creds,
-          symbol: sym,
+          symbol: symBefore,
           side,
           pct: autoPct,
-          before: Math.abs(Number(wasPos?.amount) || 0)
+          before: beforeAmount
         })
-          .then(r => emit(key.id, {type: 'auto-stop', symbol: sym, ...r}))
+          .then(r => emit(key.id, {type: 'auto-stop', symbol: symBefore, ...r}))
           .catch(e => {
             emit(key.id, {
               type: 'auto-stop',
-              symbol: sym,
+              symbol: symBefore,
+              ok: false,
+              error: e instanceof Error ? e.message : String(e)
+            })
+          })
+      }
+      /*
+       * ★ 2026-10-15 晚上（用户：「有仓位止盈的话，加仓之后把加仓的单子也要放到
+       *   止盈里面去，变成百分之百」）：**加仓**成功后，如果这个方向已经有一张止盈，
+       *   把它的数量放大到加仓后的全部仓位（触发价不动）。
+       *
+       * 跟自动止损一样丢后台（那一单已经成交了，不能被止盈的错拖成失败），
+       * 改完推 `auto-tp` 给面板补一句。
+       * ⚠️ 只在**加仓**时做（`beforeAmount > 0`）：开新仓的止盈是用户自己的事。
+       */
+      if (!test && order.reduceOnly !== true && beforeAmount > 0) {
+        void ensureTakeProfitFull({
+          userId: me.id,
+          keyId: key.id,
+          creds,
+          symbol: symBefore,
+          side,
+          before: beforeAmount
+        })
+          .then(r => emit(key.id, {type: 'auto-tp', symbol: symBefore, ...r}))
+          .catch(e => {
+            emit(key.id, {
+              type: 'auto-tp',
+              symbol: symBefore,
               ok: false,
               error: e instanceof Error ? e.message : String(e)
             })

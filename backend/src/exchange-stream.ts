@@ -469,6 +469,22 @@ export type ExchangeEvent =
       existingPrice?: number | null
       error?: string
     }
+  /**
+   * **加仓后止盈跟着放大**的结果（2026-10-15 用户：「加仓之后把加仓的单子也要
+   * 放到止盈里面去，变成百分之百」）。跟 `auto-stop` 一样只是通知 ——
+   * 没人订阅时止盈照样改。
+   */
+  | {
+      type: 'auto-tp'
+      symbol: string
+      ok: boolean
+      skipped?: string
+      price?: number
+      quantity?: number
+      orderId?: string
+      replaced?: string
+      error?: string
+    }
   | {type: 'health'; deaf: boolean}
 
 /** key_id → 订阅者 */

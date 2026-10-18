@@ -20,6 +20,7 @@ import {
   exchangeStream,
   fetchTradePositions,
   type AutoStopPush,
+  type AutoTpPush,
   type FuturesPosition,
   type PositionsPatch,
   type TradePositionRow
@@ -108,6 +109,17 @@ const autoStopListeners = new Set<(r: AutoStopPush) => void>()
 export function onAutoStop(cb: (r: AutoStopPush) => void): () => void {
   autoStopListeners.add(cb)
   return () => autoStopListeners.delete(cb)
+}
+
+/**
+ * 订阅「加仓后止盈放大完了」（后台改的；见 `POST /api/exchange/trade/order`）。
+ * 同样只有这条流活着才收得到 —— 收不到不影响止盈已经改好了。
+ */
+const autoTpListeners = new Set<(r: AutoTpPush) => void>()
+
+export function onAutoTp(cb: (r: AutoTpPush) => void): () => void {
+  autoTpListeners.add(cb)
+  return () => autoTpListeners.delete(cb)
 }
 
 /** 每个 key 的订阅（引用计数到 0 才真的退订） */
@@ -304,6 +316,10 @@ function start(keyId: number): void {
       /* 自动止损挂完了（后台挂）⇒ 转给订阅者（下单面板会补一句提示） */
       autoStop: r => {
         for (const cb of autoStopListeners) cb(r)
+      },
+      /* 加仓后止盈放大完了 ⇒ 同样转给订阅者 */
+      autoTp: r => {
+        for (const cb of autoTpListeners) cb(r)
       },
       /* 这套账户不参与统计（现货 / 没填 Key）→ 别留着上一份数据 */
       reject: () => clear(keyId),

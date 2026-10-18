@@ -1948,7 +1948,9 @@ const EXCHANGE_EVENTS = [
   'health',
   'orders',
   /** 自动止损挂完了（**后台挂**，见 `POST /api/exchange/trade/order` 的 `autoStop`） */
-  'auto-stop'
+  'auto-stop',
+  /** 加仓后止盈跟着放大到全部仓位（后台改，见同一个接口） */
+  'auto-tp'
 ]
 
 export function exchangeStream(
@@ -1975,6 +1977,13 @@ export function exchangeStream(
      * 下单响应不等它 —— 挂完从常驻流推这条过来，界面补一句提示。
      */
     autoStop?: (r: AutoStopPush) => void
+    /**
+     * **加仓后止盈放大到全部仓位**（后台改的）。
+     *
+     * 用户 2026-10-15：「有仓位止盈的话，加仓之后把加仓的单子也要放到止盈里面去，
+     * 变成百分之百」—— 改完从常驻流推这条，面板补一句提示。
+     */
+    autoTp?: (r: AutoTpPush) => void
     /**
      * 收到**任何**东西（数据事件或 20 秒一次的心跳）时回调。
      *
@@ -2003,6 +2012,7 @@ export function exchangeStream(
         else if (name === 'reject') on.reject?.(String(d?.reason ?? ''))
         else if (name === 'positions') on.positions?.(data as PositionsPatch)
         else if (name === 'auto-stop') on.autoStop?.(data as AutoStopPush)
+        else if (name === 'auto-tp') on.autoTp?.(data as AutoTpPush)
       },
       onReconnect: on.reconnect,
       onAlive: on.alive
@@ -2223,6 +2233,44 @@ export interface AutoStopResult {
   replaced?: string
   /** 已有**手工**止损时，把它的触发价带回来（前端提示用） */
   existingPrice?: number | null
+  error?: string
+}
+
+/** 加仓后止盈放大的结果（字段跟后端 `TakeProfitResult` 一一对应） */
+export interface AutoTpPush extends AutoTpResult {
+  symbol: string
+}
+
+/**
+ * 止盈放大（后台改）的结果。
+ *
+ * `ok && !skipped` 才是**真的改了**（撤旧挂新）；带 `skipped` 的都是「没动」，
+ * 前端别弹提示。
+ */
+export interface AutoTpResult {
+  ok: boolean
+  /**
+   * 没做 / 为什么没做：
+   *   · `not-add` / `not-grown` —— 不是加仓（开新仓 / 数量没变大）
+   *   · `no-tp` —— 这个方向没有止盈单
+   *   · `multiple-tp` —— 分批止盈，不敢猜改哪张
+   *   · `close-position` —— 全仓止盈（数量 0），本来就 100%
+   *   · `unchanged` —— 数量已经对上了
+   */
+  skipped?:
+    | 'not-add'
+    | 'not-grown'
+    | 'no-position'
+    | 'no-tp'
+    | 'multiple-tp'
+    | 'close-position'
+    | 'unchanged'
+    | 'no-price'
+  price?: number
+  quantity?: number
+  orderId?: string
+  /** 撤掉的旧止盈单号 */
+  replaced?: string
   error?: string
 }
 

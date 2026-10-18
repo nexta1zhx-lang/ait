@@ -68,6 +68,7 @@ import {
   availableBalanceOf,
   bindPositions,
   onAutoStop,
+  onAutoTp,
   positionsAt,
   positionsOf,
   positionsRows,
@@ -196,7 +197,27 @@ const stopAutoStop = onAutoStop(r => {
   say(`${baseOf(r.symbol)} ${note}`, bad ? 'bad' : 'ok')
 })
 
+/**
+ * **加仓后止盈跟着放大到全部仓位**（后台改的，用户 2026-10-15：「把加仓的单子也要
+ * 放到止盈里面去，变成百分之百」）。
+ *
+ * 只有**真改了**（`ok && !skipped`）才提示；`unchanged` / 没止盈 / 分批止盈这些
+ * 不动的情况不打扰。
+ */
+const stopAutoTp = onAutoTp(r => {
+  if (r.ok && !r.skipped) {
+    const at = r.price ? ` · 触发价 ${price(r.price)}` : ''
+    say(
+      `${baseOf(r.symbol)} 加仓后止盈已覆盖全部仓位：${fmt(r.quantity)}${at}`,
+      'ok'
+    )
+    return
+  }
+  if (!r.ok && r.error) say(`${baseOf(r.symbol)} 止盈没改过来：${r.error}`, 'bad')
+})
+
 onBeforeUnmount(() => {
+  stopAutoTp()
   stopAutoStop()
   unbindPos?.()
   unbindPos = null
