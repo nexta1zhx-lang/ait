@@ -1426,12 +1426,18 @@ function renderOrdLabels(lines: OrderLine[]): void {
  */
 function equalizeLabelWidth(): void {
   if (!ordLabels.length) return
+  /*
+   * ⚠️ 只有**多段**的标签（`多 $3.00 │ −$0.12`、`止盈 │ +$0.52 │ 100%`）才统一宽度；
+   *    单段的「强平」按**自己的字**撑框（用户 2026-10-18：「强平的框和字适配」）——
+   *    给它补到最宽会把两个字塞进一个大空框里，看着像错位。
+   */
   let max = 0
   for (const it of ordLabels) {
     it.el.style.minWidth = ''
-    max = Math.max(max, it.el.offsetWidth)
+    if (it.parts.length > 1) max = Math.max(max, it.el.offsetWidth)
   }
-  for (const it of ordLabels) it.el.style.minWidth = `${max}px`
+  for (const it of ordLabels)
+    it.el.style.minWidth = it.parts.length > 1 ? `${max}px` : ''
 }
 
 /* ---------------- 直接按住「线」也能拖 ----------------

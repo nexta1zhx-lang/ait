@@ -4242,6 +4242,8 @@ body.fixed-viewport .split {
   transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
+  /* 统一宽度之后内容居中，别让短的那枚贴着左边（见 `equalizeLabelWidth`） */
+  justify-content: center;
   padding: 1px 5px;
   border: 1px solid color-mix(in srgb, currentColor 55%, transparent);
   border-radius: 3px;
