@@ -1313,6 +1313,15 @@ function renderOrdLabels(lines: OrderLine[]): void {
   const host = ordLabelHost.value
   if (!host) return
   const items = lines.map((l, i) => ({l, i})).filter(x => x.l.label)
+  /*
+   * 仓位那枚标签**排最后**（DOM 顺序 = 叠放顺序）⇒ 它压在其他标签上面
+   * （用户 2026-10-18：「只是标签在止损那些上面」）。
+   * `i` 仍是它在 `lines` 里的下标，拖动预览按它找线，不受排序影响。
+   */
+  items.sort(
+    (a, b) =>
+      Number(a.l.drag?.kind === 'pos') - Number(b.l.drag?.kind === 'pos')
+  )
   /* 标签数 / 有没有「能撤的单」变了就重建（重建后要重新挂手势） */
   const sameShape =
     ordLabels.length === items.length &&
@@ -1402,7 +1411,81 @@ function renderOrdLabels(lines: OrderLine[]): void {
     }
     if (item.el.title !== lv.labelTitle) item.el.title = lv.labelTitle
   }
+  if (!sameShape) equalizeLabelWidth()
+  rebuildLineHits()
   positionOrdLabels()
+}
+
+/**
+ * 把左侧几枚标签的**框做成一样大**（用户 2026-10-18：「和其他线的框要一样大」）。
+ *
+ * 文字长短天然不一样（`强平` 两个字 vs `多 $3.00 │ −$0.12`），
+ * 不统一宽度时右边那条边参差不齐、像没对齐的表。取最宽那枚当基准，
+ * 其余用 `min-width` 补齐（内容更长的仍然按内容宽，不会被裁）。
+ * ⚠️ 只在**重建**之后量一次（`offsetWidth` 会触发布局），平移 / 悬停那每帧的路径里不碰。
+ */
+function equalizeLabelWidth(): void {
+  if (!ordLabels.length) return
+  let max = 0
+  for (const it of ordLabels) {
+    it.el.style.minWidth = ''
+    max = Math.max(max, it.el.offsetWidth)
+  }
+  for (const it of ordLabels) it.el.style.minWidth = `${max}px`
+}
+
+/* ---------------- 直接按住「线」也能拖 ----------------
+ *
+ * 用户 2026-10-18：「点击仓位线也可以实现拖动」—— 以前只有左边那枚标签能拖，
+ * 手指得先找到标签；线本身只有 1px，按不准。
+ * 做法：每条**能拖**的线盖一条 9px 高的透明命中条（只在上下 4.5px 内吃事件，
+ * 不吃横向滚动 / 缩放 —— 其余地方照旧交给图）。
+ */
+const lineHitHost = ref<HTMLElement | null>(null)
+let lineHits: {idx: number; el: HTMLElement}[] = []
+
+/** 命中条的条数 / 指向变了就重建（每次 `renderOrdLabels` 末尾调） */
+function rebuildLineHits(): void {
+  const host = lineHitHost.value
+  if (!host) return
+  const want = ordLabels.filter(it => it.drag).map(it => it.lineIdx)
+  const same =
+    want.length === lineHits.length && want.every((v, i) => lineHits[i]!.idx === v)
+  if (same) return
+  host.innerHTML = ''
+  lineHits = []
+  for (let k = 0; k < ordLabels.length; k++) {
+    const item = ordLabels[k]!
+    if (!item.drag) continue
+    const el = document.createElement('div')
+    el.className = 'line-hit'
+    el.title = '按住上下拖：仓位线拖出止盈/止损，挂单线拖动=改单'
+    el.addEventListener('pointerdown', e => ordLabelDown(e, k))
+    el.addEventListener('pointermove', ordLabelMove)
+    el.addEventListener('pointerup', ordLabelUp)
+    el.addEventListener('pointercancel', ordLabelCancel)
+    host.appendChild(el)
+    lineHits.push({idx: item.lineIdx, el})
+  }
+}
+
+/** 命中条跟着线的 y 走（跟标签同一个价、同一次重排里摆） */
+function positionLineHits(): void {
+  if (!refs || !lineHits.length) return
+  for (const h of lineHits) {
+    const item = ordLabels.find(it => it.lineIdx === h.idx)
+    if (!item) {
+      h.el.style.display = 'none'
+      continue
+    }
+    const y = refs.candle.priceToCoordinate(item.price)
+    if (y === null || y === undefined || !Number.isFinite(y)) {
+      h.el.style.display = 'none'
+      continue
+    }
+    h.el.style.display = ''
+    h.el.style.top = `${y}px`
+  }
 }
 
 /** 平移 / 缩放 / 价格轴动过之后，把左侧标签摆到对应的 y 上 */
@@ -1417,6 +1500,7 @@ function positionOrdLabels(): void {
     item.el.style.display = ''
     item.el.style.top = y + 'px'
   }
+  positionLineHits()
   positionDragPreview()
 }
 
@@ -4619,6 +4703,8 @@ onBeforeUnmount(() => {
       </span>
       <span ref="cxTimeEl" class="cx-tag cx-time off"></span>
       <!-- 左侧标签：仓位的盈亏、挂单的止盈/止损 + 预计收益 + 数量% -->
+      <!-- 每条「能拖的线」的透明命中条（按住线就能拖，见 `rebuildLineHits`） -->
+      <div ref="lineHitHost" class="line-hits"></div>
       <div ref="ordLabelHost" class="ord-labels"></div>
       <div ref="infoEl" class="chart-info"></div>
 

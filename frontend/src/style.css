@@ -4307,6 +4307,29 @@ body.fixed-viewport .split {
   display: block;
 }
 
+/*
+ * 每条**能拖的线**外面那层透明命中条（用户 2026-10-18：「点击仓位线也可以实现拖动」）。
+ * 线本身只有 1px，手指按不准 ⇒ 上下各撑 4.5px（共 9px）吃事件；
+ * 其余区域 `pointer-events: none`，横向滚动 / 缩放照旧。
+ */
+.line-hits {
+  position: absolute;
+  inset: 0;
+  z-index: 23;
+  pointer-events: none;
+}
+
+.line-hits .line-hit {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 9px;
+  margin-top: -4.5px;
+  pointer-events: auto;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
 /* 标签整体可以点（露出 ✕）/ 可以拖 */
 .ord-labels .olb.draggable {
   pointer-events: auto;
