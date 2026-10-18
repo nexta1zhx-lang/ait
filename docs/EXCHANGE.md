@@ -4027,7 +4027,7 @@ Referer:    https://bitcoooin.cn/assets/index-CnM8lKTZ.css      ← 32 次，就
 
 两个结论一起成立：
 
-1. **App 不是缓存的旧页面**（它是远程加载站点，拿到的是刚发的那版 CSS）；
+1. **App 不是缓存的旧页面**（当时 App 是远程加载站点，拿到的是刚发的那版 CSS）；
 2. **那台手机是 WebView Chrome 114** —— `scrollbar-width` **要 121 才认**（这条只在 §50.2 里躺着，
    等于没写），于是只剩 `::-webkit-scrollbar` 这条路，而当时写的是 `width: 0`。
 

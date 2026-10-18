@@ -129,12 +129,12 @@ export function setupNativeShell(): void {
  * 「装了哪一版 APK」/「WebView 版本」/「系统给的 insets 是多少」三层，
  * 光看截图分不出来。所以把这几项摆到页面上，一眼定位。
  *
- * ⚠️ 特别提醒 `version`：我们用了 `server.url` 远程加载（见 `capacitor.config.json`），
- *    **前端永远是线上最新版，而原生壳可能还是几个月前装的那个** ——
- *    每次「改了原生代码但看起来没生效」，先看这一项。
+ * ⚠️ 特别提醒 `version`：前端资源现在**随包内置**（见 `capacitor.config.json`），
+ *    页面和原生壳是同一个安装包，**不再有「前端已是最新、壳还是旧的」** ——
+ *    但反过来说，改了前端不重新出包就看不到变化，排查版本时先看这一项。
  */
 export interface ShellInfo {
-  /** APK 的 versionName（如 0.2.7）。前端是远程加载的，所以这个才是「壳」的版本 */
+  /** APK 的 versionName（如 0.2.7）。页面与壳同包，这一项就是整个 App 的版本 */
   version: string
   /** APK 的 versionCode（如 207） */
   build: string

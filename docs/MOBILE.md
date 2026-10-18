@@ -313,50 +313,52 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 
 ---
 
-## 九、软更新（改前端不用再打包 APK）
+## 九、本地打包前端（不再远程加载）
 
-用户 2026-10-04：「代码每次都要打包吗，能软更新吗」→ 已改成**远程加载**。
+> 2026-10-04 曾改成 `server.url` 远程加载（软更新）；2026-10-19 用户反馈
+> 「App 打开先黑屏，过一会儿才出内容」——远程加载把「打开 App」绑死在网络上，
+> 于是又改回**本地资源**：`frontend/dist` 随 APK 打进包，WebView 直接从本地
+> `https://localhost` 读页面，**页面本身不再请求网络**。
 
-`capacitor.config.json` 的 `server.url` 指向线上：
+`capacitor.config.json` 里只保留 scheme，不再配 `url`：
 
 ```json
-"server": {"url": "https://bitcoooin.cn", "androidScheme": "https"}
+"server": {"androidScheme": "https"}
 ```
 
-**效果**：App 的 WebView 每次启动直接加载 `https://bitcoooin.cn` 的最新前端，
-所以改前端 → 只跑 `bash scripts/release.sh` 部署 Web 就行，**再也不用重新出包 / 重装**。
+**效果**：
+
+- 打开 App **立刻**有界面（登录页 / 骨架），不会先黑屏等网页下载；
+- 数据仍走服务器（`https://bitcoooin.cn`），断网时显示「网络不通」，但 UI 不空白；
+- 页面源变成 `https://localhost`，`api.ts` 的 `API_BASE` 会指向
+  `https://bitcoooin.cn`，后端 CORS 白名单已放行 `https://localhost`；
+  路由用 hash（`#/...`），SSE / 下载链接也都走 `apiUrl()` 的绝对地址 ——
+  这些在 `platform.ts` 一开始就是按「原生壳」写的，不用额外适配。
 
 **代价（已知并接受）**：
 
-- **必须联网**才能打开 App（本来就是「瘦客户端」，所有数据都在服务器）。
-  服务器不可达时，0.2.15 起**有内置兜底**（见下面「黑屏」那一节）；
-  （内置的 `frontend/dist` 照旧随 `cap sync` 打进包，但 `server.url` 模式下用不到）。
-- App ≈ 套壳网页 —— 自用 / APK / 内部分发没问题；**上架 App Store 会被 4.2
-  「Minimum Functionality」判**（这条本来就在「还没做的」里）。
-- 想用真机联调本地改动时，`server.url` 会一直拉线上 —— 临时把这一行删掉再
-  `npx cap sync` 即可（改回来同理）。
+- **每次改前端都要重新出包**：`npm run apk` 后重装，没有软更新了。
+- 首次装这个版本时，页面源从 `bitcoooin.cn` 变成 `https://localhost`，
+  `localStorage` 不共享 ⇒ **要重新登录一次**（token / 本地偏好都会清空）。
+- App ≈ 自带页面的套壳客户端；**上架 App Store 仍会被 4.2
+  「Minimum Functionality」判**（本来就没上架）。
 
-**⚠️ 只改这一行不会立刻生效**：要**重新出一次包**（`npm run apk`）并重装，
-之后才开始「改前端不用打包」。原生 / 依赖 / `capacitor.config.json` 的改动，
-仍然要重新出包。
-
-**兼容性**：`server.url` 下页面源就是 `bitcoooin.cn`，所以
-`api.ts` 的 `API_BASE`（原生壳里写死 `https://bitcoooin.cn`）变成**同源**、CORS 用不上；
-`platform.ts` 的 `isNativeShell()` 仍靠注入的 `window.Capacitor` 判为 true，
-路由照旧 **hash** 模式（地址形如 `https://bitcoooin.cn/#/analyze`）；
-原生插件（状态栏 / 返回键 / 前后台）照常工作。
+**改完必须重新出包**：`capacitor.config.json`、`frontend/dist`（随
+`npx cap sync` 拷进 `android/app/src/main/assets/public`）都只认安装包。
 
 ### 「App 常驻后台，再打开是一片黑」—— 三种原因与对策（2026-10-17）
 
 用户 2026-10-17：「这个 APP 常驻在后台，但是我一打开的时候，会直接黑屏，什么内容都没有。」
 
-**因为这个壳是 `server.url` 远程加载**，WebView 里没有「页面」，一旦出事就是一片窗底色（近黑）。
+**2026-10-19 之前这个壳是 `server.url` 远程加载**，WebView 里没有「页面」，一旦出事就是一片窗底色（近黑）。
+现在 `frontend/dist` 已随包内置（见上一节），第一屏不再依赖网络；下面三条对策仍然保留，
+覆盖「渲染进程被回收 / 本地页面加载失败 / 脚本没跑起来」。
 三种原因、三条对策，**全部在安装包里**（要装 0.2.15+）：
 
 | 原因 | 以前的表现 | 现在的对策（`MainActivity.java`） |
 |---|---|---|
 | **渲染进程被系统回收**（后台待久了内存不够，华为这类 ROM 尤其爱干） | Capacitor 默认的 `onRenderProcessGone` 返回 `false` ⇒ **系统直接崩掉 App**（就是之前报的「一直闪退」）；或者留下一个死界面 = 黑屏 | 接管它：`return true` + **重建 Activity**（新 WebView 自动重新加载）。连续 3 次还死就不再重建，免得变成「开一次崩一次」 |
-| **回来时网还没通**（数据网刚唤醒 / 到服务器的 IPv4 被掐，这台机器实测过几分钟黑洞） | 主文档加载失败**没有错误页** ⇒ 纯黑，只能杀进程重开 | `WebViewClient.onReceivedError`（只认 `isForMainFrame`；5xx 也管）→ 换成**自带**的「连不上服务器」页：说明 + 「重新加载」+ **每 6 秒自动重试**（最多 20 次） |
+| **回来时网还没通**（数据网刚唤醒 / 到服务器的 IPv4 被掐，这台机器实测过几分钟黑洞） | 远程加载时代：主文档加载失败**没有错误页** ⇒ 纯黑，只能杀进程重开 | `WebViewClient.onReceivedError`（只认 `isForMainFrame`；5xx 也管）→ 换成**自带**的「连不上服务器」页：说明 + 「重新加载」+ **每 6 秒自动重试**（最多 20 次）。本地资源时代主要防「本地页面没加载起来」 |
 | **界面脚本没跑起来**（模块 404 / 初始化抛错） | `#app` 空着 + 深色底 = 黑屏，而且永远不动 | ① `frontend/index.html` 里一段**内联**看门狗：12 秒没挂载就露出「页面没起来 + 重新加载」；② `main.ts` 的 `app.config.errorHandler` / `unhandledrejection`：整棵树空了也露它 |
 
 **别的两条**（同一次顺手加的）：`onResume` 里——离开超过 5 分钟且 `getContentHeight() <= 0`
@@ -367,8 +369,8 @@ cd downloads && python3 -m http.server 8899 --bind 0.0.0.0
 前端能做的只有第三条。真机排查顺序：先看**装的是哪一版**（`我的 → 个人信息 → App 信息`），
 0.2.15 之前的一律先升级再说。
 
-⚠️ 改这几个 Java 文件**必须重新出包并重装**（`npm run apk`）——`server.url` 只管前端，
-原生那层只认安装包。
+⚠️ 改这几个 Java 文件**必须重新出包并重装**（`npm run apk`）——前端资源现在也随包内置，
+改前端同样要重新出包；原生那层只认安装包。
 
 ### ⚠️⚠️ 装机版跑的是**手机里的 WebView**，不是我们本机的 Chrome
 

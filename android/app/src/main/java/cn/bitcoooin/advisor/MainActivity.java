@@ -93,15 +93,17 @@ public class MainActivity extends BridgeActivity {
          *
          * 用户：「这个 APP 常驻在后台，但是我一打开的时候，会直接黑屏，什么内容都没有。」
          *
-         * 这个壳是 `capacitor.config.json` 的 `server.url = https://bitcoooin.cn`，
-         * 也就是**整个页面是从网上拉的**（不是打在本地的）。于是有三种「一片黑」：
+         * 这个壳原先是 `capacitor.config.json` 的 `server.url = https://bitcoooin.cn`，
+         * 也就是**整个页面是从网上拉的**（不是打在本地的）——2026-10-19 已改回
+         * **本地资源**（`frontend/dist` 随包内置，见 `capacitor.config.json`），
+         * 第一屏不再依赖网络；但下面这些兜底仍然保留，防的是：
          *
          *   ① **WebView 的渲染进程被系统杀了**（后台待久了内存回收，华为那类 ROM 尤其爱干）。
          *      Capacitor 默认的 `onRenderProcessGone` 返回 false ⇒ 系统**直接把 App 进程崩掉**
          *      （用户之前报的「app 端一直闪退」很可能就是这个），
          *      或者 Activity 还活着但 WebView 是死的 ⇒ 一片黑。
-         *   ② **回前台时 WebView 重新加载，但网还没通 / 到服务器的路径被掐**
-         *      （这台机器上实测过移动网到服务器的 IPv4 会被黑洞几分钟）。
+         *   ② **本地页面没加载起来**（远程加载时代是「回前台时网还没通 / 到服务器的
+         *      路径被掐」——这台机器上实测过移动网到服务器的 IPv4 会被黑洞几分钟）。
          *      原生 WebView 加载失败**没有错误页**，就是露出窗底色 = 看着像黑屏。
          *   ③ 只是**没重绘**：内容还在，但那一帧没画出来。
          *
