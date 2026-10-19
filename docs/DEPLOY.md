@@ -315,6 +315,18 @@ Clash 拉订阅 ──https://bitcoooin.cn/sub/clash──> xray ─回落─> c
 白等到超时（表现正是「老连接还能用、新地址打不开，飞行模式换 IP 才好」）。
 直连只留 h1/h2，少一层变量。
 
+### 纯 HTTP 诊断口（2026-10-19）
+
+手机移动网络排查时用：
+
+```text
+http://52.194.6.144/api/health   → 200 JSON（不跳 HTTPS）
+```
+
+`http://52.194.6.144` 其它路径仍 `308` 跳回 `https://bitcoooin.cn`。
+⚠️ **别用 `https://52.194.6.144` 测**：证书只签给 `bitcoooin.cn`，IP 上必然
+证书错误，会被误判成「服务器挂了」。这个口只放行 `/api/health`，不进别的业务路由。
+
 ### 应用侧
 
 - 表 `proxy_users`（`backend/src/db/schema.ts`）是**权威副本**：名字 / uuid / 订阅密码 /
