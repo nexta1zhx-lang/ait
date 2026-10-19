@@ -12,6 +12,17 @@
   },
   "releases": [
     {
+      "version": "0.2.21",
+      "file": "entry-advisor-0.2.21.apk",
+      "date": "2026-10-19",
+      "title": "「代码编辑器」并入「Mac 服务」：VS Code Web 和 DeepSeek Harness 一页管",
+      "notes": [
+        "**我的 → 系统管理** 里原来的「代码编辑器」改成 **「Mac 服务」**：一页列出两个跑在 Mac 上、经反向隧道转出来的服务 —— VS Code Web（`code.bitcoooin.cn`）和 DeepSeek Harness（`chat.bitcoooin.cn`）。",
+        "每个服务显示它跑的是什么、隧道端口、对外地址，以及「在线 / 隧道不通 / 未配置」——连不上时不用再登服务器猜是哪一段断了。",
+        "改密码仍然只有一个表单：两边在 Caddyfile 里共用一套账号，**改一次两个入口一起生效**；旧密码立刻失效。"
+      ]
+    },
+    {
       "version": "0.2.20",
       "file": "entry-advisor-0.2.20.apk",
       "date": "2026-10-19",
