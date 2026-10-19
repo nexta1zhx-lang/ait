@@ -8,6 +8,33 @@
 #   ② Lightsail 防火墙放行 80 / 443（控制台 → Networking → IPv4 Firewall）
 
 # ================================================================
+# 全局（2026-10-19）
+#
+# ① 关 HTTP/3：Caddy 原本会回 `Alt-Svc: h3=":443"`，手机/移动网络就会去试
+#    UDP 443 的 QUIC；那条路一抖，新连接会白等到超时（老连接不受影响）。
+#    直连只留 h1/h2，避免这层变量。
+# ② 直连流量其实是从 Xray 的 REALITY fallback 进来的（宿主 127.0.0.1:8444 →
+#    容器 :443），Caddy 原本只能看到 docker 网关 172.18.0.1。现在让 Xray
+#    fallback 先发 PROXY protocol v1（`xver: 1`，见
+#    /usr/local/etc/xray/config.json），Caddy 解析后日志/应用里就是真实客户端 IP。
+#    ⚠️ proxy_protocol 必须排在 tls 前面；allow = docker 网关 + 本机。
+#    ⚠️ 没带 PROXY 头的连接仍按普通 TLS 接受（go-proxyproto 的 USE 语义），
+#       所以开这个不会把现有直连弄断。
+# ================================================================
+{
+	servers :443 {
+		listener_wrappers {
+			proxy_protocol {
+				timeout 2s
+				allow 172.17.0.0/16 172.18.0.0/16 127.0.0.1/32
+			}
+			tls
+		}
+		protocols h1 h2
+	}
+}
+
+# ================================================================
 # 扫描器防护（2026-10-12）
 #
 # 现象：pan.bitcoooin.cn 一小时被打 1077 次，bitcoooin.cn 也被探

@@ -295,9 +295,25 @@ Clash 拉订阅 ──https://bitcoooin.cn/sub/clash──> xray ─回落─> c
 | `/usr/local/bin/xray-user` | 命令行前端，调上面的 xrayd。`list` / `add <名字> [密码]` / `del` / `passwd` / `link` / `sync` |
 
 **Caddy 那边**（`docker-compose.prod.yml`）：`443` 让给了 xray，所以 caddy 只留
-`'80:80'` + `'127.0.0.1:8444:443'` + `'443:443/udp'`（HTTP/3 走 UDP，不经 xray）。
+`'80:80'` + `'127.0.0.1:8444:443'` + `'443:443/udp'`
+（HTTP/3 走 UDP，不经 xray；2026-10-19 起 Caddy 已关 h3，见下，这个映射不再使用）。
 路由 `handle_path /sub/*` 写在**服务器上的** `/opt/crypto-advisor/Caddyfile`
 （这份是权威版本，`release.sh` 已排除它，仓库里那份不参与发布）。
+
+### 直连客户端的真实 IP（2026-10-19）
+
+普通 HTTPS 是不经代理、走 REALITY fallback 进来的，以前 Caddy 只能看到 docker
+网关 `172.18.0.1` —— 日志里所有客户端都长一样，排查「某台手机连不上」时完全瞎。
+现在：
+
+- xray 的 `realitySettings.xver` 改成 **`1`**（fallback 先发 PROXY protocol v1）；
+- Caddy 在 `:443` 上挂 `proxy_protocol` 监听包装器（`allow` 为 docker 网关 + 本机），
+  解析后 `remote_ip` / `X-Forwarded-For` 就是真实客户端 IP。
+
+同一版还**关掉了 HTTP/3**（全局 `servers :443 { protocols h1 h2 }`）：Caddy 原来会回
+`Alt-Svc: h3=":443"`，手机/移动网络就会去试 UDP 443 的 QUIC；那条路一抖，新连接会
+白等到超时（表现正是「老连接还能用、新地址打不开，飞行模式换 IP 才好」）。
+直连只留 h1/h2，少一层变量。
 
 ### 应用侧
 
