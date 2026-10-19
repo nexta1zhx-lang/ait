@@ -337,6 +337,29 @@ export const fetchRustDesk = () => get<RustDeskSnapshot>('/api/admin/rustdesk')
 export const setRustDeskNote = (id: string, note: string) =>
   patchReq<{ok: boolean}>(`/api/admin/rustdesk/${id}`, {note})
 
+/* ---------------- 代码编辑器（VS Code Web） ---------------- */
+
+export interface CodeWebInfo {
+  domain: string
+  url: string
+  /** 宿主机上 `code serve-web` 的端口 */
+  port: number
+  /** Caddyfile 里 Basic Auth 的用户名 */
+  username: string
+  /** Caddy 容器在跑 */
+  caddyUp: boolean
+  /** 宿主机的反向隧道能连上 */
+  tunnelUp: boolean
+  online: boolean
+  error?: string
+}
+
+export const fetchCodeWeb = () => get<CodeWebInfo>('/api/admin/codeweb')
+
+/** 改 Caddy Basic Auth 密码（后端改哈希 + validate + reload） */
+export const setCodeWebPassword = (password: string) =>
+  post<{ok: boolean}>('/api/admin/codeweb/password', {password})
+
 /* ---------------- 合约行情置顶（每个用户最多 5 个） ---------------- */
 
 /**

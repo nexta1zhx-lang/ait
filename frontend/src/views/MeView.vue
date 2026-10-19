@@ -49,8 +49,13 @@ const AccountStatsView = asyncPane(() => import('./AccountStatsView.vue'), {
  */
 type Pane = 'exchange' | 'stats' | 'profile' | 'admin'
 
-/** 「管理」里那四段：用户管理 / 服务器 / 代理订阅 / 远程桌面 */
-export type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk'
+/** 「管理」里那五段：用户管理 / 服务器 / 代理订阅 / 远程桌面 / 代码编辑器 */
+export type AdminTab =
+  | 'users'
+  | 'server'
+  | 'proxy'
+  | 'rustdesk'
+  | 'codeweb'
 
 /**
  * 一级 tab。用户 2026-10-06：「将交易所账户放到第一个」。
@@ -117,9 +122,11 @@ function readProfTab(v: unknown): ProfTab {
     : 'account'
 }
 
-/** 管理页里当前看的是哪一段；只有 `?t=server|proxy|rustdesk` 才算那几段，其余都当用户管理 */
+/** 管理页里当前看的是哪一段；只有 `?t=server|proxy|rustdesk|codeweb` 才算那几段，其余都当用户管理 */
 function readAdminTab(v: unknown): AdminTab {
-  return v === 'server' || v === 'proxy' || v === 'rustdesk' ? v : 'users'
+  return v === 'server' || v === 'proxy' || v === 'rustdesk' || v === 'codeweb'
+    ? v
+    : 'users'
 }
 
 const pane = ref<Pane>(readPane(route.query.p))
@@ -248,10 +255,10 @@ function writeQuery(p: Pane, t: AdminTab, m: ProfTab = profTab.value): void {
   q.p = p
   /*
    * 二级 tab 只在**非默认**那种情况下写进地址栏：
-   *   · 系统管理：只有「服务器 / 代理订阅」才写（`?t=users` 是多余的）；
+   *   · 系统管理：只有「用户管理」是默认，其余几段都写（含远程桌面 / 代码编辑器）；
    *   · 个人信息：只有非「账户信息」那段才写（默认那格不用写）。
    */
-  if (p === 'admin' && (t === 'server' || t === 'proxy')) q.t = t
+  if (p === 'admin' && t !== 'users') q.t = t
   else if (p === 'profile' && m !== 'account') q.t = m
   else delete q.t
   void router.replace({query: q})

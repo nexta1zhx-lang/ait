@@ -687,6 +687,9 @@ curl -s https://bitcoooin.cn/api/health        # rules.sources / systemChars 就
   - 手工改完**一定要自己 restart 一次**才生效：
     `sudo docker compose -f docker-compose.prod.yml restart caddy`
     （⚠️ 是 `restart`，别为了这个跑 `release.sh` —— 发布不是重载 caddy 的开关。）
+  - 例外：「我的 → 系统管理 → 代码编辑器」改的是同一个文件里的 `code.bitcoooin.cn`
+    Basic Auth 哈希，它走 `caddy validate` + `caddy reload`（热重载，不用 restart）。
+    app 容器为此多了 `./Caddyfile:/app/Caddyfile:rw` 这个挂载（见 compose）。
   - 别指望「发布顺带把 Caddyfile 同步过去」：发布只发这个仓库的代码/镜像。
 
 > 💡 为什么要「先清一遍旧文件」：`tar xzf` 只覆盖同名文件、**不会删除**本机已经删掉的

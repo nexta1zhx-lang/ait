@@ -12,6 +12,18 @@
   },
   "releases": [
     {
+      "version": "0.2.20",
+      "file": "entry-advisor-0.2.20.apk",
+      "date": "2026-10-19",
+      "title": "系统管理加「代码编辑器」：在线改 VS Code Web 的登录密码",
+      "notes": [
+        "**我的 → 系统管理** 新增「代码编辑器」一格：显示 `code.bitcoooin.cn` 地址、用户名，以及 Caddy 容器和反向隧道是否通。",
+        "可以直接重设那层 Basic Auth 密码：保存后自动生成 bcrypt 哈希、写回 Caddyfile、`caddy validate` + `caddy reload` 热重载，不断站；校验失败会自动回滚。",
+        "⚠️ 原密码存的是哈希，取不回来；改完旧密码立刻失效，已打开的页面下次请求会重新要密码。",
+        "顺带修了管理页二级 tab 不写进地址栏的问题：切到「远程桌面 / 代理订阅 / 代码编辑器」后刷新，会停在同一格。"
+      ]
+    },
+    {
       "version": "0.2.19",
       "file": "entry-advisor-0.2.19.apk",
       "date": "2026-10-19",

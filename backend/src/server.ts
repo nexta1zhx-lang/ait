@@ -52,6 +52,7 @@ import {
   type ProxyUser
 } from './proxy'
 import {rustDeskSnapshot, setRustDeskNote} from './rustdesk'
+import {getCodeWebInfo, setCodeWebPassword} from './codeweb'
 import {pruneOldData} from './db/prune'
 import {
   recordUsage,
@@ -5587,6 +5588,33 @@ async function route(
   }
 
   // 删人的 DELETE 已经并到上面那段 `/:id` 里了
+
+  /* ---- 管理员：代码编辑器（VS Code Web）的登录密码 ----
+   *
+   * VS Code 那边用 `--without-connection-token` 起，本身没有密码；对外只有
+   * Caddyfile 里 `code.bitcoooin.cn` 的 Basic Auth 这一道门。这里改的就是
+   * 那一行 bcrypt 哈希（见 ./codeweb.ts）。
+   */
+  if (p === '/api/admin/codeweb' || p.startsWith('/api/admin/codeweb/')) {
+    if (!me.isAdmin) return sendJson(res, 403, {error: '需要管理员权限'})
+
+    if (p === '/api/admin/codeweb' && method === 'GET') {
+      return sendJson(res, 200, await getCodeWebInfo())
+    }
+
+    if (p === '/api/admin/codeweb/password' && method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      try {
+        await setCodeWebPassword(str(body.password))
+        return sendJson(res, 200, {ok: true})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
 
   /* ---- 管理员：远程桌面（RustDesk）—— 只读页面，唯一能改的是别名 ---- */
   if (p === '/api/admin/rustdesk' || p.startsWith('/api/admin/rustdesk/')) {

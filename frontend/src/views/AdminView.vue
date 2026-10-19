@@ -9,6 +9,7 @@
  *   · 改某个人的密码（改完那个人会被踢下线）
  *   · 查看每个人自己的 DeepSeek 配置（Key 默认打码，点「显示」看明文）
  *   · 删号（⚠️ 会把他名下的预测历史 / 知识库 / 用量一起删掉，要二次确认）
+ *   · 服务器 / 代理订阅 / 远程桌面 / 代码编辑器（VS Code Web 的 Caddy 登录密码）
  *
  * 用户 2026-10-04（本轮）：「**服务器挪到管理界面 改为 tab 一个是用户管理 一个是服务器**」
  *   → 顶部一条二级 tab，「服务器」那半就是原来的 `ServerStatusView`（原样搬进来，一行未改）。
@@ -38,14 +39,16 @@ import SegTabs from '../comps/SegTabs.vue'
 import ServerStatusView from './ServerStatusView.vue'
 import ProxyUsersPanel from '../comps/ProxyUsersPanel.vue'
 import RustDeskPanel from '../comps/RustDeskPanel.vue'
+import CodeWebPanel from '../comps/CodeWebPanel.vue'
 
-type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk'
+type AdminTab = 'users' | 'server' | 'proxy' | 'rustdesk' | 'codeweb'
 
 const TABS: {value: AdminTab; label: string}[] = [
   {value: 'users', label: '用户管理'},
   {value: 'server', label: '服务器'},
   {value: 'proxy', label: '代理订阅'},
-  {value: 'rustdesk', label: '远程桌面'}
+  {value: 'rustdesk', label: '远程桌面'},
+  {value: 'codeweb', label: '代码编辑器'}
 ]
 
 const props = defineProps<{tab?: AdminTab}>()
@@ -200,6 +203,9 @@ onMounted(load)
 
     <!-- 远程桌面（RustDesk）：只读，同样自带面板 -->
     <RustDeskPanel v-else-if="props.tab === 'rustdesk'" />
+
+    <!-- 代码编辑器（VS Code Web）：改 Caddy Basic Auth 密码，自带面板 -->
+    <CodeWebPanel v-else-if="props.tab === 'codeweb'" />
 
     <div v-else class="adm-users">
       <section class="panel">
