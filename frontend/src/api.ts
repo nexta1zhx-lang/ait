@@ -337,28 +337,38 @@ export const fetchRustDesk = () => get<RustDeskSnapshot>('/api/admin/rustdesk')
 export const setRustDeskNote = (id: string, note: string) =>
   patchReq<{ok: boolean}>(`/api/admin/rustdesk/${id}`, {note})
 
-/* ---------------- 代码编辑器（VS Code Web） ---------------- */
+/* ---------------- Mac 服务（VS Code Web / DeepSeek Harness） ---------------- */
 
-export interface CodeWebInfo {
-  domain: string
+export interface MacService {
+  key: string
+  name: string
+  /** 对外域名 */
+  site: string
   url: string
-  /** 宿主机上 `code serve-web` 的端口 */
+  /** 服务器上反向隧道的端口 */
   port: number
-  /** Caddyfile 里 Basic Auth 的用户名 */
-  username: string
+  /** 一句话说明（跑的是什么） */
+  detail: string
+  /** Caddyfile 里有这个站点块并且配了 basic_auth */
+  configured: boolean
+  /** 隧道那头连得上 */
+  up: boolean
+}
+
+export interface MacServicesInfo {
   /** Caddy 容器在跑 */
   caddyUp: boolean
-  /** 宿主机的反向隧道能连上 */
-  tunnelUp: boolean
-  online: boolean
+  /** Basic Auth 用户名（几个入口共用一个） */
+  username: string
+  services: MacService[]
   error?: string
 }
 
-export const fetchCodeWeb = () => get<CodeWebInfo>('/api/admin/codeweb')
+export const fetchMacServices = () => get<MacServicesInfo>('/api/admin/mac')
 
-/** 改 Caddy Basic Auth 密码（后端改哈希 + validate + reload） */
-export const setCodeWebPassword = (password: string) =>
-  post<{ok: boolean}>('/api/admin/codeweb/password', {password})
+/** 改 Caddy Basic Auth 密码（几个入口一起改，后端哈希 + validate + reload） */
+export const setMacPassword = (password: string) =>
+  post<{ok: boolean}>('/api/admin/mac/password', {password})
 
 /* ---------------- 合约行情置顶（每个用户最多 5 个） ---------------- */
 

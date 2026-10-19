@@ -52,7 +52,7 @@ import {
   type ProxyUser
 } from './proxy'
 import {rustDeskSnapshot, setRustDeskNote} from './rustdesk'
-import {getCodeWebInfo, setCodeWebPassword} from './codeweb'
+import {getMacServices, setMacPassword} from './mac-services'
 import {pruneOldData} from './db/prune'
 import {
   recordUsage,
@@ -5589,24 +5589,24 @@ async function route(
 
   // 删人的 DELETE 已经并到上面那段 `/:id` 里了
 
-  /* ---- 管理员：代码编辑器（VS Code Web）的登录密码 ----
+  /* ---- 管理员：Mac 服务（VS Code Web / DeepSeek Harness）的登录密码 ----
    *
-   * VS Code 那边用 `--without-connection-token` 起，本身没有密码；对外只有
-   * Caddyfile 里 `code.bitcoooin.cn` 的 Basic Auth 这一道门。这里改的就是
-   * 那一行 bcrypt 哈希（见 ./codeweb.ts）。
+   * 这两个服务都在 Mac 上跑，经反向隧道由这台服务器转出去；Caddyfile 里
+   * `code.bitcoooin.cn` 和 `chat.bitcoooin.cn` 各有一个 basic_auth，用的是同一个
+   * 账号和哈希。这里改的就是那两行 bcrypt 哈希（见 ./mac-services.ts）。
    */
-  if (p === '/api/admin/codeweb' || p.startsWith('/api/admin/codeweb/')) {
+  if (p === '/api/admin/mac' || p.startsWith('/api/admin/mac/')) {
     if (!me.isAdmin) return sendJson(res, 403, {error: '需要管理员权限'})
 
-    if (p === '/api/admin/codeweb' && method === 'GET') {
-      return sendJson(res, 200, await getCodeWebInfo())
+    if (p === '/api/admin/mac' && method === 'GET') {
+      return sendJson(res, 200, await getMacServices())
     }
 
-    if (p === '/api/admin/codeweb/password' && method === 'POST') {
+    if (p === '/api/admin/mac/password' && method === 'POST') {
       const body = await readJsonBody(req).catch(() => null)
       if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
       try {
-        await setCodeWebPassword(str(body.password))
+        await setMacPassword(str(body.password))
         return sendJson(res, 200, {ok: true})
       } catch (e) {
         return sendJson(res, 400, {error: (e as Error).message})

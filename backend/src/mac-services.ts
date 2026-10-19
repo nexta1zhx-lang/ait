@@ -1,17 +1,19 @@
 /**
- * 「系统管理 → 代码编辑器」：管理 `code.bitcoooin.cn` 的 Caddy Basic Auth 密码。
+ * 「系统管理 → Mac 服务」：管 Mac 上那几个 Web 服务的 Caddy 入口。
  *
- * VS Code 那边是 `code serve-web --without-connection-token`，本身**没有密码**；
- * 对外的唯一一道门是 Caddyfile 里 `code.bitcoooin.cn` 的 `basic_auth`。
- * 这里只改那一行 bcrypt 哈希，改完先 `caddy validate` 再 `caddy reload`，
- * 不重启容器、不断站。
+ * 现在的两个（都在 Mac 上跑，经反向隧道由这台服务器转出去）：
+ *   · `code.bitcoooin.cn` → 宿主 8000 → `code serve-web`
+ *   · `chat.bitcoooin.cn` → 宿主 59721 → `dsh --profile remote`（DeepSeek Harness）
+ *
+ * 两边在 Caddyfile 里用的是**同一个 Basic Auth 用户 + 同一个哈希** ⇒ 这里改一次，
+ * 两个入口一起生效（只改一个会让两边密码对不上，所以干脆设成一体）。
+ *
+ * ⚠️ VS Code / Harness 自己都不做认证，对外唯一那道门就是 Caddy 的 basic_auth；
+ *    明文不落盘，Caddyfile 里只有 bcrypt 哈希。
  *
  * ⚠️ Caddyfile 由 compose 从宿主机挂到 app 容器（`./Caddyfile:/app/Caddyfile`）。
  *    单文件 bind mount **必须原地写**（`fs.writeFileSync`），不能「写临时文件再 rename」——
  *    rename 会换 inode，Caddy 容器里挂着的还是旧文件。
- *
- * ⚠️ 密码明文只会出现在 `docker exec ... caddy hash-password` 的参数里一瞬，
- *    不会落盘；Caddyfile 里始终只有哈希。
  */
 import fs from 'node:fs'
 import {execFile} from 'node:child_process'
@@ -19,34 +21,57 @@ import {promisify} from 'node:util'
 
 const pexec = promisify(execFile)
 
-const CADDYFILE = process.env.CODEWEB_CADDYFILE || '/app/Caddyfile'
-const CADDY_CONTAINER = process.env.CODEWEB_CADDY_CONTAINER || 'ca-caddy'
-const SITE = process.env.CODEWEB_SITE || 'code.bitcoooin.cn'
-const TUNNEL_PORT = Number(process.env.CODEWEB_TUNNEL_PORT || 8000)
+const CADDYFILE = process.env.MAC_CADDYFILE || '/app/Caddyfile'
+const CADDY_CONTAINER = process.env.MAC_CADDY_CONTAINER || 'ca-caddy'
 
 const PASSWORD_MIN = 8
 const PASSWORD_MAX = 200
 
-export type CodeWebInfo = {
-  domain: string
-  url: string
-  /** 宿主机上 `code serve-web` 的端口 */
+export type MacServiceDef = {
+  key: string
+  name: string
+  site: string
+  /** 服务器上反向隧道的端口（`172.17.0.1:<port>`） */
   port: number
-  /** Caddyfile 里 Basic Auth 的用户名 */
-  username: string
-  /** Caddy 容器在跑 */
+  detail: string
+}
+
+/** 顺序就是页面上从上到下的顺序 */
+export const MAC_SERVICES: MacServiceDef[] = [
+  {
+    key: 'code',
+    name: 'VS Code Web',
+    site: process.env.MAC_SITE_CODE || 'code.bitcoooin.cn',
+    port: Number(process.env.MAC_PORT_CODE || 8000),
+    detail: 'code serve-web（Copilot Chat + DeepSeek provider）'
+  },
+  {
+    key: 'chat',
+    name: 'DeepSeek Harness',
+    site: process.env.MAC_SITE_CHAT || 'chat.bitcoooin.cn',
+    port: Number(process.env.MAC_PORT_CHAT || 59721),
+    detail: 'dsh --profile remote'
+  }
+]
+
+export type MacServiceStatus = MacServiceDef & {
+  url: string
+  /** Caddyfile 里有这个站点块，并且找到了 basic_auth 用户 */
+  configured: boolean
+  /** 隧道那头连得上 */
+  up: boolean
+}
+
+export type MacServicesInfo = {
   caddyUp: boolean
-  /** 宿主机的反向隧道（`127.0.0.1:8000`）能连上 */
-  tunnelUp: boolean
-  /** 两个都通 */
-  online: boolean
-  /** Caddyfile 读不到 / 找不到站点块时的说明 */
+  /** Basic Auth 用户名（两个入口共用一个） */
+  username: string
+  services: MacServiceStatus[]
   error?: string
 }
 
 type BasicAuth = {
   username: string
-  hash: string
   line: number
   indent: string
 }
@@ -74,9 +99,8 @@ function stripComment(line: string): string {
 }
 
 function braceDelta(line: string): number {
-  const s = stripComment(line)
   let d = 0
-  for (const ch of s) {
+  for (const ch of stripComment(line)) {
     if (ch === '{') d++
     else if (ch === '}') d--
   }
@@ -84,10 +108,10 @@ function braceDelta(line: string): number {
 }
 
 /** 找到 `SITE { ... }` 这个站点块的起止行（含首尾） */
-function findSite(lines: string[]): {start: number; end: number} | null {
+function findSite(lines: string[], site: string): {start: number; end: number} | null {
   // 线上写的是裸域名；测试 / 特殊部署可能带 `http://` 或端口，一并认
   const re = new RegExp(
-    `^\\s*(?:https?://)?${SITE.replace(/\./g, '\\.')}(?::\\d+)?\\s*\\{`
+    `^\\s*(?:https?://)?${site.replace(/\./g, '\\.')}(?::\\d+)?\\s*\\{`
   )
   const start = lines.findIndex(l => re.test(stripComment(l)))
   if (start < 0) return null
@@ -99,44 +123,32 @@ function findSite(lines: string[]): {start: number; end: number} | null {
   return null
 }
 
-/** 站点块里的 `basic_auth { ... }` */
-function findBasicAuth(
-  lines: string[],
-  site: {start: number; end: number}
-): {start: number; end: number} | null {
+/** 站点块里的 `basic_auth { ... }` 的第一行 `用户名 哈希` */
+function findAuth(lines: string[], site: string): BasicAuth | null {
+  const block = findSite(lines, site)
+  if (!block) return null
   let start = -1
   let depth = 0
-  for (let i = site.start + 1; i < site.end; i++) {
+  for (let i = block.start + 1; i < block.end; i++) {
     const s = stripComment(lines[i])
     if (start < 0 && /^\s*basic_auth\s*\{/.test(s)) {
       start = i
       depth = 0
     }
-    if (start >= 0) {
-      depth += braceDelta(lines[i])
-      if (depth <= 0 && i > start) return {start, end: i}
-    }
-  }
-  return start >= 0 ? {start, end: site.end} : null
-}
-
-/** 第一个 `用户名 哈希` 行 */
-function findUser(lines: string[]): BasicAuth | null {
-  const site = findSite(lines)
-  if (!site) return null
-  const ba = findBasicAuth(lines, site)
-  if (!ba) return null
-  for (let i = ba.start + 1; i < ba.end; i++) {
-    const raw = lines[i]
-    const s = stripComment(raw).trim()
-    if (!s) continue
-    const m = s.match(/^(\S+)\s+(\S+)$/)
-    if (!m) continue
-    return {
-      username: m[1],
-      hash: m[2],
-      line: i,
-      indent: raw.match(/^\s*/)?.[0] ?? ''
+    if (start < 0) continue
+    depth += braceDelta(lines[i])
+    if (depth <= 0 && i > start) break
+    // ⚠️ 从 `basic_auth {` 的**下一行**开始找：那一行本身也符合「两个词」，
+    //    会被当成用户名叫 `basic_auth`（第一版就是这么错的）
+    if (i === start) continue
+    const row = stripComment(lines[i]).trim()
+    const m = row.match(/^(\S+)\s+\S+$/)
+    if (m) {
+      return {
+        username: m[1],
+        line: i,
+        indent: lines[i].match(/^\s*/)?.[0] ?? ''
+      }
     }
   }
   return null
@@ -147,11 +159,11 @@ function readCaddyfile(): {text: string; lines: string[]} {
   return {text, lines: text.split('\n')}
 }
 
-async function caddy(args: string[], timeout = 15_000): Promise<string> {
+async function caddy(args: string[]): Promise<string> {
   const {stdout, stderr} = await pexec(
     'docker',
     ['exec', CADDY_CONTAINER, 'caddy', ...args],
-    {timeout, maxBuffer: 1024 * 1024}
+    {timeout: 15_000, maxBuffer: 1024 * 1024}
   )
   return `${stdout}${stderr}`
 }
@@ -174,8 +186,7 @@ async function hashPassword(password: string): Promise<string> {
   } catch (e) {
     // ⚠️ 别把 execFile 的原始错误直接抛出去 —— 它带着整条命令行，
     //    里面就有明文密码。只取 stderr 的第一段。
-    const err = e as {stderr?: string}
-    const detail = String(err.stderr ?? '')
+    const detail = String((e as {stderr?: string}).stderr ?? '')
       .split('\n')
       .map(s => s.trim())
       .filter(Boolean)[0]
@@ -203,15 +214,15 @@ async function isCaddyUp(): Promise<boolean> {
   }
 }
 
-async function isTunnelUp(): Promise<boolean> {
+async function isUp(port: number): Promise<boolean> {
   /*
-   * 线上：app 容器通过 compose 的 extra_hosts 把 host.docker.internal 指到宿主机；
-   * 反向隧道监听的正是宿主机 127.0.0.1:8000。
-   * 本地开发：没有容器，直接试 127.0.0.1。任何 HTTP 响应都算通。
+   * 线上：app 容器通过 compose 的 extra_hosts 把 host.docker.internal 指到宿主机，
+   * 反向隧道就监听在宿主机上。本地开发：没有容器，直接试 127.0.0.1。
+   * 任何 HTTP 响应都算通（401 也算 —— 说明服务活着）。
    */
   for (const host of ['host.docker.internal', '127.0.0.1']) {
     try {
-      const res = await fetch(`http://${host}:${TUNNEL_PORT}/`, {
+      const res = await fetch(`http://${host}:${port}/`, {
         method: 'GET',
         redirect: 'manual',
         signal: AbortSignal.timeout(2500)
@@ -224,33 +235,40 @@ async function isTunnelUp(): Promise<boolean> {
   return false
 }
 
-export async function getCodeWebInfo(): Promise<CodeWebInfo> {
-  const info: CodeWebInfo = {
-    domain: SITE,
-    url: `https://${SITE}`,
-    port: TUNNEL_PORT,
-    username: '',
+export async function getMacServices(): Promise<MacServicesInfo> {
+  const info: MacServicesInfo = {
     caddyUp: false,
-    tunnelUp: false,
-    online: false
+    username: '',
+    services: []
   }
 
+  let lines: string[] = []
   try {
-    const auth = findUser(readCaddyfile().lines)
-    if (auth) info.username = auth.username
-    else info.error = `Caddyfile 里没找到 ${SITE} 的 basic_auth 用户`
+    lines = readCaddyfile().lines
   } catch (e) {
     info.error = `读不到 Caddyfile（${CADDYFILE}）：${shortErr(e)}`
   }
 
-  const [caddyUp, tunnelUp] = await Promise.all([isCaddyUp(), isTunnelUp()])
-  info.caddyUp = caddyUp
-  info.tunnelUp = tunnelUp
-  info.online = caddyUp && tunnelUp
+  const found = MAC_SERVICES.map(s => (lines.length ? findAuth(lines, s.site) : null))
+  for (const a of found) if (a && !info.username) info.username = a.username
+
+  info.services = await Promise.all(
+    MAC_SERVICES.map(async (s, i) => ({
+      ...s,
+      url: `https://${s.site}`,
+      configured: Boolean(found[i]),
+      up: await isUp(s.port)
+    }))
+  )
+
+  info.caddyUp = await isCaddyUp()
+  if (!info.username && !info.error) {
+    info.error = `Caddyfile 里没找到 ${MAC_SERVICES.map(s => s.site).join(' / ')} 的 basic_auth 用户`
+  }
   return info
 }
 
-export async function setCodeWebPassword(password: string): Promise<void> {
+export async function setMacPassword(password: string): Promise<void> {
   if (typeof password !== 'string') throw new Error('密码格式不对')
   if (password.length < PASSWORD_MIN) {
     throw new Error(`密码至少 ${PASSWORD_MIN} 位`)
@@ -263,13 +281,27 @@ export async function setCodeWebPassword(password: string): Promise<void> {
   }
 
   const {text, lines} = readCaddyfile()
-  const auth = findUser(lines)
-  if (!auth) {
-    throw new Error(`Caddyfile 里没找到 ${SITE} 的 basic_auth 用户`)
+  const found = MAC_SERVICES.map(s => ({site: s.site, auth: findAuth(lines, s.site)}))
+
+  const usable = found.filter(f => f.auth)
+  if (!usable.length) {
+    throw new Error(`Caddyfile 里没找到 ${MAC_SERVICES.map(s => s.site).join(' / ')} 的 basic_auth 用户`)
+  }
+  /*
+   * 两个入口共用一套账号：用户名必须一致，否则不知道该按谁改 ——
+   * 直接报出来让人先手工对齐，别猜。
+   */
+  const users = new Set(usable.map(f => f.auth!.username))
+  if (users.size > 1) {
+    throw new Error(
+      `几个入口的用户名不一致（${[...users].join(' / ')}），先在 Caddyfile 里统一再改`
+    )
   }
 
   const hash = await hashPassword(password)
-  lines[auth.line] = `${auth.indent}${auth.username} ${hash}`
+  for (const f of usable) {
+    lines[f.auth!.line] = `${f.auth!.indent}${f.auth!.username} ${hash}`
+  }
 
   try {
     // 原地写：单文件 bind mount 换 inode 后容器看不到新内容

@@ -1,21 +1,27 @@
 <script setup lang="ts">
 /**
- * 「系统管理 → 代码编辑器」—— VS Code Web 的登录密码。
+ * 「系统管理 → Mac 服务」—— Mac 上那两个 Web 服务的入口状态 + 登录密码。
  *
- * VS Code 那边是 `code serve-web --without-connection-token`，本身没有密码；
- * 对外只有 Caddyfile 里 `code.bitcoooin.cn` 的 Basic Auth 这一道门。
- * 这一页只做两件事：显示隧道 / Caddy 状态，重设那一个密码。
+ * 现在这一页管两个：
+ *   · `code.bitcoooin.cn` → VS Code Web（`code serve-web`）
+ *   · `chat.bitcoooin.cn` → DeepSeek Harness（`dsh --profile remote`）
+ * 两个服务自己都不做认证，对外只有 Caddy 的 Basic Auth；而且在 Caddyfile 里
+ * 共用同一个账号和哈希 ⇒ 这一页只放**一个**改密码表单，改完两边一起生效。
  *
- * ⚠️ 原密码是 bcrypt 哈希，取不回来；忘了只能在这里重设。
+ * ⚠️ 原密码存的是 bcrypt 哈希，取不回来；忘了只能在这里重设。
  */
 import {computed, onBeforeUnmount, onMounted, ref} from 'vue'
-import {fetchCodeWeb, setCodeWebPassword, type CodeWebInfo} from '../api'
+import {
+  fetchMacServices,
+  setMacPassword,
+  type MacServicesInfo
+} from '../api'
 import {isNativeShell} from '../platform'
 import {showToast} from '../toast'
 
 const POLL_MS = 30_000
 
-const info = ref<CodeWebInfo | null>(null)
+const info = ref<MacServicesInfo | null>(null)
 const loading = ref(false)
 const loadError = ref('')
 const saveError = ref('')
@@ -25,18 +31,28 @@ const saving = ref(false)
 
 let timer: number | null = null
 
+/** 有几个入口在用这套账号 */
+const configured = computed(
+  () => info.value?.services.filter(s => s.configured) ?? []
+)
+
+const onlineCount = computed(
+  () => info.value?.services.filter(s => s.up).length ?? 0
+)
+
 const canSave = computed(
   () =>
     password.value.length >= 8 &&
     password.value === confirm.value &&
-    !saving.value
+    !saving.value &&
+    configured.value.length > 0
 )
 
 async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    info.value = await fetchCodeWeb()
+    info.value = await fetchMacServices()
   } catch (e) {
     loadError.value = (e as Error).message
   } finally {
@@ -54,10 +70,10 @@ async function save(): Promise<void> {
   if (password.value !== confirm.value) return
   saving.value = true
   try {
-    await setCodeWebPassword(password.value)
+    await setMacPassword(password.value)
     password.value = ''
     confirm.value = ''
-    showToast('登录密码已修改')
+    showToast('登录密码已修改（所有 Mac 服务一起生效）')
     await load()
   } catch (e) {
     saveError.value = (e as Error).message
@@ -66,8 +82,7 @@ async function save(): Promise<void> {
   }
 }
 
-function open(): void {
-  const url = info.value?.url
+function open(url: string): void {
   if (!url) return
   // 原生壳里交给系统浏览器（同 ProfileView 的下载按钮），网页版新开标签页
   if (isNativeShell()) window.location.href = url
@@ -85,23 +100,17 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="cw">
+  <div class="ms">
     <section class="panel">
       <h2>
-        代码编辑器
-        <small>VS Code Web</small>
+        Mac 服务
+        <small v-if="info?.services.length">
+          在线 {{ onlineCount }} / {{ info.services.length }}
+        </small>
         <span class="spacer" />
-        <span
-          v-if="info"
-          class="dot"
-          :class="info.online ? 'ok' : 'bad'"
-        />
-        <b
-          v-if="info"
-          class="svc"
-          :class="info.online ? 'ok' : 'bad'"
-        >
-          {{ info.online ? '在线' : '离线' }}
+        <span v-if="info" class="dot" :class="info.caddyUp ? 'ok' : 'bad'" />
+        <b v-if="info" class="svc" :class="info.caddyUp ? 'ok' : 'bad'">
+          {{ info.caddyUp ? 'Caddy 正常' : 'Caddy 异常' }}
         </b>
         <button class="mini" type="button" @click="load()">刷新</button>
       </h2>
@@ -110,51 +119,55 @@ onBeforeUnmount(() => {
       <p v-if="loadError" class="err">{{ loadError }}</p>
       <p v-if="info?.error" class="err">{{ info.error }}</p>
 
-      <template v-if="info">
-        <div class="kv">
-          <span class="rk">地址</span>
-          <code>{{ info.url }}</code>
-          <button class="mini" type="button" @click="open">打开</button>
+      <p v-if="info && !info.services.length" class="dim">还没有配置任何服务。</p>
+
+      <div v-for="s in info?.services ?? []" :key="s.key" class="srow">
+        <div class="shead">
+          <span class="dot" :class="s.up ? 'ok' : 'bad'" />
+          <div class="s-id">
+            <div class="s-line">
+              <b>{{ s.name }}</b>
+              <span v-if="!s.configured" class="badge bad">未配置</span>
+              <span v-else-if="!s.up" class="badge bad">隧道不通</span>
+              <span v-else class="badge">在线</span>
+            </div>
+            <div class="s-meta">
+              <span>{{ s.detail }}</span>
+              <span class="mono">127.0.0.1:{{ s.port }}</span>
+            </div>
+          </div>
         </div>
-        <div class="kv">
-          <span class="rk">用户名</span>
-          <code>{{ info.username || '（未配置）' }}</code>
+        <div class="sacts">
+          <code class="surl">{{ s.url }}</code>
+          <button class="mini" type="button" @click="open(s.url)">打开</button>
         </div>
-        <div class="kv">
-          <span class="rk">Caddy</span>
-          <span class="dim small">
-            {{ info.caddyUp ? '容器在跑' : '容器没跑 / 连不上宿主机' }}
-          </span>
-        </div>
-        <div class="kv">
-          <span class="rk">反向隧道</span>
-          <span class="dim small">
-            {{
-              info.tunnelUp
-                ? `127.0.0.1:${info.port} 通`
-                : `127.0.0.1:${info.port} 不通 —— 检查 Mac 上的 serve-web 和 ssh -R`
-            }}
-          </span>
-        </div>
-      </template>
+      </div>
 
       <p class="foot dim small">
-        VS Code 以 <code>--without-connection-token</code> 启动，本身没有密码；
-        外面这层登录框来自 Caddy 的 Basic Auth。
+        这两个服务都跑在 Mac 上，经反向隧道由这台服务器转出去。
+        连不上时先看 Mac 上的进程和那条 <code>ssh -R</code>；
+        隧道在，这里就会显示「在线」。
       </p>
     </section>
 
     <section class="panel">
       <h2>
         修改登录密码
-        <small>只影响 {{ info?.domain || 'code.bitcoooin.cn' }}</small>
+        <small v-if="configured.length">
+          {{ configured.map(s => s.site).join(' / ') }}
+        </small>
       </h2>
 
       <p class="dim small tip">
         原密码存的是 bcrypt 哈希，取不回来；这里只能重设。
+        {{ configured.length > 1 ? '几个入口共用一套账号，改一次一起生效。' : '' }}
         改完旧密码立刻失效，已经打开的页面下次请求会重新要密码。
       </p>
 
+      <label class="field">
+        <span>用户名</span>
+        <input :value="info?.username || '（未配置）'" type="text" disabled />
+      </label>
       <label class="field">
         <span>新密码</span>
         <input
@@ -196,7 +209,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.cw {
+.ms {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -211,6 +224,7 @@ h2 {
   gap: 8px;
   margin: 0 0 12px;
   font-size: 13px;
+  flex-wrap: wrap;
 }
 h2 small {
   color: var(--muted);
@@ -252,22 +266,69 @@ h2 small {
   color: var(--muted);
   cursor: pointer;
 }
-.kv {
+
+/* ==================== 一个服务一行（跟「远程桌面」那张卡同一套写法） ==================== */
+.srow {
+  padding: 12px 14px;
+  border: 1px solid rgba(48, 39, 29, 0.72);
+  border-radius: 12px;
+  background:
+    radial-gradient(ellipse at 12% 0%, rgba(120, 136, 163, 0.09), transparent 62%),
+    linear-gradient(145deg, rgb(21, 22, 24), rgb(24, 19, 16));
+}
+.srow + .srow {
+  margin-top: 10px;
+}
+.shead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.s-id {
+  min-width: 0;
+}
+.s-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.s-line b {
+  font-size: 14px;
+}
+.badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.badge.bad {
+  color: var(--bad);
+  border-color: rgba(255, 116, 128, 0.4);
+}
+.s-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.mono {
+  font-family: var(--mono, ui-monospace);
+  opacity: 0.7;
+}
+.sacts {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--line, var(--border));
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line, var(--border));
 }
-.kv:last-of-type {
-  border-bottom: none;
-}
-.rk {
-  flex: 0 0 88px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.kv code {
+.surl {
   flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
@@ -278,6 +339,7 @@ h2 small {
   background: var(--panel-2);
   color: var(--text);
 }
+
 .tip {
   margin: 0 0 10px;
   line-height: 1.6;
@@ -328,5 +390,12 @@ h2 small {
   padding-top: 10px;
   border-top: 1px solid var(--border);
   line-height: 1.6;
+}
+.foot code {
+  font-family: var(--mono, ui-monospace);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--panel-2);
 }
 </style>
