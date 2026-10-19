@@ -37,7 +37,8 @@
  *   · **不再有滑动条**：这一单固定按「**5 倍额度**」开 =
  *     `min(5 × 账户权益, 可用保证金 × 杠杆)`（后端 `MAX_ORDER_EQUITY_RATIO` 同口径）。
  *     够不到 5 倍时，算出来那个数天然就是**最多能开**的量，界面上如实说明。
- *   · **浮盈加仓**：额度按该币浮盈 × 持仓杠杆计算，并受全账户 11 倍上限约束。
+ *   · **加仓**：额度 = **可用保证金 × 杠杆**（跟开仓同一口径）；只要有可用余额就能加，
+ *     不再要求先有浮盈。
  *   · 版式重做：额度那张卡片（大号「仓位价值」+ 右上 `5×` 标 + 「成交后总杠杆」预演）
  *     + 三格小卡（保证金 / 数量 / 可用）+ 一整行「加仓 · 做多 · 做空」。
  *   · 杠杆最高 **10x**（`LEV_UI_MAX`，后端 `MAX_SYMBOL_LEVERAGE` 硬拦）。
@@ -64,7 +65,6 @@ import {
   type TradePositionRow
 } from '../api'
 import {
-  accountEquityOf,
   availableBalanceOf,
   bindPositions,
   onAutoProtect,
@@ -377,19 +377,6 @@ const refPrice = computed(() => markRef.value)
 /* ---------------- 已开 / 未开：这个币的额度账 ---------------- */
 
 /**
- * 账户权益（钱包余额 + 未实现盈亏）。
- * 后端那三条上限（`assertOrderLimits`）用的就是这个口径，两边必须一致。
- */
-const equity = computed(() => {
-  /* ★ 优先共享 store 那一份（常驻流每次推持仓都带钱包 + 浮盈 ⇒ 跟着行情实时动）；
-     没有（还没读到 / 没绑流）才退回这份 REST 快照里的余额 */
-  const live = accountEquityOf(keyId.value)
-  if (live !== null) return live
-  const b = info.value?.balance
-  return b ? Number(b.wallet ?? 0) + Number(b.unrealized ?? 0) : 0
-})
-
-/**
  * 常驻流那份持仓**是不是比手上这份 `/api/exchange/trade` 更新**。
  *
  * ★ 2026-10-15 修的 bug（用户：「止盈止损后开单界面没更新」）：
@@ -493,15 +480,6 @@ const roomByMargin = computed(() => Math.max(0, available.value * lev.value * 0.
 /** **还能开的名义价值**（USDT）—— 面板上那个大数字就是它 */
 const roomNotional = computed(() => Math.max(0, roomByMargin.value))
 
-/** 当前持仓的**未实现盈利**（USDT）—— 加仓的钱从这里来（走实时那一份 `curPos`） */
-const posProfit = computed(() =>
-  Math.max(0, Number(curPos.value?.unrealized ?? 0))
-)
-/** 这只币浮盈可支撑的名义加仓额度 = 该币浮盈 × 持仓杠杆 */
-const profitRoom = computed(() => {
-  return posProfit.value * Math.min(LEV_UI_MAX, Math.max(1, lev.value))
-})
-
 /** 按交易所步长**向下**取整（宁可小一点，也别超余额 / 超精度） */
 function floorTo(v: number, decimals: number): number {
   if (!(v > 0)) return 0
@@ -531,7 +509,8 @@ const quantityText = computed(() =>
 /**
  * **加仓**：一个键位 + 弹层里滑动选「加仓金额（USDT）」
  * （用户 2026-10-15：「改为一个键位加仓 加仓在平仓左侧，点击加 弹窗显示 改为可滑动加仓」；
- *   加仓额度按该币浮盈计算，不按剩余保证金计算。）
+ *   2026-10-19：「不是带有浮盈的时候才能加仓，只要有保证金够的时候可用、余额够都可以加仓」
+ *   ⇒ 额度改成**可用保证金 × 杠杆**，跟开仓同一个口径，不再看浮盈。）
  */
 const addOpen = ref(false)
 /** 弹层里滑出来的加仓金额（USDT **名义价值**，不是保证金） */
@@ -541,13 +520,13 @@ const addValue = ref(0)
 const addMinCost = computed(() => Number(info.value?.minCost ?? 0) || 5)
 
 /**
- * 加仓金额的**上限** = 该币浮盈 × 持仓杠杆（`profitRoom`）。
+ * 加仓金额的**上限** = 可用保证金 × 杠杆（`roomByMargin`，已留 0.5% 手续费余量）。
  *
- * ★ 2026-10-15 用户：「加仓不算在 5 倍内，但是总杠杠还是 11 最大」
- *   → 2026-10-18 用户把「5 倍 / 11 倍」两条都撤了（「不再设置单币 5 倍杠杆，总共 11 倍
- *   限制」），所以这里只剩浮盈这一条：后端 `assertOrderLimits` 现在也只校验它。
+ * ★ 2026-10-19 用户：「取消一条限制，不是带有浮盈的时候才能加仓，只要有保证金够的时候
+ *   可用、余额够都可以加仓」—— 原来按「该币浮盈 × 持仓杠杆」，浮盈一归零就完全加不了；
+ *   现在跟开仓同一把尺子。够不够由交易所自己的保证金校验兜底。
  */
-const addMax = computed(() => Math.max(0, profitRoom.value))
+const addMax = computed(() => Math.max(0, roomByMargin.value))
 
 /** 一笔加仓金额 → 数量（按合约精度向下取整） */
 function addQty(usdt: number): number {
@@ -599,7 +578,7 @@ async function confirmAdd(): Promise<void> {
   const pos = curPos.value
   if (!pos) return
   if (addRealNotional.value > addMax.value + 0.01) {
-    say('浮盈或账户额度已变化，请重新选择加仓金额')
+    say('可用保证金或额度已变化，请重新选择加仓金额')
     return
   }
   const q = addQtyNum.value
@@ -617,7 +596,7 @@ async function confirmAdd(): Promise<void> {
 /**
  * 「现在能不能算这一单」的**前置检查**（空 = 没问题）。
  *
- * 额度那几条**不在**这里：加仓不看 5 倍额度（见 `addQuantity`），
+ * 额度那几条**不在**这里：现在开仓 / 加仓都只看**可用保证金**（见 `roomByMargin`），
  * 所以开仓和加仓各有一份自己的「不能下单」原因（`blocker` / `addBlocker`）。
  */
 const preBlocked = computed(() => {
@@ -626,8 +605,6 @@ const preBlocked = computed(() => {
   if (!info.value.ready) return info.value.reason || '现在下不了单'
   /* 余额都没读到就别拿它算仓位 —— 把真正的原因（IP 白名单 / 网络）摆出来 */
   if (info.value.balanceError) return info.value.balanceError
-  /* 额度是按权益算的，权益读不到就没法算 */
-  if (equity.value <= 0) return '读不到账户权益（钱包 + 浮盈），先别开'
   if (!(refPrice.value > 0)) return '还没拿到价格，稍等一下'
   return ''
 })
@@ -660,15 +637,17 @@ const blocker = computed(() => {
 /**
  * **加仓**不能下单的原因（空 = 能加）。
  *
- * 加仓额度按该币「浮盈 × 持仓杠杆」计算，不按剩余保证金计算；仍受全账户 11 倍上限。
+ * 加仓额度 = **可用保证金 × 杠杆**（跟开仓同一个口径），不再看浮盈；
+ * 够不够由交易所保证金校验兜底。
  */
 const addBlocker = computed(() => {
   const pre = preBlocked.value
   if (pre) return pre
   if (!opened.value) return '现在没有持仓，不能加仓'
+  if (available.value <= 0) return '合约账户没有可用余额（先划转一点保证金）'
   if (!(refPrice.value > 0)) return '还没拿到价格，稍等一下'
   if (!(addMax.value >= addMinCost.value))
-    return `该币浮盈 × 持仓杠杆的加仓额度不足最小下单量（${fmt(addMinCost.value, 2)} USDT）`
+    return `可用保证金撑起的加仓额度不足最小下单量（${fmt(addMinCost.value, 2)} USDT）`
   if (!(addQty(addMinCost.value) > 0))
     return '按这个合约的精度取整之后是 0'
   return ''
@@ -703,7 +682,7 @@ const curMarginText = computed(() =>
 
 /**
  * 浮盈**占保证金的百分比**（仓位卡右上角括号里那个数）。
- * 加仓能加多少是照浮盈金额算的，但「赚了百分之几」才是判断要不要加的那一眼。
+ * 加仓能加多少是照可用保证金算的，但「赚了百分之几」才是判断要不要加的那一眼。
  */
 const curRoeText = computed(() => {
   const p = curPos.value
@@ -1089,13 +1068,13 @@ async function submit(
   dir: 'long' | 'short',
   /** 不传 = 用面板算好的那一单（**剩余额度**）；加仓会传自己的量 */
   qtyOverride?: number,
-  /** 文案前缀（如「加仓 50%（浮盈）」），只进提示 */
+  /** 文案前缀（如「加仓 50%」），只进提示 */
   note = '',
   /**
    * 这一下是**加仓**吗（往已有的仓位上加）。
    *
    * ⚠️ 加仓**不吃单币 5 倍额度**（后端 `assertOrderLimits` 判出加仓就跳过那两道 5 倍闸，
-   *    2026-10-15 用户定的）；额度来自该币浮盈 × 持仓杠杆，并受全账户 11 倍限制。
+   *    2026-10-15 用户定的）；额度 = 可用保证金 × 杠杆（与开仓一致）。
    */
   isAdd = false
 ): Promise<void> {
@@ -1453,14 +1432,11 @@ watch(opened, (now, before) => {
 })
 
 /*
- * 浮盈每秒在动 ⇒ 加仓额度会跟着缩。弹层开着的时候把滑动条**收回到新上限**，
- * 不然手指停在旧的最大值上、提交时才报「额度已变化」。
+ * 可用余额会随行情 / 成交变化 ⇒ 加仓额度会跟着变。弹层开着的时候把滑动条
+ * **收回到新上限**，不然手指停在旧的最大值上、提交时才报「额度已变化」。
  *
- * ⚠️ 必须挂在这儿（文件末尾那一批 `watch` 里），**不能**跟 `addMax` 写在一起：
- *    `watch(源)` 会**立刻求值一次**，而 `addMax → profitRoom → curPos`
- *    这条链上的 `curPos` 定义在更下面 ⇒ 写在前面会踩 `const` 的 TDZ
- *    （`Cannot access 'curPos' before initialization`），
- *    整个 setup 抛错、面板**整块渲染不出来**（2026-10-15 线上真踩到）。
+ * ⚠️ 必须挂在这儿（文件末尾那一批 `watch` 里）：`watch(源)` 会**立刻求值一次**，
+ *    别挪到 `addMax` 旁边提前碰还没初始化的 store / computed。
  */
 watch(addMax, max => {
   if (addOpen.value && addValue.value > max) addValue.value = max
@@ -1955,8 +1931,8 @@ onMounted(async () => {
 
     <!--
       加仓弹层（用户 2026-10-15：「点击加 弹窗显示 改为可滑动加仓」）：
-      滑动条滑的是**加仓金额（USDT 名义价值）**，上限是「该币浮盈 × 持仓杠杆 /
-      全账户总杠杆 11 倍剩余额度」两者取小，不按剩余保证金计算。
+      滑动条滑的是**加仓金额（USDT 名义价值）**，上限是「可用保证金 × 杠杆」
+      （留 0.5% 手续费），跟开仓同一个口径。
     -->
     <Teleport to="body">
       <div v-if="addOpen" class="sheet-mask" @click="addOpen = false" />
@@ -1976,7 +1952,7 @@ onMounted(async () => {
           方向和持仓一致（{{ curPos ? sideText(curPos) : '' }}）· 最多
           <b>{{ fmt(addMax, 2) }} USDT</b>
           <span class="dim"
-            >（按该币浮盈 × 持仓杠杆计算）</span
+            >（按可用保证金 × 杠杆计算）</span
           >
         </p>
         <label class="ord-field ord-slider">
@@ -1997,7 +1973,7 @@ onMounted(async () => {
           约
           <b>{{ addQtyNum.toFixed(Math.min(12, amountPrecision)) }}</b>
           {{ base }} · 保证金 <b>{{ fmt(addRealMargin, 2) }}</b> USDT
-          <span class="dim">（浮盈 {{ fmt(posProfit, 2) }} USDT）</span>
+          <span class="dim">（可用 {{ fmt(available, 2) }} USDT）</span>
         </p>
         <button
           type="button"

@@ -23,7 +23,7 @@
  *      —— 这几个是**纯函数**，而它们的失效方式同样很隐蔽：命名约定一变，
  *      `pruneCandles` 就再也匹配不到过期子分区（表会一直涨），或者建分区时算出重叠区间
  *      （直接建不出来）。所以拿固定夹具卡住它们。
- *   ⑨ 同向加仓浮盈额度、其他币开仓 5 倍额度、账户总杠杆 11 倍上限。
+ *   ⑨ 合约杠杆硬顶；加仓不再受浮盈限制（只看可用保证金）。
  *   ⑩ 「数据问答」的参数收敛（模型给的日期 / 跨度 / 条数 / 币种 → SQL 参数）
  */
 import {
@@ -42,9 +42,8 @@ import {planContractChanges, type RawContract} from '../data/market'
 import {
   BINANCE_MAX_WINDOW_MS,
   BINANCE_RETENTION_MS,
-  isWithinPositionProfitAddBudget,
-  planWindows,
-  positionProfitAddBudget
+  MAX_SYMBOL_LEVERAGE,
+  planWindows
 } from '../data/exchange-trade'
 import {
   KeyStream,
@@ -542,28 +541,20 @@ function checkWindows(): boolean {
 }
 
 /* ------------------------------------------------------------------ */
-/* ⑨ 合约开仓与浮盈加仓额度                                            */
+/* ⑨ 合约杠杆硬上限（加仓的浮盈限制已删，2026-10-19）                    */
 /* ------------------------------------------------------------------ */
-function checkTradeBudgets(): boolean {
+function checkTradeLimits(): boolean {
   let ok = true
-  const bad = (msg: string): void => {
-    console.error(`❌ 加仓额度夹具：${msg}`)
+  /*
+   * 2026-10-19：用户要求「不是带有浮盈的时候才能加仓，只要有保证金够的时候可用、
+   * 余额够都可以加仓」⇒ 加仓额度改回「可用保证金 × 杠杆」，浮盈预算那套夹具整块删除。
+   * 现在只剩杠杆硬顶这一条可测。
+   */
+  if (MAX_SYMBOL_LEVERAGE !== 10) {
+    console.error(`❌ 合约夹具：杠杆硬顶应为 10x，实际 ${MAX_SYMBOL_LEVERAGE}`)
     ok = false
   }
-
-  const profitBudget = positionProfitAddBudget(10, 10)
-  if (profitBudget !== 100) bad(`浮盈 10 × 10x 应为 100，实际 ${profitBudget}`)
-  if (positionProfitAddBudget(-3, 10) !== 0) bad('负浮盈不能生成加仓额度')
-  if (positionProfitAddBudget(10, 20) !== 100) bad('加仓额度杠杆必须封顶 10x')
-  if (!isWithinPositionProfitAddBudget(100, profitBudget)) bad('预算内的加仓单应放行')
-  if (isWithinPositionProfitAddBudget(102, profitBudget)) bad('超出浮盈预算的加仓单应拒绝')
-  if (isWithinPositionProfitAddBudget(5, 0)) bad('无浮盈时不应允许加仓')
-
-  /*
-   * 2026-10-18：5 × 权益 / 11 倍总杠杆那两套夹具随规则一起删了
-   * （用户：「不再设置单币 5 倍杠杆，总共 11 倍限制」），现在只剩加仓这一条。
-   */
-  if (ok) console.log('✅ 加仓额度：该币浮盈 × 持仓杠杆（≤10x）夹具通过')
+  if (ok) console.log('✅ 合约：杠杆硬顶 10x；加仓只看可用保证金（浮盈限制已删）')
   return ok
 }
 
@@ -836,7 +827,7 @@ if (!checkTier()) failed = true
 if (!checkTierText()) failed = true
 if (!checkPartitions()) failed = true
 if (!checkWindows()) failed = true
-if (!checkTradeBudgets()) failed = true
+if (!checkTradeLimits()) failed = true
 if (!checkVerdict()) failed = true
 if (!checkAsk()) failed = true
 

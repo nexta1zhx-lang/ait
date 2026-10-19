@@ -5123,6 +5123,8 @@ npm run candles:audit -- --symbols=BTC/USDT:USDT,ETH/USDT:USDT
 
 ## 64. 加仓额度改按该币浮盈 × 持仓杠杆（新开其他币仍按 5 倍，2026-10-15）
 
+> ⚠️ 2026-10-19 已**整条作废**：加仓改回按可用保证金计算，见 §72。
+
 用户澄清最终口径：「**该币种加仓可以根据浮盈最多 10，而其他币种没开单的情况下还是按 5 倍来算**」。
 这里的「最多 10」指加仓额度按该币浮盈乘以杠杆倍率（倍率最高封顶 10x）：
 
@@ -5438,12 +5440,13 @@ grep -c "（bg）权重" logs/backend.log   # 后台让路——常态，不用�
 | ① 单笔名义 ≤ 5 × 权益（`orderEquityRatio`） | **删** |
 | ② 单币累计名义 ≤ 5 × 权益（`symbolBudget`） | **删** |
 | ③ 账户总杠杆 ≤ 11（`totalLeverageAfter`） | **删** |
-| 同向加仓 ≤ 该币浮盈 × 持仓杠杆（`positionProfitAddBudget`） | **留着** |
+| 同向加仓 ≤ 该币浮盈 × 持仓杠杆（`positionProfitAddBudget`） | **删**（2026-10-19，见 §72） |
 
 - 三个导出的常量 / 纯函数（`MAX_ORDER_EQUITY_RATIO`、`MAX_ACCOUNT_LEVERAGE`、
   `symbolBudget`、`orderEquityRatio`、`totalLeverageAfter`）一起删，
-  `scripts/selftest.ts` 里对应的夹具同步去掉（只剩加仓那条）。
-- `assertOrderLimits` 现在只读 `positionRisk`，**不再读余额**（少一发 `/fapi/v2/balance`）。
+  `scripts/selftest.ts` 里对应的夹具同步去掉。
+- `assertOrderLimits` 现在只做 `assertTradable`（2026-10-19 起**连 `positionRisk` 也不读了**，
+  加仓浮盈规则已删，见 §72）。
 - 兜底换成**交易所自己的保证金校验**：钱不够它直接回 `-2019`，面板那一套
   `autoShrinkQty` 收口还在。
 - `MAX_SYMBOL_LEVERAGE = 10` **没动**（2026-10-14 用户定的「杠杆最大只能设 10 倍」，
@@ -5455,7 +5458,7 @@ grep -c "（bg）权重" logs/backend.log   # 后台让路——常态，不用�
   「上限 5 倍权益 / 成交后账户总杠杆 …」提示文案）、`levAfter` / `liveLevText` /
   `fiveText` / `roomBySymbol` / `roomByAccount` / `fulled` / `openNotional` / `equityText`。
 - 「能开多少」现在**只有一个来源**：`可用 × 杠杆 × 0.995`（那 0.5% 是留给手续费的）。
-  加仓上限同样只剩「该币浮盈 × 持仓杠杆」。
+  加仓上限也是同一个式子（2026-10-19 起，见 §72）。
 - **杠杆还是点击切换**：币种行那颗 `10x` 小标签 → 底部弹层选档（1 / 2 / 3 / 5 / 10，
   受交易所该币上限约束），改一次真写交易所；下单前 `ensureLeverage()` 仍会补一次。
 - **买入仓位百分比**（新）：`posPct`（1–100，默认 **50** —— 用户当天定的「默认 50%」），
@@ -5484,3 +5487,20 @@ grep -c "（bg）权重" logs/backend.log   # 后台让路——常态，不用�
 3. 做多 0.001 BTC（市价、测试账户、真单）：成交 81,538.4，面板当场切到「已开」那一块，
    单号 `1166702238785`；随后「全平」平掉，账户回到无持仓、无挂单，
    钱包 9.81 → 9.72（两个 taker 手续费）。
+
+## 72. 加仓不再看浮盈，只看可用保证金（2026-10-19 用户）
+
+用户：「K线界面的仓位加仓有问题，它显示的金额不是我实时的可用金额价值开不出来，有时候。
+然后取消一条限制，不是带有浮盈的时候才能加仓，只要有保证金够的时候可用、余额够都可以加仓。」
+
+- 后端 `assertOrderLimits` 里那条「同向加仓 ≤ 该币浮盈 × 持仓杠杆」**整条删掉**：
+  现在只做 `assertTradable`（Key 权限 / IP 白名单），不再读 `positionRisk` / 余额。
+  加仓够不够由**交易所自己的保证金校验**兜底（不够回 `-2019`，`autoShrinkQty` 仍会收口一次）。
+- 前端 `OrderPanel.vue`：`addMax` 从「浮盈 × 杠杆」改成 **`可用保证金 × 杠杆 × 0.995`**
+  （跟开仓同一个 `roomByMargin`，0.5% 留给手续费）；加仓弹层底部显示的是**实时可用**
+  （`availableBalanceOf`，常驻流每次推持仓都会更新），不再是浮盈。
+- `addBlocker` 的拦截原因改成「可用余额为 0 / 可用额度不足最小下单量」；
+  浮盈为 0、甚至浮亏时都能加仓。
+- 删掉 `positionProfitAddBudget` / `isWithinPositionProfitAddBudget` 及 selftest 里那组夹具，
+  只留 `MAX_SYMBOL_LEVERAGE = 10` 的检查。
+- 注意：**浮亏时加仓**会拉低开仓均价，风险自负；交易所只校验保证金，不判断方向。

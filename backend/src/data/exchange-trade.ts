@@ -602,19 +602,18 @@ export async function isDualSide(ex: any, cacheKey: number | string): Promise<bo
 }
 
 /**
- * 开单的硬上限 —— **2026-10-18 起只剩一条**（用户：「合约杠杆功能修复，不再设置单币
- * 5 倍杠杆，总共 11 倍限制」）：
+ * 开单的硬上限 —— **2026-10-19 起只剩杠杆那一档**：
  *
  *   · ~~单笔 / 单币累计名义 ≤ 5 × 账户权益~~ —— **删掉了**（`MAX_ORDER_EQUITY_RATIO`）；
  *   · ~~账户总杠杆 ≤ 11 倍~~ —— **删掉了**（`MAX_ACCOUNT_LEVERAGE`）；
- *   · **同向加仓 ≤ 该币浮盈 × 持仓杠杆** —— 留着（`positionProfitAddBudget`）：
- *     那是「别拿没赚到的钱去加仓」，不是倍数上限；
+ *   · ~~同向加仓 ≤ 该币浮盈 × 持仓杠杆~~ —— **删掉了**（2026-10-19 用户：「不是带有浮盈
+ *     的时候才能加仓，只要有保证金够的时候可用、余额够都可以加仓」）；
  *   · **单币杠杆 ≤ 10 倍**（`MAX_SYMBOL_LEVERAGE`）—— 留着（用户 2026-10-14 定的
  *     「杠杆设置最大只能设 10 倍」，这次的改动没提它）。
  *
  * 剩下真正兜底的是**交易所自己的保证金校验**：钱不够就开不出来，这块不归我们管。
- * ⚠️ 前端 `OrderPanel.vue` 里关于「能开多少」的算法要和这里对齐 —— 现在就是
- *    「可用保证金 × 杠杆」，别再按 5 倍权益 / 11 倍总杠杆去算。
+ * ⚠️ 前端 `OrderPanel.vue` 里关于「能开多少 / 能加多少」的算法要和这里对齐 ——
+ *    都是「可用保证金 × 杠杆」。
  */
 export const MAX_SYMBOL_LEVERAGE = 10
 
@@ -649,92 +648,27 @@ export async function setSymbolLeverage(
   return {symbol: spec.symbol, leverage: n(r?.leverage) || lev}
 }
 
-/** 同向加仓的单笔名义额度 = 该币正浮盈 × 杠杆（杠杆最高按 10x 计）。 */
-export function positionProfitAddBudget(unrealizedProfit: number, leverage: number): number {
-  const profit = Number.isFinite(unrealizedProfit) ? Math.max(0, unrealizedProfit) : 0
-  const lev = Number.isFinite(leverage) ? Math.floor(leverage) : 1
-  return profit * Math.min(MAX_SYMBOL_LEVERAGE, Math.max(1, lev))
-}
-
-/** 浮盈随行情变化，比较时留 0.5% + 0.5 USDT 的取数余量；无浮盈时不允许加仓。 */
-export function isWithinPositionProfitAddBudget(addNotional: number, budget: number): boolean {
-  return budget > 0 && Math.max(0, addNotional) <= budget * 1.005 + 0.5
-}
-
 /**
  * 开单前的体检。**只拦开仓** —— 减仓 / 平仓不走这里。
  *
- * ★ 2026-10-18 只剩一条（用户：「合约杠杆功能修复，不再设置单币 5 倍杠杆，总共 11 倍
- *   限制」）：**同向加仓 ≤ 该币浮盈 × 持仓杠杆**（`positionProfitAddBudget`）。
- *   原来的「单笔 / 单币 ≤ 5 × 权益」和「账户总杠杆 ≤ 11 倍」两道闸**已删**，
- *   钱不够由交易所自己的保证金校验兜底。
+ * ★ 2026-10-19 用户：「取消一条限制，不是带有浮盈的时候才能加仓，只要有保证金够的时候
+ *   可用、余额够都可以加仓」—— 原来那条「同向加仓 ≤ 该币浮盈 × 持仓杠杆」
+ *   （`positionProfitAddBudget`）**整条删掉**了。
  *
- * 判「是不是加仓」看持仓方向：这个币已经有仓位、方向跟这一单一致 = 加仓。
- * 权益读不到 / 为 0 ⇒ **不拦** —— 那种单子交易所自己会因保证金不足拒掉，别在这儿误伤。
+ *   现在加仓和开仓**同一把尺子**：只看可用保证金够不够，够不够由交易所自己的保证金
+ *   校验兜底（前端 `OrderPanel.vue` 的滑动条上限 = 可用 × 杠杆 × 0.995，留 0.5% 手续费）。
+ *   行情 / 浮盈再怎么变都不会把「加仓」按钮锁死。
  *
- * @param quantity 这一单的数量（基础币）
- * @param price    参考价：限价单传委托价，市价单传面板的参考价；都没有就退到标记价
- * @param side     这一单的方向 —— 判「加仓」要用：只有「已经有同向仓位」才算加仓
- *                 （反向的是减仓，那一路根本不走这个函数）。
- *                 ⚠️ 路由那层传下来的是 **`long` / `short`**（`server.ts` 里归一过），
- *                    所以这里 `buy`/`sell`、`long`/`short` 两套写法都认。
- *                    （第一版只认 `buy` ⇒ 判据恒 false ⇒ 豁免不生效，实测踩到。）
+ * 参数保留是为了路由层不用改（`quantity` / `price` / `side` 现在没有额度规则要用）。
  */
 export async function assertOrderLimits(
   c: ExchangeCredentials,
-  rawSymbol: string,
-  quantity: number,
-  price?: number,
-  side?: string
+  _rawSymbol: string,
+  _quantity: number,
+  _price?: number,
+  _side?: string
 ): Promise<void> {
   assertTradable(c)
-  const spec = await specFor(c, rawSymbol)
-  const ex = createExchange(c)
-  /*
-   * 只读持仓，不再读余额 —— 5 倍 / 11 倍那两条要「权益」，现在没这条规则了，
-   * 少打一发 `/fapi/v2/balance`（下单前这条路径原来要两个来回）。
-   */
-  const raw = await readPositionRiskRow(ex, undefined)
-  const rows: any[] = Array.isArray(raw) ? raw : raw ? [raw] : []
-
-  const dir = String(side ?? '').toLowerCase()
-  const wantSide: 'long' | 'short' | '' =
-    dir === 'buy' || dir === 'long' ? 'long' : dir === 'sell' || dir === 'short' ? 'short' : ''
-  /* 参考价：限价单的委托价优先（那才是真实成交价），市价单退到标记价 */
-  const mine =
-    rows.find(
-      r =>
-        String(r?.symbol ?? '').toUpperCase() === spec.symbol &&
-        wantSide !== '' &&
-        positionFromRow(r)?.side === wantSide
-    ) ??
-    rows.find(r => String(r?.symbol ?? '').toUpperCase() === spec.symbol)
-  const ref =
-    price !== undefined && price > 0 ? price : Number(mine?.markPrice) || 0
-  const add = Math.max(0, quantity) * (Number.isFinite(ref) ? ref : 0)
-
-  const minePos = mine ? positionFromRow(mine) : null
-  /*
-   * 这一单是**加仓**吗：这个币已经有仓位，而且方向跟这一单一致
-   * （多单再买 / 空单再卖 ⇒ 加仓；反向的那是减仓，前端走 `closePositions`，不进这里）。
-   *
-   * ★ 2026-10-18：同向加仓额度按该币浮盈 × 持仓杠杆（杠杆封顶 10x）；
-   *   开仓那边已经没有任何倍数闸（5 倍权益 / 11 倍总杠杆都删了），
-   *   保证金够不够由交易所自己校验。
-   */
-  const isAdd = !!minePos && wantSide !== '' && minePos.side === wantSide
-  if (!isAdd) return
-
-  const positionProfit = Math.max(0, minePos.unrealized)
-  const positionLeverage = Math.min(MAX_SYMBOL_LEVERAGE, Math.max(1, minePos.leverage || 1))
-  const profitBudget = positionProfitAddBudget(minePos.unrealized, minePos.leverage)
-  if (!isWithinPositionProfitAddBudget(add, profitBudget)) {
-    throw new Error(
-      `${spec.symbol} 本次加仓约 ${add.toFixed(2)} USDT，超过该币浮盈额度：` +
-        `浮盈 ${positionProfit.toFixed(2)} × 持仓杠杆 ${positionLeverage}x = ` +
-        `${profitBudget.toFixed(2)} USDT`
-    )
-  }
 }
 
 export interface OrderInput {

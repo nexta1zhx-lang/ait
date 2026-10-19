@@ -4568,12 +4568,11 @@ async function route(
       }
 
       /*
-       * 开单金额上限：
-       *   · 同向加仓 ≤ 该币浮盈 × 持仓杠杆；其他开仓单笔 / 单币仍 ≤ 5 × 账户权益；
-       *   · **账户总杠杆 ≤ 11 倍**（`Σ持仓名义 ÷ 权益`）。
+       * 开单前的体检：现在只剩 `assertTradable`（Key 权限 / IP 白名单）。
        *
-       * ⚠️ 5 倍管的是**金额**、不是杠杆 —— 杠杆本身由 `setSymbolLeverage` 拦在 10x
-       *    （用户：「杠杆设置最大只能设 10 倍」）。
+       * ★ 2026-10-19 用户：「不是带有浮盈的时候才能加仓，只要有保证金够的时候可用、
+       *   余额够都可以加仓」—— 「同向加仓 ≤ 该币浮盈 × 持仓杠杆」也删了。
+       *   加仓和开仓同一把尺子：只看可用保证金，够不够由交易所自己的保证金校验兜底。
        * 跟黑名单一样**只拦开仓**：减仓 / 平仓放行（手里有仓必须跑得掉）。
        */
       if (!body.reduceOnly) {
@@ -4582,7 +4581,6 @@ async function route(
           str(body.symbol, 'BTCUSDT'),
           Number(body.quantity),
           body.price === undefined ? undefined : Number(body.price),
-          /* 方向要传：`assertOrderLimits` 拿它区分加仓与开仓，再应用对应额度 */
           side
         )
       }
