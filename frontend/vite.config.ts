@@ -17,6 +17,13 @@ export default defineConfig({
   root: __dirname,
   base: '/',
   plugins: [vue()],
+  define: {
+    /*
+     * 前端构建时的版本号（package.json）—— 「个人信息 → 版本」用它和
+     * `/api/downloads` 的最新包比较。原生壳里还会同时拿到 APK 的 versionName。
+     */
+    __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? '0.0.0')
+  },
   build: {
     outDir: path.join(__dirname, 'dist'),
     emptyOutDir: true,

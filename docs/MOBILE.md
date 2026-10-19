@@ -393,3 +393,17 @@ User-Agent: Mozilla/5.0 (Linux; Android 12; SUP-AL90 …; wv) … Chrome/114.0.5
   （0.2.7 起那张体检单上有壳版本 / **WebView 版本** / 安全区实测值）。
 - 顺带记一条同源的经验：**WebView 的根滚动条是原生控件画的**，
   CSS（`::-webkit-scrollbar` / `scrollbar-width`）**碰不到它** —— 只能让根视口别滚。
+
+## 十、App 内检查更新（2026-10-19）
+
+「我的 → 个人信息 → 账户信息」里有一张「版本」卡：
+
+- **当前版本**：原生壳读 APK 的 `versionName` / `versionCode`；网页版读构建时注入的
+  `__APP_VERSION__`（`vite.config.ts` 从 `package.json` 取）。
+- **获取最新版本**：点一下读 `/api/downloads` 的最新一条，弹底部弹层：
+  - 有新版本 → 显示版本 / 日期 / 大小 / 更新说明 + 「下载安装包」「取消」；
+  - 已是最新 → 只显示「取消」。
+- 下载链接还是 `/dl/<文件名>`，原生壳里用**跨域导航**交给系统浏览器
+  （Capacitor 的 `Bridge.launchIntent`）；**不要**用 `window.open(url, '_system')` ——
+  Capacitor 没开多窗口，Android WebView 会直接忽略。
+- ⚠️ 页面随包内置，所以这里下载的新包**必须手动安装**才生效，不会自动覆盖。

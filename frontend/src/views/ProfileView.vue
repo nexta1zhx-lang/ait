@@ -17,11 +17,14 @@ import {computed, onMounted, ref, watch} from 'vue'
 import {
   authChangePassword,
   disableTotp,
+  downloadUrl,
   enableTotp,
+  fetchDownloads,
   fetchPushStatus,
   fetchSessions,
   fetchTotpState,
   testPush,
+  type DownloadRelease,
   type PushStatus,
   revokeOtherSessions,
   revokeSession,
@@ -417,6 +420,83 @@ async function loadShell(): Promise<void> {
   }
 }
 
+/* ------------------------- 版本 / 检查更新 ------------------------- */
+/*
+ * 用户 2026-10-19：「个人信息里显示当前版本号，加一个获取最新版本的按钮；
+ * 点开弹窗给出最新包下载链接，可以直接下载，也可以取消」。
+ *
+ * 数据源跟「下载 App」页同一个 `/api/downloads`（扫 downloads/ + releases.json），
+ * 所以发一版新包只要补 releases.json，这里就能看到，不用改前端。
+ */
+const currentVersion = computed(() => shell.value?.version || __APP_VERSION__)
+const currentBuild = computed(() => shell.value?.build ?? '')
+
+const latestOpen = ref(false)
+const latestBusy = ref(false)
+const latestErr = ref('')
+const latestRel = ref<DownloadRelease | null>(null)
+
+/** `0.2.18` → `[0,2,18]`；比较时逐段看，缺的按 0 算 */
+function versionParts(v: string): number[] {
+  return String(v)
+    .split(/[._-]/)
+    .map(n => parseInt(n, 10) || 0)
+}
+
+function isNewer(a: string, b: string): boolean {
+  const x = versionParts(a)
+  const y = versionParts(b)
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0)
+    if (d) return d > 0
+  }
+  return false
+}
+
+/** 最新包是不是比当前版本新 */
+const hasUpdate = computed(
+  () => !!latestRel.value && isNewer(latestRel.value.version, currentVersion.value)
+)
+
+/** 4,316,551 → 「4.1 MB」 */
+function humanSize(bytes: number): string {
+  if (!(bytes > 0)) return '—'
+  const mb = bytes / 1024 / 1024
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`
+}
+
+async function checkLatest(): Promise<void> {
+  if (latestBusy.value) return
+  latestBusy.value = true
+  latestErr.value = ''
+  latestRel.value = null
+  try {
+    const d = await fetchDownloads()
+    latestRel.value = d.releases.find(r => r.latest) ?? null
+    if (!latestRel.value) latestErr.value = '下载清单里还没有可用的安装包'
+  } catch (e) {
+    latestErr.value = (e as Error)?.message || '读取下载清单失败'
+  } finally {
+    latestBusy.value = false
+    latestOpen.value = true
+  }
+}
+
+function downloadLatest(): void {
+  const r = latestRel.value
+  if (!r) return
+  const url = downloadUrl(r.url)
+  /*
+   * 原生壳：Capacitor 的 WebView 会把**跨域导航**（https://localhost → bitcoooin.cn）
+   * 交给系统浏览器（`Bridge.launchIntent`），APK 才会真的下载。
+   * 别用 `window.open('_system')` —— Capacitor 没开多窗口，Android WebView 会直接忽略。
+   * 网页版：新开标签页下载。
+   */
+  if (isNativeShell()) window.location.href = url
+  else window.open(url, '_blank', 'noopener')
+  latestOpen.value = false
+}
+
 async function saveName(): Promise<void> {
   nameMsg.value = ''
   nameErr.value = ''
@@ -715,14 +795,39 @@ async function changePw(): Promise<void> {
       </div>
     </section>
 
+    <section v-if="tab === 'account'" class="panel">
+      <h2>版本</h2>
+      <p class="note">
+        当前版本 <b>v{{ currentVersion }}</b>
+        <template v-if="currentBuild">（{{ currentBuild }}）</template>
+        <span v-if="!shell" class="dim"> · 网页版</span>
+      </p>
+      <ul class="kvs">
+        <li>
+          <span>最新版本</span>
+          <b>{{ latestRel ? `v${latestRel.version}` : '点下面按钮获取' }}</b>
+        </li>
+      </ul>
+      <div class="row">
+        <button
+          class="btn primary"
+          type="button"
+          :disabled="latestBusy"
+          @click="checkLatest"
+        >
+          {{ latestBusy ? '检查中…' : '获取最新版本' }}
+        </button>
+      </div>
+      <p class="note dim tiny">新包需要手动安装，不会自动覆盖。</p>
+    </section>
+
     <section v-if="tab === 'account' && shell" class="panel">
       <h2>App 信息</h2>
       <p class="note">
         这一块是给「状态栏 / 安全区颜色不对」这类问题留的体检单。
         <br />
-        <b>原生壳版本</b>：我们用的是远程加载（`server.url`），
-        <b>前端永远是线上最新版，而壳可能还是几个月前装的那个</b> ——
-        所以改完原生代码觉得「没生效」时，先看这一项。
+        <b>原生壳版本</b>：页面已经随安装包内置，所以这个版本号就是**整个 App 的版本**；
+        改完前端也要重新出包，不再有「线上已更新、壳还是旧的」那回事。
         <br />
         <b>WebView</b>：≥140 才会让页面铺满整屏（状态栏透明、透出页面背景）；
         低于 140 时状态栏背后是原生那层底色。
@@ -949,6 +1054,67 @@ async function changePw(): Promise<void> {
             <span class="dim tiny">改完所有设备都要重新登录</span>
           </div>
         </div>
+      </section>
+    </Teleport>
+
+    <!--
+      版本更新弹层（用户 2026-10-19：「点开弹窗给出最新包下载链接，可以直接下载，也可以取消」）：
+      只读 `/api/downloads` 的最新一条，不在页面加载时自动请求。
+    -->
+    <Teleport to="body">
+      <div v-if="latestOpen" class="sheet-mask" @click="latestOpen = false" />
+      <section
+        v-if="latestOpen"
+        class="sheet warm-skin ver-sheet"
+        role="dialog"
+        aria-label="版本更新"
+      >
+        <header class="sheet-head">
+          <b>{{ latestErr ? '版本信息' : hasUpdate ? '发现新版本' : '版本信息' }}</b>
+          <button
+            type="button"
+            class="sheet-x"
+            title="关闭"
+            @click="latestOpen = false"
+          >
+            ✕
+          </button>
+        </header>
+
+        <template v-if="latestErr">
+          <p class="err">{{ latestErr }}</p>
+        </template>
+        <template v-else-if="latestRel">
+          <div class="sheet-text">
+            <p>
+              最新版本 <b>v{{ latestRel.version }}</b>
+              <span class="dim"> · {{ latestRel.date }} · {{ humanSize(latestRel.size) }}</span>
+            </p>
+            <p v-if="hasUpdate">
+              当前 <b>v{{ currentVersion }}</b> → 最新 <b>v{{ latestRel.version }}</b>
+            </p>
+            <p v-else>当前已经是最新版本 <b>v{{ latestRel.version }}</b>。</p>
+            <p v-if="latestRel.title">{{ latestRel.title }}</p>
+          </div>
+
+          <ul v-if="hasUpdate && latestRel.notes.length" class="ver-notes">
+            <li v-for="(n, i) in latestRel.notes.slice(0, 6)" :key="i">{{ n }}</li>
+          </ul>
+
+          <div class="row ver-actions">
+            <button
+              v-if="hasUpdate"
+              class="btn primary"
+              type="button"
+              @click="downloadLatest"
+            >
+              下载安装包
+            </button>
+            <button class="btn ghost" type="button" @click="latestOpen = false">
+              取消
+            </button>
+          </div>
+        </template>
       </section>
     </Teleport>
   </div>
@@ -1430,5 +1596,22 @@ h2 {
 .edit-sheet .err,
 .edit-sheet .ok {
   margin: 0;
+}
+
+/* 版本更新弹层：更新说明列表 + 按钮行 */
+.ver-notes {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 34vh;
+  overflow: auto;
+}
+.ver-notes li {
+  margin: 2px 0;
+}
+.ver-actions {
+  margin-top: 4px;
 }
 </style>
