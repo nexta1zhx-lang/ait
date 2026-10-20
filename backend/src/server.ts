@@ -194,7 +194,12 @@ import {
   type ExchangeCredentials
 } from './data/exchange-account'
 import {hydrateMarketsCache} from './data/ccxt-markets'
-import {getPositions, liveStateOf, subscribePositions} from './data/position-cache'
+import {
+  getPositions,
+  isStreamActive,
+  liveStateOf,
+  subscribePositions
+} from './data/position-cache'
 import {listPositionHistory, positionMetaOf, type PositionMeta} from './data/position-history'
 import {
   ensureAutoStop,
@@ -210,6 +215,10 @@ import {
   cancelTradeOrders,
   closePositions,
   collectTradeInfo,
+  knownLeverage,
+  specFor,
+  stepToDecimals,
+  type TradeInfo,
   humanizeTrade,
   listOpenOrders,
   modifyTradeOrder,
@@ -3197,6 +3206,83 @@ async function route(
     }
   }
 
+/**
+ * **面板那条「走内存快照」的近路**（2026-10-21）。
+ *
+ * 常驻流（`data/position-cache`）一直在推「可用余额 / 钱包 / 持仓（含杠杆和账本侧信息）」，
+ * 跟 `/api/exchange/trade/positions` 是同一份。下单面板只要这些 + 合约规格，
+ * 所以能拼出来就**一次交易所都不打**（实测 130~165ms → 5ms 上下）。
+ *
+ * 什么时候拼不出来（返回 null，调用方退回真打交易所）：
+ *   · 这套 Key 的常驻流没在跑（刚启动 / 断流）；
+ *   · 这个币**没有持仓**、而且我们也没记过它的杠杆（`positionRisk` 里才有，别拿 10 倍糊弄）；
+ *   · 合约规格在本地表里查不到（`specFor` 会自己去问一次）。
+ *
+ * ⚠️ 返回的 `positionMeta` 是常驻流顺手查好的（开仓时间 / 已实现盈利），
+ *    走这条路反而**省了**原来那两发账本查询。
+ */
+async function tradeInfoFromLive(
+  key: ExchangeKey,
+  creds: ExchangeCredentials,
+  rawSymbol: string
+): Promise<{info: TradeInfo; positionMeta: PositionMeta | null} | null> {
+  if (!isStreamActive(key.id)) return null
+  const live = liveStateOf(key.id)
+  if (!live) return null
+  // 快照太旧（刚起流、还没推到第一份）就别拿它冒充实时 —— 老老实实打一次交易所
+  if (!(live.at > 0) || Date.now() - live.at > 30_000) return null
+  let spec: Awaited<ReturnType<typeof specFor>>
+  try {
+    spec = await specFor(creds, rawSymbol)
+  } catch {
+    return null
+  }
+  const row = live.positions.find(p => p.raw === spec.symbol) ?? null
+  const memo = row?.leverage
+    ? {lev: Number(row.leverage), max: knownLeverage(key.id, spec.symbol)?.max ?? null}
+    : knownLeverage(key.id, spec.symbol)
+  // 杠杆不知道就别猜（数量 / 所需保证金都会跟着错）
+  if (!memo || !(memo.lev > 0)) return null
+
+  return {
+    info: {
+      symbol: spec.symbol,
+      base: spec.base,
+      balance: {
+        available: live.available,
+        wallet: live.wallet,
+        unrealized: live.unrealized
+      },
+      leverage: memo.lev,
+      maxLeverage: memo.max,
+      position: row
+        ? {
+            side: row.side === 'short' ? 'short' : 'long',
+            amount: Math.abs(Number(row.amount) || 0),
+            entryPrice: Number(row.entryPrice) || 0,
+            markPrice: Number(row.markPrice) || 0,
+            unrealized: Number(row.unrealizedPnl) || 0,
+            notional: Number(row.notional) || 0,
+            maintMargin: Number(row.maintMargin) || 0,
+            mmr: Number(row.mmr) || 0,
+            leverage: Number(row.leverage) || memo.lev,
+            liquidationPrice:
+              row.liquidationPrice != null && Number(row.liquidationPrice) > 0
+                ? Number(row.liquidationPrice)
+                : null
+          }
+        : null,
+      amountPrecision: stepToDecimals(spec.stepSize),
+      pricePrecision: stepToDecimals(spec.tickSize),
+      minAmount: spec.minQty,
+      minCost: spec.minNotional,
+      balanceError: null,
+      errors: []
+    },
+    positionMeta: row?.meta ?? null
+  }
+}
+
   /* ---- 账户统计配置（每用户，2026-10-09）---- */
   /*
    * 用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」。
@@ -4594,17 +4680,34 @@ async function route(
       })
     try {
       const symbol = str(url.searchParams.get('symbol'), 'BTCUSDT')
-      const info = await collectTradeInfo(
-        {
-          exchange: key.exchange,
-          apiKey: key.apiKey,
-          secret: key.secret,
-          password: key.password,
-          marketType: key.marketType,
-          sandbox: key.sandbox
-        },
-        symbol
-      )
+      const creds = {
+        exchange: key.exchange,
+        apiKey: key.apiKey,
+        secret: key.secret,
+        password: key.password,
+        marketType: key.marketType,
+        sandbox: key.sandbox
+      }
+      /*
+       * ★ 2026-10-21 用户：「仓位价值 / 开仓那些为什么出来这么慢？」
+       *
+       * 原因：这个接口每次都要**现打 3 次交易所**（余额 / 持仓+杠杆 / 最大杠杆），
+       * 实测 130~165ms（而且跟同一个账户的常驻流抢同一份权重预算）。
+       * 但常驻流（`position-cache`）**一直在推**余额和持仓 —— 面板要的这些里头
+       * 绝大部分它都有。所以：流在跑、且这个币的杠杆也知道（`positionRisk` 里有，
+       * 或者用户刚调过），就直接用内存那份拼出来，**一次交易所都不打**
+       * （实测 5ms 上下）。缺杠杆 / 流没跑 ⇒ 老老实实走下面原来那条。
+       */
+      const liveFast = await tradeInfoFromLive(key, creds, symbol)
+      if (liveFast) {
+        return sendJson(res, 200, {
+          ready: true,
+          account: publicExchangeKey(key),
+          ...liveFast.info,
+          positionMeta: liveFast.positionMeta ?? null
+        })
+      }
+      const info = await collectTradeInfo(creds, symbol, key.id)
       /*
        * 持仓的**账本侧**信息（用户 2026-10-14：「底下加上已开仓时间，已实现盈利」）：
        * 这两样币安的 `positionRisk` 里**都没有**，只能从**本地账本**还原 ——
@@ -4658,7 +4761,8 @@ async function route(
           sandbox: key.sandbox
         },
         str(body.symbol, 'BTCUSDT'),
-        Number(body.leverage)
+        Number(body.leverage),
+        key.id
       )
       return sendJson(res, 200, {ok: true, ...r, error: null})
     } catch (e) {

@@ -83,7 +83,7 @@ import {pickSymbol, prefetchSymbol} from '../analyze'
 import {contracts} from '../store'
 import {freshLivePrice, nowTick, ticker} from '../ticker'
 import {showToast} from '../toast'
-import {loadTradeKeys, tradeKey} from '../trade-account'
+import {loadTradeKeys, tradeKey, tradeKeyId} from '../trade-account'
 import {sweepOrphansAfterClose} from '../trade-overlay'
 import {lockLeftMs, lockText} from '../blacklist'
 import ReduceSheet from './ReduceSheet.vue'
@@ -105,7 +105,12 @@ const emit = defineEmits<{config: []}>()
  * 用哪套交易所 Key —— 「配置」弹层里切（用户 2026-10-05：「配置中可切换用户」）。
  * `undefined` = 后端按默认那套处理。
  */
-const keyId = computed(() => tradeKey.value?.id)
+/*
+ * 用哪套 Key：**优先列表里解析出来的那套**（选的 → 默认 → 第一套）；
+ * 列表还没回来时退回 localStorage 里记住的那个 id —— 这样第一发就能直接打对账户，
+ * 不用等 `/api/exchange/keys` 回来（那是**两次串行往返**，手机上就是好几百毫秒）。
+ */
+const keyId = computed(() => tradeKey.value?.id ?? tradeKeyId.value)
 
 /** 币安原始符号（BTCUSDT）：合约表里查不到就按 `币种 + USDT` 兜底 */
 const exSymbol = computed(
@@ -283,12 +288,16 @@ const available = computed(
     availableBalanceOf(keyId.value) ??
     Number(info.value?.balance?.available ?? 0)
 )
-const availableText = computed(() =>
-  // 余额那一项没读到时显示「—」：显示 0 会让人以为账户真的没钱（原因走 toast）
-  info.value?.balance && !info.value.balanceError
-    ? fmt(available.value, 2)
-    : '—'
-)
+const availableText = computed(() => {
+  if (info.value?.balance && !info.value.balanceError) return fmt(available.value, 2)
+  /* `info` 还没到：常驻流已经有余额就先显示它（2026-10-21，别让人干等那发交易所请求） */
+  if (!info.value) {
+    const live = availableBalanceOf(keyId.value)
+    if (live != null) return fmt(live, 2)
+  }
+  // 余额那一项真没读到就显示「—」：显示 0 会让人以为账户真的没钱（原因走 toast）
+  return '—'
+})
 
 /** 交易所允许的最大杠杆（读不到就按 125 兜底） */
 const exchangeMaxLev = computed(() => {
@@ -452,7 +461,22 @@ const curNotional = computed(() =>
  * 用户 2026-10-14 明确要治这个（「切换会跳到未开仓在显示已开，未开是会先显示 0」）：
  * 这期间只显示一行占位，两块正文都不渲染。
  */
-const reading = computed(() => !info.value && loading.value)
+/**
+ * 还要不要摆「正在读合约账户…」。
+ *
+ * ★ 2026-10-21 用户：「仓位价值 / 开仓那些为什么出来这么慢？这个数据不应该是实时的吗？」
+ *   原来只看 `info`（那发要打交易所，手机上 1 秒上下）。但**常驻流（SSE）早就把
+ *   可用余额推过来了**（`availableBalanceOf`），持仓也是同一路推的 ⇒ 有它就先把面板画出来，
+ *   `info` 回来再把杠杆 / 精度 / 能不能下单这些细节补上。
+ *   没有常驻流数据（刚进页面那 100~300ms）才摆占位，避免闪一下「能开 0.00」。
+ */
+const reading = computed(
+  () =>
+    !info.value &&
+    loading.value &&
+    availableBalanceOf(keyId.value) == null &&
+    positionsRows.value.length === 0
+)
 
 /** 有持仓吗（界面靠它分「已开 / 未开」两种样子） */
 const opened = computed(() => curPos.value !== null)
@@ -1442,9 +1466,13 @@ watch(addMax, max => {
   if (addOpen.value && addValue.value > max) addValue.value = max
 })
 
-onMounted(async () => {
-  /* 先把 Key 列表拿来（`tradeKey` 靠它算），不然第一发会打到默认那套上去 */
-  await loadTradeKeys()
+onMounted(() => {
+  /*
+   * Key 列表**不 await**：`keyId` 会先退回 localStorage 记住的那个 id，
+   * 第一发直接打对账户；列表回来之后 `tradeKey` 落定，`watch` 会把面板再对一次。
+   * （以前这里是 `await loadTradeKeys()` 再做请求 —— 手机上等于多一趟串行往返。）
+   */
+  void loadTradeKeys()
   if (props.active) void load()
   /* 顺手把「已开的币种」预热一遍：点顶栏那排时不用等 */
   prefetchInfo(heldSymbols.value.map(s => s.base))

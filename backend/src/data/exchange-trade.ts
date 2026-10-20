@@ -312,7 +312,7 @@ function rawSymbolOf(raw: string): string {
  *
  * ⚠️ 入参允许是 ccxt 那种写法（见 `rawSymbolOf`），不必先转。
  */
-async function specFor(
+export async function specFor(
   c: ExchangeCredentials,
   raw: string
 ): Promise<SymbolSpec> {
@@ -334,7 +334,7 @@ async function specFor(
 }
 
 /** 步长（0.001）→ 小数位（3）。交易所给的 `stepSize` 是**值**不是位数。 */
-function stepToDecimals(step: unknown): number {
+export function stepToDecimals(step: unknown): number {
   const s = Number(step)
   if (!Number.isFinite(s) || s <= 0) return 0
   return Math.max(0, Math.min(12, Math.ceil(-Math.log10(s))))
@@ -534,7 +534,9 @@ export interface TradeInfo {
  */
 export async function collectTradeInfo(
   c: ExchangeCredentials,
-  rawSymbol: string
+  rawSymbol: string,
+  /** 记杠杆缓存用（不传就不记） */
+  keyId?: number | string
 ): Promise<TradeInfo> {
   assertTradable(c)
   const spec = await specFor(c, rawSymbol)
@@ -565,6 +567,9 @@ export async function collectTradeInfo(
     })
   ])
   const leverage = nullish(riskRow?.leverage)
+  if (keyId !== undefined && leverage !== null) {
+    rememberLeverage(keyId, spec.symbol, leverage, maxLeverage)
+  }
 
   return {
     symbol: spec.symbol,
@@ -617,6 +622,54 @@ export async function isDualSide(ex: any, cacheKey: number | string): Promise<bo
  */
 export const MAX_SYMBOL_LEVERAGE = 10
 
+/* ---------------- 杠杆记忆（读内存快照时用） ---------------- */
+
+/**
+ * 某套 Key 的某个交易对**最后已知的杠杆 / 最大杠杆**。
+ *
+ * 为什么要有：`/api/exchange/trade` 现在优先读常驻流的内存快照（`position-cache`），
+ * 那条路**不打交易所**、几毫秒就能回；但「杠杆」只存在于 `positionRisk` 里 ——
+ * 没持仓的币在快照里没有那一行。所以凡是**已经问过交易所**的地方
+ * （`collectTradeInfo` / 调杠杆）都把答案记在这儿，下次就能直接复用。
+ *
+ * ⚠️ 只是缓存，**不是权威**：查不到就返回 null，调用方要退回真打一次交易所
+ *    （别拿默认 10 倍去糊弄 —— 数量 / 所需保证金都会跟着算错）。
+ */
+const leverageMemo = new Map<string, {lev: number; max: number | null}>()
+
+function levKey(keyId: number | string, symbol: string): string {
+  return `${keyId}|${String(symbol).toUpperCase()}`
+}
+
+/** 记住这个交易对的杠杆（`max` 传 null = 这次没读到，保留旧值） */
+export function rememberLeverage(
+  keyId: number | string,
+  symbol: string,
+  lev: number | null,
+  max?: number | null
+): void {
+  if (!Number.isFinite(Number(keyId))) return
+  const k = levKey(keyId, symbol)
+  const prev = leverageMemo.get(k)
+  const nextLev = Number.isFinite(Number(lev)) && Number(lev) > 0 ? Number(lev) : prev?.lev
+  const nextMax =
+    max === undefined
+      ? prev?.max ?? null
+      : Number.isFinite(Number(max)) && Number(max) > 0
+        ? Number(max)
+        : prev?.max ?? null
+  if (nextLev == null) return
+  leverageMemo.set(k, {lev: nextLev, max: nextMax})
+}
+
+/** 查这个交易对记得的杠杆（没记过就是 null） */
+export function knownLeverage(
+  keyId: number | string,
+  symbol: string
+): {lev: number; max: number | null} | null {
+  return leverageMemo.get(levKey(keyId, symbol)) ?? null
+}
+
 /**
  * 调这个交易对的杠杆（`POST /fapi/v1/leverage`）。
  *
@@ -628,7 +681,9 @@ export const MAX_SYMBOL_LEVERAGE = 10
 export async function setSymbolLeverage(
   c: ExchangeCredentials,
   rawSymbol: string,
-  leverage: number
+  leverage: number,
+  /** 记杠杆缓存用（不传就不记） */
+  keyId?: number | string
 ): Promise<{symbol: string; leverage: number}> {
   assertTradable(c)
   if (!Number.isFinite(leverage) || leverage < 1)
@@ -645,6 +700,7 @@ export async function setSymbolLeverage(
     symbol: spec.symbol,
     leverage: lev
   })
+  if (keyId !== undefined) rememberLeverage(keyId, spec.symbol, n(r?.leverage) || lev)
   return {symbol: spec.symbol, leverage: n(r?.leverage) || lev}
 }
 
@@ -1035,7 +1091,9 @@ export async function closePositions(
  *    `positionSide`，不能只按 symbol 去重。
  */
 export async function listPositions(
-  c: ExchangeCredentials
+  c: ExchangeCredentials,
+  /** 记杠杆缓存用（不传就不记）—— 面板那条内存快照近路靠它 */
+  keyId?: number | string
 ): Promise<FuturesPositionRow[]> {
   assertTradable(c)
   const ex = createExchange(c)
@@ -1045,7 +1103,17 @@ export async function listPositions(
   for (const r of rows) {
     const pos = positionFromRow(r)
     const symbol = String(r?.symbol ?? '').toUpperCase()
-    if (!pos || !symbol) continue
+    if (!symbol) continue
+    /*
+     * ⚠️ 这里**不管有没有持仓**都记一笔杠杆：`positionRisk` 一次会把这个账户
+     *    所有交易对都吐出来（没持仓的 `positionAmt` 是 0，但 `leverage` 是准的）。
+     *    常驻流每次快照都走这儿 ⇒ 面板问任何币都不用再单独打一次交易所。
+     */
+    if (keyId !== undefined) {
+      const lev = Math.floor(n(r?.leverage)) || 0
+      if (lev > 0) rememberLeverage(keyId, symbol, lev)
+    }
+    if (!pos) continue
     out.push({...pos, symbol})
   }
   /* 名义大的排前面：一眼看到最要紧的那笔 */

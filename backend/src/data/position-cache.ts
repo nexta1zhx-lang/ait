@@ -361,7 +361,7 @@ async function fetchRows(
   const run = (async (): Promise<FuturesPositionRow[]> => {
     try {
       await takeWeight(5, 'positionRisk')
-      const rows = await listPositions(c)
+      const rows = await listPositions(c, keyId ?? undefined)
       if (keyId) rowsCache.set(keyOf(keyId), {at: Date.now(), rows})
       return rows
     } catch (e) {
