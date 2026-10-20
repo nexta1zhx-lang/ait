@@ -2114,6 +2114,58 @@ button.danger {
   font-weight: 500;
 }
 
+/*
+ * 第三行：**我对这个币的标注**（2026-10-20）。
+ *
+ * 用户：「大概就是杂毛，异能等这些标签能显示标注的时间多长时间之前」。
+ * 只有有标注的币才渲染这一行（见 `MarketPanel` 的 `v-if`），没标注的行高度不变。
+ *
+ * ⚠️ 窄屏（360px）币种列的文字区只剩 ~114px：胶囊必须允许收缩 + 省略号，
+ *    时间固定不缩（它是这一行最要紧的信息之一），否则整行会把币种列顶宽。
+ */
+.mkt-table .icell-n {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px;
+  row-gap: 2px;
+  min-width: 0;
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--muted);
+}
+.mkt-table .icell-n .ann-pill {
+  /*
+   * ⚠️ `flex: 0 0 auto`：宁可**换行**也别把每个两字标签压成一个字（开单分析左栏
+   * 只有 430px，早先的 `0 1 auto` 会把「杂毛 / 异能 / 插针」各截成「杂 / 异 / 插」）。
+   * 标签多了这一行会折成两行，但只影响有标注的行。
+   */
+  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mkt-table .icell-n .ann-pill.ann-more {
+  flex: 0 0 auto;
+}
+.mkt-table .icell-n .ann-only {
+  background: var(--panel);
+  color: var(--muted);
+}
+.mkt-table .icell-n .ann-ago {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--muted);
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
 /* 图标：32px 的源图缩到 26px（高分屏也清晰）；拿不到就退回首字母圆 */
 .mkt-table .ico {
   flex: 0 0 auto;
@@ -3278,7 +3330,8 @@ body.fixed-viewport .split {
  * 所以样式并在一起写 —— 只是测试那颗多一个「开着」状态（`.on`）。
  */
 .tk-head .tk-cfg,
-.tk-head .tk-test {
+.tk-head .tk-test,
+.tk-head .tk-note {
   flex: 0 0 auto;
   width: 30px;
   height: 28px;
@@ -3303,7 +3356,8 @@ body.fixed-viewport .split {
 }
 
 .tk-head .tk-cfg svg,
-.tk-head .tk-test svg {
+.tk-head .tk-test svg,
+.tk-head .tk-note svg {
   width: 17px;
   height: 17px;
   fill: none;
@@ -3316,7 +3370,8 @@ body.fixed-viewport .split {
 /* 悬停：触屏不应用（`✓` 灰着的时候也别亮） */
 @media (hover: hover) {
   .tk-head .tk-cfg:hover,
-  .tk-head .tk-test:hover:not(:disabled) {
+  .tk-head .tk-test:hover:not(:disabled),
+  .tk-head .tk-note:hover:not(:disabled) {
     color: var(--text);
     border-color: var(--blue);
   }
@@ -3340,6 +3395,20 @@ body.fixed-viewport .split {
 .tk-head .tk-test.no {
   color: var(--blue);
   border-color: var(--blue);
+}
+
+/*
+ * 标注那颗（2026-10-20）：跟「烧瓶 / 配置」同一个盒子、同一种线描图标。
+ * 亮着（`.on`）= 这个币已经有标注；用主题金色，跟测试的蓝一眼分得开。
+ * 没选到币时 `disabled`，别让用户点开一个不知道该标谁的弹窗。
+ */
+.tk-head .tk-note.on {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+.tk-head .tk-note:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 /*
@@ -8021,6 +8090,10 @@ button.badge:disabled {
   }
   .split.m-market .mkt-table .icell-v {
     font-size: 11px;
+  }
+  /* 标注那行在窄屏再收一点（标签宁可换行也别截成一个字，2026-10-20） */
+  .split.m-market .mkt-table .icell-n {
+    font-size: 9.5px;
   }
   /*
    * ⚠️ 手机上的置顶星**不能占位**（2026-10-04 实测）：

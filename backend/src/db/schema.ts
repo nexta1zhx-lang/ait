@@ -114,6 +114,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled  BOOLEAN NOT NULL DEFAUL
 ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_recovery JSONB  NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT NOT NULL DEFAULT 0;
 
+-- 币种标注：默认标签是否已经播种过（2026-10-20，见 db/annotations.ts）。
+-- 只拿来判「第一次用这个功能」，不参与业务逻辑：
+--   · null = 还没播过，第一次列标签时种下 杂毛 / 异能，然后写 now()；
+--   · 用户把默认标签删光了也不会再长回来（标记已经是非空）。
+ALTER TABLE users ADD COLUMN IF NOT EXISTS annotation_tags_seeded_at TIMESTAMPTZ;
+
 -- 合约行情的置顶币种（2026-10-04，每个用户最多 5 个，见 db/pins.ts）。
 -- 只存 base（BTC，不带 /USDT）；sort 是置顶区里的先后顺序。
 -- ⚠️ 注释里千万别写反引号 —— SCHEMA_SQL 是 JS 模板字符串，会被当场截断。
@@ -137,6 +143,45 @@ CREATE TABLE IF NOT EXISTS user_blacklist (
   PRIMARY KEY (user_id, base)
 );
 CREATE INDEX IF NOT EXISTS user_blacklist_user_idx ON user_blacklist (user_id, until);
+
+-- 币种标注（2026-10-20，见 db/annotations.ts）。
+-- 用户：「在合约行情显示我对币种的标注数据……在 K 线页面顶部加标注按钮，
+-- 可以打标签和描述，标签可选可维护」。
+--
+-- 两张表：
+--   · annotation_tags     —— 标签词表（杂毛 / 异能 …），只用来给弹窗挑，可增删改；
+--   · symbol_annotations  —— 一条标注 = 一个币 + 当时选中的标签名 + 一句描述 + 时刻。
+-- ⚠️ 标注里存的是标签**名字快照**（不是 id）：改名时后端会把历史里的同名标签一起改，
+--    删除标签则不动历史 —— 历史是记录，词表只是可选集合。
+CREATE TABLE IF NOT EXISTS annotation_tags (
+  id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  name       TEXT        NOT NULL,
+  sort       INTEGER     NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 同一个人的标签不许重名（不区分大小写）
+CREATE UNIQUE INDEX IF NOT EXISTS annotation_tags_user_name_idx
+  ON annotation_tags (user_id, lower(name));
+CREATE INDEX IF NOT EXISTS annotation_tags_user_sort_idx
+  ON annotation_tags (user_id, sort, id);
+
+CREATE TABLE IF NOT EXISTS symbol_annotations (
+  id         BIGSERIAL   PRIMARY KEY,
+  user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  -- 基础币（BTC，不带 /USDT），跟置顶 / 黑名单 / 提醒同一个口径
+  base       TEXT        NOT NULL,
+  -- 标签名数组，如 ["杂毛","异能"]；空数组 = 只写了描述
+  tags       JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  -- 描述（可以为空 = 只选了标签）
+  note       TEXT        NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 某个币的历史（新的在前） + 全量最新一条（行情列表用）
+CREATE INDEX IF NOT EXISTS symbol_annotations_user_base_idx
+  ON symbol_annotations (user_id, base, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS symbol_annotations_user_time_idx
+  ON symbol_annotations (user_id, created_at DESC, id DESC);
 
 -- 账户统计的每用户配置（2026-10-09，见 db/stats-settings.ts）。
 -- 用户 2026-10-09：「在配置里面选择的配置，要保存到个人的后端和个人信息中」——

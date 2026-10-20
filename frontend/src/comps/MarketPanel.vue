@@ -39,6 +39,11 @@ import {
   pinnedBases as pins,
   toggleFavorite
 } from '../pins'
+import {
+  agoText,
+  annotationOf,
+  ensureAnnotations
+} from '../annotations'
 import {marketMinVolUsd, rankBase, rankSinceMs} from '../settings'
 import {contracts} from '../store'
 
@@ -352,6 +357,13 @@ function sync(): void {
   /* 黑名单也一起拉（同样是 20 秒新鲜度窗口）—— 有它才知道哪几行要显示「禁用」 */
   void ensureBlacklist().catch(e =>
     console.warn(`[行情] 读取黑名单失败：${(e as Error).message}`)
+  )
+  /*
+   * 币种标注也一起拉（2026-10-20）：行情表里有标注的币多显示一行标签 + 多久之前。
+   * 同样是 20 秒新鲜度窗口；拉不到只是不显示标注，不能影响行情本身。
+   */
+  void ensureAnnotations().catch(e =>
+    console.warn(`[行情] 读取币种标注失败：${(e as Error).message}`)
   )
   /*
    * 后台标签页的定时器会被节流到分钟级 ⇒ 回来时那个日切定时器可能早该跳了却没跳。
@@ -821,6 +833,31 @@ const toneOf = (v: number | null): string =>
  */
 const arrowOf = (v: number | null): string =>
   v === null || !Number.isFinite(v) ? '' : v >= 0 ? '▲' : '▼'
+
+/* ---------------- 币种标注（2026-10-20） ---------------- */
+
+/**
+ * 行情行第三行：最新标注的标签 + 多久之前。
+ *
+ * 只显示**最新一条**（历史去 K 线底部看）；标签最多 3 个，多的折成「+N」。
+ * 无标签只写了描述的，用一枚「标注」胶囊占位，别让这一行只剩时间。
+ */
+const annTagsOf = (base: string): string[] =>
+  annotationOf(base)?.tags.slice(0, 3) ?? []
+const annMoreOf = (base: string): number => {
+  const n = annotationOf(base)?.tags.length ?? 0
+  return n > 3 ? n - 3 : 0
+}
+const annAgoOf = (base: string): string => {
+  const a = annotationOf(base)
+  return a ? agoText(a.at) : ''
+}
+/** 整行 title：完整标签 + 描述（窄屏只截一小段，悬停 / 长按能看全） */
+function annTitleOf(base: string): string {
+  const a = annotationOf(base)
+  if (!a) return ''
+  return [a.tags.join(' · '), a.note].filter(Boolean).join(' — ')
+}
 </script>
 
 <template>
@@ -1106,6 +1143,32 @@ const arrowOf = (v: number | null): string =>
                       <span class="cap-vol">{{
                         bigText(r.quoteVolume24h)
                       }}</span>
+                    </span>
+                    <!--
+                      第三行：我对这个币的最新标注（2026-10-20）。
+                      用户：「大概就是杂毛，异能等这些标签能显示标注的时间多长时间之前」。
+                      ⚠️ 只有有标注的币才渲染这一行 —— 没标注的行高度跟以前一模一样。
+                    -->
+                    <span
+                      v-if="annotationOf(r.base)"
+                      class="icell-n"
+                      :title="annTitleOf(r.base)"
+                    >
+                      <span
+                        v-for="t in annTagsOf(r.base)"
+                        :key="t"
+                        class="ann-pill"
+                        >{{ t }}</span
+                      >
+                      <span v-if="annMoreOf(r.base)" class="ann-pill ann-more"
+                        >+{{ annMoreOf(r.base) }}</span
+                      >
+                      <span
+                        v-if="!annTagsOf(r.base).length"
+                        class="ann-pill ann-only"
+                        >标注</span
+                      >
+                      <span class="ann-ago">{{ annAgoOf(r.base) }}</span>
                     </span>
                   </span>
                 </span>

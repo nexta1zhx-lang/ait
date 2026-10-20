@@ -28,8 +28,15 @@ import TickerHead from '../comps/TickerHead.vue'
 import OrderPanel from '../comps/OrderPanel.vue'
 import JournalView from './JournalView.vue'
 import BanSheet from '../comps/BanSheet.vue'
+import AnnotationSheet from '../comps/AnnotationSheet.vue'
+import SymbolAnnotations from '../comps/SymbolAnnotations.vue'
 import AutoPredictView from './AutoPredictView.vue'
 import AskView from './AskView.vue'
+import {
+  annotationBaseOf,
+  annotationOf,
+  ensureAnnotations
+} from '../annotations'
 import {
   ensurePins,
   isPinnedBase,
@@ -116,6 +123,24 @@ onMounted(() =>
     /* 拉不到不打扰：这只是显示用，真下单后端还会拦一道 */
   })
 )
+
+/*
+ * 币种标注（2026-10-20）。
+ *
+ * 顶部那颗标签按钮 + 底部弹窗 + 图下方那块历史都在这儿串起来：
+ *   · `annBase` 是**基础币**（BTC），后端 / 行情列表 / 标注都按它存；
+ *   · `currentAnnotation` 决定按钮亮不亮（这个币有没有标注）；
+ *   · 汇总在进页 / 切回来时拉一次（20 秒新鲜度窗口，不会来回切都发请求）。
+ */
+const annOpen = ref(false)
+const annBase = computed(() => annotationBaseOf(symbol.value))
+const currentAnnotation = computed(() => annotationOf(annBase.value))
+onMounted(() => {
+  void ensureAnnotations().catch(() => undefined)
+})
+onActivated(() => {
+  void ensureAnnotations().catch(() => undefined)
+})
 
 /*
  * 顶部行情条 / 底部涨幅：跟着币种走，进来就拉、换币立刻重拉。
@@ -841,6 +866,37 @@ onDeactivated(() => {
                   测试模式本身的状态靠「在图上那条结束线 + 预测结果里那条测试模式标识」看，
                   图标不再有「亮着」这一档（用户要的就是勾和叉，不是开关）。
                 -->
+                <!--
+                  币种标注（2026-10-20 用户：「在 K 线页面顶部右侧加一个按钮在测试旁第一个，
+                  点击之后可以底部弹窗可以打标签和描述」）。
+                  位置钉死在**测试左边第一颗**；有标注时染成主题金色（跟测试的蓝区分），
+                  点开是底部弹层（`AnnotationSheet`）。
+                -->
+                <button
+                  type="button"
+                  class="ghost tiny tk-note"
+                  :class="{on: !!currentAnnotation}"
+                  :title="
+                    !annBase
+                      ? '标注：先选一个币'
+                      : currentAnnotation
+                        ? `${annBase} 最新标注：${
+                            currentAnnotation.tags.join(' · ') || '只有描述'
+                          } —— 点开再加一条 / 看历史`
+                        : `给 ${annBase} 打标签 / 写描述`
+                  "
+                  aria-label="币种标注"
+                  :disabled="!annBase"
+                  @click="annOpen = true"
+                >
+                  <!-- 价签：跟收藏的星、测试的烧瓶、配置的滑块一眼分得开 -->
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M4 5.5A1.5 1.5 0 0 1 5.5 4h5.9a1.5 1.5 0 0 1 1.06.44l6.6 6.6a1.5 1.5 0 0 1 0 2.12l-5.4 5.4a1.5 1.5 0 0 1-2.12 0l-6.6-6.6A1.5 1.5 0 0 1 4 10.4Z"
+                    />
+                    <circle cx="8.2" cy="8.2" r="1.3" />
+                  </svg>
+                </button>
                 <template v-if="!testMode">
                   <button
                     type="button"
@@ -970,8 +1026,9 @@ onDeactivated(() => {
               </svg>
             </button>
           </template>
-          <!-- 底部：合约下单模块。 -->
+          <!-- 底部：币种标注（图下方一窄条）+ 合约下单模块。 -->
           <template #bottom>
+            <SymbolAnnotations :base="annBase" />
             <OrderPanel
               :symbol="symbol"
               :active="pageAlive && chartActive"
@@ -1003,6 +1060,13 @@ onDeactivated(() => {
       :busy="banBusy"
       @close="banOpen = false"
       @confirm="doLock"
+    />
+
+    <!-- 币种标注：底部弹窗（入口在 K 线头部测试左边第一颗价签） -->
+    <AnnotationSheet
+      :open="annOpen"
+      :base="annBase"
+      @close="annOpen = false"
     />
   </div>
 </template>

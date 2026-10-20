@@ -423,6 +423,83 @@ export const unlockBase = (base: string) =>
     error: string | null
   }>('/api/blacklist/unlock', {base})
 
+/* ---------------- 币种标注（2026-10-20） ---------------- */
+
+/**
+ * 用户：「在合约行情界面显示我对币种的标注数据……K 线页面顶部加标注按钮，
+ * 可以打标签和描述，标签可选可维护」。
+ *
+ * 标签存**名字**（不是 id），所以这里的类型全是字符串数组；时间统一 ISO。
+ */
+export interface AnnotationTag {
+  id: number
+  name: string
+}
+
+/** 一条标注：币 + 当时选中的标签 + 描述 + 标注时刻 */
+export interface SymbolAnnotation {
+  id: number
+  /** 基础币（BTC，不带 /USDT） */
+  base: string
+  tags: string[]
+  note: string
+  /** 标注时刻（ISO） */
+  at: string
+}
+
+/** 行情列表用：每个币最新一条 + 标签词表 */
+export interface AnnotationSummary {
+  tags: AnnotationTag[]
+  latest: Record<string, SymbolAnnotation>
+  error?: string | null
+}
+
+/** K 线底部用：某个币的全部历史（新的在前）+ 标签词表 */
+export interface AnnotationHistory {
+  tags: AnnotationTag[]
+  entries: SymbolAnnotation[]
+  error?: string | null
+}
+
+/** 拉「每个币最新一条」（合约行情那一列标签） */
+export const fetchAnnotationSummary = () =>
+  get<AnnotationSummary>('/api/annotations')
+
+/** 拉某个币的全部历史（K 线底部） */
+export const fetchAnnotationHistory = (base: string) =>
+  get<AnnotationHistory>(`/api/annotations?base=${encodeURIComponent(base)}`)
+
+/** 追加一条标注（标签和描述至少要有一样，后端会校验） */
+export const createSymbolAnnotation = (input: {
+  base: string
+  tags: string[]
+  note: string
+}) => post<{entry: SymbolAnnotation; error: string | null}>('/api/annotations', input)
+
+/** 删掉一条（只能删自己的） */
+export const deleteSymbolAnnotation = (id: number) =>
+  del<{ok: boolean; error: string | null}>(`/api/annotations/${id}`)
+
+/** 新增一个标签；回来的是新标签 + 整份词表 */
+export const createAnnotationTag = (name: string) =>
+  post<{tag: AnnotationTag; tags: AnnotationTag[]; error: string | null}>(
+    '/api/annotation-tags',
+    {name}
+  )
+
+/** 改标签名（后端会把历史标注里的同名标签一起改） */
+export const renameAnnotationTag = (id: number, name: string) =>
+  post<{tag: AnnotationTag; tags: AnnotationTag[]; error: string | null}>(
+    `/api/annotation-tags/${id}`,
+    {name}
+  )
+
+/** 删标签（历史标注里的名字不动，只是以后不再提供这个选项） */
+export const deleteAnnotationTag = (id: number) =>
+  del<{tags: AnnotationTag[]; error: string | null}>(
+    `/api/annotation-tags/${id}`
+  )
+
 /* ---------------- 通用 ---------------- */
 
 /**

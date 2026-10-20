@@ -158,6 +158,16 @@ import {
   setJournalPinned,
   updateJournalCategory
 } from './db/journals'
+import {
+  createAnnotationTag,
+  deleteAnnotationTag,
+  deleteSymbolAnnotation,
+  listAnnotationTags,
+  listLatestAnnotations,
+  listSymbolAnnotations,
+  renameAnnotationTag,
+  saveSymbolAnnotation
+} from './db/annotations'
 import {polishText} from './llm/polish'
 import {pickCandidates} from './scan/rules'
 import {
@@ -3081,6 +3091,105 @@ async function route(
         removed: had,
         error: null
       })
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  /* ---- 币种标注（2026-10-20，见 db/annotations.ts）----
+   *
+   * 用户：「合约行情界面显示我对币种的标注数据……K 线页面顶部右侧加一个按钮，
+   * 点击之后底部弹窗可以打标签和描述，标签可选可维护」。
+   *
+   *   GET    /api/annotations             每个币最新一条（行情列表用）+ 标签词表
+   *   GET    /api/annotations?base=BTC    这个币的全部历史（K 线底部用）+ 标签词表
+   *   POST   /api/annotations             追加一条（body: base / tags / note）
+   *   DELETE /api/annotations/:id         删一条（只能删自己的）
+   *   POST   /api/annotation-tags         新增标签（body: name）
+   *   POST   /api/annotation-tags/:id     改标签名（历史里的同名标签一起改）
+   *   DELETE /api/annotation-tags/:id     删标签（不动历史里的名字）
+   *
+   * ⚠️ 全是纯读库 / 写库，不打交易所、不计权重；**全部要登录**，按 me.id 隔离。
+   */
+  if (p === '/api/annotations' && method === 'GET') {
+    try {
+      const rawBase = str(url.searchParams.get('base') ?? '').trim()
+      if (rawBase) {
+        const [tags, entries] = await Promise.all([
+          listAnnotationTags(me.id),
+          listSymbolAnnotations(me.id, rawBase)
+        ])
+        return sendJson(res, 200, {tags, entries, error: null})
+      }
+      const [tags, latest] = await Promise.all([
+        listAnnotationTags(me.id),
+        listLatestAnnotations(me.id)
+      ])
+      return sendJson(res, 200, {tags, latest, error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (p === '/api/annotations' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const entry = await saveSymbolAnnotation(me.id, {
+        base: body.base,
+        tags: body.tags,
+        note: body.note
+      })
+      return sendJson(res, 200, {entry, error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  const annotationMatch = /^\/api\/annotations\/(\d+)$/.exec(p)
+  if (annotationMatch && method === 'DELETE') {
+    try {
+      const ok = await deleteSymbolAnnotation(me.id, Number(annotationMatch[1]))
+      return sendJson(res, ok ? 200 : 404, {
+        ok,
+        error: ok ? null : '没这条标注'
+      })
+    } catch (e) {
+      return sendJson(res, 400, {ok: false, error: (e as Error).message})
+    }
+  }
+
+  if (p === '/api/annotation-tags' && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const r = await createAnnotationTag(me.id, body.name)
+      return sendJson(res, 200, {tag: r.tag, tags: r.tags, error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  const annotationTagMatch = /^\/api\/annotation-tags\/(\d+)$/.exec(p)
+  if (annotationTagMatch && method === 'POST') {
+    const body = await readJsonBody(req).catch(() => null)
+    if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+    try {
+      const r = await renameAnnotationTag(
+        me.id,
+        Number(annotationTagMatch[1]),
+        body.name
+      )
+      return sendJson(res, 200, {tag: r.tag, tags: r.tags, error: null})
+    } catch (e) {
+      return sendJson(res, 400, {error: (e as Error).message})
+    }
+  }
+
+  if (annotationTagMatch && method === 'DELETE') {
+    try {
+      const tags = await deleteAnnotationTag(me.id, Number(annotationTagMatch[1]))
+      return sendJson(res, 200, {tags, error: null})
     } catch (e) {
       return sendJson(res, 400, {error: (e as Error).message})
     }
