@@ -5,7 +5,7 @@
  * 干三件事：
  *   ① **先读库里最新一条快照**渲染（毫秒级，不打交易所）→ 旧了就后台刷新
  *   ② **订阅 SSE**：WS 一有动静后端就落一条并推过来 → 数字秒跳，
- *      不用等 5 分钟采样、也不用用户手动 ⟳
+ *      不用等 5 分钟采样
  *   ③ 下面两个 tab 各取所需：**成交/盈亏读后端账本**（WS 实时落 + 断线后 RESF 补，
  *      **不需要交易对**），**挂单打交易所**（秒级变化的东西，不进快照）
  *
@@ -29,7 +29,6 @@ import {
   type TpSlAction,
   type TpSlTarget
 } from '../tpsl'
-import {usePullRefresh} from '../pull-refresh'
 import {testOrder} from '../settings'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
@@ -1213,8 +1212,9 @@ const MANUAL_MIN_MS = 1500
 
 /**
  * `auto = true` —— **前端自己兜底**触发的那次（快照旧了 / 流没活着 / 兜底定时器）。
- * 这种「顺手刷一下」**不该**把成交 / 挂单 / 钱账本也全对一遍（那是用户主动刷新才做的事，
- * 见 `wakeExchangeStream` 的 `force`）—— 用户明确说过「不是每次刷新都要请求接口」。
+ * 这种「顺手刷一下」**不该**把成交 / 挂单 / 钱账本也全对一遍（只有平仓、划转这类
+ * 「钱真的动了」的动作才需要，见 `wakeExchangeStream` 的 `force`）——
+ * 用户明确说过「不是每次刷新都要请求接口」。
  */
 async function doRefresh(auto = false): Promise<void> {
   if (refreshing.value) return
@@ -1267,19 +1267,6 @@ async function doRefresh(auto = false): Promise<void> {
     refreshing.value = false
   }
 }
-
-/*
- * 移动端下拉刷新—— 见 `pull-refresh.ts` 里那段说明：
- * 它是「后台对账降频」的前提，因为给得手动兜底，才敢把自动请求砍下来。
- * 触发的就是上面那个 `doRefresh()`（跟 ⟳ 按钮同一条路，一样有防抖）。
- */
-const {
-  pull: pullY,
-  state: pullState,
-  onTouchStart: onPullStart,
-  onTouchMove: onPullMove,
-  onTouchEnd: onPullEnd
-} = usePullRefresh(() => doRefresh())
 
 /** 成交账本：几套合起来、按时间倒序（多套时每条标出是哪套的） */
 async function loadFills(): Promise<void> {
@@ -2093,32 +2080,7 @@ onUnmounted(stopWork)
 </script>
 
 <template>
-  <div
-    class="live warm-skin"
-    @touchstart.passive="onPullStart"
-    @touchmove.passive="onPullMove"
-    @touchend.passive="onPullEnd"
-    @touchcancel.passive="onPullEnd"
-  >
-    <!--
-      下拉刷新的指示条：**绝对定位、不占位**（拉的时候页面不会跳一下）。
-      三段文案 = 三种状态：还没拉到阈值 / 松开就刷 / 正在刷。
-    -->
-    <div
-      class="pull"
-      :class="{on: pullState !== 'idle', busy: pullState === 'busy'}"
-      :style="{transform: `translate(-50%, ${pullY}px)`}"
-      aria-hidden="true"
-    >
-      <span class="pull-dot" />
-      {{
-        pullState === 'busy'
-          ? '刷新中…'
-          : pullState === 'ready'
-            ? '松开刷新'
-            : '下拉刷新'
-      }}
-    </div>
+  <div class="live warm-skin">
     <p v-if="err" class="err">{{ err }}</p>
 
     <section v-if="!keys.length && !loading" class="panel empty">
@@ -2143,7 +2105,6 @@ onUnmounted(stopWork)
       :open-cycles="openCycles"
       :cycles-since="cyclesSince"
       :loading-orders="loadingOrders"
-      :refreshing="refreshing"
       :curve="curve"
       :curve-range="curveRange"
       :curve-bucket-sec="curveBucketSec"
@@ -2151,7 +2112,6 @@ onUnmounted(stopWork)
       :last-price="lastPrices"
       :busy="posBusy"
       @update:curve-range="curveRange = $event"
-      @refresh="doRefresh()"
       @transfer="transferOpen = true"
       @reduce="openReduce"
       @close="closeRow"
@@ -2287,55 +2247,6 @@ onUnmounted(stopWork)
   /* 下拉指示条挂在它上面（absolute），所以它得是定位祖先 */
   position: relative;
 }
-
-/*
- * 下拉刷新指示条（移动端）。
- * ⚠️ `translate(-50%, Npx)` 里的 N 由脚本给（阻尼后的拖动距离）——
- *    初始 `translate(-50%, 0)` 时它还压在顶部内容上，所以平时 `opacity: 0`
- *    并且 `pointer-events: none`（绝不挡点击）。
- */
-.pull {
-  position: absolute;
-  top: -34px;
-  left: 50%;
-  z-index: 30;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  color: var(--fg-dim, #8b93a1);
-  background: var(--card, #171b22);
-  box-shadow: 0 2px 10px rgb(0 0 0 / 35%);
-  opacity: 0;
-  transition: opacity 0.15s;
-  pointer-events: none;
-  white-space: nowrap;
-}
-.pull.on {
-  opacity: 1;
-}
-.pull-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent, #4c8dff);
-}
-.pull.busy .pull-dot {
-  animation: pull-spin 0.9s linear infinite;
-}
-@keyframes pull-spin {
-  0% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.2;
-  }
-  100% {
-    opacity: 1;
-  }
-}
 .spacer {
   flex: 1 1 auto;
 }
@@ -2363,9 +2274,8 @@ onUnmounted(stopWork)
  * 窄屏：整页内容**垫到 1.2 个屏高**（用户 2026-10-06：「高度固定一下为 120vh」）。
  *
  * 这一页在窄屏是**整页一个滚动条**（`.tabs-body` 的定高已撤，见
- * `ExchangeAccountBoard.vue` 末尾那个 `@media`）—— 内容不足一屏时页面就完全滚不动，
- * 「拉到顶再往下拉」的下拉刷新也没有余量。垫到 120vh 之后：
- * 页面正好 1.2 屏，永远有一点点可滚，切 tab / 换币时高度也不再跳。
+ * `ExchangeAccountBoard.vue` 末尾那个 `@media`）—— 内容不足一屏时页面就完全滚不动、
+ * 切 tab / 换币时高度还会跳。垫到 120vh 之后：页面正好 1.2 屏，永远有一点点可滚。
  *
  * ⚠️ 用 `min-height` 而不是 `height`：`.live` 是**列向 flex 容器**，
  *    写死 `height` 会让子项按默认的 `flex-shrink: 1` **被压扁**

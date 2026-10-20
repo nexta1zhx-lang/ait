@@ -86,8 +86,6 @@ const props = defineProps<{
   cyclesSince?: string | null
   /** 挂单正在拉（慢接口，单独转圈） */
   loadingOrders?: boolean
-  /** 正在刷新快照（⟳ 转圈 + 禁点） */
-  refreshing?: boolean
   /**
    * 「没有数据」的原因（现货 / 还没采过 / 这些账户都没数据）。
    * ⚠️ 这是**终态文案**，底部唯一还会画字的地方 —— 首屏那次加载已经故意留白了
@@ -152,7 +150,6 @@ const props = defineProps<{
 export type LedgerTab = 'inc' | 'trades' | 'flow'
 
 const emit = defineEmits<{
-  (e: 'refresh'): void
   /** 换了筛选的币种（`''` = 全部）—— 取数在外层，这里只往上报 */
   (e: 'filter', v: {tab: LedgerTab; symbol: string}): void
   /** 点了「周期范围」那颗按钮 —— 底部弹窗由外层挂 */
@@ -1641,24 +1638,6 @@ const RANGES = [
           >
             {{ currency === 'usd' ? 'USDT' : 'CNY' }}
           </button>
-          <!--
-            刷新：**内联 SVG**，不是 `⟳` 那个字符 —— 那个字形在 Android WebView
-            的兜底字体里没有，App 里是一颗空白按钮（用户 2026-10-05：
-            「交易所账户的刷新图标在 app 没有显示」）。
-          -->
-          <button
-            class="ghost tiny rf"
-            :class="{busy: refreshing}"
-            :disabled="refreshing"
-            title="立即刷新"
-            aria-label="立即刷新"
-            @click="emit('refresh')"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6.02" />
-              <path d="M20.5 3.5v5.2h-5.2" />
-            </svg>
-          </button>
         </div>
 
         <div class="hero-num">
@@ -2756,11 +2735,6 @@ const RANGES = [
 .hero-k {
   font-size: 12px;
   color: var(--muted);
-}
-.rf {
-  padding: 2px 8px;
-  font-size: 13px;
-  line-height: 1.2;
 }
 /* 手机上这是整页最该看见的数 —— 30px 别再小 */
 .hero-v {
@@ -4222,34 +4196,6 @@ const RANGES = [
   white-space: nowrap;
   padding: 7px 14px;
 }
-/*
- * 刷新按钮的图标：**内联 SVG**（原来那个 `⟳` 字符在 Android WebView 里
- * 兜底字体没这个字形，App 上是一颗空白按钮）。
- * 尺寸对齐 `.ghost.tiny` 的高度，别把这一行撑高。
- */
-.rf {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 6px;
-}
-
-.rf svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.9;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-/* 刷新中：整个按钮转圈（keyframes spin 是全局的，见 style.css） */
-.rf.busy {
-  animation: spin 0.8s linear infinite;
-  cursor: default;
-}
-
 /* USDT / CNY 切换：跟「几分钟前」并排的一颗小标签，点了就换 */
 .cur {
   padding: 3px 7px;
@@ -4354,7 +4300,7 @@ const RANGES = [
  *    一滑就带着整页飞，很烦），窄屏这里必须盖掉。
  *    ⚠️ 别改成 `contain`：那样内层滚到顶以后手指再怎么拉页面都不动，
  *      「卡住」的手感就是它来的。
- * ⚠️ 整页本身仍然可滚（120vh > 可视区），下拉刷新照旧成立。
+ * ⚠️ 整页本身仍然可滚（120vh > 可视区）。
  */
 @media (max-width: 900px) {
   .exb {
