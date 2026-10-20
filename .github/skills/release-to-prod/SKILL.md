@@ -36,6 +36,15 @@ git status --short          # 必须是空的
 git add -A && git commit    # 提交信息按仓库风格：type(scope): 中文标题 + 讲清为什么
 ```
 
+### 0b. APK 现在是自动的
+
+`release.sh` 默认会先跑 `scripts/build-apk.sh` 打一版 APK 再一起上传（用户 2026-10-21：
+「需要 apk 每次都要上传」）。所以：
+
+- 发版前把 `package.json` 的版本号改好（只在那一处改），`releases.json` 补一条说明；
+- 不想这次打 APK 才加 `--no-apk`；
+- 缺 JDK 21 / Android SDK 只会警告并跳过；**有工具链但编不过会中止**，先修再发。
+
 ### 1. 体检（不碰服务器）
 
 ```bash

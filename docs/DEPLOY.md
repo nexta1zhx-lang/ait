@@ -455,6 +455,12 @@ sudo docker logs --since 24h hbbs | grep -E "update_pk|IP change"
 > 1. **不许加 `-y`**：最后那句确认必须**由人按下**（助手要用 PTY 驱动，看到 `[y/N]` 才写 `y`）；
 > 2. **不许跳过验证**：类型检查 / 构建 / 真单验证（`test: true`）该跑还得跑，跑不过就不发。
 >
+> **APK 跟着每次发布走**（2026-10-21 用户：「需要 apk 每次都要上传」）：
+> `scripts/release.sh` 现在默认**先在本机打一版 APK**（`scripts/build-apk.sh`，
+> 版本号取自 `package.json`）再把缺的那份传上去；`--no-apk` 可以跳过。
+> 缺 JDK 21 / Android SDK 的机器只警告、不拦发布；**打包失败**（有工具链但编不过）直接中止。
+> 版本号仍然只改 `package.json` 一处，`android/app/build.gradle` 由 `build-apk.sh` 同步。
+>
 > 🤖 **助手照着发的操作手册**在 [`.github/skills/release-to-prod/SKILL.md`](../.github/skills/release-to-prod/SKILL.md)
 > —— 里面是本文没有的那几件：**没有 PTY 时确认怎么按**（FIFO 三行）、
 > **发完怎么证明上线的是这一次的包**（比对前端包哈希）、回滚怎么做。改动这个流程时两处一起改。

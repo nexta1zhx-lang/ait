@@ -14,6 +14,7 @@
 #   bash scripts/release.sh -y           # 不问，直接发
 #   bash scripts/release.sh --dry-run    # 只打包 + 打印命令，不碰服务器
 #   bash scripts/release.sh --no-check   # 跳过「未提交改动」检查（tsc 由预构建那步保证）
+#   bash scripts/release.sh --no-apk     # 这次不打 Android 包（默认**每次都打**并上传）
 #
 # 服务器端那个脚本是 scripts/deploy.sh（加 swap / 装 Docker / 起容器 / 自检）；
 # 这个脚本只管「把本机代码安全地送过去并让它跑起来」。
@@ -44,12 +45,15 @@ REMOTE_APK_DIR="${REMOTE_APK_DIR:-/tmp/ca-apk}"
 ASSUME_YES=0
 DRY_RUN=0
 CHECK=1
+# 打不打 Android 包（用户 2026-10-21：「需要 apk 每次都要上传」⇒ 默认每次打）
+BUILD_APK="${BUILD_APK:-1}"
 
 for arg in "$@"; do
   case "$arg" in
     -y|--yes)     ASSUME_YES=1 ;;
     -n|--dry-run) DRY_RUN=1 ;;
     --no-check)   CHECK=0 ;;
+    --no-apk)     BUILD_APK=0 ;;
     -h|--help)
       awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
       exit 0 ;;
@@ -147,6 +151,40 @@ npm run --silent build:all
 [[ -f backend/dist/server.js ]] || die '预构建失败：没有 backend/dist/server.js'
 [[ -f frontend/dist/index.html ]] || die '预构建失败：没有 frontend/dist/index.html'
 ok "产物已就绪（后端 $(find backend/dist -type f | wc -l | tr -d ' ') 个文件 / 前端 $(find frontend/dist -type f | wc -l | tr -d ' ') 个文件）"
+
+# ---------------------------------------------------------------- 0c. 打 Android 包
+# 用户 2026-10-21：「需要 apk 每次都要上传」。
+#
+# 以前 APK 是手动 `npm run apk` 打的，发布只负责「把本地 downloads/ 里服务器没有的传上去」，
+# 结果常常**网页更新了、App 还是旧的**（Capacitor 打的是本地静态资源，不是线上页面）。
+# 现在默认每次发布都在本机重新打一版，跟着这次发布一起传（`--no-apk` 可以不打包）。
+#
+# 版本号只在 `package.json` 一处维护：`scripts/build-apk.sh` 会把它同步进
+# `android/app/build.gradle`（versionName / versionCode），产物落 `downloads/entry-advisor-<版本>.apk`。
+if (( BUILD_APK )); then
+  c '打 Android 包（APK）'
+  if bash scripts/build-apk.sh > /tmp/ca-apk-build.log 2>&1; then
+    APK_VER="$(node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0)"
+    if [[ -f "downloads/entry-advisor-$APK_VER.apk" ]]; then
+      ok "APK 已生成：downloads/entry-advisor-$APK_VER.apk"
+    else
+      warn "APK 脚本跑完了，但没找到 downloads/entry-advisor-$APK_VER.apk（看 /tmp/ca-apk-build.log）"
+    fi
+    # build-apk.sh 会按 package.json 改写 build.gradle；改动了就提醒提交，别让它在工作区里飘着
+    if [[ -n "$(git status --porcelain android/app/build.gradle 2>/dev/null)" ]]; then
+      warn 'android/app/build.gradle 的版本号跟着 package.json 改了 —— 记得提交'
+    fi
+  else
+    # 没有 JDK 21 / Android SDK 的机器不该因此发不了版：只警告，网页照发
+    if grep -q 'JDK 21\|ANDROID_HOME\|SDK' /tmp/ca-apk-build.log 2>/dev/null; then
+      warn '这台机器缺 JDK 21 / Android SDK，这次跳过 APK（日志 /tmp/ca-apk-build.log）'
+    else
+      die 'APK 打包失败（日志 /tmp/ca-apk-build.log）—— 修好再发，别让 App 落后于网页'
+    fi
+  fi
+else
+  c '跳过 APK（--no-apk）'
+fi
 
 # ---------------------------------------------------------------- 1. 打包
 c "打包 → $LOCAL_TAR"
