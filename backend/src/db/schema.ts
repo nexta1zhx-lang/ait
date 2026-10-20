@@ -574,6 +574,18 @@ CREATE TABLE IF NOT EXISTS journal_categories (
 CREATE UNIQUE INDEX IF NOT EXISTS journal_categories_user_name_idx
   ON journal_categories (user_id, lower(name));
 
+/*
+ * 专家经验的**文件夹筛选**记忆（用户 2026-10-20：「文件可多选显示，保存到服务器配置中」）。
+ *
+ * 只存「选了哪几个分类」，属于界面偏好 —— 按用户一行，换设备也跟着走。
+ * 空数组 = 全部（不筛）。
+ */
+CREATE TABLE IF NOT EXISTS user_journal_prefs (
+  user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  categories BIGINT[] NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- 条目挂分类（可空 = 未分类）+ 置顶
 ALTER TABLE journal_entries ADD COLUMN IF NOT EXISTS category_id BIGINT
   REFERENCES journal_categories (id) ON DELETE SET NULL;

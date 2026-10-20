@@ -31,21 +31,47 @@ export const MAX_TAGS_PER_USER = 50
 export const MAX_HISTORY = 200
 
 /**
- * 第一次用标注功能时播种的标签。
+ * **三色系**（用户 2026-10-20：「改为三色系」）。
  *
- * 用户原话里点名了这两个（「大概就是杂毛，异能等这些标签」），所以给一份能直接用的起点；
+ * 标签颜色只认这三个值，前端按它画扁平胶囊：
+ *   · 红 `#e35561` 风险类  · 绿 `#5dc887` 机会类  · 黄 `#f6d758` 观察类
+ * 其它颜色（老调色板里的、用户自己填的）前端一律当**灰**（= 还没归类）。
+ */
+export const TAG_FAMILY_COLORS = {
+  red: '#e35561',
+  green: '#5dc887',
+  yellow: '#f6d758'
+} as const
+
+/**
+ * 第一次用标注功能时播种的标签词表 —— 三色系那 16 个（用户 2026-10-20 给的名单）。
+ *
  * 只播一次（`users.annotation_tags_seeded_at`），用户删光后不会再长回来。
  */
 export const DEFAULT_TAGS = [
-  {name: '杂毛', color: '#f07178'},
-  {name: '异能', color: '#c792ea'}
+  {name: '多空双爆', color: TAG_FAMILY_COLORS.red},
+  {name: '貔貅', color: TAG_FAMILY_COLORS.red},
+  {name: '杀猪盘', color: TAG_FAMILY_COLORS.red},
+  {name: '大单砸盘', color: TAG_FAMILY_COLORS.red},
+  {name: '死水', color: TAG_FAMILY_COLORS.red},
+  {name: '易插针', color: TAG_FAMILY_COLORS.red},
+  {name: '爆仓预警', color: TAG_FAMILY_COLORS.red},
+  {name: '爆量', color: TAG_FAMILY_COLORS.green},
+  {name: '主升浪', color: TAG_FAMILY_COLORS.green},
+  {name: 'V反', color: TAG_FAMILY_COLORS.green},
+  {name: '突破', color: TAG_FAMILY_COLORS.green},
+  {name: '龙头', color: TAG_FAMILY_COLORS.green},
+  {name: '蓄势', color: TAG_FAMILY_COLORS.yellow},
+  {name: '异动', color: TAG_FAMILY_COLORS.yellow},
+  {name: '洗盘', color: TAG_FAMILY_COLORS.yellow},
+  {name: '变盘', color: TAG_FAMILY_COLORS.yellow}
 ] as const
 
 /**
- * 标签可选颜色（跟前端 `annotations.ts` 的 `TAG_COLORS` 保持同一套）。
+ * 老调色板：**只用来给「没指定颜色」的标签补一个占位色**（库里的 `color` 不能空）。
  *
- * 后端用它做两件事：老标签没有颜色时按顺序补一个；新标签没指定颜色时按数量取下一个。
- * ⚠️ 两边改色板要一起改 —— 这里只负责存 / 回，前端负责画。
+ * ⚠️ 2026-10-20 起这些颜色前端不认（不在 `TAG_FAMILY_COLORS` 里 ⇒ 画成灰），
+ *    用户想让它有颜色，就在「管理标签」里点红 / 绿 / 黄。
  */
 export const TAG_COLORS = [
   '#f07178', // 红

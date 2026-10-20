@@ -26,75 +26,120 @@ import {
 } from './api'
 import {ago} from './format'
 
-/**
- * 标签可选颜色（跟后端 `db/annotations.ts` 的 `TAG_COLORS` 保持同一套）。
- *
- * 前端用它画：行情行内彩色标签、弹窗里选中 / 未选中的标签、历史区的标签，
- * 以及「管理标签」最底下那个颜色圆圈的快捷选项。
- */
-export const TAG_COLORS = [
-  '#f07178', // 红
-  '#f0b429', // 黄
-  '#72d6a0', // 绿
-  '#7aa2f7', // 蓝
-  '#c792ea', // 紫
-  '#e08aa8', // 粉
-  '#ff9e64', // 橙
-  '#4dd0e1', // 青
-  '#a3be8c', // 橄榄
-  '#d3b583' // 主题金
-] as const
-
-/** 标签名的兜底色：词表里删掉的旧标签 / 颜色为空时按名字散列到调色板 */
-function fallbackTagColor(name: string): string {
-  let h = 0
-  const s = String(name ?? '')
-  for (let i = 0; i < s.length; i++) {
-    h = (Math.imul(h, 31) + s.charCodeAt(i)) >>> 0
-  }
-  return TAG_COLORS[h % TAG_COLORS.length]!
-}
-
-function hexRgb(hex: string): {r: number; g: number; b: number} {
-  const s = /^#[0-9a-f]{6}$/i.test(hex) ? hex.slice(1) : 'd3b583'
-  return {
-    r: parseInt(s.slice(0, 2), 16),
-    g: parseInt(s.slice(2, 4), 16),
-    b: parseInt(s.slice(4, 6), 16)
-  }
-}
-
-/** 标签名 → 颜色（词表里有就用词表的，没有就按名字散列一个） */
-export function tagColorOf(rawName: string): string {
-  const name = String(rawName ?? '')
-  const found = annotationTags.value.find(t => t.name === name)
-  const c = String(found?.color ?? '').trim().toLowerCase()
-  return /^#[0-9a-f]{6}$/.test(c) ? c : fallbackTagColor(name)
-}
-
-/**
- * 标签胶囊的内联样式：淡色底 + 本色字 + 半透明描边。
- *
- * 不用 `color-mix()` —— 安卓 System WebView 不一定算得出来（见 style.css 里的提醒）。
- * `active` = 这个标签在弹窗里被选中：底色更深、描边更实。
- */
-export function tagChipStyle(
-  rawName: string,
-  active = false
-): Record<string, string> {
-  const color = tagColorOf(rawName)
-  const {r, g, b} = hexRgb(color)
-  const alpha = active ? 0.3 : 0.13
-  const line = active ? 0.75 : 0.38
-  return {
-    color,
-    background: `rgba(${r}, ${g}, ${b}, ${alpha})`,
-    borderColor: `rgba(${r}, ${g}, ${b}, ${line})`
-  }
-}
-
 /** 标签词表（按维护顺序） */
 export const annotationTags = ref<AnnotationTag[]>([])
+
+/* ---------------- 三色系标签（2026-10-20） ---------------- */
+
+/**
+ * 标签的色系（用户 2026-10-20：「改为三色系，扁平化 / 无边框」）。
+ *
+ * 颜色存在 `annotation_tags.color` 里，就存下面这三个值：
+ *   · 红 `#e35561` —— 风险类（多空双爆 / 貔貅 / 杀猪盘 / 大单砸盘 / 死水 / 易插针 / 爆仓预警）
+ *   · 绿 `#5dc887` —— 机会类（爆量 / 主升浪 / V反 / 突破 / 龙头）
+ *   · 黄 `#f6d758` —— 观察类（蓄势 / 异动 / 洗盘 / 变盘）
+ * ⚠️ 不在三色里的老颜色（以前那套 10 色调色板）一律当**灰**（「其它」那档）。
+ */
+export const TAG_FAMILY_COLORS = {
+  red: '#e35561',
+  green: '#5dc887',
+  yellow: '#f6d758'
+} as const
+
+export type TagFamily = keyof typeof TAG_FAMILY_COLORS | 'gray'
+
+/** 色系 → 展示名（弹窗里分组用） */
+export const TAG_FAMILY_LABEL: Record<TagFamily, string> = {
+  red: '红色系',
+  green: '绿色系',
+  yellow: '黄色系',
+  gray: '其它'
+}
+
+/**
+ * 色系的**皮肤**：同色系深底 + 亮字，扁平无边框（照着用户给的参照图取的色）。
+ *
+ * 灰那档用一层极淡的白（`rgba(255,255,255,.07)`）：它压在行情行的暖色底、
+ * 弹窗的冷色底上都成立，不用另配两套主题色。
+ *
+ * ⚠️ 红色 2026-10-20 用户：「红色的背景色加一点深度」—— 底从 `#392127` 压到
+ *    `#4a2029`（更沉、更红），亮字还是 `#e35561`，对比反而更清楚。
+ */
+const FAMILY_SKIN: Record<TagFamily, {bg: string; fg: string}> = {
+  red: {bg: '#4a2029', fg: '#e35561'},
+  green: {bg: '#20362e', fg: '#5dc887'},
+  yellow: {bg: '#3c3925', fg: '#f6d758'},
+  gray: {bg: 'rgba(255, 255, 255, 0.07)', fg: '#9aa0a8'}
+}
+
+/**
+ * 内置的色系归属：老数据 / 后端还没写颜色的标签，按名字兜底。
+ *
+ * 用户 2026-10-20 给的名单，顺序照抄（红 7 / 绿 5 / 黄 4）。
+ * 名单外的标签 → 灰（「其它」那档），用户也可以在「管理标签」里改成红 / 绿 / 黄。
+ */
+const NAME_FAMILY: Record<string, TagFamily> = {
+  多空双爆: 'red',
+  貔貅: 'red',
+  杀猪盘: 'red',
+  大单砸盘: 'red',
+  死水: 'red',
+  易插针: 'red',
+  爆仓预警: 'red',
+  爆量: 'green',
+  主升浪: 'green',
+  V反: 'green',
+  突破: 'green',
+  龙头: 'green',
+  蓄势: 'yellow',
+  异动: 'yellow',
+  洗盘: 'yellow',
+  变盘: 'yellow'
+}
+
+/** `#rrggbb` → 色系；不是三色之一的（含空串）返回空 */
+export function familyOfColor(raw: unknown): TagFamily | null {
+  const c = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+  if (c === TAG_FAMILY_COLORS.red) return 'red'
+  if (c === TAG_FAMILY_COLORS.green) return 'green'
+  if (c === TAG_FAMILY_COLORS.yellow) return 'yellow'
+  return null
+}
+
+/**
+ * 标签名 → 色系。
+ *
+ * 先看词表里存的颜色（用户自己归的类最算数），再看内置名单，最后兜到灰。
+ * 词表里查不到（比如词表还没拉到 / 标签已被删）就按名字走内置名单。
+ */
+export function tagFamilyOf(rawName: string): TagFamily {
+  const name = String(rawName ?? '').trim()
+  const found = annotationTags.value.find(t => t.name === name)
+  const byColor = familyOfColor(found?.color)
+  if (byColor) return byColor
+  return NAME_FAMILY[name] ?? 'gray'
+}
+
+/**
+ * 标签胶囊的内联样式：**扁平无边框**，只有一层同色系深底 + 亮字。
+ *
+ * 三个地方共用：行情行内标签、弹窗里的标签、K 线底部历史标签。
+ * `active` 只给弹窗用（选中时字重 + 一圈本色细环，见 `AnnotationSheet` 的 CSS）。
+ */
+export function tagChipStyle(rawName: string): Record<string, string> {
+  const skin = FAMILY_SKIN[tagFamilyOf(rawName)]
+  return {color: skin.fg, background: skin.bg}
+}
+
+/** 「管理标签」里那枚**当前色系**的小圆点用什么色（灰 = 还没归类，给一层淡白） */
+export function tagFamilyDotColor(rawName: string): string {
+  const family = tagFamilyOf(rawName)
+  return family === 'gray'
+    ? 'rgba(255, 255, 255, 0.16)'
+    : FAMILY_SKIN[family].fg
+}
 /** base（大写）→ 最新一条 */
 export const latestAnnotations = ref<Record<string, SymbolAnnotation>>({})
 /** base（大写）→ 全部历史（新的在前） */
@@ -317,10 +362,11 @@ export async function addAnnotationTag(name: string): Promise<AnnotationTag> {
 }
 
 /**
- * 改标签的名字 / 颜色。
+ * 改标签名 / 色系。
  *
  * 改名：词表 + 缓存里所有历史 / 最新条目一起改（后端也会改历史）。
- * 改色：词表里的颜色换掉即可 —— 历史里存的是名字，颜色按词表现查。
+ * 改色：只动词表里那条记录 —— 历史里存的是名字，颜色按名字现查（见 `tagFamilyOf`）。
+ * ⚠️ 颜色只能是 `TAG_FAMILY_COLORS` 里的三个值（或者灰：留空 / 老调色板色）。
  */
 export async function updateTag(
   id: number,

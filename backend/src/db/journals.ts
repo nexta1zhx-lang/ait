@@ -175,8 +175,8 @@ export async function listJournalEntries(
     q?: string
     /** 只看某几个月（`YYYY-MM`，可以给多个 —— 用户 2026-10-18：「可以选择多月份」） */
     months?: string[]
-    /** 只看某个分类（分类 id；null / 0 = 全部） */
-    category?: number | null
+    /** 只看某几个分类（分类 id；空 = 全部）—— 用户 2026-10-20：「文件夹可多选显示」 */
+    categories?: number[]
     limit?: number
     offset?: number
   } = {}
@@ -191,7 +191,9 @@ export async function listJournalEntries(
     .filter((r): r is {from: string; to: string} => r !== null)
   const froms = ranges.length ? ranges.map(r => r.from) : null
   const tos = ranges.length ? ranges.map(r => r.to) : null
-  const categoryId = Math.max(0, Number(opts.category) || 0) || null
+  const categoryIds = (opts.categories ?? [])
+    .map(id => Math.max(0, Number(id) || 0))
+    .filter(id => id > 0)
 
   const rows = await query<EntryRow>(
     `SELECT ${ENTRY_COLUMNS}, count(*) OVER () AS total
@@ -204,7 +206,7 @@ export async function listJournalEntries(
               SELECT 1
                 FROM unnest($6::timestamptz[], $7::timestamptz[]) AS mr(a, b)
                WHERE e.updated_at >= mr.a AND e.updated_at < mr.b))
-        AND ($8::bigint IS NULL OR e.category_id = $8::bigint)
+        AND (cardinality($8::bigint[]) = 0 OR e.category_id = ANY($8::bigint[]))
       ORDER BY e.pinned DESC, e.updated_at DESC, e.id DESC
       LIMIT $4 OFFSET $5`,
     [
@@ -215,7 +217,7 @@ export async function listJournalEntries(
       offset,
       froms,
       tos,
-      categoryId
+      categoryIds
     ]
   )
 
@@ -508,4 +510,52 @@ export async function deleteJournalEntry(userId: number, id: number): Promise<bo
     [id, userId]
   )
   return rows.length > 0
+}
+
+/* ---------------- 界面偏好：文件夹筛选 ---------------- */
+
+/**
+ * 这个用户上次选了哪几个分类（空数组 = 全部）。
+ *
+ * 用户 2026-10-20：「文件夹可多选显示，保存到服务器配置中」—— 换设备也跟着走，
+ * 所以不放 localStorage，按用户存库（`user_journal_prefs`）。
+ */
+export async function getJournalPrefs(userId: number): Promise<number[]> {
+  const row = await queryOne<{categories: (string | number)[] | null}>(
+    'SELECT categories FROM user_journal_prefs WHERE user_id = $1',
+    [userId]
+  )
+  return (row?.categories ?? []).map(id => Number(id)).filter(id => Number.isFinite(id) && id > 0)
+}
+
+/**
+ * 存一份文件夹筛选。
+ *
+ * ⚠️ 只收**这个用户真的有的**分类 id（分类被删了、id 传错了都不留），
+ *    否则下次进来会筛出一个空列表还找不到原因。
+ */
+export async function saveJournalPrefs(
+  userId: number,
+  rawIds: unknown
+): Promise<number[]> {
+  const wanted = (Array.isArray(rawIds) ? rawIds : [])
+    .map(id => Number(id) || 0)
+    .filter(id => id > 0)
+  let ids: number[] = []
+  if (wanted.length) {
+    const rows = await query<{id: string | number}>(
+      'SELECT id FROM journal_categories WHERE user_id = $1 AND id = ANY($2::bigint[])',
+      [userId, wanted]
+    )
+    const ok = new Set(rows.map(r => Number(r.id)))
+    ids = wanted.filter(id => ok.has(id))
+  }
+  await query(
+    `INSERT INTO user_journal_prefs (user_id, categories, updated_at)
+     VALUES ($1, $2::bigint[], now())
+     ON CONFLICT (user_id) DO UPDATE
+        SET categories = EXCLUDED.categories, updated_at = now()`,
+    [userId, ids]
+  )
+  return ids
 }

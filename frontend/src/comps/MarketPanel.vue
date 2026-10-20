@@ -39,12 +39,7 @@ import {
   pinnedBases as pins,
   toggleFavorite
 } from '../pins'
-import {
-  agoText,
-  annotationOf,
-  ensureAnnotations,
-  tagChipStyle
-} from '../annotations'
+import {annotationOf, ensureAnnotations, tagChipStyle} from '../annotations'
 import {marketMinVolUsd, rankBase, rankSinceMs} from '../settings'
 import {contracts} from '../store'
 
@@ -838,20 +833,19 @@ const arrowOf = (v: number | null): string =>
 /* ---------------- 币种标注（2026-10-20） ---------------- */
 
 /**
- * 行情行第三行：最新标注的标签 + 多久之前。
+ * 行情行第一行：最新标注的标签。
  *
- * 只显示**最新一条**（历史去 K 线底部看）；标签最多 3 个，多的折成「+N」。
- * 无标签只写了描述的，用一枚「标注」胶囊占位，别让这一行只剩时间。
+ * 只显示**最新一条**（历史去 K 线底部看）；**最多 2 个**，多的折成「+N」。
+ * ⚠️ 2026-10-20 用户：「去掉时间」—— 标签后面那截「N 分钟前」不再显示，
+ *    时间只在 K 线底部的标注历史里看。
+ * ⚠️ 为什么是 2 而不是 3：币种列窄（手机上不到 140px），3 个标签必然换行，
+ *    行高被顶高一截、看着很挤；参照图里那种交易所列表也是两个封顶。
  */
 const annTagsOf = (base: string): string[] =>
-  annotationOf(base)?.tags.slice(0, 3) ?? []
+  annotationOf(base)?.tags.slice(0, 2) ?? []
 const annMoreOf = (base: string): number => {
   const n = annotationOf(base)?.tags.length ?? 0
-  return n > 3 ? n - 3 : 0
-}
-const annAgoOf = (base: string): string => {
-  const a = annotationOf(base)
-  return a ? agoText(a.at) : ''
+  return n > 2 ? n - 2 : 0
 }
 /** 整行 title：完整标签 + 描述（窄屏只截一小段，悬停 / 长按能看全） */
 function annTitleOf(base: string): string {
@@ -1131,9 +1125,9 @@ function annTitleOf(base: string): string {
                         />
                       </svg>
                       <!--
-                        最新标注的标签：**放在币种后面、上面那一行**（用户 2026-10-20），
-                        每个标签按词表里的颜色画成胶囊。最多 3 个，其余折成 +N。
-                        没标签只有描述的标注不占这里，时间紧跟在后面。
+                        最新标注的标签：**放在币种后面、上面那一行**（用户 2026-10-20）。
+                        三色系扁平胶囊（红 / 绿 / 黄，名单外是灰），颜色由 `tagChipStyle()` 给；
+                        最多 3 个，其余折成 +N。没标签只有描述的标注不占这里。
                       -->
                       <span
                         v-if="annotationOf(r.base) && annTagsOf(r.base).length"
@@ -1153,10 +1147,6 @@ function annTitleOf(base: string): string {
                           >+{{ annMoreOf(r.base) }}</span
                         >
                       </span>
-                      <!-- 时间紧跟在标签后面（同一行；窄了会自然换行，不挤成交额） -->
-                      <span v-if="annAgoOf(r.base)" class="icell-ann-ago">{{
-                        annAgoOf(r.base)
-                      }}</span>
                     </span>
                     <!--
                       第二行：市值排名 + 成交额。

@@ -434,7 +434,10 @@ export const unlockBase = (base: string) =>
 export interface AnnotationTag {
   id: number
   name: string
-  /** #rrggbb；空串 = 后端还没补默认色（正常列表不会出现） */
+  /**
+   * #rrggbb。**前端已经不用了**（2026-10-20 起标签只有一套配色，
+   * 见 style.css 的 `--tag-bg` / `--tag-fg`）；后端和库里还留着这个字段。
+   */
   color: string
 }
 
@@ -471,11 +474,14 @@ export const fetchAnnotationSummary = () =>
 export const fetchAnnotationHistory = (base: string) =>
   get<AnnotationHistory>(`/api/annotations?base=${encodeURIComponent(base)}`)
 
-/** 追加一条标注（标签和描述至少要有一样，后端会校验） */
+/**
+ * 追加一条标注。**只传标签**（2026-10-20 用户：「不需要加描述了，简单一点」）；
+ * `note` 后端仍然可选收（老客户端 / 老数据），新前端不再发。
+ */
 export const createSymbolAnnotation = (input: {
   base: string
   tags: string[]
-  note: string
+  note?: string
 }) => post<{entry: SymbolAnnotation; error: string | null}>('/api/annotations', input)
 
 /** 删掉一条（只能删自己的） */
@@ -483,13 +489,13 @@ export const deleteSymbolAnnotation = (id: number) =>
   del<{ok: boolean; error: string | null}>(`/api/annotations/${id}`)
 
 /** 新增一个标签；回来的是新标签 + 整份词表。不传 color = 后端从调色板挑一个 */
-export const createAnnotationTag = (name: string, color?: string) =>
+export const createAnnotationTag = (name: string) =>
   post<{tag: AnnotationTag; tags: AnnotationTag[]; error: string | null}>(
     '/api/annotation-tags',
-    color ? {name, color} : {name}
+    {name}
   )
 
-/** 改标签名 / 颜色（改名时后端会把历史标注里的同名标签一起改） */
+/** 改标签名 / 色系（改名时后端会把历史标注里的同名标签一起改） */
 export const updateAnnotationTag = (
   id: number,
   patch: {name?: string; color?: string}
@@ -2860,8 +2866,8 @@ export const fetchJournal = (
     q?: string
     /** 只看某几个月（`YYYY-MM`，可以多个） */
     months?: string[]
-    /** 只看某个分类（分类 id） */
-    category?: number
+    /** 只看某几个分类（分类 id；空 = 全部）—— 文件夹可多选 */
+    categories?: number[]
     limit?: number
     offset?: number
   } = {}
@@ -2870,12 +2876,25 @@ export const fetchJournal = (
   if (opts.coin) qs.set('coin', opts.coin)
   if (opts.q) qs.set('q', opts.q)
   if (opts.months?.length) qs.set('months', opts.months.join(','))
-  if (opts.category) qs.set('category', String(opts.category))
+  if (opts.categories?.length) qs.set('categories', opts.categories.join(','))
   if (opts.limit) qs.set('limit', String(opts.limit))
   if (opts.offset) qs.set('offset', String(opts.offset))
   const q = qs.toString()
   return get<JournalList & {error: string | null}>(`/api/journal/entries${q ? `?${q}` : ''}`)
 }
+
+/**
+ * 专家经验的**文件夹筛选**（服务器配置，用户 2026-10-20：「可多选显示，保存到服务器配置中」）。
+ *
+ * 空数组 = 全部；跨设备同一份。
+ */
+export const fetchJournalPrefs = () =>
+  get<{categories: number[]; error: string | null}>('/api/journal/prefs')
+
+export const saveJournalPrefs = (categories: number[]) =>
+  post<{categories: number[]; error: string | null}>('/api/journal/prefs', {
+    categories
+  })
 
 /** 分类列表（第一次会由后端种下 仓位 / 经验 / 回忆录 三个预设） */
 export const fetchJournalCategories = () =>

@@ -1947,6 +1947,17 @@ button.danger {
 }
 
 /*
+ * 币种格**上下居中**（用户 2026-10-20：「整体对齐方式再对齐一下中间」）。
+ *
+ * 全局 `.table td` 是 `vertical-align: top`，而币种格是「币名 + 成交额」两行、
+ * 比最新价 / 涨跌方块高 —— top 对齐时整块吊在行上半截，右边那两列却是居中的，
+ * 一眼就错位。这里跟着 `<th>` 和价格列一起走 middle。
+ */
+.mkt-table .mkt-body tr > td:first-child {
+  vertical-align: middle;
+}
+
+/*
  * 置顶那颗星（用户 2026-10-04：「合约行情添加币种置顶功能最多 5 个，无视排行和用户绑定」）。
  *
  * · 平时**很淡**（不抢行情本身），置顶了才亮成主色
@@ -2118,44 +2129,43 @@ button.danger {
 }
 
 /*
- * 币名后面的**彩色标签**（2026-10-20）。
+ * 币名后面的标签（2026-10-20）。
  *
- * 用户：「标签放在币种后面，在上面显示，而且标签是带颜色的」——
- * 所以不再单独占第三行，直接挂在 `.icell-t` 这一行；空间不够时整组换行，
- * 但始终在成交额那行**上面**。颜色由 `tagChipStyle()` 内联给（淡底 + 本色字）。
+ * 用户：「标签放在币种后面，在上面显示」→「不要描边，要实色」→
+ * 「改为三色系，扁平化 / 无边框」——
+ * 所以是**同色系深底 + 亮字的一层皮**，没有边框（底色 / 字色由 `tagChipStyle()` 内联给，
+ * 红 `#392127/#e35561`、绿 `#20362e/#5dc887`、黄 `#3c3925/#f6d758`，名单外是灰）。
+ * 挂在 `.icell-t` 这一行，和币名垂直居中对齐。
+ * 定高 + 定行高（15px）而不是靠 padding 撑：9.5px 的字用 padding 撑出来的盒子
+ * 上下留白不均，和币名并排时看着会「偏上一格」。
  */
 .mkt-table .icell-tags {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 3px;
+  align-self: center;
+  gap: 4px;
   min-width: 0;
 }
 .mkt-table .ann-tag {
   flex: 0 0 auto;
+  display: inline-block;
   max-width: 100%;
+  height: 15px;
   padding: 0 5px;
-  border: 1px solid transparent;
-  border-radius: 3px;
+  border: 0;
+  border-radius: 4px;
   font-size: 9.5px;
-  line-height: 1.4;
+  font-weight: var(--fw-mid);
+  line-height: 15px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 「+N」不跟着标签样式走：它是「还有几个」的计数，用面板色压住 */
 .mkt-table .ann-tag.ann-more {
   background: var(--panel);
   color: var(--muted);
-  border-color: var(--border);
-}
-
-/* 标签后面的「N 分钟前」（同一行，窄了跟着换行；不挤第二行成交额） */
-.mkt-table .icell-ann-ago {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 9.5px;
-  white-space: nowrap;
-  opacity: 0.9;
 }
 
 /* 图标：32px 的源图缩到 26px（高分屏也清晰）；拿不到就退回首字母圆 */
@@ -2367,8 +2377,8 @@ button.danger {
  * ⚠️ 还要 **上下居中**（`vertical-align: middle`，用户 2026-10-05：「价格上下居中」）：
  *    `.table td` 全局是 `vertical-align: top`，而币种格是两行（比价格高一大截），
  *    top 对齐时价格就吊在行顶上 —— 居中之后它跟币名、涨跌方块在同一条水平线上。
- *    ⚠️ 只动价格这一格：币种格要顶对齐（图标 + 两行文字），
- *    而涨跌方块自己 28px 高、几乎占满行高，居不居中差不到 2px。
+ *    ⚠️ 只动价格这一格：涨跌方块自己 28px 高、几乎占满行高，居不居中差不到 2px。
+ *    （币种格 2026-10-20 也改成了 middle，见上面 `.mkt-table .mkt-body tr > td:first-child`。）
  */
 .mkt-table .mkt-head th:nth-child(2),
 .mkt-table .mkt-body tr > td:nth-child(2) {
@@ -4955,6 +4965,32 @@ body.fixed-viewport .split {
 
 .tk-head .tk-left .combo {
   width: 190px;
+}
+
+/*
+ * 币种后面那排标签（用户 2026-10-20：「标签在 K 线界面也放在币种后面」）。
+ *
+ * 跟行情列表同一套三色系皮肤（颜色由 `tagChipStyle()` 内联给），
+ * 字号比列表里大一点（12px 上下），因为这里挨着币名、看得清。
+ * 最多两个，多了在 `AnalyzeView` 里就截掉了 —— 这一行还要放 ★ / 🚫 / 价签。
+ */
+.tk-head .tk-tags {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.tk-head .tk-tag {
+  max-width: 84px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: var(--fw-mid);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tk-head .tk-fav {

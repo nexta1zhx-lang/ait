@@ -151,10 +151,12 @@ import {
   createJournalCategory,
   deleteJournalCategory,
   deleteJournalEntry,
+  getJournalPrefs,
   listJournalCategories,
   listJournalEntries,
   MAX_BODY,
   saveJournalEntry,
+  saveJournalPrefs,
   setJournalPinned,
   updateJournalCategory
 } from './db/journals'
@@ -3572,6 +3574,34 @@ async function route(
    * ⚠️ 全是纯读库 + 写库：**不打交易所、不计权重、不调模型**。
    * ⚠️ 不再有 `/api/journal`（按月统计）、`/summary`（月度总结）、`/months`、`/coin` —— 都已删。
    */
+  /*
+   * 文件夹筛选的**服务器配置**（用户 2026-10-20：「文件夹可多选显示，保存到服务器配置中」）。
+   *
+   *   GET /api/journal/prefs   → `{categories: number[]}`（空 = 全部）
+   *   PUT /api/journal/prefs   → body `{categories: number[]}`，只留用户真有的分类
+   */
+  if (p === '/api/journal/prefs') {
+    if (method === 'GET') {
+      try {
+        const categories = await getJournalPrefs(me.id)
+        return sendJson(res, 200, {categories, error: null})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+    if (method === 'PUT' || method === 'POST') {
+      const body = await readJsonBody(req).catch(() => null)
+      if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
+      try {
+        const categories = await saveJournalPrefs(me.id, body.categories)
+        return sendJson(res, 200, {categories, error: null})
+      } catch (e) {
+        return sendJson(res, 400, {error: (e as Error).message})
+      }
+    }
+    return sendJson(res, 405, {error: 'Method Not Allowed'})
+  }
+
   if (p === '/api/journal/entries' && method === 'GET') {
     try {
       const list = await listJournalEntries(me.id, {
@@ -3582,7 +3612,15 @@ async function route(
           .split(',')
           .map(m => m.trim())
           .filter(Boolean),
-        category: Number(url.searchParams.get('category') ?? 0) || null,
+        /* 分类也可以多选：`categories=3,5`（老的 `category=` 还认，单值） */
+        categories: (
+          url.searchParams.get('categories') ??
+          url.searchParams.get('category') ??
+          ''
+        )
+          .split(',')
+          .map(v => Number(v) || 0)
+          .filter(v => v > 0),
         limit: Number(url.searchParams.get('limit') ?? 0) || undefined,
         offset: Number(url.searchParams.get('offset') ?? 0) || 0
       })

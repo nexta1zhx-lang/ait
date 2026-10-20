@@ -5,10 +5,9 @@
  * 用户：「在 K 线页面顶部右侧加一个按钮在测试旁第一个，点击之后可以底部弹窗
  * 可以打标签和描述，标签是可选的可维护的」。
  *
- * 三块：
- *   ① 标签多选（词表里点，选中高亮；一条最多 8 个）；
- *   ② 快速加标签（输入 + 回车，加完顺手选中）+「管理标签」（改名 / 删除）；
- *   ③ 描述（500 字，可空）—— 标签和描述至少写一样，否则保存键是灰的。
+ * 两块（2026-10-20 用户：「不需要加描述了，简单一点」——描述那格整块删掉）：
+ *   ① 标签多选（按色系分组，一条最多 8 个）；
+ *   ② 快速加标签（输入 + 回车，加完顺手选中）+「管理标签」（改名 / 色系 / 删除）。
  *
  * 用全站统一的 `.sheet` 底部弹层（跟 `BanSheet` 一样 `Teleport to="body"`），
  * 样式大部分写在 `style.css`，这里只补弹窗自己的那几块。
@@ -17,15 +16,24 @@ import {computed, ref, watch} from 'vue'
 import {
   addAnnotationTag,
   addSymbolAnnotation,
+  agoText,
   annotationTags,
   ensureAnnotationTags,
+  historyOf,
+  loadAnnotationHistory,
+  removeSymbolAnnotation,
   removeTag,
-  TAG_COLORS,
   tagChipStyle,
-  tagColorOf,
-  updateTag
+  TAG_FAMILY_COLORS,
+  TAG_FAMILY_LABEL,
+  tagFamilyDotColor,
+  tagFamilyOf,
+  updateTag,
+  type TagFamily
 } from '../annotations'
+import type {SymbolAnnotation} from '../api'
 import {askConfirm} from '../confirm'
+import {bjShort, bjTime} from '../format'
 import {showToast} from '../toast'
 
 const props = defineProps<{
@@ -38,12 +46,9 @@ const emit = defineEmits<{(e: 'close'): void}>()
 
 /** 一条标注最多选几个标签（跟后端 MAX_TAGS_PER_ANNOTATION 一致） */
 const MAX_PICK = 8
-/** 描述上限（跟后端 MAX_NOTE 一致） */
-const MAX_NOTE = 500
 
 const baseUpper = computed(() => String(props.base ?? '').trim().toUpperCase())
 const selected = ref<string[]>([])
-const note = ref('')
 const error = ref('')
 const busy = ref(false)
 
@@ -56,9 +61,40 @@ const tagBusy = ref(false)
 /** 正在改名的那条 */
 const editId = ref(0)
 const editName = ref('')
-/** 「管理标签」最底下那个颜色编辑器：给哪个标签选色（空 = 不显示） */
-const colorTagName = ref('')
-const colorOpen = ref(false)
+/**
+ * 历史面板开着没有（用户 2026-10-20：「底下的去掉，历史放在标签弹窗，
+ * 加一个图标可弹窗看历史」—— 就是标题右边那颗时钟）。
+ */
+const historyOpen = ref(false)
+/** 这个币的历史（模块级缓存，见 `annotations.historyOf`） */
+const entries = computed(() => historyOf(baseUpper.value))
+/** 正在删的那条历史 */
+const histBusyId = ref(0)
+/** 管理区里正在展开「换色系」的那条标签（0 = 都收着） */
+const famEditId = ref(0)
+
+/**
+ * 词表按色系分组（用户 2026-10-20：「按颜色分类可选择标签」）。
+ *
+ * 顺序固定 红 → 绿 → 黄 → 灰，空的组不渲染；组里保持词表原来的维护顺序。
+ */
+const tagGroups = computed(() => {
+  const order: TagFamily[] = ['red', 'green', 'yellow', 'gray']
+  return order
+    .map(family => ({
+      family,
+      label: TAG_FAMILY_LABEL[family],
+      tags: annotationTags.value.filter(t => tagFamilyOf(t.name) === family)
+    }))
+    .filter(g => g.tags.length > 0)
+})
+
+/** 管理区里可以点的那三个色系（灰 = 还没归类，不给按钮） */
+const FAMILY_CHOICES: {family: keyof typeof TAG_FAMILY_COLORS; hex: string}[] = [
+  {family: 'red', hex: TAG_FAMILY_COLORS.red},
+  {family: 'green', hex: TAG_FAMILY_COLORS.green},
+  {family: 'yellow', hex: TAG_FAMILY_COLORS.yellow}
+]
 
 /** 保存键：有币、有内容、没在提交（标签正在改也别急着保存） */
 const canSave = computed(
@@ -66,12 +102,11 @@ const canSave = computed(
     Boolean(baseUpper.value) &&
     !busy.value &&
     !tagBusy.value &&
-    (selected.value.length > 0 || note.value.trim().length > 0)
+    selected.value.length > 0
 )
 
 function resetForm(): void {
   selected.value = []
-  note.value = ''
   error.value = ''
   busy.value = false
   manage.value = false
@@ -79,8 +114,9 @@ function resetForm(): void {
   tagBusy.value = false
   editId.value = 0
   editName.value = ''
-  colorTagName.value = ''
-  colorOpen.value = false
+  historyOpen.value = false
+  histBusyId.value = 0
+  famEditId.value = 0
 }
 
 /** 每次打开都是干净的一份；词表没到就顺手拉一次 */
@@ -162,7 +198,6 @@ async function submitEdit(): Promise<void> {
     const tag = await updateTag(id, {name})
     if (old) {
       selected.value = selected.value.map(n => (n === old ? tag.name : n))
-      if (colorTagName.value === old) colorTagName.value = tag.name
     }
     cancelEdit()
   } catch (e) {
@@ -172,39 +207,55 @@ async function submitEdit(): Promise<void> {
   }
 }
 
-/**
- * 打开「管理标签」最底下的颜色编辑器。
- *
- * 用户 2026-10-20：「在管理标签里面的最底下显示颜色的话就是一个圆圈，
- * 点击之后有快捷的颜色选项，以及所有的那个颜色选择器那种」。
- * 点某一行的颜色圆圈 = 把那个标签送到底下的编辑器里。
- */
-function pickColor(name: string): void {
-  colorTagName.value = name
-  colorOpen.value = true
-  error.value = ''
+/** 标题右边那颗时钟：开关历史面板（打开时顺手拉一次最新的） */
+function toggleHistory(): void {
+  historyOpen.value = !historyOpen.value
+  if (historyOpen.value) {
+    void loadAnnotationHistory(baseUpper.value, true).catch(e => {
+      error.value = (e as Error).message
+    })
+  }
 }
 
-/** 落一个颜色（快捷色 / 完整选择器都走这里） */
-async function applyColor(color: string): Promise<void> {
-  const name = colorTagName.value
-  if (!name || tagBusy.value) return
+/** 管理区里那颗圆点：点一下展开三种颜色，再点收起来 */
+function toggleFamEdit(id: number): void {
+  famEditId.value = famEditId.value === id ? 0 : id
+}
+
+/** 删一条历史（确认后删；删完列表由 store 自己回退） */
+async function removeEntry(entry: SymbolAnnotation): Promise<void> {
+  if (histBusyId.value) return
+  const ok = await askConfirm({
+    title: '删掉这条标注？',
+    body: [entry.tags.join(' · ') || '（没标签）', bjTime(entry.at)],
+    okText: '删除',
+    danger: true
+  })
+  if (!ok) return
+  histBusyId.value = entry.id
+  try {
+    await removeSymbolAnnotation(entry.id, baseUpper.value)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    histBusyId.value = 0
+  }
+}
+
+/** 把一个标签归到某个色系（存的就是那个色系的代表色） */
+async function setFamily(name: string, hex: string): Promise<void> {
   const tag = annotationTags.value.find(t => t.name === name)
-  if (!tag) return
+  if (!tag || tagBusy.value) return
+  if (String(tag.color ?? '').toLowerCase() === hex) return
   tagBusy.value = true
   error.value = ''
   try {
-    await updateTag(tag.id, {color})
+    await updateTag(tag.id, {color: hex})
   } catch (e) {
     error.value = (e as Error).message
   } finally {
     tagBusy.value = false
   }
-}
-
-function onColorPicked(e: Event): void {
-  const v = (e.target as HTMLInputElement).value
-  void applyColor(v)
 }
 
 /** 删标签：历史里已经写下的名字保留，只是以后不再提供这个选项 */
@@ -225,10 +276,6 @@ async function deleteTag(tag: {id: number; name: string}): Promise<void> {
     await removeTag(tag.id)
     selected.value = selected.value.filter(n => n !== tag.name)
     if (editId.value === tag.id) cancelEdit()
-    if (colorTagName.value === tag.name) {
-      colorTagName.value = ''
-      colorOpen.value = false
-    }
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -244,7 +291,6 @@ async function save(): Promise<void> {
     const entry = await addSymbolAnnotation({
       base: baseUpper.value,
       tags: [...selected.value],
-      note: note.value.trim()
     })
     showToast(`${entry.base} 已标注`, 'ok')
     emit('close')
@@ -266,170 +312,237 @@ async function save(): Promise<void> {
       aria-label="币种标注"
     >
       <header class="sheet-head">
-        <b>{{ baseUpper || '—' }} · 标注</b>
-        <button class="ghost tiny" title="关掉" @click="emit('close')">✕</button>
-      </header>
-
-      <p class="ann-lead">
-        给这个币打几个标签、写一句当时的想法。标签可以多选，也可以不选。
-      </p>
-
-      <!-- ① 多选标签 -->
-      <div class="ann-pick">
-        <button
-          v-for="t in annotationTags"
-          :key="t.id"
-          type="button"
-          class="ann-pick-chip"
-          :class="{on: selected.includes(t.name)}"
-          :style="tagChipStyle(t.name, selected.includes(t.name))"
-          :aria-pressed="selected.includes(t.name)"
-          @click="toggleTag(t.name)"
-        >
-          {{ t.name }}
-        </button>
-        <button
-          type="button"
-          class="ghost tiny ann-manage-btn"
-          @click="manage = !manage"
-        >
-          {{ manage ? '收起管理' : '管理标签' }}
-        </button>
-      </div>
-      <p v-if="!annotationTags.length" class="ann-hint">
-        还没有标签，在下面加一个（比如 杂毛、异能），或者直接写描述。
-      </p>
-
-      <!-- ② 快速加标签 -->
-      <div class="ann-add">
-        <input
-          v-model="newTag"
-          class="ann-add-input"
-          type="text"
-          maxlength="12"
-          placeholder="新标签，如 杂毛"
-          autocomplete="off"
-          spellcheck="false"
-          @keyup.enter="submitNewTag"
-        />
-        <button
-          type="button"
-          class="ghost tiny"
-          :disabled="tagBusy || !newTag.trim()"
-          @click="submitNewTag"
-        >
-          加
-        </button>
-      </div>
-
-      <!-- ②' 管理：颜色 / 改名 / 删除 -->
-      <div v-if="manage" class="ann-manage">
-        <p v-if="!annotationTags.length" class="ann-hint">还没有标签。</p>
-        <div v-for="t in annotationTags" :key="t.id" class="ann-manage-row">
+        <b>{{ baseUpper || '—' }} · {{ historyOpen ? '历史标注' : '标注' }}</b>
+        <span class="ann-head-btns">
+          <!-- 时钟：开关历史面板（用户 2026-10-20：「加一个图标可弹窗看历史」） -->
           <button
             type="button"
-            class="ann-color-dot"
-            :style="{background: tagColorOf(t.name)}"
-            :title="`改「${t.name}」的颜色`"
-            :aria-label="`改「${t.name}」的颜色`"
-            @click="pickColor(t.name)"
-          />
-          <template v-if="editId === t.id">
-            <input
-              v-model="editName"
-              class="ann-add-input ann-edit-input"
-              type="text"
-              maxlength="12"
-              autocomplete="off"
-              spellcheck="false"
-              @keyup.enter="submitEdit"
-            />
+            class="ghost tiny ann-ico"
+            :class="{on: historyOpen}"
+            :aria-label="historyOpen ? '返回标注' : '看历史标注'"
+            :title="historyOpen ? '返回标注' : '历史标注'"
+            :aria-pressed="historyOpen"
+            @click="toggleHistory"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8.4" />
+              <path d="M12 7.6V12l3 1.9" />
+            </svg>
+          </button>
+          <button class="ghost tiny" title="关掉" @click="emit('close')">✕</button>
+        </span>
+      </header>
+
+      <!-- ================= 历史面板 ================= -->
+      <template v-if="historyOpen">
+        <p v-if="!entries.length" class="ann-hint">这个币还没有标注。</p>
+        <ul v-else class="ann-hist">
+          <li v-for="e in entries" :key="e.id" class="ann-hist-item">
+            <div class="ann-hist-top">
+              <span
+                v-for="t in e.tags"
+                :key="t"
+                class="ann-hist-pill"
+                :style="tagChipStyle(t)"
+                >{{ t }}</span
+              >
+              <span v-if="!e.tags.length" class="ann-hist-pill ann-hist-only"
+                >标注</span
+              >
+              <span class="ann-hist-time" :title="bjTime(e.at)"
+                >{{ bjShort(e.at) }} · {{ agoText(e.at) }}</span
+              >
+              <button
+                type="button"
+                class="ann-ico ann-ico-del"
+                :disabled="histBusyId === e.id"
+                title="删掉这条标注"
+                aria-label="删掉这条标注"
+                @click="removeEntry(e)"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 7h14M10 7V5.2h4V7M7.4 7l.7 12.1h7.8L16.6 7" />
+                </svg>
+              </button>
+            </div>
+            <p v-if="e.note" class="ann-hist-note">{{ e.note }}</p>
+          </li>
+        </ul>
+        <button class="btn-run ann-save" @click="historyOpen = false">
+          返回标签
+        </button>
+      </template>
+
+      <!-- ================= 选标签 / 管理 ================= -->
+      <template v-else>
+        <p class="ann-lead">点几个标签就算标好了（可以多选）。</p>
+
+        <!--
+          ① 多选标签：**按色系分组**（红 / 绿 / 黄 / 灰），组名在左边，标签在里面排一排。
+          用户 2026-10-20：「改为三色系、扁平化（无边框），按颜色分类可选择标签」。
+        -->
+        <div class="ann-pick">
+          <div v-for="g in tagGroups" :key="g.family" class="ann-group">
+            <span class="ann-group-k">{{ g.label }}</span>
             <button
+              v-for="t in g.tags"
+              :key="t.id"
               type="button"
-              class="ghost tiny"
-              :disabled="tagBusy || !editName.trim()"
-              @click="submitEdit"
+              class="ann-pick-chip"
+              :class="{on: selected.includes(t.name)}"
+              :style="tagChipStyle(t.name)"
+              :aria-pressed="selected.includes(t.name)"
+              @click="toggleTag(t.name)"
             >
-              保存
+              {{ t.name }}
             </button>
-            <button type="button" class="ghost tiny" @click="cancelEdit">
-              取消
-            </button>
-          </template>
-          <template v-else>
-            <span class="ann-manage-name">{{ t.name }}</span>
-            <button type="button" class="ghost tiny" @click="startEdit(t)">
-              改名
-            </button>
-            <button
-              type="button"
-              class="ghost tiny"
-              :disabled="tagBusy"
-              @click="deleteTag(t)"
-            >
-              删除
-            </button>
-          </template>
+          </div>
+          <p v-if="!annotationTags.length" class="ann-hint">
+            还没有标签，点右边的齿轮加一个。
+          </p>
+          <!-- 管理标签：一个齿轮图标（用户 2026-10-20：「管理标签改为管理的图标」） -->
+          <button
+            type="button"
+            class="ghost tiny ann-ico ann-manage-btn"
+            :class="{on: manage}"
+            :aria-label="manage ? '收起管理' : '管理标签'"
+            :title="manage ? '收起管理' : '管理标签'"
+            :aria-pressed="manage"
+            @click="manage = !manage"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.1" />
+              <path
+                d="M12 3.4l1.5 1.9 2.3-.5.7 2.3 2.2 1-.9 2.2.9 2.2-2.2 1-.7 2.3-2.3-.5L12 20.6l-1.5-1.9-2.3.5-.7-2.3-2.2-1 .9-2.2-.9-2.2 2.2-1 .7-2.3 2.3.5z"
+              />
+            </svg>
+          </button>
         </div>
 
         <!--
-          最底下的颜色编辑器（用户 2026-10-20：「在管理标签里面的最底下显示颜色的话
-          就是一个圆圈，点击之后有快捷的颜色选项，以及所有的那个颜色选择器那种」）。
-          ⚠️ 默认不显示：只有点了上面某一行的颜色圆圈才出来；新加标签不会自动弹这个。
+          ② 管理标签（齿轮展开）：新增 + 改名 / 换色系 / 删除。
+          用户 2026-10-20：「新增也放在管理里」「颜色只显示当前的颜色，点击出现切换」
+          「改名和删除换图标」。
         -->
-        <div v-if="colorTagName" class="ann-color-edit">
-          <span class="ann-color-title">颜色 · {{ colorTagName }}</span>
-          <button
-            type="button"
-            class="ann-color-dot"
-            :style="{background: tagColorOf(colorTagName)}"
-            :aria-label="`选择「${colorTagName}」的颜色`"
-            @click="colorOpen = !colorOpen"
-          />
-          <span class="ann-color-hex">{{ tagColorOf(colorTagName) }}</span>
-        </div>
-        <div v-if="colorTagName && colorOpen" class="ann-color-pop">
-          <button
-            v-for="c in TAG_COLORS"
-            :key="c"
-            type="button"
-            class="ann-swatch"
-            :class="{on: tagColorOf(colorTagName) === c}"
-            :style="{background: c}"
-            :aria-label="`把「${colorTagName}」改成 ${c}`"
-            @click="applyColor(c)"
-          />
-          <label class="ann-color-full">
-            <span>自定义</span>
+        <div v-if="manage" class="ann-manage">
+          <div class="ann-add">
             <input
-              type="color"
-              :value="tagColorOf(colorTagName)"
-              @change="onColorPicked"
+              v-model="newTag"
+              class="ann-add-input"
+              type="text"
+              maxlength="12"
+              placeholder="新标签，如 插针"
+              autocomplete="off"
+              spellcheck="false"
+              @keyup.enter="submitNewTag"
             />
-          </label>
+            <button
+              type="button"
+              class="ghost tiny"
+              :disabled="tagBusy || !newTag.trim()"
+              @click="submitNewTag"
+            >
+              加
+            </button>
+          </div>
+          <p v-if="!annotationTags.length" class="ann-hint">还没有标签。</p>
+          <div v-for="t in annotationTags" :key="t.id" class="ann-manage-row">
+            <template v-if="editId === t.id">
+              <input
+                v-model="editName"
+                class="ann-add-input ann-edit-input"
+                type="text"
+                maxlength="12"
+                autocomplete="off"
+                spellcheck="false"
+                @keyup.enter="submitEdit"
+              />
+              <button
+                type="button"
+                class="ann-ico"
+                :disabled="tagBusy || !editName.trim()"
+                title="保存"
+                aria-label="保存"
+                @click="submitEdit"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 12.6l4.4 4.4L19 7.4" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="ann-ico"
+                title="取消"
+                aria-label="取消"
+                @click="cancelEdit"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+                </svg>
+              </button>
+            </template>
+            <template v-else>
+              <!-- 只显示**当前**色系那一颗；点它才展开红 / 绿 / 黄三选一 -->
+              <button
+                type="button"
+                class="ann-fam-now"
+                :style="{background: tagFamilyDotColor(t.name)}"
+                :title="`色系：${TAG_FAMILY_LABEL[tagFamilyOf(t.name)]}（点一下换）`"
+                :aria-label="`「${t.name}」的色系：${TAG_FAMILY_LABEL[tagFamilyOf(t.name)]}，点一下换`"
+                :aria-expanded="famEditId === t.id"
+                @click="toggleFamEdit(t.id)"
+              />
+              <span class="ann-manage-name">{{ t.name }}</span>
+              <span v-if="famEditId === t.id" class="ann-fam-pop">
+                <button
+                  v-for="f in FAMILY_CHOICES"
+                  :key="f.family"
+                  type="button"
+                  class="ann-fam-dot"
+                  :class="{on: tagFamilyOf(t.name) === f.family}"
+                  :style="{background: f.hex}"
+                  :title="`归到${TAG_FAMILY_LABEL[f.family]}`"
+                  :aria-label="`把「${t.name}」归到${TAG_FAMILY_LABEL[f.family]}`"
+                  :disabled="tagBusy"
+                  @click="setFamily(t.name, f.hex)"
+                />
+              </span>
+              <button
+                type="button"
+                class="ann-ico"
+                title="改名"
+                aria-label="改名"
+                @click="startEdit(t)"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4.8 19.2l.9-3.6L15.9 5.4l2.7 2.7L8.4 18.3z" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="ann-ico ann-ico-del"
+                :disabled="tagBusy"
+                title="删除"
+                aria-label="删除"
+                @click="deleteTag(t)"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 7h14M10 7V5.2h4V7M7.4 7l.7 12.1h7.8L16.6 7" />
+                </svg>
+              </button>
+            </template>
+          </div>
         </div>
-      </div>
 
-      <!-- ③ 描述 -->
-      <label class="ann-note">
-        <span>描述（可选）</span>
-        <textarea
-          v-model="note"
-          rows="3"
-          :maxlength="MAX_NOTE"
-          placeholder="为什么标它？比如：刚插针、量能异常、走到前高……"
-        />
-        <em>{{ note.length }}/{{ MAX_NOTE }}</em>
-      </label>
+        <p v-if="error" class="error ann-err">{{ error }}</p>
 
-      <p v-if="error" class="error ann-err">{{ error }}</p>
-
-      <button class="btn-run ann-save" :disabled="!canSave" @click="save">
-        {{ busy ? '保存中…' : '保存标注' }}
-      </button>
-      <p class="ann-dim">
-        时间按保存那一刻算；标签和描述至少写一样。历史标注在 K 线图下方，可折叠。
-      </p>
+        <button class="btn-run ann-save" :disabled="!canSave" @click="save">
+          {{ busy ? '保存中…' : '保存标注' }}
+        </button>
+        <p class="ann-dim">
+          时间按保存那一刻算；历史标注点标题右边那颗时钟看。
+        </p>
+      </template>
     </section>
   </Teleport>
 </template>
@@ -442,20 +555,36 @@ async function save(): Promise<void> {
   color: var(--muted);
 }
 
-/* 选中 / 未选中的标签胶囊：一排铺开，标签多了自己换行 */
+/*
+ * 标签选择区：**按色系分组**，每组一行（左边一枚「红色系 / 绿色系 / …」的小字，
+ * 右边标签平铺，放不下自己换行）。用户 2026-10-20：「按颜色分类可选择标签」。
+ */
 .ann-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+.ann-group {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
 }
+.ann-group-k {
+  flex: 0 0 auto;
+  width: 46px;
+  font-size: 11px;
+  color: var(--muted);
+}
+/* 扁平胶囊：底色 / 字色由 `tagChipStyle()` 内联给（三色系），这里只管形状 */
 .ann-pick-chip {
   flex: 0 0 auto;
   max-width: 100%;
-  padding: 5px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  padding: 5px 9px;
+  border: 0;
+  /* 用户 2026-10-20：「标签选择圆角小一点」—— 999px 的胶囊改成小圆角方块感 */
+  border-radius: 6px;
   background: var(--panel-2);
   color: var(--text);
   font: inherit;
@@ -466,9 +595,8 @@ async function save(): Promise<void> {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 选中 = 字重 + 一圈本色细环（无边框那套风格里，这是最不打断扁平感的选中态） */
 .ann-pick-chip.on {
-  /* 颜色 / 底色 / 描边由 `tagChipStyle()` 内联给（每个标签自己的颜色），
-     这里只加「选中」的视觉：字重 + 一圈本标签颜色的细环。 */
   font-weight: 600;
   box-shadow: 0 0 0 1px currentColor;
 }
@@ -510,6 +638,83 @@ async function save(): Promise<void> {
   padding: 8px 0 2px;
   border-top: 1px solid var(--border);
 }
+/*
+ * 「管理标签」每行开头那枚**当前色系**的圆点：
+ * 平时只显示一个（用户 2026-10-20：「颜色只显示当前的颜色，点击出现切换」），
+ * 点它才在名字右边展开红 / 绿 / 黄三颗。
+ */
+.ann-fam-now {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.ann-fam-pop {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--panel);
+}
+.ann-fam-dot {
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0.55;
+}
+.ann-fam-dot.on {
+  opacity: 1;
+  box-shadow: 0 0 0 1.5px var(--panel), 0 0 0 2.5px currentColor;
+}
+.ann-fam-dot:disabled {
+  cursor: default;
+}
+
+/* 图标按钮（管理齿轮 / 改名 / 删除 / 保存 / 取消 / 历史时钟） */
+.ann-ico {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 全局 `button` 带底色，图标按钮要自己关掉（否则会变成一块金底） */
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ann-ico:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.ann-ico svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ann-ico.on {
+  color: var(--accent);
+  background: var(--accent-soft, rgba(255, 193, 107, 0.13));
+}
+.ann-ico-del:hover:not(:disabled) {
+  color: var(--bad, #e35561);
+  background: var(--bad-soft, rgba(227, 85, 97, 0.14));
+}
 .ann-manage-row {
   display: flex;
   align-items: center;
@@ -525,122 +730,61 @@ async function save(): Promise<void> {
   font-size: 12.5px;
 }
 
-/*
- * 颜色圆圈（管理标签每一行一个；最底下那个大的也用这个）。
- * 用户：「显示颜色的话就是一个圆圈，点击之后有快捷的颜色选项，
- * 以及所有的那个颜色选择器那种」。
- */
-.ann-color-dot {
+/* 标题右侧：历史时钟 + 关闭 */
+.ann-head-btns {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-  cursor: pointer;
-  box-shadow: inset 0 0 0 2px var(--panel);
-}
-@media (hover: hover) {
-  .ann-color-dot:hover {
-    filter: brightness(1.15);
-  }
-}
-
-/* 最底下的颜色行：默认不显示（`colorTagName` 为空），点了某一行的圆圈才出现 */
-.ann-color-edit {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 7px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--border);
-  font-size: 12px;
-  color: var(--muted);
-}
-.ann-color-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ann-color-hex {
-  flex: 0 0 auto;
-  font-size: 10.5px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  color: var(--muted);
+  gap: 4px;
 }
 
-/* 快捷色 + 完整颜色选择器 */
-.ann-color-pop {
+/* 历史面板（标题右边那颗钟点开）：一条一个卡片，标签 + 时间 + 删除 */
+.ann-hist {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 300px;
+  overflow: auto;
+}
+.ann-hist-item {
+  padding: 7px 9px;
+  border-radius: var(--r-xs, 8px);
+  background: var(--panel-2);
+}
+.ann-hist-top {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 8px;
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--panel-2);
-}
-.ann-swatch {
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 2px solid transparent;
-  border-radius: 50%;
-  cursor: pointer;
-}
-.ann-swatch.on {
-  border-color: var(--text);
-  box-shadow: 0 0 0 1px var(--panel-2);
-}
-.ann-color-full {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  font-size: 11.5px;
-  color: var(--muted);
-  cursor: pointer;
-}
-.ann-color-full input[type='color'] {
-  width: 28px;
-  height: 24px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
-  cursor: pointer;
-}
-
-.ann-note {
-  display: flex;
-  flex-direction: column;
   gap: 5px;
-  margin-top: 4px;
-  font-size: 12px;
+}
+.ann-hist-pill {
+  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel);
   color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
-.ann-note textarea {
-  width: 100%;
-  min-height: 74px;
-  resize: vertical;
-  padding: 8px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--panel-2);
-  color: var(--text);
-  font: inherit;
-  font-size: 12.5px;
-  line-height: 1.55;
+.ann-hist-only {
+  opacity: 0.75;
 }
-.ann-note em {
-  align-self: flex-end;
-  font-style: normal;
-  font-size: 11px;
+.ann-hist-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.ann-hist-note {
+  margin: 5px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
   color: var(--muted);
 }
 

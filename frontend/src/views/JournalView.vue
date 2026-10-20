@@ -25,9 +25,11 @@ import {
   deleteJournalEntry,
   fetchJournal,
   fetchJournalCategories,
+  fetchJournalPrefs,
   pinJournalEntry,
   polishJournal,
   saveJournalEntry,
+  saveJournalPrefs,
   updateJournalCategory,
   type Contract,
   type JournalCategory,
@@ -70,8 +72,13 @@ const calYear = ref(new Date().getFullYear())
 
 /** 分类（用户 2026-10-18：「添加分类……分类可以有不同的颜色表示不同文件夹」） */
 const categories = ref<JournalCategory[]>([])
-/** 当前筛选的分类（null = 全部） */
-const category = ref<number | null>(null)
+/**
+ * 当前筛选的分类（**可多选**；空数组 = 全部）。
+ *
+ * 用户 2026-10-20：「文件夹可多选显示，保存到服务器配置中」——
+ * 选中的这几个 id 存在 `user_journal_prefs` 里（`/api/journal/prefs`），换设备也跟着走。
+ */
+const pickedCats = ref<number[]>([])
 /** 分类面板开着没有 */
 const catOpen = ref(false)
 /** 新分类可选的颜色（跟后端 `CATEGORY_COLORS` 同一套） */
@@ -109,7 +116,7 @@ async function load(reset = true): Promise<void> {
       coin: coin.value || undefined,
       q: q.value.trim() || undefined,
       months: months.value.length ? months.value : undefined,
-      category: category.value || undefined,
+      categories: pickedCats.value.length ? pickedCats.value : undefined,
       limit: PAGE,
       offset
     })
@@ -194,10 +201,19 @@ async function loadCategories(): Promise<void> {
   }
 }
 
-/** 当前筛选的那个分类（顶栏按钮上显示名字 + 颜色点） */
-const currentCat = computed(
-  () => categories.value.find(c => c.id === category.value) ?? null
+/** 当前选中的分类对象（顶栏按钮上显示色点 + 名字 / 个数） */
+const currentCats = computed(() =>
+  pickedCats.value
+    .map(id => categories.value.find(c => c.id === id))
+    .filter((c): c is JournalCategory => Boolean(c))
 )
+
+/** 顶栏那颗按钮上的文字：全部 / 单个分类名 / 「N 个分类」 */
+const catLabel = computed(() => {
+  const list = currentCats.value
+  if (!list.length) return ''
+  return list.length === 1 ? list[0]!.name : `${list.length} 个分类`
+})
 
 /**
  * 「默认」分类（没选分类的条目都挂它 —— 用户 2026-10-18：「未选择就是默认分类」）。
@@ -207,11 +223,32 @@ const defaultCat = computed(
   () => categories.value.find(c => c.name === '默认') ?? categories.value[0] ?? null
 )
 
-/** 选一个分类（null = 全部）→ 关面板 + 重新拉第一页 */
-function pickCategory(id: number | null): void {
-  category.value = id
-  catOpen.value = false
+/**
+ * 点一个分类 = **加选 / 取消**（面板不关，方便连着点几个）。
+ *
+ * 每次改完：① 重拉第一页；② 把这份选择写回服务器配置（失败只提示、不回滚，
+ * 免得网络抖一下就把用户的筛选改掉）。
+ */
+function toggleCategory(id: number): void {
+  const i = pickedCats.value.indexOf(id)
+  if (i >= 0) pickedCats.value.splice(i, 1)
+  else pickedCats.value.push(id)
   void load()
+  persistCats()
+}
+
+/** 「全部」= 清空选择 */
+function clearCategories(): void {
+  if (!pickedCats.value.length) return
+  pickedCats.value = []
+  void load()
+  persistCats()
+}
+
+function persistCats(): void {
+  void saveJournalPrefs([...pickedCats.value]).catch(e => {
+    showToast(`筛选没存上：${(e as Error).message}`, 'bad')
+  })
 }
 
 /* ---- 分类的「新增 / 编辑」共用一个底部输入行 ---- */
@@ -285,7 +322,10 @@ async function removeCategory(c: JournalCategory): Promise<void> {
   try {
     await deleteJournalCategory(c.id)
     categories.value = categories.value.filter(x => x.id !== c.id)
-    if (category.value === c.id) category.value = null
+    if (pickedCats.value.includes(c.id)) {
+      pickedCats.value = pickedCats.value.filter(id => id !== c.id)
+      persistCats()
+    }
     if (editingCatId.value === c.id) cancelEditCategory()
     await load()
     showToast('已删除')
@@ -313,7 +353,10 @@ async function addCategory(): Promise<void> {
     const r = await createJournalCategory({name, color: newCatColor.value})
     categories.value = [...categories.value, r.category]
     newCatName.value = ''
-    pickCategory(r.category.id)
+    pickedCats.value = [r.category.id]
+    catOpen.value = false
+    void load()
+    persistCats()
     showToast(`已新增分类「${r.category.name}」`)
   } catch (e) {
     showToast(`没加上：${(e as Error).message}`, 'bad')
@@ -349,9 +392,20 @@ watch(q, () => {
 })
 
 onMounted(() => {
+  void init()
+})
+
+/** 先拿「上次选了哪几个文件夹」，再拉列表（避免先闪一下全部再变） */
+async function init(): Promise<void> {
+  try {
+    const r = await fetchJournalPrefs()
+    pickedCats.value = r.categories.filter(id => id > 0)
+  } catch {
+    /* 读不到配置就当全部 —— 不影响看内容 */
+  }
   void load()
   void loadCategories()
-})
+}
 
 function toggle(e: JournalEntry): void {
   openId.value = openId.value === e.id ? null : e.id
@@ -451,7 +505,10 @@ function startNew(): void {
     title: '',
     body: '',
     coins: [],
-    categoryId: category.value ?? defaultCat.value?.id ?? null
+    categoryId:
+      pickedCats.value.length === 1
+        ? pickedCats.value[0]!
+        : (defaultCat.value?.id ?? null)
   }
   comboPick.value = ''
   bodyBackup.value = ''
@@ -553,6 +610,33 @@ async function remove(e: JournalEntry): Promise<void> {
       用户 2026-10-18：「币种选择在左边字体放小，搜日记占剩余位置」。
     -->
     <div class="j-bar">
+      <!--
+        分类：**放在整行最左边**（用户 2026-10-20：「图标放在最左侧」）。
+        图标 + 当前分类的色点；点开是一条弹层：全部 / 各分类（可多选）/ 新增。
+      -->
+      <div class="j-cat-wrap">
+        <button
+          type="button"
+          class="ghost tiny j-cat"
+          :class="{on: pickedCats.length > 0}"
+          :title="catLabel ? `只看：${catLabel}（可多选）` : '按分类看（可多选）'"
+          @click="toggleCat"
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h4l2 2.4h6.6a2.2 2.2 0 0 1 2.2 2.2v7.2a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2Z" />
+          </svg>
+          <i
+            v-for="c in currentCats.slice(0, 3)"
+            :key="c.id"
+            class="j-catdot"
+            :style="{background: c.color || 'var(--muted)'}"
+          />
+          <span v-if="pickedCats.length > 3" class="j-catcount">{{ pickedCats.length }}</span>
+        </button>
+
+      </div>
+
       <SymbolCombo
         plain
         class="j-flt"
@@ -569,27 +653,6 @@ async function remove(e: JournalEntry): Promise<void> {
         </button>
       </div>
       <!--
-        分类（用户 2026-10-18：「文件夹放在日期左边」）。
-        图标 + 当前分类的色点；点开是一条弹层：全部 / 各分类 / 新增。
-      -->
-      <div class="j-cat-wrap">
-        <button
-          type="button"
-          class="ghost tiny j-cat"
-          :class="{on: !!category}"
-          :title="currentCat ? `只看「${currentCat.name}」` : '按分类看'"
-          @click="toggleCat"
-        >
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
-               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M3.5 7.2A2.2 2.2 0 0 1 5.7 5h4l2 2.4h6.6a2.2 2.2 0 0 1 2.2 2.2v7.2a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2Z" />
-          </svg>
-          <i v-if="currentCat" class="j-catdot" :style="{background: currentCat.color || 'var(--muted)'}" />
-        </button>
-
-      </div>
-
-      <!--
         分类弹层：从底部起来（用户 2026-10-18：「分类弹出框在最下方」）。
         颜色只露一颗，点它轮着换（同一天：「颜色选择只显示一个点击切换」）。
       -->
@@ -605,8 +668,8 @@ async function remove(e: JournalEntry): Promise<void> {
             <button
               type="button"
               class="j-cat-item"
-              :class="{sel: category === null}"
-              @click="pickCategory(null)"
+              :class="{sel: pickedCats.length === 0}"
+              @click="clearCategories"
             >
               <i class="j-catdot" style="background: var(--muted); opacity: 0.5" />
               <span>全部</span>
@@ -617,9 +680,14 @@ async function remove(e: JournalEntry): Promise<void> {
               v-for="c in categories"
               :key="c.id"
               class="j-cat-row"
-              :class="{sel: category === c.id}"
+              :class="{sel: pickedCats.includes(c.id)}"
             >
-              <button type="button" class="j-cat-pick" @click="pickCategory(c.id)">
+              <button
+                type="button"
+                class="j-cat-pick"
+                :aria-pressed="pickedCats.includes(c.id)"
+                @click="toggleCategory(c.id)"
+              >
                 <i class="j-catdot" :style="{background: c.color || 'var(--muted)'}" />
                 <span>{{ c.name }}</span>
               </button>
@@ -876,8 +944,8 @@ async function remove(e: JournalEntry): Promise<void> {
 
     <p v-else-if="!loading" class="j-empty dim">
       {{
-        q || coin || months.length || category
-          ? `这个${months.length && !q && !coin && !category ? '月份' : '筛选'}下没有记录。`
+        q || coin || months.length || pickedCats.length
+          ? `这个${months.length && !q && !coin && !pickedCats.length ? '月份' : '筛选'}下没有记录。`
           : '还没有记录。点右边那颗加号记一条 —— 不用天天写，想到就记。'
       }}
     </p>
@@ -1386,6 +1454,21 @@ async function remove(e: JournalEntry): Promise<void> {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+}
+/* 顶栏那颗按钮：多选时最多三颗色点 + 一个数字（4 个以上才显示） */
+.j-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.j-cat .j-catdot + .j-catdot {
+  margin-left: -2px;
+}
+.j-catcount {
+  margin-left: 2px;
+  font-size: 10.5px;
+  line-height: 1;
+  color: inherit;
 }
 /* 一行 = 名字（点了就筛选）+ 改 / 删两颗 */
 .j-cat-row {

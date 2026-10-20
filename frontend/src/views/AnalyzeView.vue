@@ -29,13 +29,13 @@ import OrderPanel from '../comps/OrderPanel.vue'
 import JournalView from './JournalView.vue'
 import BanSheet from '../comps/BanSheet.vue'
 import AnnotationSheet from '../comps/AnnotationSheet.vue'
-import SymbolAnnotations from '../comps/SymbolAnnotations.vue'
 import AutoPredictView from './AutoPredictView.vue'
 import AskView from './AskView.vue'
 import {
   annotationBaseOf,
   annotationOf,
-  ensureAnnotations
+  ensureAnnotations,
+  tagChipStyle
 } from '../annotations'
 import {
   ensurePins,
@@ -135,6 +135,15 @@ onMounted(() =>
 const annOpen = ref(false)
 const annBase = computed(() => annotationBaseOf(symbol.value))
 const currentAnnotation = computed(() => annotationOf(annBase.value))
+/**
+ * 币种后面那排标签（用户 2026-10-20：「标签在 K 线界面也放在币种后面」）。
+ *
+ * 最多 2 个：顶部这一行还有 ★ / 🚫 / 价签按钮，手机上塞不下第三个。
+ * 颜色跟行情列表同一套（`tagChipStyle`）。
+ */
+const headerTags = computed(() =>
+  (currentAnnotation.value?.tags ?? []).slice(0, 2)
+)
 onMounted(() => {
   void ensureAnnotations().catch(() => undefined)
 })
@@ -766,6 +775,19 @@ onDeactivated(() => {
                   @pick="pickSymbol"
                   @submit="onRun"
                 />
+                <!--
+                  这个币最新一条标注的标签（用户 2026-10-20：「标签在 K 线界面也放在币种后面」）。
+                  最多 2 个，多了不显示 —— 顶部这一行还要放 ★ / 🚫 / 价签。
+                -->
+                <span v-if="headerTags.length" class="tk-tags">
+                  <span
+                    v-for="t in headerTags"
+                    :key="t"
+                    class="tk-tag"
+                    :style="tagChipStyle(t)"
+                    >{{ t }}</span
+                  >
+                </span>
                 <button
                   type="button"
                   class="ghost tiny tk-fav"
@@ -1027,10 +1049,10 @@ onDeactivated(() => {
             </button>
           </template>
           <!--
-            底部：合约下单模块 + 币种标注。
-            ★ 2026-10-20 用户：「历史和最近的位置是放在开仓按钮下面的位置」——
-              所以 `SymbolAnnotations` 必须在 `OrderPanel` **后面**（做多/做空按钮下面），
-              不能再放到图下方、下单模块上面。
+            底部：合约下单模块。
+            ★ 2026-10-20 用户：「底下的去掉，历史放在标签弹窗，加一个图标可弹窗看历史」——
+              原来挂在开仓按钮下面的「最新横幅 + 历史标注」整块删了，
+              历史改成标注弹窗右上角那颗时钟图标点开看（见 `AnnotationSheet`）。
           -->
           <template #bottom>
             <OrderPanel
@@ -1038,7 +1060,6 @@ onDeactivated(() => {
               :active="pageAlive && chartActive"
               @config="cfgOpen = true"
             />
-            <SymbolAnnotations :base="annBase" />
           </template>
         </KlineChart>
       </aside>
