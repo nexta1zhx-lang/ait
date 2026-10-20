@@ -2060,10 +2060,13 @@ button.danger {
 .mkt-table .icell-t {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
+  row-gap: 2px;
   min-width: 0;
 }
 .mkt-table .icell-name {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2115,55 +2118,44 @@ button.danger {
 }
 
 /*
- * 第三行：**我对这个币的标注**（2026-10-20）。
+ * 币名后面的**彩色标签**（2026-10-20）。
  *
- * 用户：「大概就是杂毛，异能等这些标签能显示标注的时间多长时间之前」。
- * 只有有标注的币才渲染这一行（见 `MarketPanel` 的 `v-if`），没标注的行高度不变。
- *
- * ⚠️ 窄屏（360px）币种列的文字区只剩 ~114px：胶囊必须允许收缩 + 省略号，
- *    时间固定不缩（它是这一行最要紧的信息之一），否则整行会把币种列顶宽。
+ * 用户：「标签放在币种后面，在上面显示，而且标签是带颜色的」——
+ * 所以不再单独占第三行，直接挂在 `.icell-t` 这一行；空间不够时整组换行，
+ * 但始终在成交额那行**上面**。颜色由 `tagChipStyle()` 内联给（淡底 + 本色字）。
  */
-.mkt-table .icell-n {
+.mkt-table .icell-tags {
   display: flex;
-  align-items: center;
   flex-wrap: wrap;
+  align-items: center;
   gap: 3px;
-  row-gap: 2px;
   min-width: 0;
-  margin-top: 2px;
-  font-size: 10px;
-  line-height: 1.25;
-  color: var(--muted);
 }
-.mkt-table .icell-n .ann-pill {
-  /*
-   * ⚠️ `flex: 0 0 auto`：宁可**换行**也别把每个两字标签压成一个字（开单分析左栏
-   * 只有 430px，早先的 `0 1 auto` 会把「杂毛 / 异能 / 插针」各截成「杂 / 异 / 插」）。
-   * 标签多了这一行会折成两行，但只影响有标注的行。
-   */
+.mkt-table .ann-tag {
   flex: 0 0 auto;
   max-width: 100%;
   padding: 0 5px;
+  border: 1px solid transparent;
   border-radius: 3px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  font-size: 9.5px;
+  line-height: 1.4;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.mkt-table .icell-n .ann-pill.ann-more {
-  flex: 0 0 auto;
-}
-.mkt-table .icell-n .ann-only {
+.mkt-table .ann-tag.ann-more {
   background: var(--panel);
   color: var(--muted);
+  border-color: var(--border);
 }
-.mkt-table .icell-n .ann-ago {
+
+/* 标签后面的「N 分钟前」（同一行，窄了跟着换行；不挤第二行成交额） */
+.mkt-table .icell-ann-ago {
   flex: 0 0 auto;
-  margin-left: auto;
   color: var(--muted);
+  font-size: 9.5px;
   white-space: nowrap;
-  opacity: 0.85;
+  opacity: 0.9;
 }
 
 /* 图标：32px 的源图缩到 26px（高分屏也清晰）；拿不到就退回首字母圆 */
@@ -8091,9 +8083,9 @@ button.badge:disabled {
   .split.m-market .mkt-table .icell-v {
     font-size: 11px;
   }
-  /* 标注那行在窄屏再收一点（标签宁可换行也别截成一个字，2026-10-20） */
-  .split.m-market .mkt-table .icell-n {
-    font-size: 9.5px;
+  /* 币名后面的彩色标签在窄屏再收一点（2026-10-20） */
+  .split.m-market .mkt-table .ann-tag {
+    font-size: 9px;
   }
   /*
    * ⚠️ 手机上的置顶星**不能占位**（2026-10-04 实测）：

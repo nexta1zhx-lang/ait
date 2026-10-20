@@ -1026,14 +1026,19 @@ onDeactivated(() => {
               </svg>
             </button>
           </template>
-          <!-- 底部：币种标注（图下方一窄条）+ 合约下单模块。 -->
+          <!--
+            底部：合约下单模块 + 币种标注。
+            ★ 2026-10-20 用户：「历史和最近的位置是放在开仓按钮下面的位置」——
+              所以 `SymbolAnnotations` 必须在 `OrderPanel` **后面**（做多/做空按钮下面），
+              不能再放到图下方、下单模块上面。
+          -->
           <template #bottom>
-            <SymbolAnnotations :base="annBase" />
             <OrderPanel
               :symbol="symbol"
               :active="pageAlive && chartActive"
               @config="cfgOpen = true"
             />
+            <SymbolAnnotations :base="annBase" />
           </template>
         </KlineChart>
       </aside>

@@ -20,11 +20,78 @@ import {
   deleteSymbolAnnotation,
   fetchAnnotationHistory,
   fetchAnnotationSummary,
-  renameAnnotationTag,
+  updateAnnotationTag,
   type AnnotationTag,
   type SymbolAnnotation
 } from './api'
 import {ago} from './format'
+
+/**
+ * 标签可选颜色（跟后端 `db/annotations.ts` 的 `TAG_COLORS` 保持同一套）。
+ *
+ * 前端用它画：行情行内彩色标签、弹窗里选中 / 未选中的标签、历史区的标签，
+ * 以及「管理标签」最底下那个颜色圆圈的快捷选项。
+ */
+export const TAG_COLORS = [
+  '#f07178', // 红
+  '#f0b429', // 黄
+  '#72d6a0', // 绿
+  '#7aa2f7', // 蓝
+  '#c792ea', // 紫
+  '#e08aa8', // 粉
+  '#ff9e64', // 橙
+  '#4dd0e1', // 青
+  '#a3be8c', // 橄榄
+  '#d3b583' // 主题金
+] as const
+
+/** 标签名的兜底色：词表里删掉的旧标签 / 颜色为空时按名字散列到调色板 */
+function fallbackTagColor(name: string): string {
+  let h = 0
+  const s = String(name ?? '')
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(h, 31) + s.charCodeAt(i)) >>> 0
+  }
+  return TAG_COLORS[h % TAG_COLORS.length]!
+}
+
+function hexRgb(hex: string): {r: number; g: number; b: number} {
+  const s = /^#[0-9a-f]{6}$/i.test(hex) ? hex.slice(1) : 'd3b583'
+  return {
+    r: parseInt(s.slice(0, 2), 16),
+    g: parseInt(s.slice(2, 4), 16),
+    b: parseInt(s.slice(4, 6), 16)
+  }
+}
+
+/** 标签名 → 颜色（词表里有就用词表的，没有就按名字散列一个） */
+export function tagColorOf(rawName: string): string {
+  const name = String(rawName ?? '')
+  const found = annotationTags.value.find(t => t.name === name)
+  const c = String(found?.color ?? '').trim().toLowerCase()
+  return /^#[0-9a-f]{6}$/.test(c) ? c : fallbackTagColor(name)
+}
+
+/**
+ * 标签胶囊的内联样式：淡色底 + 本色字 + 半透明描边。
+ *
+ * 不用 `color-mix()` —— 安卓 System WebView 不一定算得出来（见 style.css 里的提醒）。
+ * `active` = 这个标签在弹窗里被选中：底色更深、描边更实。
+ */
+export function tagChipStyle(
+  rawName: string,
+  active = false
+): Record<string, string> {
+  const color = tagColorOf(rawName)
+  const {r, g, b} = hexRgb(color)
+  const alpha = active ? 0.3 : 0.13
+  const line = active ? 0.75 : 0.38
+  return {
+    color,
+    background: `rgba(${r}, ${g}, ${b}, ${alpha})`,
+    borderColor: `rgba(${r}, ${g}, ${b}, ${line})`
+  }
+}
 
 /** 标签词表（按维护顺序） */
 export const annotationTags = ref<AnnotationTag[]>([])
@@ -249,10 +316,18 @@ export async function addAnnotationTag(name: string): Promise<AnnotationTag> {
   return r.tag
 }
 
-/** 改标签名：词表 + 缓存里所有历史 / 最新条目一起改（后端也会改历史） */
-export async function renameTag(id: number, name: string): Promise<AnnotationTag> {
+/**
+ * 改标签的名字 / 颜色。
+ *
+ * 改名：词表 + 缓存里所有历史 / 最新条目一起改（后端也会改历史）。
+ * 改色：词表里的颜色换掉即可 —— 历史里存的是名字，颜色按词表现查。
+ */
+export async function updateTag(
+  id: number,
+  patch: {name?: string; color?: string}
+): Promise<AnnotationTag> {
   const old = annotationTags.value.find(t => t.id === id)?.name ?? ''
-  const r = await renameAnnotationTag(id, name)
+  const r = await updateAnnotationTag(id, patch)
   summaryRevision++
   annotationTags.value = r.tags
   if (old && old !== r.tag.name) rewriteTagEverywhere(old, r.tag.name)

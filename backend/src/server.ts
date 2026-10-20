@@ -165,7 +165,7 @@ import {
   listAnnotationTags,
   listLatestAnnotations,
   listSymbolAnnotations,
-  renameAnnotationTag,
+  updateAnnotationTag,
   saveSymbolAnnotation
 } from './db/annotations'
 import {polishText} from './llm/polish'
@@ -3105,8 +3105,8 @@ async function route(
    *   GET    /api/annotations?base=BTC    这个币的全部历史（K 线底部用）+ 标签词表
    *   POST   /api/annotations             追加一条（body: base / tags / note）
    *   DELETE /api/annotations/:id         删一条（只能删自己的）
-   *   POST   /api/annotation-tags         新增标签（body: name）
-   *   POST   /api/annotation-tags/:id     改标签名（历史里的同名标签一起改）
+   *   POST   /api/annotation-tags         新增标签（body: name / color?）
+   *   POST   /api/annotation-tags/:id     改标签名或颜色（改名时历史里的同名标签一起改）
    *   DELETE /api/annotation-tags/:id     删标签（不动历史里的名字）
    *
    * ⚠️ 全是纯读库 / 写库，不打交易所、不计权重；**全部要登录**，按 me.id 隔离。
@@ -3163,7 +3163,7 @@ async function route(
     const body = await readJsonBody(req).catch(() => null)
     if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
     try {
-      const r = await createAnnotationTag(me.id, body.name)
+      const r = await createAnnotationTag(me.id, body.name, body.color)
       return sendJson(res, 200, {tag: r.tag, tags: r.tags, error: null})
     } catch (e) {
       return sendJson(res, 400, {error: (e as Error).message})
@@ -3175,10 +3175,10 @@ async function route(
     const body = await readJsonBody(req).catch(() => null)
     if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
     try {
-      const r = await renameAnnotationTag(
+      const r = await updateAnnotationTag(
         me.id,
         Number(annotationTagMatch[1]),
-        body.name
+        {name: body.name, color: body.color}
       )
       return sendJson(res, 200, {tag: r.tag, tags: r.tags, error: null})
     } catch (e) {

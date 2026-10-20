@@ -42,7 +42,8 @@ import {
 import {
   agoText,
   annotationOf,
-  ensureAnnotations
+  ensureAnnotations,
+  tagChipStyle
 } from '../annotations'
 import {marketMinVolUsd, rankBase, rankSinceMs} from '../settings'
 import {contracts} from '../store'
@@ -1129,6 +1130,33 @@ function annTitleOf(base: string): string {
                           stroke-linecap="round"
                         />
                       </svg>
+                      <!--
+                        最新标注的标签：**放在币种后面、上面那一行**（用户 2026-10-20），
+                        每个标签按词表里的颜色画成胶囊。最多 3 个，其余折成 +N。
+                        没标签只有描述的标注不占这里，时间紧跟在后面。
+                      -->
+                      <span
+                        v-if="annotationOf(r.base) && annTagsOf(r.base).length"
+                        class="icell-tags"
+                        :title="annTitleOf(r.base)"
+                      >
+                        <span
+                          v-for="t in annTagsOf(r.base)"
+                          :key="t"
+                          class="ann-tag"
+                          :style="tagChipStyle(t)"
+                          >{{ t }}</span
+                        >
+                        <span
+                          v-if="annMoreOf(r.base)"
+                          class="ann-tag ann-more"
+                          >+{{ annMoreOf(r.base) }}</span
+                        >
+                      </span>
+                      <!-- 时间紧跟在标签后面（同一行；窄了会自然换行，不挤成交额） -->
+                      <span v-if="annAgoOf(r.base)" class="icell-ann-ago">{{
+                        annAgoOf(r.base)
+                      }}</span>
                     </span>
                     <!--
                       第二行：市值排名 + 成交额。
@@ -1136,6 +1164,8 @@ function annTitleOf(base: string): string {
                       原来的「24h 34.21亿」换成「No.1 · 34.21亿」。
                       `rank` 是后端从 CoinGecko 贴过来的（见 data/marketcap.ts）；
                       前 500 名之外的币没有这个数，那就退回去只显示成交额。
+                      ★ 2026-10-20：标签挪到上面一行后，时间也跟着标签走，这行不再放时间
+                        （开单分析左栏很窄，时间放这会把成交额挤成省略号）。
                     -->
                     <span class="icell-v">
                       <b v-if="r.rank" class="cap-rank">No.{{ r.rank }}</b>
@@ -1143,32 +1173,6 @@ function annTitleOf(base: string): string {
                       <span class="cap-vol">{{
                         bigText(r.quoteVolume24h)
                       }}</span>
-                    </span>
-                    <!--
-                      第三行：我对这个币的最新标注（2026-10-20）。
-                      用户：「大概就是杂毛，异能等这些标签能显示标注的时间多长时间之前」。
-                      ⚠️ 只有有标注的币才渲染这一行 —— 没标注的行高度跟以前一模一样。
-                    -->
-                    <span
-                      v-if="annotationOf(r.base)"
-                      class="icell-n"
-                      :title="annTitleOf(r.base)"
-                    >
-                      <span
-                        v-for="t in annTagsOf(r.base)"
-                        :key="t"
-                        class="ann-pill"
-                        >{{ t }}</span
-                      >
-                      <span v-if="annMoreOf(r.base)" class="ann-pill ann-more"
-                        >+{{ annMoreOf(r.base) }}</span
-                      >
-                      <span
-                        v-if="!annTagsOf(r.base).length"
-                        class="ann-pill ann-only"
-                        >标注</span
-                      >
-                      <span class="ann-ago">{{ annAgoOf(r.base) }}</span>
                     </span>
                   </span>
                 </span>

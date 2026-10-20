@@ -27,7 +27,9 @@ import {
   annotationOf,
   historyOf,
   loadAnnotationHistory,
-  removeSymbolAnnotation
+  removeSymbolAnnotation,
+  tagChipStyle,
+  tagColorOf
 } from '../annotations'
 import {askConfirm} from '../confirm'
 import {bjShort, bjTime} from '../format'
@@ -67,6 +69,14 @@ const liveText = computed(() => {
   const note = a.note.replace(/\s+/g, ' ').trim()
   const head = [tags, note].filter(Boolean).join(' · ')
   return `${head} · ${agoText(a.at)}`
+})
+
+/** 横幅左边那颗「最新」跟着最新一条的第一个标签染色（没标签就沿用主题金） */
+const latestTagStyle = computed(() => {
+  const first = latest.value?.tags[0]
+  if (!first) return {}
+  const c = tagColorOf(first)
+  return {color: c, borderColor: c}
 })
 
 function measure(): void {
@@ -160,7 +170,7 @@ async function remove(entry: SymbolAnnotation): Promise<void> {
   <section v-if="latest" class="ann-strip" aria-label="币种标注">
     <!-- ① 最新一条：类似通知横幅的滚动文字 -->
     <div class="ann-live">
-      <span class="ann-live-k">最新</span>
+      <span class="ann-live-k" :style="latestTagStyle">最新</span>
       <div ref="boxEl" class="ann-live-box">
         <div
           class="ann-live-track"
@@ -191,7 +201,9 @@ async function remove(entry: SymbolAnnotation): Promise<void> {
     <ol v-if="open && entries.length" class="ann-list">
       <li v-for="e in entries" :key="e.id" class="ann-item">
         <div class="ann-item-top">
-          <span v-for="t in e.tags" :key="t" class="ann-pill">{{ t }}</span>
+          <span v-for="t in e.tags" :key="t" class="ann-pill" :style="tagChipStyle(t)"
+            >{{ t }}</span
+          >
           <span v-if="!e.tags.length" class="ann-pill ann-only">标注</span>
           <span class="ann-time" :title="bjTime(e.at)"
             >{{ bjShort(e.at) }} · {{ agoText(e.at) }}</span
@@ -341,6 +353,7 @@ async function remove(entry: SymbolAnnotation): Promise<void> {
   flex: 0 0 auto;
   max-width: 100%;
   padding: 1px 6px;
+  border: 1px solid transparent;
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--accent);

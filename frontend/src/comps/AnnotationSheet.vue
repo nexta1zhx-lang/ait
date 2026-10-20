@@ -20,7 +20,10 @@ import {
   annotationTags,
   ensureAnnotationTags,
   removeTag,
-  renameTag
+  TAG_COLORS,
+  tagChipStyle,
+  tagColorOf,
+  updateTag
 } from '../annotations'
 import {askConfirm} from '../confirm'
 import {showToast} from '../toast'
@@ -53,6 +56,9 @@ const tagBusy = ref(false)
 /** 正在改名的那条 */
 const editId = ref(0)
 const editName = ref('')
+/** 「管理标签」最底下那个颜色编辑器：给哪个标签选色（空 = 不显示） */
+const colorTagName = ref('')
+const colorOpen = ref(false)
 
 /** 保存键：有币、有内容、没在提交（标签正在改也别急着保存） */
 const canSave = computed(
@@ -73,6 +79,8 @@ function resetForm(): void {
   tagBusy.value = false
   editId.value = 0
   editName.value = ''
+  colorTagName.value = ''
+  colorOpen.value = false
 }
 
 /** 每次打开都是干净的一份；词表没到就顺手拉一次 */
@@ -151,9 +159,10 @@ async function submitEdit(): Promise<void> {
   tagBusy.value = true
   error.value = ''
   try {
-    const tag = await renameTag(id, name)
+    const tag = await updateTag(id, {name})
     if (old) {
       selected.value = selected.value.map(n => (n === old ? tag.name : n))
+      if (colorTagName.value === old) colorTagName.value = tag.name
     }
     cancelEdit()
   } catch (e) {
@@ -161,6 +170,41 @@ async function submitEdit(): Promise<void> {
   } finally {
     tagBusy.value = false
   }
+}
+
+/**
+ * 打开「管理标签」最底下的颜色编辑器。
+ *
+ * 用户 2026-10-20：「在管理标签里面的最底下显示颜色的话就是一个圆圈，
+ * 点击之后有快捷的颜色选项，以及所有的那个颜色选择器那种」。
+ * 点某一行的颜色圆圈 = 把那个标签送到底下的编辑器里。
+ */
+function pickColor(name: string): void {
+  colorTagName.value = name
+  colorOpen.value = true
+  error.value = ''
+}
+
+/** 落一个颜色（快捷色 / 完整选择器都走这里） */
+async function applyColor(color: string): Promise<void> {
+  const name = colorTagName.value
+  if (!name || tagBusy.value) return
+  const tag = annotationTags.value.find(t => t.name === name)
+  if (!tag) return
+  tagBusy.value = true
+  error.value = ''
+  try {
+    await updateTag(tag.id, {color})
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    tagBusy.value = false
+  }
+}
+
+function onColorPicked(e: Event): void {
+  const v = (e.target as HTMLInputElement).value
+  void applyColor(v)
 }
 
 /** 删标签：历史里已经写下的名字保留，只是以后不再提供这个选项 */
@@ -181,6 +225,10 @@ async function deleteTag(tag: {id: number; name: string}): Promise<void> {
     await removeTag(tag.id)
     selected.value = selected.value.filter(n => n !== tag.name)
     if (editId.value === tag.id) cancelEdit()
+    if (colorTagName.value === tag.name) {
+      colorTagName.value = ''
+      colorOpen.value = false
+    }
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -234,6 +282,7 @@ async function save(): Promise<void> {
           type="button"
           class="ann-pick-chip"
           :class="{on: selected.includes(t.name)}"
+          :style="tagChipStyle(t.name, selected.includes(t.name))"
           :aria-pressed="selected.includes(t.name)"
           @click="toggleTag(t.name)"
         >
@@ -273,10 +322,18 @@ async function save(): Promise<void> {
         </button>
       </div>
 
-      <!-- ②' 管理：改名 / 删除 -->
+      <!-- ②' 管理：颜色 / 改名 / 删除 -->
       <div v-if="manage" class="ann-manage">
         <p v-if="!annotationTags.length" class="ann-hint">还没有标签。</p>
         <div v-for="t in annotationTags" :key="t.id" class="ann-manage-row">
+          <button
+            type="button"
+            class="ann-color-dot"
+            :style="{background: tagColorOf(t.name)}"
+            :title="`改「${t.name}」的颜色`"
+            :aria-label="`改「${t.name}」的颜色`"
+            @click="pickColor(t.name)"
+          />
           <template v-if="editId === t.id">
             <input
               v-model="editName"
@@ -313,6 +370,43 @@ async function save(): Promise<void> {
               删除
             </button>
           </template>
+        </div>
+
+        <!--
+          最底下的颜色编辑器（用户 2026-10-20：「在管理标签里面的最底下显示颜色的话
+          就是一个圆圈，点击之后有快捷的颜色选项，以及所有的那个颜色选择器那种」）。
+          ⚠️ 默认不显示：只有点了上面某一行的颜色圆圈才出来；新加标签不会自动弹这个。
+        -->
+        <div v-if="colorTagName" class="ann-color-edit">
+          <span class="ann-color-title">颜色 · {{ colorTagName }}</span>
+          <button
+            type="button"
+            class="ann-color-dot"
+            :style="{background: tagColorOf(colorTagName)}"
+            :aria-label="`选择「${colorTagName}」的颜色`"
+            @click="colorOpen = !colorOpen"
+          />
+          <span class="ann-color-hex">{{ tagColorOf(colorTagName) }}</span>
+        </div>
+        <div v-if="colorTagName && colorOpen" class="ann-color-pop">
+          <button
+            v-for="c in TAG_COLORS"
+            :key="c"
+            type="button"
+            class="ann-swatch"
+            :class="{on: tagColorOf(colorTagName) === c}"
+            :style="{background: c}"
+            :aria-label="`把「${colorTagName}」改成 ${c}`"
+            @click="applyColor(c)"
+          />
+          <label class="ann-color-full">
+            <span>自定义</span>
+            <input
+              type="color"
+              :value="tagColorOf(colorTagName)"
+              @change="onColorPicked"
+            />
+          </label>
         </div>
       </div>
 
@@ -373,9 +467,10 @@ async function save(): Promise<void> {
   white-space: nowrap;
 }
 .ann-pick-chip.on {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-  color: var(--accent);
+  /* 颜色 / 底色 / 描边由 `tagChipStyle()` 内联给（每个标签自己的颜色），
+     这里只加「选中」的视觉：字重 + 一圈本标签颜色的细环。 */
+  font-weight: 600;
+  box-shadow: 0 0 0 1px currentColor;
 }
 .ann-manage-btn {
   margin-left: auto;
@@ -428,6 +523,97 @@ async function save(): Promise<void> {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12.5px;
+}
+
+/*
+ * 颜色圆圈（管理标签每一行一个；最底下那个大的也用这个）。
+ * 用户：「显示颜色的话就是一个圆圈，点击之后有快捷的颜色选项，
+ * 以及所有的那个颜色选择器那种」。
+ */
+.ann-color-dot {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 2px var(--panel);
+}
+@media (hover: hover) {
+  .ann-color-dot:hover {
+    filter: brightness(1.15);
+  }
+}
+
+/* 最底下的颜色行：默认不显示（`colorTagName` 为空），点了某一行的圆圈才出现 */
+.ann-color-edit {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+.ann-color-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ann-color-hex {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+/* 快捷色 + 完整颜色选择器 */
+.ann-color-pop {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+.ann-swatch {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.ann-swatch.on {
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px var(--panel-2);
+}
+.ann-color-full {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ann-color-full input[type='color'] {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  cursor: pointer;
 }
 
 .ann-note {

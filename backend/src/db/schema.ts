@@ -157,6 +157,8 @@ CREATE TABLE IF NOT EXISTS annotation_tags (
   id         BIGSERIAL   PRIMARY KEY,
   user_id    BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   name       TEXT        NOT NULL,
+  -- 标签色（#rrggbb；空串 = 还没挑，列标签时按调色板补一个默认色）
+  color      TEXT        NOT NULL DEFAULT '',
   sort       INTEGER     NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -165,6 +167,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS annotation_tags_user_name_idx
   ON annotation_tags (user_id, lower(name));
 CREATE INDEX IF NOT EXISTS annotation_tags_user_sort_idx
   ON annotation_tags (user_id, sort, id);
+-- 老库补列（2026-10-20 标签加颜色）
+ALTER TABLE annotation_tags ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS symbol_annotations (
   id         BIGSERIAL   PRIMARY KEY,

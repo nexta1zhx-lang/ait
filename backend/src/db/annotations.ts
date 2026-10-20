@@ -36,11 +36,35 @@ export const MAX_HISTORY = 200
  * 用户原话里点名了这两个（「大概就是杂毛，异能等这些标签」），所以给一份能直接用的起点；
  * 只播一次（`users.annotation_tags_seeded_at`），用户删光后不会再长回来。
  */
-export const DEFAULT_TAGS = ['杂毛', '异能'] as const
+export const DEFAULT_TAGS = [
+  {name: '杂毛', color: '#f07178'},
+  {name: '异能', color: '#c792ea'}
+] as const
+
+/**
+ * 标签可选颜色（跟前端 `annotations.ts` 的 `TAG_COLORS` 保持同一套）。
+ *
+ * 后端用它做两件事：老标签没有颜色时按顺序补一个；新标签没指定颜色时按数量取下一个。
+ * ⚠️ 两边改色板要一起改 —— 这里只负责存 / 回，前端负责画。
+ */
+export const TAG_COLORS = [
+  '#f07178', // 红
+  '#f0b429', // 黄
+  '#72d6a0', // 绿
+  '#7aa2f7', // 蓝
+  '#c792ea', // 紫
+  '#e08aa8', // 粉
+  '#ff9e64', // 橙
+  '#4dd0e1', // 青
+  '#a3be8c', // 橄榄
+  '#d3b583' // 主题金
+] as const
 
 export interface AnnotationTag {
   id: number
   name: string
+  /** #rrggbb（空串 = 还没挑，列表接口会补一个默认色） */
+  color: string
 }
 
 export interface SymbolAnnotation {
@@ -126,6 +150,17 @@ function cleanTags(v: unknown): string[] {
   return out
 }
 
+/** 颜色归一成小写 `#rrggbb`；不合法返回空串（调用方决定报错还是用默认色） */
+function cleanColor(v: unknown): string {
+  const s = String(v ?? '').trim().toLowerCase()
+  return /^#[0-9a-f]{6}$/.test(s) ? s : ''
+}
+
+/** 按顺序取一个默认色（标签多了会循环） */
+function defaultColorAt(index: number): string {
+  return TAG_COLORS[((index % TAG_COLORS.length) + TAG_COLORS.length) % TAG_COLORS.length]!
+}
+
 /**
  * 第一次列标签时播种默认词表。
  *
@@ -139,11 +174,12 @@ async function ensureDefaultTags(userId: number): Promise<void> {
   )
   if (!row || row.seeded_at) return
   for (let i = 0; i < DEFAULT_TAGS.length; i++) {
+    const t = DEFAULT_TAGS[i]!
     await query(
-      `INSERT INTO annotation_tags (user_id, name, sort)
-       VALUES ($1, $2, $3)
+      `INSERT INTO annotation_tags (user_id, name, color, sort)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT DO NOTHING`,
-      [userId, DEFAULT_TAGS[i], i]
+      [userId, t.name, t.color, i]
     )
   }
   await query(
@@ -153,16 +189,39 @@ async function ensureDefaultTags(userId: number): Promise<void> {
   )
 }
 
-/** 这个用户的标签词表（按维护顺序） */
+/**
+ * 这个用户的标签词表（按维护顺序）。
+ *
+ * 老标签（加颜色之前就存在的）`color` 是空串 —— 这里按顺序补一个调色板颜色并写回，
+ * 保证前端永远拿得到能画出来的颜色；已有颜色的绝不覆盖。
+ */
 export async function listAnnotationTags(userId: number): Promise<AnnotationTag[]> {
   await ensureDefaultTags(userId)
-  const rows = await query<{id: string | number; name: string}>(
-    `SELECT id, name FROM annotation_tags
+  const rows = await query<{
+    id: string | number
+    name: string
+    color: string | null
+  }>(
+    `SELECT id, name, color FROM annotation_tags
       WHERE user_id = $1
       ORDER BY sort, id`,
     [userId]
   )
-  return rows.map(r => ({id: Number(r.id), name: r.name}))
+  const out: AnnotationTag[] = []
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]!
+    let color = cleanColor(r.color)
+    if (!color) {
+      color = defaultColorAt(i)
+      await query(
+        `UPDATE annotation_tags SET color = $3
+          WHERE id = $1 AND user_id = $2 AND (color = '' OR color IS NULL)`,
+        [r.id, userId, color]
+      )
+    }
+    out.push({id: Number(r.id), name: r.name, color})
+  }
+  return out
 }
 
 /**
@@ -222,15 +281,20 @@ export async function saveSymbolAnnotation(
     .slice(0, MAX_NOTE)
   if (!tags.length && !note) throw new Error('至少选一个标签或写一句描述')
 
-  // 默认标签先播种，再补提交上来的（排序不会因为先后顺序打架）
+  // 默认标签先播种，再补提交上来的（排序 / 颜色都不会因为先后顺序打架）
   await ensureDefaultTags(userId)
+  const tagCount = await queryOne<{n: string}>(
+    'SELECT count(*)::text AS n FROM annotation_tags WHERE user_id = $1',
+    [userId]
+  )
+  let colorIndex = Number(tagCount?.n ?? 0)
   for (const name of tags) {
     await query(
-      `INSERT INTO annotation_tags (user_id, name, sort)
-       VALUES ($1, $2,
+      `INSERT INTO annotation_tags (user_id, name, color, sort)
+       VALUES ($1, $2, $3,
                COALESCE((SELECT max(sort) + 1 FROM annotation_tags WHERE user_id = $1), 0))
        ON CONFLICT DO NOTHING`,
-      [userId, name]
+      [userId, name, defaultColorAt(colorIndex++)]
     )
   }
 
@@ -259,13 +323,17 @@ export async function deleteSymbolAnnotation(
 
 /* ---------------- 标签词表维护 ---------------- */
 
-/** 新增一个标签；重名（大小写不敏感）给一句人话 */
+/** 新增一个标签；重名（大小写不敏感）给一句人话。颜色不传就用调色板下一个。 */
 export async function createAnnotationTag(
   userId: number,
-  rawName: unknown
+  rawName: unknown,
+  rawColor?: unknown
 ): Promise<{tag: AnnotationTag; tags: AnnotationTag[]}> {
   await ensureDefaultTags(userId)
   const name = cleanTagName(rawName)
+  const wanted = String(rawColor ?? '').trim()
+  const picked = wanted ? cleanColor(wanted) : ''
+  if (wanted && !picked) throw new Error('颜色写法不对（要 #rrggbb）')
   const count = await queryOne<{n: string}>(
     'SELECT count(*)::text AS n FROM annotation_tags WHERE user_id = $1',
     [userId]
@@ -273,76 +341,110 @@ export async function createAnnotationTag(
   if (Number(count?.n ?? 0) >= MAX_TAGS_PER_USER) {
     throw new Error(`标签最多 ${MAX_TAGS_PER_USER} 个 —— 先删掉几个再加`)
   }
-  const row = await queryOne<{id: string | number; name: string}>(
-    `INSERT INTO annotation_tags (user_id, name, sort)
-     VALUES ($1, $2,
+  const color = picked || defaultColorAt(Number(count?.n ?? 0))
+  const row = await queryOne<{
+    id: string | number
+    name: string
+    color: string | null
+  }>(
+    `INSERT INTO annotation_tags (user_id, name, color, sort)
+     VALUES ($1, $2, $3,
              COALESCE((SELECT max(sort) + 1 FROM annotation_tags WHERE user_id = $1), 0))
      ON CONFLICT DO NOTHING
-     RETURNING id, name`,
-    [userId, name]
+     RETURNING id, name, color`,
+    [userId, name, color]
   )
   if (!row) throw new Error(`「${name}」已经有了`)
   return {
-    tag: {id: Number(row.id), name: row.name},
+    tag: {
+      id: Number(row.id),
+      name: row.name,
+      color: cleanColor(row.color) || color
+    },
     tags: await listAnnotationTags(userId)
   }
 }
 
 /**
- * 改标签名 —— **历史标注里的同名标签一起改**。
+ * 改标签的**名字 / 颜色**（至少给一样）。
  *
- * 为什么不是「只改词表」：用户维护的是同一份标签口径，改名之后旧记录里还挂着旧名字，
- * 行情列表和 K 线历史就会同时出现两个看起来是一回事的标签。所以这里用一条 UPDATE
- * 把 `symbol_annotations.tags` 里的同名项重写掉。
+ * 改名时**历史标注里的同名标签一起改**：用户维护的是同一份标签口径，改名之后旧记录里
+ * 还挂着旧名字，行情列表和 K 线历史就会同时出现两个看起来是一回事的标签。
+ * 改颜色不动历史（历史里存的是名字，颜色按词表名字现查）。
  *
- * ⚠️ 顺序要保住：`jsonb_array_elements ... WITH ORDINALITY` 再 `ORDER BY ord`，
+ * ⚠️ 标签顺序要保住：`jsonb_array_elements ... WITH ORDINALITY` 再 `ORDER BY ord`，
  *    否则 `jsonb_agg` 可能把标签顺序打乱（历史区的展示顺序也跟着乱）。
  */
-export async function renameAnnotationTag(
+export async function updateAnnotationTag(
   userId: number,
   id: number,
-  rawName: unknown
+  input: {name?: unknown; color?: unknown}
 ): Promise<{tag: AnnotationTag; tags: AnnotationTag[]}> {
-  const name = cleanTagName(rawName)
-  const old = await queryOne<{name: string}>(
-    'SELECT name FROM annotation_tags WHERE id = $1 AND user_id = $2',
+  const existing = await queryOne<{name: string; color: string | null}>(
+    'SELECT name, color FROM annotation_tags WHERE id = $1 AND user_id = $2',
     [id, userId]
   )
-  if (!old) throw new Error('这个标签不存在（或者不是你的）')
-  if (old.name === name) {
-    return {tag: {id, name}, tags: await listAnnotationTags(userId)}
-  }
-  const dup = await queryOne<{id: string}>(
-    `SELECT id FROM annotation_tags
-      WHERE user_id = $1 AND lower(name) = lower($2) AND id <> $3`,
-    [userId, name, id]
-  )
-  if (dup) throw new Error(`「${name}」已经有了`)
+  if (!existing) throw new Error('这个标签不存在（或者不是你的）')
 
-  const row = await queryOne<{id: string | number; name: string}>(
-    'UPDATE annotation_tags SET name = $3 WHERE id = $1 AND user_id = $2 RETURNING id, name',
-    [id, userId, name]
+  const hasName = input.name !== undefined && String(input.name).trim() !== ''
+  const hasColor = input.color !== undefined
+  if (!hasName && !hasColor) throw new Error('没有要改的东西')
+
+  const oldName = existing.name
+  const name = hasName ? cleanTagName(input.name) : oldName
+  let color = cleanColor(existing.color)
+  if (hasColor) {
+    const wanted = String(input.color ?? '').trim()
+    color = wanted ? cleanColor(wanted) : ''
+    if (!color) throw new Error('颜色写法不对（要 #rrggbb）')
+  }
+  if (!color) color = defaultColorAt(0)
+
+  if (name !== oldName) {
+    const dup = await queryOne<{id: string}>(
+      `SELECT id FROM annotation_tags
+        WHERE user_id = $1 AND lower(name) = lower($2) AND id <> $3`,
+      [userId, name, id]
+    )
+    if (dup) throw new Error(`「${name}」已经有了`)
+  }
+
+  const row = await queryOne<{
+    id: string | number
+    name: string
+    color: string | null
+  }>(
+    `UPDATE annotation_tags SET name = $3, color = $4
+      WHERE id = $1 AND user_id = $2
+      RETURNING id, name, color`,
+    [id, userId, name, color]
   )
   if (!row) throw new Error('这个标签不存在（或者不是你的）')
 
-  await query(
-    `UPDATE symbol_annotations a
-        SET tags = COALESCE((
-          SELECT jsonb_agg(
-                   CASE WHEN x.value = to_jsonb($2::text)
-                        THEN to_jsonb($3::text)
-                        ELSE x.value
-                   END
-                   ORDER BY x.ord)
-            FROM jsonb_array_elements(a.tags) WITH ORDINALITY AS x(value, ord)
-        ), '[]'::jsonb)
-      WHERE a.user_id = $1
-        AND a.tags @> jsonb_build_array($2::text)`,
-    [userId, old.name, name]
-  )
+  if (name !== oldName) {
+    await query(
+      `UPDATE symbol_annotations a
+          SET tags = COALESCE((
+            SELECT jsonb_agg(
+                     CASE WHEN x.value = to_jsonb($2::text)
+                          THEN to_jsonb($3::text)
+                          ELSE x.value
+                     END
+                     ORDER BY x.ord)
+              FROM jsonb_array_elements(a.tags) WITH ORDINALITY AS x(value, ord)
+          ), '[]'::jsonb)
+        WHERE a.user_id = $1
+          AND a.tags @> jsonb_build_array($2::text)`,
+      [userId, oldName, name]
+    )
+  }
 
   return {
-    tag: {id: Number(row.id), name: row.name},
+    tag: {
+      id: Number(row.id),
+      name: row.name,
+      color: cleanColor(row.color) || color
+    },
     tags: await listAnnotationTags(userId)
   }
 }

@@ -434,6 +434,8 @@ export const unlockBase = (base: string) =>
 export interface AnnotationTag {
   id: number
   name: string
+  /** #rrggbb；空串 = 后端还没补默认色（正常列表不会出现） */
+  color: string
 }
 
 /** 一条标注：币 + 当时选中的标签 + 描述 + 标注时刻 */
@@ -480,18 +482,21 @@ export const createSymbolAnnotation = (input: {
 export const deleteSymbolAnnotation = (id: number) =>
   del<{ok: boolean; error: string | null}>(`/api/annotations/${id}`)
 
-/** 新增一个标签；回来的是新标签 + 整份词表 */
-export const createAnnotationTag = (name: string) =>
+/** 新增一个标签；回来的是新标签 + 整份词表。不传 color = 后端从调色板挑一个 */
+export const createAnnotationTag = (name: string, color?: string) =>
   post<{tag: AnnotationTag; tags: AnnotationTag[]; error: string | null}>(
     '/api/annotation-tags',
-    {name}
+    color ? {name, color} : {name}
   )
 
-/** 改标签名（后端会把历史标注里的同名标签一起改） */
-export const renameAnnotationTag = (id: number, name: string) =>
+/** 改标签名 / 颜色（改名时后端会把历史标注里的同名标签一起改） */
+export const updateAnnotationTag = (
+  id: number,
+  patch: {name?: string; color?: string}
+) =>
   post<{tag: AnnotationTag; tags: AnnotationTag[]; error: string | null}>(
     `/api/annotation-tags/${id}`,
-    {name}
+    patch
   )
 
 /** 删标签（历史标注里的名字不动，只是以后不再提供这个选项） */
