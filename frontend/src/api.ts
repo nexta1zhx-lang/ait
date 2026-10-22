@@ -4234,3 +4234,215 @@ export interface ServerStatus {
  */
 export const fetchServerStatus = (minutes = 30) =>
   get<ServerStatus>(`/api/server-status?minutes=${minutes}`)
+
+/* ---------------- 盘中体检 / 盘后复盘（2026-10-22） ----------------
+ *
+ * ⚠️ 三组接口都**只读**：不参与下单、不拦单、不改参数。
+ *    用户原话：「我不希望你再对我的开单有限制……开单之后给我状态和改进的点」。
+ */
+
+/** 一条持仓的体检卡（后端 `data/position-live.ts` 的 `HealthCard`） */
+export interface HealthCard {
+  keyId: number
+  /** 币安原始符号（`1000PEPEUSDT`） */
+  symbol: string
+  /** ccxt 统一符号（`1000PEPE/USDT:USDT`）—— 点 K 线要用 */
+  unified: string
+  side: 'long' | 'short'
+  amount: number
+  entry: number
+  mark: number
+  leverage: number
+  notional: number
+  unrealized: number
+  /** ROE %（相对保证金） */
+  roe: number | null
+  /** 这个仓位占账户净值几倍 */
+  accountLeverage: number | null
+  openedAt: string | null
+  holdMin: number | null
+  stopPrice: number | null
+  stopPct: number | null
+  stopSource: string
+  rUnit: number | null
+  /** 当前几 R */
+  r: number | null
+  mfeR: number | null
+  maeR: number | null
+  /** 现价到止损还有多少（%）；已跌破为负 */
+  distToStopPct: number | null
+  bucket: 'lt30' | 'gte30' | null
+  bucketWinrate: number | null
+  tips: {code: string; text: string}[]
+}
+
+/** 当前所有持仓的体检卡（跨 key，只读常驻流，不打交易所） */
+export const fetchHealthCards = () =>
+  get<{cards: HealthCard[]; at: number}>('/api/positions/live')
+
+/** 一条复盘 */
+export interface ReviewRow {
+  id: number
+  kind: 'trade' | 'summary'
+  /** 属于哪一套 Key（账户） */
+  keyId: number | null
+  /** 账户名（「币安」/「测试」） */
+  accountName: string | null
+  symbol: string | null
+  side: string | null
+  openedAt: string | null
+  closedAt: string | null
+  holdMin: number | null
+  net: number | null
+  fee: number | null
+  buckets: string | null
+  baselineWinrate: number | null
+  verdict: string | null
+  tip: string | null
+  detail: Record<string, unknown> | null
+  createdAt: string
+}
+
+export interface ReviewAccount {
+  id: number
+  name: string
+}
+
+/** 复盘列表的筛选条件（2026-10-22：账户 / 盈亏 / 持仓档 / 排序） */
+export interface ReviewFilter {
+  keyId?: number | null
+  /** win = 只看盈利，loss = 只看亏损 */
+  result?: 'win' | 'loss' | null
+  /** lt30 = 持仓不到 30 分钟，gte30 = 30 分钟以上 */
+  hold?: 'lt30' | 'gte30' | null
+  /** asc = 交易时间由前到后（默认） */
+  order?: 'asc' | 'desc'
+}
+
+export const fetchReviews = (
+  kind: 'trade' | 'summary' = 'trade',
+  limit = 200,
+  filter: ReviewFilter = {}
+) => {
+  const q = new URLSearchParams({kind, limit: String(limit)})
+  if (filter.keyId) q.set('keyId', String(filter.keyId))
+  if (filter.result) q.set('result', filter.result)
+  if (filter.hold) q.set('hold', filter.hold)
+  if (filter.order) q.set('order', filter.order)
+  return get<{
+    reviews: ReviewRow[]
+    kind: string
+    accounts: ReviewAccount[]
+    total: number
+  }>(`/api/reviews?${q.toString()}`)
+}
+
+export const fetchReview = (id: number) => get<{review: ReviewRow}>(`/api/reviews/${id}`)
+
+/** 给历史仓位补复盘（幂等：复盘过的那一笔会跳过） */
+export const backfillReviews = () =>
+  post<{ok: boolean; created: number}>('/api/reviews/backfill', {})
+
+/* ---------------- 周期复盘（2026-10-22 晚）----------------
+ *
+ * 用户：「每笔和总结去掉，我可以自定义选择一段周期的时间进行总结」。
+ * 数据直接从成交账本算（后端 `summarizeRange`），**不读复盘表**，
+ * 所以没有「补历史」、也没有后台同步。
+ */
+
+export interface RangeBucket {
+  key: string
+  label: string
+  count: number
+  wins: number
+  net: number
+}
+
+export interface RangeSummary {
+  from: string | null
+  to: string | null
+  count: number
+  net: number
+  grossProfit: number
+  grossLoss: number
+  fee: number
+  winRate: number
+  payoff: number
+  medianHoldMin: number
+  maxWin: number
+  maxLoss: number
+  byHold: RangeBucket[]
+  bySide: RangeBucket[]
+  topSymbols: RangeBucket[]
+  worstSymbols: RangeBucket[]
+}
+
+export const fetchRangeSummary = (q: {
+  from: number | null
+  to: number | null
+  keyId: number | null
+}) => {
+  const p = new URLSearchParams()
+  if (q.from) p.set('from', String(q.from))
+  if (q.to) p.set('to', String(q.to))
+  if (q.keyId) p.set('keyId', String(q.keyId))
+  return get<{summary: RangeSummary; accounts: ReviewAccount[]}>(
+    `/api/review-summary?${p.toString()}`
+  )
+}
+
+/* ---------------- 仓位明细（2026-10-22 晚）----------------
+ *
+ * ⚠️ 单位是**仓位周期**（0 → 加仓 → 减仓 → 归零），不是单张成交：
+ *    用户：「不要以每笔为单位，因为一次交易可能拆成多个订单」。
+ *    一张单在 `orders` 里。
+ */
+export interface CycleOrder {
+  time: string
+  side: 'buy' | 'sell'
+  amount: number
+  price: number
+  fee: number
+  realized: number
+  reduce: boolean
+}
+
+export interface CycleDetail {
+  symbol: string
+  side: 'long' | 'short'
+  openAt: string
+  closeAt: string | null
+  holdSec: number
+  entry: number | null
+  exit: number | null
+  qty: number
+  leverage: number | null
+  realized: number
+  fee: number
+  funding: number
+  net: number
+  /** 这个仓位一共由几笔成交组成 */
+  fills: number
+  /** 最大浮盈 / 最大回撤（相对开仓价，%；null = 没有分钟级 K 线） */
+  mfePct: number | null
+  maePct: number | null
+  mfeUsd: number | null
+  maeUsd: number | null
+  /** 上面两个数是用哪一档 K 线算的 */
+  resolution: '1m' | '15m' | '1h' | null
+  orders: CycleOrder[]
+}
+
+export const fetchPositionCycles = (q: {
+  from: number | null
+  to: number | null
+  keyId: number | null
+  limit?: number
+}) => {
+  const p = new URLSearchParams()
+  if (q.from) p.set('from', String(q.from))
+  if (q.to) p.set('to', String(q.to))
+  if (q.keyId) p.set('keyId', String(q.keyId))
+  if (q.limit) p.set('limit', String(q.limit))
+  return get<{cycles: CycleDetail[]}>(`/api/position-cycles?${p.toString()}`)
+}

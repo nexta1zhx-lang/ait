@@ -1104,6 +1104,76 @@ CREATE TABLE IF NOT EXISTS rustdesk_devices (
   note       TEXT        NOT NULL DEFAULT '',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------- 持仓计划（盘中体检 / 盘后复盘的对照基准）
+-- 2026-10-22：「不要限制我开单，但开单之后要能看状态、平仓之后要能复盘」。
+--
+-- ⚠️ **这张表不参与下单** —— 不校验、不拦截、不改参数。它只在开仓成交之后
+--    由定时器补一条（data/position-live.ts 的 syncPlans），记下「这笔进场时
+--    周围长什么样」，平仓时拿来和结果对照。
+-- ⚠️ 老仓（这张表上线之前的持仓）没有对应行 —— 体检卡里 stop_source='fallback'，
+--    复盘里标「无结构位」，别编一个止损价出来。
+CREATE TABLE IF NOT EXISTS position_plans (
+  id            BIGSERIAL   PRIMARY KEY,
+  user_id       BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  key_id        BIGINT      NOT NULL REFERENCES user_exchange_keys (id) ON DELETE CASCADE,
+  symbol        TEXT        NOT NULL,               -- 币安原始符号（1000PEPEUSDT）
+  pos_side      TEXT        NOT NULL DEFAULT 'BOTH',
+  side          TEXT        NOT NULL,               -- long | short
+  opened_at     TIMESTAMPTZ NOT NULL,
+  closed_at     TIMESTAMPTZ,
+  entry_price   NUMERIC(24,8) NOT NULL,
+  qty           NUMERIC(24,8) NOT NULL,
+  leverage      NUMERIC(24,8),
+  entry_tf      TEXT,                               -- 算结构位用的周期
+  -- 进场前 24 小时的涨跌幅（%）。复盘的「档位」靠它：
+  -- 你自己的数据里 <−3% 与 >+25% 两端赚钱、中间地带亏钱（见 data/trade-review.ts）
+  chg24_entry   NUMERIC(10,4),
+  stop_price    NUMERIC(24,8),
+  stop_pct      NUMERIC(10,6),
+  stop_source   TEXT        NOT NULL DEFAULT 'structural',  -- structural | fallback
+  r_unit        NUMERIC(24,8),                      -- 1R = |entry − stop|
+  mfe_price     NUMERIC(24,8),                      -- 持仓期间最有利价
+  mae_price     NUMERIC(24,8),                      -- 持仓期间最不利价
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- 同一个币 + 同一个方向 + 同一个开仓时刻只允许一条（定时器重跑不会写重）
+CREATE UNIQUE INDEX IF NOT EXISTS position_plans_key
+  ON position_plans (key_id, symbol, pos_side, opened_at);
+CREATE INDEX IF NOT EXISTS position_plans_open_idx
+  ON position_plans (user_id) WHERE closed_at IS NULL;
+
+-- ---------------------------------------------------------------- 复盘（每笔一条 + 每 20 笔一条阶段总结）
+-- 2026-10-22：用户要的是「平仓之后给我改进的点」，不是拦截。
+--
+-- ⚠️ 文案原则（写在 data/trade-review.ts 里，别在别处另写一套）：
+--    **只陈述事实 + 你自己的历史基准，不下命令** ——
+--    写「你历史上 <30 分钟的单子胜率 20%」，不写「你应该拿久一点」。
+CREATE TABLE IF NOT EXISTS trade_reviews (
+  id            BIGSERIAL   PRIMARY KEY,
+  user_id       BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  key_id        BIGINT,
+  kind          TEXT        NOT NULL DEFAULT 'trade',   -- trade | summary
+  symbol        TEXT,
+  side          TEXT,
+  opened_at     TIMESTAMPTZ,
+  closed_at     TIMESTAMPTZ,
+  hold_min      INTEGER,
+  net           NUMERIC(24,8),
+  fee           NUMERIC(24,8),
+  -- 档位：<30m / >=30m / 两端 / 中间 / long / short —— 同一个笔会有多个，逗号分隔
+  buckets       TEXT,
+  baseline_winrate NUMERIC(6,4),
+  verdict       TEXT,          -- 一句点评
+  tip           TEXT,          -- 一个改进点
+  detail        JSONB,         -- 事实明细（进出价 / MFE / MAE / 杠杆 / 当时 24h 涨跌）
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS trade_reviews_user_idx
+  ON trade_reviews (user_id, created_at DESC);
+-- 一笔仓位只复盘一次（定时器重跑 / 重启都不会重复写）
+CREATE UNIQUE INDEX IF NOT EXISTS trade_reviews_plan_idx
+  ON trade_reviews (key_id, symbol, opened_at) WHERE kind = 'trade';
 `
 
 /**

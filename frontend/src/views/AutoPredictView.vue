@@ -65,6 +65,7 @@ import {
 } from '../analyze'
 import AnalysisDetail from '../comps/AnalysisDetail.vue'
 import SubTabs from '../comps/SubTabs.vue'
+import ReviewsView from './ReviewsView.vue'
 import AnswerBody from '../comps/AnswerBody.vue'
 import PredictHistory from '../comps/PredictHistory.vue'
 import StepsPanel from '../comps/StepsPanel.vue'
@@ -178,7 +179,9 @@ const TAB_OPTIONS = computed<
   {value: 'scan', label: '币种监测', badge: picks.value.length},
   {value: 'live', label: 'AI分析'},
   {value: 'ai', label: '自动分析', badge: aiRows.value.length},
-  {value: 'alerts', label: '提醒', badge: activeAlerts.value.length}
+  {value: 'alerts', label: '提醒', badge: activeAlerts.value.length},
+  /* 2026-10-22：周期复盘（自己选一段时间 → 看这一段的总结 + 仓位明细） */
+  {value: 'reviews', label: '复盘'}
 ])
 
 /* ---------------- 「AI分析」那一格（原一级 tab「预测结果」） ---------------- */
@@ -427,7 +430,12 @@ function pctClass(v: number): string {
     -->
     <SubTabs :model-value="tab" :options="TAB_OPTIONS" @update:model-value="setTab" />
 
-    <section v-if="tab === 'scan'" class="panel">
+    <!-- 复盘：选一段时间看总结和仓位明细（只读，不参与下单） -->
+    <section v-if="tab === 'reviews'" class="panel reviews-pane">
+      <ReviewsView />
+    </section>
+
+    <section v-else-if="tab === 'scan'" class="panel">
       <div class="sec-head">
         <h2>
           币种监测

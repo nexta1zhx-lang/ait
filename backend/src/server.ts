@@ -127,6 +127,17 @@ import {
   verifyTotp
 } from './util/totp'
 import {MAX_PINS, listPins, togglePin} from './db/pins'
+import {listHealthCards} from './data/position-live'
+import {
+  backfillReviews,
+  countReviews,
+  getReview,
+  listCycleDetails,
+  summarizeRange,
+  listReviews,
+  syncPositionJournal,
+  type ReviewQuery
+} from './data/trade-review'
 import {
   BLACKLIST_DEFAULT_HOURS,
   BLACKLIST_MAX_HOURS,
@@ -3035,6 +3046,111 @@ async function route(
       return sendJson(res, 405, {error: 'Method Not Allowed'})
     const pins = await listPins(me.id)
     return sendJson(res, 200, {pins, max: MAX_PINS})
+  }
+
+  /* ---- 盘中体检 / 盘后复盘（2026-10-22）----
+   *
+   * ⚠️ **只读**：这几个接口不参与下单、不改参数、不拦任何请求。
+   *    用户原话：「我不希望你再对我的开单有限制……开单之后给我状态和改进的点」。
+   *    数据见 `data/position-live.ts`（体检卡）与 `data/trade-review.ts`（复盘）。
+   */
+  if (p === '/api/positions/live') {
+    if (method !== 'GET') return sendJson(res, 405, {error: 'Method Not Allowed'})
+    const cards = await listHealthCards(me.id)
+    return sendJson(res, 200, {cards, at: Date.now()})
+  }
+
+  if (p === '/api/reviews' && method === 'GET') {
+    const kind = url.searchParams.get('kind') === 'summary' ? 'summary' : 'trade'
+    const limit = Number(url.searchParams.get('limit') ?? 50) || 50
+    const keyRaw = Number(url.searchParams.get('keyId'))
+    const keyId = Number.isFinite(keyRaw) && keyRaw > 0 ? keyRaw : null
+    const resultRaw = url.searchParams.get('result')
+    const holdRaw = url.searchParams.get('hold')
+    const query: ReviewQuery = {
+      keyId,
+      result: resultRaw === 'win' || resultRaw === 'loss' ? resultRaw : null,
+      hold: holdRaw === 'lt30' || holdRaw === 'gte30' ? holdRaw : null,
+      order: url.searchParams.get('order') === 'desc' ? 'desc' : 'asc'
+    }
+    const [reviews, keys, total] = await Promise.all([
+      listReviews(me.id, kind, limit, query),
+      listExchangeKeys(me.id, {all: true}),
+      countReviews(me.id, kind, query)
+    ])
+    /* 账户清单一起回：前端那颗筛选器照着画，省得再请求一次 */
+    const accounts = keys.map(k => ({id: k.id, name: k.name}))
+    return sendJson(res, 200, {reviews, kind, accounts, total})
+  }
+
+  /*
+   * 周期总结（2026-10-22 晚）：自己选一段时间 → 出这一段的总结。
+   * ⚠️ 直接从成交账本算，**不读 `trade_reviews`** —— 所以没有「补历史」、也没有默认同步。
+   */
+  if (p === '/api/review-summary' && method === 'GET') {
+    const fromRaw = Number(url.searchParams.get('from'))
+    const toRaw = Number(url.searchParams.get('to'))
+    const keyRaw = Number(url.searchParams.get('keyId'))
+    const summary = await summarizeRange(
+      me.id,
+      Number.isFinite(keyRaw) && keyRaw > 0 ? keyRaw : null,
+      Number.isFinite(fromRaw) && fromRaw > 0 ? fromRaw : null,
+      Number.isFinite(toRaw) && toRaw > 0 ? toRaw : null
+    )
+    const keys = await listExchangeKeys(me.id, {all: true})
+    return sendJson(res, 200, {
+      summary,
+      accounts: keys.map(k => ({id: k.id, name: k.name}))
+    })
+  }
+
+  /*
+   * 仓位明细（2026-10-22 晚）：**单位是仓位周期**（0 → 加仓 → 减仓 → 归零），
+   * 不是单张成交 —— 用户：「不要以每笔为单位，因为一次交易可能拆成多个订单」。
+   */
+  if (p === '/api/position-cycles' && method === 'GET') {
+    const fromRaw = Number(url.searchParams.get('from'))
+    const toRaw = Number(url.searchParams.get('to'))
+    const keyRaw = Number(url.searchParams.get('keyId'))
+    const limit = Number(url.searchParams.get('limit') ?? 200) || 200
+    const cycles = await listCycleDetails(
+      me.id,
+      Number.isFinite(keyRaw) && keyRaw > 0 ? keyRaw : null,
+      Number.isFinite(fromRaw) && fromRaw > 0 ? fromRaw : null,
+      Number.isFinite(toRaw) && toRaw > 0 ? toRaw : null,
+      limit
+    )
+    return sendJson(res, 200, {cycles})
+  }
+
+  if (p === '/api/reviews/summary' && method === 'GET') {
+    const summaries = await listReviews(me.id, 'summary', 50)
+    return sendJson(res, 200, {summaries})
+  }
+
+  if (p.startsWith('/api/reviews/') && method === 'GET') {
+    const id = Number(p.slice('/api/reviews/'.length))
+    if (!Number.isFinite(id)) return sendJson(res, 400, {error: 'id 不合法'})
+    const review = await getReview(me.id, id)
+    if (!review) return sendJson(res, 404, {error: '没有这条复盘'})
+    return sendJson(res, 200, {review})
+  }
+
+  /*
+   * 给历史仓位补复盘（这张表上线之前平掉的单子没有 plan）。
+   * 幂等：已经复盘过的那一笔会跳过。只在用户自己点「补历史」时跑一次。
+   */
+  if (p === '/api/reviews/backfill' && method === 'POST') {
+    const keys = await listExchangeKeys(me.id, {all: true})
+    let created = 0
+    for (const k of keys) {
+      try {
+        created += await backfillReviews(me.id, k.id)
+      } catch (e) {
+        console.error(`[reviews] 回填 ${k.id} 失败：`, (e as Error).message)
+      }
+    }
+    return sendJson(res, 200, {ok: true, created})
   }
 
   /** 置顶 / 取消置顶（行情表那颗星按一下就是切换） */
@@ -6843,6 +6959,16 @@ async function main(): Promise<void> {
    * 它同时也让那条流常开 —— 前端没在看行情时提醒照样有效。
    */
   startPriceAlerts()
+
+  /*
+   * 持仓日志（2026-10-22）：默认**不跑**了 ——
+   * 用户当晚改口：「复盘改成自己选一段周期来总结，补历史去掉、默认同步也去掉」。
+   *
+   * 现在复盘页直接从成交账本算（`summarizeRange`），不需要提前落 `position_plans`；
+   * 这一跳留着只作手动/脚本入口（`syncPositionJournal` 仍在 `data/trade-review.ts`），
+   * 不再挂定时器 —— 免得每分钟白跑一轮 SQL。
+   */
+
 
   /*
    * 清掉过期的登录会话（启动一次 + 每天一次就够）。

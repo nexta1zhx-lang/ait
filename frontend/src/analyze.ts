@@ -175,7 +175,7 @@ export type LeftTab = (typeof LEFT_TABS)[number]['value'] | 'chart' | 'test'
  * ⚠️ 状态放在模块作用域，不是 `AutoPredictView` 里：一级 tab 切走那个组件就卸载了，
  *    而「点分析 / 点 ✓」都要能把人直接送到 `live` 那一格（见 `onRun` / `confirmTestPoint`）。
  */
-export type AutoTab = 'scan' | 'live' | 'ai' | 'alerts'
+export type AutoTab = 'scan' | 'live' | 'ai' | 'alerts' | 'reviews'
 export const autoTab = ref<AutoTab>('scan')
 
 /** 窄屏断点 —— 跟 CSS 里 ≤900px 那套对齐（手机上「K 线」是单独一格） */
