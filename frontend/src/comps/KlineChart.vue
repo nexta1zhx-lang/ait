@@ -825,6 +825,8 @@ interface OrderLine {
   labelColor?: string
   /** 挂单才有的单号：标签上会冒出一颗「✕」，点了确认就能撤（用户 2026-10-06） */
   cancelId?: string
+  /** 是否为 Algo 条件单（止盈 / 止损） */
+  conditional?: boolean
   /**
    * 这条线**能不能拖**（拖了会怎样）。
    *
@@ -1086,6 +1088,7 @@ function orderLineList(): OrderLine[] {
         label: lab.label,
         labelColor: lab.color,
         cancelId: o.id,
+        conditional: orderKind(o) !== 'plain',
         /* 拖着它走 = **改单**（撤旧的、挂新价）；认不出平的是哪条就只给看、不给拖 */
         drag: target
           ? {
@@ -1249,6 +1252,7 @@ let ordLabels: {
   lineIdx: number
   /** 挂单才有：点了它就去撤这张单 */
   cancelId?: string
+  conditional?: boolean
 }[] = []
 
 /** 现在露出一颗「✕」的是哪颗标签（点一下标签出✕，再点别处收起来） */
@@ -1283,7 +1287,12 @@ let dragPreviewParts: HTMLElement[] = []
  *    所以这一步必须问一次 —— 走全站那个确认框（`askConfirm`），别用 `window.confirm`
  *    （系统默认那种改不了样式，也压不过图上的东西）。
  */
-async function cancelOrderAsk(id: string, symbol: string, price: number): Promise<void> {
+async function cancelOrderAsk(
+  id: string,
+  symbol: string,
+  price: number,
+  conditional = false
+): Promise<void> {
   const name = baseToName(symbol)
   const ok = await askConfirm({
     title: `撤掉 ${name} 这张挂单？`,
@@ -1296,7 +1305,7 @@ async function cancelOrderAsk(id: string, symbol: string, price: number): Promis
   })
   if (!ok) return
   try {
-    const r = await cancelTradeOrder(symbol, id, tradeKey.value?.id)
+    const r = await cancelTradeOrder(symbol, id, tradeKey.value?.id, conditional)
     if (!r.ok) {
       emit('note', r.error || '撤单失败', 'bad')
       return
@@ -1365,6 +1374,7 @@ function renderOrdLabels(lines: OrderLine[]): void {
     items.every(
       (x, k) =>
         !!x.l.cancelId === !!ordLabels[k]!.cancelId &&
+        !!x.l.conditional === !!ordLabels[k]!.conditional &&
         x.l.label!.length === ordLabels[k]!.parts.length
     )
   if (!sameShape) {
@@ -1414,7 +1424,12 @@ function renderOrdLabels(lines: OrderLine[]): void {
         }
         x.addEventListener('click', e => {
           e.stopPropagation()
-          void cancelOrderAsk(l.cancelId!, overlaySymbol.value, l.p)
+          void cancelOrderAsk(
+            l.cancelId!,
+            overlaySymbol.value,
+            l.p,
+            l.conditional
+          )
         })
         el.appendChild(x)
       }
@@ -1426,7 +1441,8 @@ function renderOrdLabels(lines: OrderLine[]): void {
         parts,
         drag: l.drag ?? null,
         lineIdx: i,
-        cancelId: l.cancelId
+        cancelId: l.cancelId,
+        conditional: l.conditional
       }
     })
   }
@@ -1437,6 +1453,7 @@ function renderOrdLabels(lines: OrderLine[]): void {
     item.drag = lv.drag ?? null
     item.lineIdx = items[k]!.i
     item.cancelId = lv.cancelId
+    item.conditional = lv.conditional
     const color = lv.labelColor ?? lv.color
     lv.label!.forEach((t, j) => {
       const el = item.parts[j]

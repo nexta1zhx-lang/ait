@@ -657,7 +657,12 @@ async function cancelOrderEdit(): Promise<void> {
   if (!t || orderBusy.value) return
   orderBusy.value = true
   try {
-    await cancelTradeOrder(t.raw, t.id, t.keyId)
+    await cancelTradeOrder(
+      t.raw,
+      t.id,
+      t.keyId,
+      /STOP|TAKE_PROFIT/i.test(t.type)
+    )
     sayMsg(`${t.name} 已撤单`, 'ok')
     editTarget.value = null
   } catch (e) {
@@ -687,7 +692,12 @@ function keyNameOf(id?: number): string {
  *    去掉，都是真单」）—— 只留一句人话说明代价（平仓保护没了），确认键走 `danger` 就够。
  */
 async function cancelListedOrders(p: {
-  items: {keyId?: number; symbol: string; orderId: string}[]
+  items: {
+    keyId?: number
+    symbol: string
+    orderId: string
+    conditional?: boolean
+  }[]
   what: string
 }): Promise<void> {
   if (!p.items.length || cancellingAll.value) return
@@ -983,7 +993,7 @@ async function saveTpSl(actions: TpSlAction[]): Promise<void> {
       const what = a.kind === 'profit' ? '止盈' : '止损'
       try {
         if (a.cancel && a.id) {
-          const r = await cancelTradeOrder(t.raw, a.id, t.keyId)
+          const r = await cancelTradeOrder(t.raw, a.id, t.keyId, true)
           if (!r.ok) bad.push(`撤${what}：${r.error || '失败'}`)
           else done++
           continue

@@ -1214,7 +1214,8 @@ export async function listOpenOrders(
   const raw: any[] = [...((normal as any[]) ?? []), ...((algo as any[]) ?? [])]
   const out: OpenOrderRow[] = []
   for (const o of raw) {
-    const id = String(o?.id ?? '')
+    /* Algo 条件单撤单接口认的是 algoId；优先用原始字段避免 ccxt 归一 ID 不一致。 */
+    const id = String(o?.info?.algoId ?? o?.id ?? '')
     /* ⚠️ 用 `info.symbol`（币安原始 `1000BONKUSDT`）优先，ccxt 那个是统一写法
        `1000BONK/USDT:USDT` —— 前端要拿它跟合约表里的 symbol 对得上 */
     const sym = String(o?.info?.symbol ?? o?.symbol ?? symbol ?? '').toUpperCase()
@@ -1721,7 +1722,7 @@ export async function placeStopOrder(
 
   let canceled: string | undefined
   if (input.orderId) {
-    await cancelAnyOrder(ex, symbol, input.orderId)
+    await cancelAnyOrder(ex, symbol, input.orderId, true)
     canceled = input.orderId
   }
 
@@ -1761,7 +1762,12 @@ export async function placeStopOrder(
       ? {positionSide: input.posSide === 'SHORT' ? 'SHORT' : 'LONG'}
       : {reduceOnly: true}),
     test: false,
-    orderId: r?.id === undefined ? undefined : String(r.id),
+    orderId:
+      r?.info?.algoId !== undefined
+        ? String(r.info.algoId)
+        : r?.id === undefined
+          ? undefined
+          : String(r.id),
     status: r?.status === undefined ? undefined : String(r.status),
     canceled,
     kind,
@@ -1780,13 +1786,14 @@ export async function placeStopOrder(
 export async function cancelTradeOrder(
   c: ExchangeCredentials,
   symbol: string,
-  orderId: string
+  orderId: string,
+  conditional = false
 ): Promise<{orderId: string; symbol: string}> {
   assertTradable(c)
   if (!orderId) throw new Error('缺单号')
   const ex = createExchange(c)
   const spec = await specFor(c, symbol)
-  await cancelAnyOrder(ex, spec.symbol, orderId)
+  await cancelAnyOrder(ex, spec.symbol, orderId, conditional)
   return {orderId, symbol: spec.symbol}
 }
 
@@ -1804,6 +1811,8 @@ export interface CancelOrderItem {
   /** 币安原始符号（`1000BONKUSDT`） */
   symbol: string
   orderId: string
+  /** 已知是 Algo 条件单时只走条件单撤单接口，避免误撤同 ID 的普通订单 */
+  conditional?: boolean
 }
 
 export interface CancelOrdersResult {
@@ -1835,7 +1844,11 @@ export async function cancelTradeOrders(
     const symbol = String(it?.symbol ?? '').trim()
     const orderId = String(it?.orderId ?? '').trim()
     if (!symbol || !orderId) continue
-    uniq.set(`${symbol.toUpperCase()}|${orderId}`, {symbol, orderId})
+    uniq.set(`${symbol.toUpperCase()}|${orderId}`, {
+      symbol,
+      orderId,
+      conditional: it.conditional === true
+    })
   }
   const list = [...uniq.values()].slice(0, CANCEL_MAX)
   const cancelled: CancelOrdersResult['cancelled'] = []
@@ -1855,7 +1868,7 @@ export async function cancelTradeOrders(
         symbol = (await specFor(c, it.symbol)).symbol
         cache.set(k, symbol)
       }
-      await cancelAnyOrder(ex, symbol, it.orderId)
+      await cancelAnyOrder(ex, symbol, it.orderId, it.conditional)
       cancelled.push(it)
     } catch (e) {
       const error = humanizeTrade(e)
@@ -1880,8 +1893,13 @@ export async function cancelTradeOrders(
 async function cancelAnyOrder(
   ex: any,
   symbol: string,
-  orderId: string
+  orderId: string,
+  conditional = false
 ): Promise<void> {
+  if (conditional) {
+    await ex.cancelOrder(orderId, symbol, {conditional: true})
+    return
+  }
   try {
     await ex.cancelOrder(orderId, symbol)
     return
@@ -2087,7 +2105,12 @@ export async function cancelOrphanOrders(
     out.checked++
     if (live.has(`${o.symbol}|${closes(o)}`)) continue
     try {
-      await cancelAnyOrder(ex, o.symbol, o.id)
+      await cancelAnyOrder(
+        ex,
+        o.symbol,
+        o.id,
+        /STOP|TAKE_PROFIT/i.test(o.type)
+      )
       out.cancelled.push({symbol: o.symbol, orderId: o.id, amount: o.amount})
     } catch (e) {
       out.failed.push({symbol: o.symbol, orderId: o.id, error: humanize(e)})

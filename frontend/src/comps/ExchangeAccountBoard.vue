@@ -183,7 +183,18 @@ const emit = defineEmits<{
    * 跟着当前账户 + 那一格的币种/类型筛选走，每项自带 `keyId`（「全部」可能横跨两套）。
    * 真正的二次确认 + 调接口在外层（只有它知道账户名、也只有它能提示结果）。
    */
-  (e: 'cancelAll', v: {items: {keyId?: number; symbol: string; orderId: string}[]; what: string}): void
+  (
+    e: 'cancelAll',
+    v: {
+      items: {
+        keyId?: number
+        symbol: string
+        orderId: string
+        conditional?: boolean
+      }[]
+      what: string
+    }
+  ): void
   /**
    * 点「挂单」列表里的一行 = 改这张单。
    * 交出去的是**这一张单 + 它对应的仓位 / 标记价**（见 `orderEditOf`）——
@@ -799,12 +810,22 @@ const ordRangeText = computed(() => {
 
 /** 交给外层的撤单载荷（列表里现在这些） */
 function cancelAllPayload(): {
-  items: {keyId?: number; symbol: string; orderId: string}[]
+  items: {
+    keyId?: number
+    symbol: string
+    orderId: string
+    conditional?: boolean
+  }[]
   what: string
 } {
   return {
     items: filteredOrderGroups.value.flatMap(g =>
-      g.rows.map(o => ({keyId: o.keyId, symbol: o.symbol, orderId: o.id}))
+      g.rows.map(o => ({
+        keyId: o.keyId,
+        symbol: o.symbol,
+        orderId: o.id,
+        conditional: orderKind(o) !== 'plain'
+      }))
     ),
     what: ordRangeText.value || '全部挂单'
   }

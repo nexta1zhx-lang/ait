@@ -143,6 +143,10 @@ async function readPositionAfter(
  * 加仓会再调一次 ⇒ 按新均价撤旧换新。
  */
 export async function ensureAutoStop(input: AutoStopInput): Promise<AutoStopResult> {
+  return enqueueProtect(input.keyId, () => ensureAutoStopNow(input))
+}
+
+async function ensureAutoStopNow(input: AutoStopInput): Promise<AutoStopResult> {
   const pct = Number(input.pct)
   /*
    * `keepPrice`（减仓「只收数量」那条）**不需要百分比** —— 触发价拿原来那张的，
@@ -265,96 +269,131 @@ export async function ensureAutoStop(input: AutoStopInput): Promise<AutoStopResu
   }
 }
 
-/* ---------------- 加仓后把已有止盈放大到全部仓位 ---------------- */
+/* ---------------- 加仓后把「100% 的保护单」重新放回 100% ---------------- */
 
 /**
- * 加仓后**止盈**怎么改（用户 2026-10-15 晚上：「有仓位止盈的话，加仓之后把加仓的
- * 单子也要放到止盈里面去，变成百分之百」）。
+ * 加仓后**止盈 / 止损**怎么改。
  *
- * 跟自动止损不一样：止盈的价是**用户自己设的**，这里只动数量，**绝不改触发价**。
- * 口径：
+ * 用户 2026-10-15 晚：「有仓位止盈的话，加仓之后把加仓的单子也要放到止盈里面去，
+ * 变成百分之百」；2026-10-24：「我加仓之后止损并没有自动加仓到百分之百……
+ * 我已经有的手工订单，如果原来都是 100% 的状态，都要自动改为 100%」。
+ *
+ * 口径（止盈、止损、手工挂的**一视同仁**）：
  *   · 只处理「加仓」（`before > 0` 且新仓位更大）；
- *   · 一张止盈 ⇒ 数量改成**加仓后的全部仓位**（原来是 100% 的仍然是 100%）；
- *   · 多张（分批止盈）/ `closePosition`（数量 0，本来就覆盖全仓）/ 数量已对上 ⇒ **不动**。
+ *   · 加仓前就是 **100%**（数量 ≈ 加仓前的整个仓位）的那几张 ⇒ 数量改成**加仓后的
+ *     全部仓位**，触发价**一分不动**（价是用户自己定的）；
+ *   · 部分止盈 / 部分止损（本来就不是 100%）⇒ **不动**，那是用户刻意的分批分布；
+ *   · `closePosition`（数量 0）本来就跟着仓位走 ⇒ 不动；数量已经对上 ⇒ 不动。
+ *
+ * ⚠️ 以前这里只认「一张止盈」、遇到多张就整组跳过，止损那边更是只认自己挂的自动单 ——
+ *    表现就是用户看到的：加仓之后止损还停在旧数量上（手工那张压根没被碰过）。
  *
  * 拆成纯函数是为了**能拿假数据在本地验**（这条链会真撤单 / 真挂单，不能靠猜）。
  */
-export type TakeProfitPlan =
+export interface ProtectFullChange {
+  orderId: string
+  kind: 'profit' | 'stop'
+  /** 触发价（不改，只是撤旧挂新时要带上） */
+  stopPrice: number
+  /** 加仓前多少张 */
+  from: number
+  /** 要改成多少张（= 加仓后的全部仓位） */
+  quantity: number
+}
+
+export type ProtectFullSkip =
+  | 'not-add'
+  | 'not-grown'
+  | 'no-orders'
+  | 'partial-only'
+  | 'unchanged'
+  | 'no-position'
+
+export type ProtectFullPlan =
   | {
       action: 'skip'
-      reason:
-        | 'not-add'
-        | 'not-grown'
-        | 'no-tp'
-        | 'multiple-tp'
-        | 'close-position'
-        | 'unchanged'
-        | 'no-price'
-      price?: number
+      reason: Exclude<ProtectFullSkip, 'no-position'>
       quantity?: number
-      orderId?: string
     }
-  | {action: 'resize'; orderId: string; stopPrice: number; quantity: number; from: number}
+  | {action: 'resize'; changes: ProtectFullChange[]; quantity: number}
 
-export function planTakeProfitResize(input: {
+/** 「加仓前就是 100%」的容差：交易所按步长向下取整，差一步不该当成「部分平仓」 */
+const FULL_TOL = 0.005
+
+export function planProtectFull(input: {
   /** 加仓前这个方向的数量 */
   before: number
   /** 加仓后这个方向的数量 */
   amount: number
-  /** 这个方向上已有的止盈单（调用方已按 symbol + 平仓侧筛过） */
-  tps: {id?: unknown; amount?: unknown; stopPrice?: unknown}[]
-}): TakeProfitPlan {
+  /** 这个方向上已有的保护单（调用方已按 symbol + 平仓侧 + 方向筛过） */
+  orders: {id?: unknown; type?: unknown; amount?: unknown; stopPrice?: unknown}[]
+}): ProtectFullPlan {
   const before = Math.abs(Number(input.before) || 0)
   const amount = Math.abs(Number(input.amount) || 0)
   if (!(before > 0)) return {action: 'skip', reason: 'not-add'}
   if (!(amount > before + 1e-9))
     return {action: 'skip', reason: 'not-grown', quantity: amount}
-  const tps = input.tps
-  if (!tps.length) return {action: 'skip', reason: 'no-tp'}
-  /* 分批止盈没法猜哪张该覆盖全仓 —— 猜错就把用户自己的分布改坏了 */
-  if (tps.length > 1)
-    return {action: 'skip', reason: 'multiple-tp', quantity: amount}
-  const tp = tps[0]!
-  const orderId = String(tp.id ?? '')
-  const from = Math.abs(Number(tp.amount) || 0)
-  const stopPrice = Number(tp.stopPrice) || 0
-  /* 数量 0 = `closePosition`（全仓平）—— 本来就覆盖全部仓位 */
-  if (!(from > 0))
+  if (!input.orders.length) return {action: 'skip', reason: 'no-orders'}
+
+  const changes: ProtectFullChange[] = []
+  let sawFull = false
+  for (const o of input.orders) {
+    const orderId = String(o.id ?? '')
+    const from = Math.abs(Number(o.amount) || 0)
+    const stopPrice = Number(o.stopPrice) || 0
+    /* 没触发价 / 没单号 ⇒ 没法撤旧挂新 */
+    if (!(stopPrice > 0) || !orderId) continue
+    /* 数量 0 = `closePosition`（本来就跟着仓位走）⇒ 已经是 100%，不用改 */
+    if (!(from > 0)) {
+      sawFull = true
+      continue
+    }
+    /* 加仓前不是 100% 的（分批止盈 / 部分止损）保持用户自己的分布 */
+    if (from < before * (1 - FULL_TOL)) continue
+    sawFull = true
+    if (Math.abs(from - amount) < 1e-9) continue
+    changes.push({
+      orderId,
+      kind: String(o.type ?? '').toUpperCase().includes('TAKE_PROFIT')
+        ? 'profit'
+        : 'stop',
+      stopPrice,
+      from,
+      quantity: amount
+    })
+  }
+  if (!changes.length)
     return {
       action: 'skip',
-      reason: 'close-position',
-      price: stopPrice,
-      quantity: amount,
-      orderId
+      reason: sawFull ? 'unchanged' : 'partial-only',
+      quantity: amount
     }
-  if (Math.abs(from - amount) < 1e-9)
-    return {
-      action: 'skip',
-      reason: 'unchanged',
-      price: stopPrice,
-      quantity: from,
-      orderId
-    }
-  if (!(stopPrice > 0))
-    return {action: 'skip', reason: 'no-price', quantity: amount, orderId}
-  return {action: 'resize', orderId, stopPrice, quantity: amount, from}
+  return {action: 'resize', changes, quantity: amount}
 }
 
-export type TakeProfitSkip =
-  | Extract<TakeProfitPlan, {action: 'skip'}>['reason']
-  | 'no-position'
-
-export interface TakeProfitResult {
+/**
+ * 加仓后放回 100% 的结果（**止盈 / 止损共用一份**）。
+ *
+ * `ok && !skipped` 才是真的改了（撤旧挂新）；带 `skipped` 的都是「没动」。
+ */
+export interface ProtectFullResult {
   ok: boolean
   /** 没做 / 为什么没做 */
-  skipped?: TakeProfitSkip
+  skipped?: ProtectFullSkip
+  /** 改完那几张里第一张的触发价（提示用） */
   price?: number
+  /** 改完的数量（= 加仓后的全部仓位） */
   quantity?: number
   orderId?: string
   /** 撤掉的旧单号（改数量 = 撤旧挂新） */
   replaced?: string
+  /** 一共改了几张（止盈 / 止损各自可能都有一张 100% 的） */
+  changed?: number
   error?: string
 }
+
+export type TakeProfitResult = ProtectFullResult
+export type StopLossResult = ProtectFullResult
 
 export type TakeProfitInput = Omit<
   AutoStopInput,
@@ -367,11 +406,6 @@ export type TakeProfitInput = Omit<
   test?: boolean
 }
 
-/**
- * 加仓之后，把已有的那张止盈**数量**放大到加仓后的全部仓位（触发价不动）。
- *
- * 失败**绝不能**影响已经成交的加仓单：调用方只把结果推给前端提示一句。
- */
 /**
  * 「改保护单数量」这类后台任务 **同一套 Key 串行**。
  *
@@ -395,100 +429,147 @@ function enqueueProtect<T>(keyId: number, fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-/** 加仓后止盈放大（串行，见 `enqueueProtect`） */
+/** 加仓后止盈放回 100%（串行，见 `enqueueProtect`） */
 export function ensureTakeProfitFull(
   input: TakeProfitInput
 ): Promise<TakeProfitResult> {
-  return enqueueProtect(input.keyId, () => ensureTakeProfitFullNow(input))
+  return enqueueProtect(input.keyId, () => growProtectNow(input, 'profit'))
 }
 
-async function ensureTakeProfitFullNow(
+/**
+ * 加仓后把「加仓前是 100%」的止损放回 100%（**手工挂的那张也算**，触发价不动）。
+ *
+ * 用户 2026-10-24：「我加仓之后止损并没有自动加仓到百分之百」+「我已经有的手工订单，
+ * 如果原来都是 100% 的状态，都要自动改为 100%」。
+ */
+export function ensureStopLossFull(
   input: TakeProfitInput
-): Promise<TakeProfitResult> {
+): Promise<StopLossResult> {
+  return enqueueProtect(input.keyId, () => growProtectNow(input, 'stop'))
+}
+
+/** 加仓后把这一侧（止盈 / 止损）所有 100% 的保护单放回 100% */
+async function growProtectNow(
+  input: TakeProfitInput,
+  kind: 'profit' | 'stop'
+): Promise<ProtectFullResult> {
   const symbol = String(input.symbol ?? '').toUpperCase()
   const before = Math.abs(Number(input.before) || 0)
+  const label = kind === 'profit' ? '止盈' : '止损'
   try {
     const pos = await readPositionAfter({...input, symbol}, before)
     if (!pos) return {ok: false, skipped: 'no-position'}
 
     const closing: 'buy' | 'sell' = input.side === 'long' ? 'sell' : 'buy'
+    const posSide = input.side === 'long' ? 'LONG' : 'SHORT'
     /*
-     * 条件单跟止损在同一套接口上（`listOpenOrders` 两路都拉）。
-     * ⚠️ 只认**平这个方向的那一侧**：多单的止盈是 SELL，空单是 BUY；
-     *    `TAKE_PROFIT_MARKET` 命中，`STOP_MARKET` 不含这个词，不会混进来。
+     * 条件单跟自动止损在同一套接口上（`listOpenOrders` 两路都拉）。
+     * ⚠️ 只认**平这个方向的那一侧**：多单的止盈止损是 SELL，空单是 BUY；
+     *    `posSide` 只在双向持仓模式下才有意义（单向模式币安回 `BOTH`）。
      */
-    const all = await listOpenOrders(input.creds, symbol)
-    const tps = all.filter(
+    const mine = (await listOpenOrders(input.creds, symbol)).filter(
       o =>
         String(o.symbol ?? '').toUpperCase() === symbol &&
         String(o.side ?? '').toLowerCase() === closing &&
-        String(o.type ?? '').toUpperCase().includes('TAKE_PROFIT')
+        (o.posSide === 'BOTH' || o.posSide === posSide) &&
+        (kind === 'profit'
+          ? String(o.type ?? '').toUpperCase().includes('TAKE_PROFIT')
+          : String(o.type ?? '').toUpperCase().includes('STOP'))
     )
-    const plan = planTakeProfitResize({before, amount: pos.amount, tps})
+    const plan = planProtectFull({before, amount: pos.amount, orders: mine})
     if (plan.action === 'skip')
       return {
         /* `unchanged` 也算成功：本来就已经覆盖全仓了 */
         ok: plan.reason === 'unchanged',
         skipped: plan.reason,
-        price: plan.price,
-        quantity: plan.quantity,
-        orderId: plan.orderId
+        quantity: plan.quantity
       }
 
     const dual =
       input.dual ?? (await isDualSide(createExchange(input.creds), input.keyId))
-    const posSide = input.side === 'long' ? 'LONG' : 'SHORT'
     const test = input.test === true
-    try {
-      const placed = await placeStopOrder(input.creds, input.keyId, {
-        symbol,
-        side: closing,
-        kind: 'profit',
-        stopPrice: plan.stopPrice,
-        quantity: plan.quantity,
-        /* 双向持仓必须带 positionSide，否则会被当成 LONG */
-        posSide: dual ? posSide : undefined,
-        /* 撤旧挂新：`placeStopOrder` 看到 orderId 会先撤掉它（测试模式不会撤） */
-        orderId: plan.orderId || undefined,
-        test
-      })
-      console.log(
-        `[止盈调整] ${symbol} ${input.side} 加仓后 ${plan.from} → ${placed.quantity}` +
-          `（全部仓位）触发价 ${placed.stopPrice}` +
-          `${placed.canceled ? ` 撤旧单 ${placed.canceled}` : ''}` +
-          `${test ? ' [测试]' : ''}`
-      )
-      return {
-        ok: true,
-        price: placed.stopPrice,
-        quantity: placed.quantity,
-        orderId:
-          placed.orderId === undefined ? undefined : String(placed.orderId),
-        replaced: placed.canceled
-      }
-    } catch (e) {
-      /*
-       * 「撤旧挂新」是两步：撤完再挂失败，仓位就**没有止盈**了。
-       * 尽力按原来的数量挂回去（价不变），再把错报上去。
-       * ⚠️ 测试模式根本没撤单，不需要（也不该）回挂。
-       */
-      if (!test)
-        await placeStopOrder(input.creds, input.keyId, {
+    /* 哪几张是我们自己挂的（自动止损）—— 改完要按**新单号**把标记写回去 */
+    const marks = new Map(
+      (await listOpenOrdersDb(input.userId, input.keyId)).map(o => [
+        String(o.orderId),
+        String(o.source ?? '')
+      ])
+    )
+    const out: ProtectFullResult = {ok: true, quantity: plan.quantity, changed: 0}
+    for (const change of plan.changes) {
+      const order = mine.find(o => String(o.id) === change.orderId)
+      if (!order) continue
+      try {
+        const placed = await placeStopOrder(input.creds, input.keyId, {
           symbol,
           side: closing,
-          kind: 'profit',
-          stopPrice: plan.stopPrice,
-          quantity: plan.from,
+          kind: change.kind,
+          stopPrice: change.stopPrice,
+          quantity: change.quantity,
+          /* 双向持仓必须带 positionSide，否则会被当成 LONG */
           posSide: dual ? posSide : undefined,
-          test: false
-        }).catch(restoreErr => {
-          console.warn(
-            `[止盈调整] ${symbol} 改数量失败后，按原数量回挂也失败：` +
-              `${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`
-          )
+          /* 撤旧挂新：`placeStopOrder` 看到 orderId 会先撤掉它（测试模式不撤） */
+          orderId: change.orderId,
+          test
         })
-      throw e
+        const source = marks.get(change.orderId) ?? ''
+        if (!test && source && placed.orderId)
+          await upsertOpenOrder(input.userId, input.keyId, {
+            orderId: String(placed.orderId),
+            symbol,
+            side: closing,
+            type: placed.type,
+            posSide: dual ? posSide : 'BOTH',
+            price: null,
+            stopPrice: placed.stopPrice ?? change.stopPrice,
+            amount: placed.quantity ?? change.quantity,
+            filled: 0,
+            reduceOnly: order.reduceOnly,
+            time: Date.now(),
+            source
+          })
+        console.log(
+          `[${label}调整] ${symbol} ${input.side} 加仓后 ${change.from} → ${placed.quantity}` +
+            `（全部仓位）触发价 ${placed.stopPrice}` +
+            `${placed.canceled ? ` 撤旧单 ${placed.canceled}` : ''}` +
+            `${test ? ' [测试]' : ''}`
+        )
+        out.changed = (out.changed ?? 0) + 1
+        out.price = placed.stopPrice
+        out.orderId =
+          placed.orderId === undefined ? undefined : String(placed.orderId)
+        out.replaced = placed.canceled
+      } catch (e) {
+        out.ok = false
+        out.error = e instanceof Error ? e.message : String(e)
+        /*
+         * 「撤旧挂新」是两步：撤完再挂失败，仓位就**没有这一张保护**了。
+         * 尽力按原来的数量挂回去（价不变），再把错报上去。
+         * ⚠️ 测试模式根本没撤单，不需要（也不该）回挂。
+         */
+        if (!test)
+          await placeStopOrder(input.creds, input.keyId, {
+            symbol,
+            side: closing,
+            kind: change.kind,
+            stopPrice: change.stopPrice,
+            quantity: change.from,
+            posSide: dual ? posSide : undefined,
+            test: false
+          }).catch(restoreErr => {
+            console.warn(
+              `[${label}调整] ${symbol} 改数量失败后，按原数量回挂也失败：` +
+                `${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`
+            )
+          })
+      }
     }
+    /* 一张都没改成（都被撤掉了 / 对不上号）⇒ 别说「已放回 100%」 */
+    if (!out.changed) {
+      out.ok = false
+      out.error = `${label}单已经不在场上了（可能刚被撤或刚成交），刷新再看`
+    }
+    return out
   } catch (e) {
     return {ok: false, error: e instanceof Error ? e.message : String(e)}
   }

@@ -18,6 +18,7 @@
     "build:all": "npm run build && npm run ui:build",
     "typecheck": "tsc -p backend/tsconfig.json --noEmit",
     "selftest": "tsx backend/src/scripts/selftest.ts",
+    "check:protect": "tsx backend/src/scripts/check-protect.ts",
     "sync:contracts": "tsx backend/src/sync.ts",
     "db:up": "docker compose up -d db",
     "db:down": "docker compose down",

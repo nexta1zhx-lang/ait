@@ -20,6 +20,7 @@ import {
   exchangeStream,
   fetchTradePositions,
   type AutoProtectPush,
+  type AutoSlPush,
   type AutoStopPush,
   type AutoTpPush,
   type FuturesPosition,
@@ -121,6 +122,13 @@ const autoTpListeners = new Set<(r: AutoTpPush) => void>()
 export function onAutoTp(cb: (r: AutoTpPush) => void): () => void {
   autoTpListeners.add(cb)
   return () => autoTpListeners.delete(cb)
+}
+
+const autoSlListeners = new Set<(r: AutoSlPush) => void>()
+
+export function onAutoSl(cb: (r: AutoSlPush) => void): () => void {
+  autoSlListeners.add(cb)
+  return () => autoSlListeners.delete(cb)
 }
 
 /** 订阅「减仓后止盈 / 止损收数量完了」（后台改的；见平仓接口） */
@@ -329,6 +337,9 @@ function start(keyId: number): void {
       /* 加仓后止盈放大完了 ⇒ 同样转给订阅者 */
       autoTp: r => {
         for (const cb of autoTpListeners) cb(r)
+      },
+      autoSl: r => {
+        for (const cb of autoSlListeners) cb(r)
       },
       /* 减仓后止盈止损收数量完了 ⇒ 同样转给订阅者 */
       autoProtect: r => {

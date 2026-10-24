@@ -68,6 +68,7 @@ import {
   availableBalanceOf,
   bindPositions,
   onAutoProtect,
+  onAutoSl,
   onAutoStop,
   onAutoTp,
   positionsAt,
@@ -207,19 +208,34 @@ const stopAutoStop = onAutoStop(r => {
  * **加仓后止盈跟着放大到全部仓位**（后台改的，用户 2026-10-15：「把加仓的单子也要
  * 放到止盈里面去，变成百分之百」）。
  *
- * 只有**真改了**（`ok && !skipped`）才提示；`unchanged` / 没止盈 / 分批止盈这些
- * 不动的情况不打扰。
+ * 只有**真改了**（`ok && !skipped`）才提示；`unchanged` / 没有止盈 / 只有部分止盈
+ * 这些不动的情况不打扰。
  */
 const stopAutoTp = onAutoTp(r => {
   if (r.ok && !r.skipped) {
     const at = r.price ? ` · 触发价 ${price(r.price)}` : ''
+    const n = (r.changed ?? 0) > 1 ? ` ${r.changed} 张` : ''
     say(
-      `${baseOf(r.symbol)} 加仓后止盈已覆盖全部仓位：${fmt(r.quantity)}${at}`,
+      `${baseOf(r.symbol)} 加仓后止盈${n}已放回 100%：${fmt(r.quantity)}${at}`,
       'ok'
     )
     return
   }
   if (!r.ok && r.error) say(`${baseOf(r.symbol)} 止盈没改过来：${r.error}`, 'bad')
+})
+
+const stopAutoSl = onAutoSl(r => {
+  if (r.ok && !r.skipped) {
+    const at = r.price ? ` · 触发价 ${price(r.price)}` : ''
+    const n = (r.changed ?? 0) > 1 ? ` ${r.changed} 张` : ''
+    say(
+      `${baseOf(r.symbol)} 加仓后止损${n}已放回 100%：${fmt(r.quantity)}${at}`,
+      'ok'
+    )
+    return
+  }
+  if (!r.ok && r.error)
+    say(`${baseOf(r.symbol)} 加仓后止损没放回 100%：${r.error}`, 'bad')
 })
 
 /**
@@ -240,6 +256,7 @@ const stopAutoProtect = onAutoProtect(r => {
 
 onBeforeUnmount(() => {
   stopAutoProtect()
+  stopAutoSl()
   stopAutoTp()
   stopAutoStop()
   unbindPos?.()

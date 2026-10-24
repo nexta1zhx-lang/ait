@@ -45,6 +45,7 @@ import {
   MAX_SYMBOL_LEVERAGE,
   planWindows
 } from '../data/exchange-trade'
+import {planProtectFull} from '../data/auto-stop'
 import {
   KeyStream,
   ORPHAN_SWEEP_GAP_MS,
@@ -558,6 +559,65 @@ function checkTradeLimits(): boolean {
   return ok
 }
 
+function checkProtectFull(): boolean {
+  /*
+   * 加仓后「原来是 100% 的保护单」要回到 100%（用户 2026-10-24）：
+   *   · 止盈 / 止损各一张 100% ⇒ 两张都改成新仓位（价格不动）；
+   *   · 本来就只覆盖一部分的那张 ⇒ 不动（那是用户自己的分批分布）；
+   *   · 数量已经是新仓位 / `closePosition`（数量 0）/ 不是加仓 ⇒ 不动。
+   */
+  const both = planProtectFull({
+    before: 5,
+    amount: 8,
+    orders: [
+      {id: 'tp', type: 'TAKE_PROFIT_MARKET', amount: 5, stopPrice: 120},
+      {id: 'sl', type: 'STOP_MARKET', amount: 5, stopPrice: 90}
+    ]
+  })
+  const partial = planProtectFull({
+    before: 5,
+    amount: 8,
+    orders: [
+      {id: 'tp-full', type: 'TAKE_PROFIT_MARKET', amount: 5, stopPrice: 120},
+      {id: 'sl-part', type: 'STOP_MARKET', amount: 2, stopPrice: 90}
+    ]
+  })
+  const closePosition = planProtectFull({
+    before: 5,
+    amount: 8,
+    orders: [{id: 'full', type: 'STOP_MARKET', amount: 0, stopPrice: 90}]
+  })
+  const unchanged = planProtectFull({
+    before: 5,
+    amount: 8,
+    orders: [{id: 'done', type: 'STOP_MARKET', amount: 8, stopPrice: 90}]
+  })
+  const notAdd = planProtectFull({
+    before: 0,
+    amount: 8,
+    orders: [{id: 'sl', type: 'STOP_MARKET', amount: 8, stopPrice: 90}]
+  })
+  const ok =
+    both.action === 'resize' &&
+    both.changes.length === 2 &&
+    both.changes.every(c => c.quantity === 8) &&
+    both.changes.some(c => c.orderId === 'tp' && c.kind === 'profit') &&
+    both.changes.some(c => c.orderId === 'sl' && c.kind === 'stop') &&
+    partial.action === 'resize' &&
+    partial.changes.length === 1 &&
+    partial.changes[0]!.orderId === 'tp-full' &&
+    closePosition.action === 'skip' &&
+    closePosition.reason === 'unchanged' &&
+    unchanged.action === 'skip' &&
+    unchanged.reason === 'unchanged' &&
+    notAdd.action === 'skip' &&
+    notAdd.reason === 'not-add'
+  if (!ok) console.error('❌ 加仓保护单夹具：100% 的止盈 / 止损没有一起放回 100%')
+  else
+    console.log('✅ 加仓保护单：100% 的止盈 / 止损（含手工）一起放回 100%；部分单与新开仓不改')
+  return ok
+}
+
 /* ------------------------------------------------------------------ */
 /* ⑩ 结论档位与「该不该提醒」                                          */
 /* ------------------------------------------------------------------ */
@@ -828,6 +888,7 @@ if (!checkTierText()) failed = true
 if (!checkPartitions()) failed = true
 if (!checkWindows()) failed = true
 if (!checkTradeLimits()) failed = true
+if (!checkProtectFull()) failed = true
 if (!checkVerdict()) failed = true
 if (!checkAsk()) failed = true
 

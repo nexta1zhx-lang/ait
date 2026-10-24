@@ -215,6 +215,7 @@ import {listPositionHistory, positionMetaOf, type PositionMeta} from './data/pos
 import {
   ensureAutoStop,
   ensureReduceProtection,
+  ensureStopLossFull,
   ensureTakeProfitFull,
   type AutoStopResult
 } from './data/auto-stop'
@@ -839,6 +840,40 @@ const exchangeCredsOf = (k: ExchangeKey): ExchangeCredentials => ({
   marketType: k.marketType,
   sandbox: k.sandbox
 })
+
+/**
+ * **下单前**这个方向有多少张（判断「这一单是不是加仓」用）。
+ *
+ * ⚠️ 不能只看常驻流：流还没起来（刚进页面 / 页面在后台）时 `liveStateOf` 是 `null`，
+ *    数量会被读成 0 ⇒ 加仓被当成「开新仓」，止损 / 止盈就不会放回 100%
+ *    （用户 2026-10-24：「我加仓之后止损并没有自动加仓到百分之百」）。
+ *    这时退回读一次持仓（缓存命中是零权重，不会明显拖慢下单）。
+ * ⚠️ 读不到就算 0：宁可少改一次保护单，也不能把这一单卡住。
+ */
+async function amountBeforeAdd(
+  keyId: number,
+  creds: ExchangeCredentials,
+  symbol: string,
+  side: 'long' | 'short'
+): Promise<number> {
+  const sumOf = (
+    rows: {symbol?: unknown; raw?: unknown; side?: unknown; amount?: unknown}[] | undefined
+  ): number => {
+    const hit = (rows ?? []).find(
+      p =>
+        String(p.raw ?? p.symbol ?? '').toUpperCase() === symbol &&
+        (String(p.side ?? 'long') === 'short' ? 'short' : 'long') === side
+    )
+    return Math.abs(Number(hit?.amount) || 0)
+  }
+  const live = liveStateOf(keyId)
+  if (live) return sumOf(live.positions)
+  try {
+    return sumOf(await getPositions(keyId, creds))
+  } catch {
+    return 0
+  }
+}
 
 /**
  * 库里那条挂单（`OpenOrderInput`）→ **跟实时那条接口逐字一致的形状**。
@@ -1870,6 +1905,10 @@ async function handleExchangeStream(
     if (ev.type === 'auto-tp') {
       const {type: _t, ...rest} = ev
       return send('auto-tp', rest)
+    }
+    if (ev.type === 'auto-sl') {
+      const {type: _t, ...rest} = ev
+      return send('auto-sl', rest)
     }
     /* 减仓后止盈止损收数量（见平仓那段）—— 同样原样推 */
     if (ev.type === 'auto-protect') {
@@ -4953,18 +4992,20 @@ async function tradeInfoFromLive(
         )
       }
       /*
-       * **下单前**这个方向有多少张 —— 两个地方要用：
+       * **下单前**这个方向有多少张 —— 三处要用：
        *   · 自动止损判断「这一单到底落地上没有」；
+       *   · 判断这一单是不是**加仓**（加仓才把 100% 的止盈 / 止损放回 100%）；
        *   · 加仓后把已有止盈放大到全部仓位（用户 2026-10-15）。
        * ⚠️ 必须 symbol + side 一起挑：双向持仓同一个币有两条。
+       * ⚠️ 走 `amountBeforeAdd`（流没起来时退回读持仓缓存），不然会被读成 0。
        */
       const symBefore = str(body.symbol, 'BTCUSDT').toUpperCase()
-      const beforePos = liveStateOf(key.id)?.positions?.find(
-        p =>
-          String(p.raw ?? '').toUpperCase() === symBefore &&
-          (p.side === 'short' ? 'short' : 'long') === side
+      const beforeAmount = await amountBeforeAdd(
+        key.id,
+        creds,
+        symBefore,
+        side
       )
-      const beforeAmount = Math.abs(Number(beforePos?.amount) || 0)
       const order = await placeOrder(
         creds,
         key.id,
@@ -4994,7 +5035,14 @@ async function tradeInfoFromLive(
        *     挂完推 `auto-stop` 给面板补一句。
        */
       const autoPct = Number(body.autoStop ?? 0)
-      if (!test && order.reduceOnly !== true && Number.isFinite(autoPct) && autoPct > 0) {
+      const isAdd = !test && order.reduceOnly !== true && beforeAmount > 0
+      if (
+        !isAdd &&
+        !test &&
+        order.reduceOnly !== true &&
+        Number.isFinite(autoPct) &&
+        autoPct > 0
+      ) {
         /*
          * ★ 2026-10-15（用户：「后台挂」）：**丢到后台去挂，不占这一单的响应**。
          *
@@ -5023,9 +5071,67 @@ async function tradeInfoFromLive(
           })
       }
       /*
-       * ★ 2026-10-15 晚上（用户：「有仓位止盈的话，加仓之后把加仓的单子也要放到
-       *   止盈里面去，变成百分之百」）：**加仓**成功后，如果这个方向已经有一张止盈，
-       *   把它的数量放大到加仓后的全部仓位（触发价不动）。
+       * 加仓后把「加仓前就是 100%」的止损放回 100%（**手工挂的那张也算**，触发价不动）。
+       * 自动止损先跑完（如果启用），避免两个后台任务同时撤挂同一张单。
+       */
+      if (isAdd) {
+        const adjustStop = (): void => {
+          void ensureStopLossFull({
+            userId: me.id,
+            keyId: key.id,
+            creds,
+            symbol: symBefore,
+            side,
+            before: beforeAmount
+          })
+            .then(r => emit(key.id, {type: 'auto-sl', symbol: symBefore, ...r}))
+            .catch(e => {
+              emit(key.id, {
+                type: 'auto-sl',
+                symbol: symBefore,
+                ok: false,
+                error: e instanceof Error ? e.message : String(e)
+              })
+            })
+        }
+        if (
+          Number.isFinite(autoPct) &&
+          autoPct > 0 &&
+          !test &&
+          order.reduceOnly !== true
+        ) {
+          /* 两个后台任务都入保护单队列，确保自动止损先完成再扩数量。 */
+          void ensureAutoStop({
+            userId: me.id,
+            keyId: key.id,
+            creds,
+            symbol: symBefore,
+            side,
+            pct: autoPct,
+            before: beforeAmount
+          })
+            .then(r => {
+              emit(key.id, {type: 'auto-stop', symbol: symBefore, ...r})
+              adjustStop()
+            })
+            .catch(e => {
+              emit(key.id, {
+                type: 'auto-stop',
+                symbol: symBefore,
+                ok: false,
+                error: e instanceof Error ? e.message : String(e)
+              })
+              adjustStop()
+            })
+        } else {
+          adjustStop()
+        }
+      }
+      /*
+       * ★ 2026-10-15 晚（用户：「有仓位止盈的话，加仓之后把加仓的单子也要放到
+       *   止盈里面去，变成百分之百」；2026-10-24：「如果原来都是 100% 的状态，
+       *   都要自动改为 100%」）：**加仓**成功后，把加仓前就是 100% 的止盈
+       *   （含手工挂的）数量改成加仓后的全部仓位（触发价不动）。
        *
        * 跟自动止损一样丢后台（那一单已经成交了，不能被止盈的错拖成失败），
        * 改完推 `auto-tp` 给面板补一句。
@@ -5338,14 +5444,17 @@ async function tradeInfoFromLive(
     const body = await readJsonBody(req).catch(() => null)
     if (!body) return sendJson(res, 400, {error: '请求体不是合法 JSON'})
     const raw = Array.isArray(body.items) ? body.items : []
-    const groups = new Map<number | null, {symbol: string; orderId: string}[]>()
+    const groups = new Map<
+      number | null,
+      {symbol: string; orderId: string; conditional: boolean}[]
+    >()
     for (const it of raw.slice(0, 200)) {
       const symbol = str(it?.symbol, '')
       const orderId = str(it?.orderId, '')
       if (!symbol || !orderId) continue
       const kid = num(it?.keyId) || null
       const list = groups.get(kid) ?? []
-      list.push({symbol, orderId})
+      list.push({symbol, orderId, conditional: it?.conditional === true})
       groups.set(kid, list)
     }
     const cancelled: {symbol: string; orderId: string}[] = []
@@ -5418,7 +5527,8 @@ async function tradeInfoFromLive(
           sandbox: key.sandbox
         },
         str(body.symbol, 'BTCUSDT'),
-        str(body.orderId, '')
+        str(body.orderId, ''),
+        body.conditional === true
       )
       /* 撤单没有测试版：撤了就是真撤了，缓存立刻作废（别让那条线还画着） */
       void reconcileKeyOrders(key.id)

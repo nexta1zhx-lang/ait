@@ -2072,6 +2072,7 @@ const EXCHANGE_EVENTS = [
   'auto-stop',
   /** 加仓后止盈跟着放大到全部仓位（后台改，见同一个接口） */
   'auto-tp',
+  'auto-sl',
   /** 减仓后止盈 / 止损收到剩余仓位（后台改，见平仓接口） */
   'auto-protect'
 ]
@@ -2107,6 +2108,8 @@ export function exchangeStream(
      * 变成百分之百」—— 改完从常驻流推这条，面板补一句提示。
      */
     autoTp?: (r: AutoTpPush) => void
+    /** 加仓后最近的一张止损扩到全部仓位 */
+    autoSl?: (r: AutoSlPush) => void
     /**
      * **减仓后止盈 / 止损收到剩余仓位**（后台改的）。
      *
@@ -2143,6 +2146,7 @@ export function exchangeStream(
         else if (name === 'positions') on.positions?.(data as PositionsPatch)
         else if (name === 'auto-stop') on.autoStop?.(data as AutoStopPush)
         else if (name === 'auto-tp') on.autoTp?.(data as AutoTpPush)
+        else if (name === 'auto-sl') on.autoSl?.(data as AutoSlPush)
         else if (name === 'auto-protect')
           on.autoProtect?.(data as AutoProtectPush)
       },
@@ -2368,42 +2372,49 @@ export interface AutoStopResult {
   error?: string
 }
 
-/** 加仓后止盈放大的结果（字段跟后端 `TakeProfitResult` 一一对应） */
-export interface AutoTpPush extends AutoTpResult {
-  symbol: string
-}
-
 /**
- * 止盈放大（后台改）的结果。
+ * 加仓后「把 100% 的保护单放回 100%」的结果（后端 `ProtectFullResult`）。
  *
- * `ok && !skipped` 才是**真的改了**（撤旧挂新）；带 `skipped` 的都是「没动」，
- * 前端别弹提示。
+ * 止盈（`auto-tp`）和止损（`auto-sl`）走同一份口径：加仓前就是 100% 的那几张
+ * （手工挂的也算）改成加仓后的全部仓位，触发价不动。
  */
-export interface AutoTpResult {
+export interface AutoFullResult {
   ok: boolean
   /**
    * 没做 / 为什么没做：
    *   · `not-add` / `not-grown` —— 不是加仓（开新仓 / 数量没变大）
-   *   · `no-tp` —— 这个方向没有止盈单
-   *   · `multiple-tp` —— 分批止盈，不敢猜改哪张
-   *   · `close-position` —— 全仓止盈（数量 0），本来就 100%
-   *   · `unchanged` —— 数量已经对上了
+   *   · `no-orders` —— 这个方向没有止盈（或止损）单
+   *   · `partial-only` —— 只有分批 / 部分平仓的那些，本来就不是 100%，不动
+   *   · `unchanged` —— 已经覆盖全仓了
+   *   · `no-position` —— 读不到仓位
    */
   skipped?:
     | 'not-add'
     | 'not-grown'
-    | 'no-position'
-    | 'no-tp'
-    | 'multiple-tp'
-    | 'close-position'
+    | 'no-orders'
+    | 'partial-only'
     | 'unchanged'
-    | 'no-price'
+    | 'no-position'
+  /** 改完那几张里第一张的触发价 */
   price?: number
+  /** 改完的数量（= 加仓后的全部仓位） */
   quantity?: number
   orderId?: string
-  /** 撤掉的旧止盈单号 */
+  /** 撤掉的旧单号 */
   replaced?: string
+  /** 一共改了几张（止盈 / 止损可能各有一张） */
+  changed?: number
   error?: string
+}
+
+/** 加仓后止盈放回 100% 的结果 */
+export interface AutoTpPush extends AutoFullResult {
+  symbol: string
+}
+
+/** 加仓后止损放回 100% 的结果（手工挂的那张也算） */
+export interface AutoSlPush extends AutoFullResult {
+  symbol: string
 }
 
 /** 减仓后止盈 / 止损收数量的结果（字段跟后端 `ReduceProtectResult` 一一对应） */
@@ -2626,10 +2637,15 @@ export interface ModifiedOrder {
 /**
  * 撤一张挂单（**真动作**，没有测试版 —— 撤了就是撤了，调用前自己确认）。
  */
-export const cancelTradeOrder = (symbol: string, orderId: string, id?: number) =>
+export const cancelTradeOrder = (
+  symbol: string,
+  orderId: string,
+  id?: number,
+  conditional = false
+) =>
   post<{ok: boolean; orderId?: string; error: string | null}>(
     `/api/exchange/trade/cancel-order${id ? `?id=${id}` : ''}`,
-    {symbol, orderId}
+    {symbol, orderId, conditional}
   )
 
 /**
@@ -2640,7 +2656,12 @@ export const cancelTradeOrder = (symbol: string, orderId: string, id?: number) =
  * ⚠️ 每项各自带 `keyId`：挂单那一格在「全部」时横跨两套账户。
  */
 export const cancelTradeOrders = (
-  items: {keyId?: number; symbol: string; orderId: string}[]
+  items: {
+    keyId?: number
+    symbol: string
+    orderId: string
+    conditional?: boolean
+  }[]
 ) =>
   post<{
     ok: boolean
